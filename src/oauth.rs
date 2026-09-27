@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, Mac};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -513,8 +513,12 @@ async fn register_client(
     }
 
     let db = state.db;
-    let conn = match db.write() {
+    let mut writer = match db.writer() {
         Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let conn = match writer.transaction() {
+        Ok(conn) => conn,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
     // Drop grants that can never authenticate anything again, so the client
@@ -614,7 +618,11 @@ async fn register_client(
         tracing::error!(error = %e, "failed to register OAuth client");
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
-    drop(conn);
+    if let Err(error) = conn.commit() {
+        tracing::error!(%error, "failed to commit OAuth issuance");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
+    drop(writer);
 
     info!(client_id = %client_id, name = %client_name, "OAuth client registered");
 
@@ -1127,11 +1135,11 @@ async fn authorize_approve(
     // lockdown either commits first (and this transaction finds no session) or
     // commits after (and burns the code this one wrote). There is no order in
     // which an approval outlives the session that authorized it.
-    let conn = match oauth.db.write() {
+    let mut writer = match oauth.db.writer() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let tx = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+    let tx = match writer.transaction() {
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!(error = %e, "failed to open OAuth authorization transaction");
@@ -1187,7 +1195,7 @@ async fn authorize_approve(
         tracing::error!(error = %e, "failed to commit OAuth authorization");
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
-    drop(conn);
+    drop(writer);
 
     let mut redirect_url = form.redirect_uri.clone();
     redirect_url.push_str(if redirect_url.contains('?') { "&" } else { "?" });
@@ -1568,8 +1576,12 @@ async fn device_authorization(
     let mut user_code = generate_user_code();
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEVICE_CODE_EXPIRES_IN as i64);
 
-    let conn = match state.db.write() {
+    let mut writer = match state.db.writer() {
         Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let conn = match writer.transaction() {
+        Ok(conn) => conn,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
     if let Err(error) = cleanup_expired_device_codes(&conn) {
@@ -1624,7 +1636,11 @@ async fn device_authorization(
             }
         }
     }
-    drop(conn);
+    if let Err(error) = conn.commit() {
+        tracing::error!(%error, "failed to commit OAuth issuance");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
+    drop(writer);
     if !inserted {
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
@@ -1927,11 +1943,11 @@ async fn device_approve(
     // used to take its own write lock, which is why this handler had to
     // resolve the bot before opening its own, and why a lockdown could land
     // between the two.
-    let conn = match oauth.db.write() {
+    let mut writer = match oauth.db.writer() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let tx = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+    let tx = match writer.transaction() {
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!(error = %e, "failed to open device approval transaction");
@@ -1996,7 +2012,7 @@ async fn device_approve(
         tracing::error!(error = %e, "failed to commit device approval");
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
-    drop(conn);
+    drop(writer);
 
     info!(user_code = %normalized, decision = %new_status, "OAuth device verification");
 
@@ -2076,11 +2092,11 @@ async fn token_exchange(
     // the token. Splitting the read from the burn is what let a recovery land
     // in between and hand out a 30-day token against a code it had already
     // invalidated.
-    let conn = match state.db.write() {
+    let mut writer = match state.db.writer() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+    let conn = match writer.transaction() {
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!(error = %e, "failed to open OAuth token transaction");
@@ -2282,11 +2298,11 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     // approved-row read used to sit outside the transaction that consumed it,
     // so a recovery that denied the grant between the two still handed the
     // polling device a token.
-    let conn = match state.db.write() {
+    let mut writer = match state.db.writer() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+    let conn = match writer.transaction() {
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!(error = %e, "failed to open device token transaction");
@@ -2581,16 +2597,14 @@ async fn revoke_token(
     // Hash the token before lookup since we store SHA-256 hashes.
     let token_hash = sha256_hex(req.token.as_bytes());
     // RFC 7009: always return 200, but log DB errors instead of silently discarding
-    match state.db.write() {
-        Ok(conn) => {
-            if let Err(e) = conn.execute(
-                "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
-                params![token_hash],
-            ) {
-                tracing::error!(error = %e, "failed to revoke OAuth token");
-            }
-        }
-        Err(e) => tracing::error!(error = %e, "failed to acquire DB lock for token revocation"),
+    if let Err(error) = state.db.transaction(|conn| {
+        conn.execute(
+            "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
+            params![token_hash],
+        )?;
+        Ok(())
+    }) {
+        tracing::error!(%error, "failed to revoke OAuth token");
     }
 
     StatusCode::OK.into_response()

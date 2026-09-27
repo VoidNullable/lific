@@ -2,6 +2,9 @@ pub mod migrate;
 pub mod models;
 pub mod queries;
 
+#[cfg(test)]
+mod contention_tests;
+
 use crossbeam_queue::ArrayQueue;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ const READ_POOL_SIZE: usize = 8;
 /// Database pool with read/write splitting.
 ///
 /// SQLite allows concurrent reads but only one writer at a time.
-/// - Writes go through a single Mutex-protected connection.
+/// - Writes use immediate SQLite transactions on a Mutex-protected connection.
 /// - Reads pull from a lock-free pool of read-only connections.
 /// - Readers never block each other. Readers never block writers.
 #[derive(Clone)]
@@ -39,6 +42,20 @@ pub struct DbPool {
 pub struct ReadConn {
     conn: Option<Connection>,
     pool: Arc<ArrayQueue<Connection>>,
+}
+
+/// Borrows the pool's writer. SQL is only available through a transaction.
+pub(crate) struct Writer<'a>(std::sync::MutexGuard<'a, Connection>);
+
+impl Writer<'_> {
+    /// Reserve SQLite's writer before stamping the audit actor.
+    pub(crate) fn transaction(&mut self) -> Result<Transaction<'_>, LificError> {
+        let transaction = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::actor::stamp(&transaction, &crate::actor::current())?;
+        Ok(transaction)
+    }
 }
 
 impl std::ops::Deref for ReadConn {
@@ -107,30 +124,36 @@ impl DbPool {
             .map_err(|error| LificError::Internal(format!("write lock poisoned: {error}")))
     }
 
-    /// Acquire the exclusive write connection.
-    ///
-    /// LIF-155: stamps the current actor context (task-local set by the
-    /// REST middleware / MCP wrapper / CLI default) onto `_actor_state`
-    /// so the audit triggers attribute every write that follows. The
-    /// exclusive guard makes the stamp race-free: nobody else can write
-    /// between the stamp and the mutation.
+    pub(crate) fn writer(&self) -> Result<Writer<'_>, LificError> {
+        self.lock_writer().map(Writer)
+    }
+
+    /// Autocommit access for test fixtures only. Production writes must use a transaction.
+    #[cfg(test)]
     pub fn write(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LificError> {
         let connection = self.lock_writer()?;
-        crate::actor::stamp(&connection, &crate::actor::current());
+        crate::actor::stamp(&connection, &crate::actor::current())?;
         Ok(connection)
+    }
+
+    /// Checkpoint outside a transaction; SQLite cannot checkpoint an active writer.
+    pub(crate) fn checkpoint(&self) -> Result<(), LificError> {
+        self.lock_writer()?
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 
     /// Run a write operation in an immediate SQLite transaction.
     ///
     /// The immediate lock serializes the caller's reads and writes with
-    /// writers in other processes. Errors roll back on drop.
+    /// writers in other processes. SQLite waits up to its configured busy
+    /// timeout for other connections. Errors roll back on drop.
     pub fn transaction<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LificError>,
     ) -> Result<T, LificError> {
-        let mut connection = self.lock_writer()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::actor::stamp(&transaction, &crate::actor::current());
+        let mut writer = self.writer()?;
+        let transaction = writer.transaction()?;
         let result = operation(&transaction)?;
         transaction.commit()?;
         Ok(result)
@@ -254,24 +277,12 @@ pub fn open(path: &Path) -> Result<DbPool, LificError> {
     disable_sqlite_memstatus();
     secure_parent(path)?;
     ensure_private_file(path)?;
-    // Writer connection — runs migrations
     let writer = Connection::open(path)?;
     secure_file(path)?;
     apply_pragmas(&writer)?;
     secure_sidecars(path)?;
     migrate::run(&writer)?;
     secure_sidecars(path)?;
-
-    // LIF-155: clear any actor left over from a previous process (the
-    // `_actor_state` row persists). Writes before the first request stamp
-    // must read as 'system', not as whoever acted last before restart.
-    crate::actor::stamp(
-        &writer,
-        &crate::actor::ActorCtx {
-            user_id: None,
-            transport: crate::actor::Transport::System,
-        },
-    );
 
     // Pre-fill read pool
     let readers = ArrayQueue::new(READ_POOL_SIZE);

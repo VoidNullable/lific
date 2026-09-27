@@ -17,8 +17,10 @@ pub fn run(
     // Seed the settings row from TOML on first touch, then operate on
     // the DB store (authoritative).
     {
-        let conn = pool.write()?;
+        let mut writer = pool.writer()?;
+        let conn = writer.transaction()?;
         db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
+        conn.commit()?;
     }
 
     match action {
@@ -56,9 +58,11 @@ pub fn run(
                 web_auto_login: auto_login,
                 authz_enforced,
             };
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             db::queries::settings::update(&conn, patch)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
             if !json {
                 println!("Updated instance settings.");
             }

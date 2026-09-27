@@ -645,13 +645,38 @@ fn retain_visible_relations(
     })
 }
 
-/// Execute a write operation against the exclusive write connection.
+/// Commit the operation and its audit stamp together.
 fn with_write<F, T>(db: &DbPool, f: F) -> Result<T, LificError>
 where
     F: FnOnce(&rusqlite::Connection) -> Result<T, LificError>,
 {
-    let conn = db.write()?;
-    f(&conn)
+    db.transaction(|conn| f(conn))
+}
+
+#[test]
+fn failed_write_rolls_back_mutation_and_audit() {
+    let db = crate::db::open_memory().unwrap();
+    let result: Result<(), LificError> = with_write(&db, |conn| {
+        queries::create_project(
+            conn,
+            &crate::db::models::CreateProject {
+                name: "Rollback".into(),
+                identifier: "ROLL".into(),
+                ..Default::default()
+            },
+        )?;
+        Err(LificError::BadRequest("rollback probe".into()))
+    });
+    assert!(matches!(result, Err(LificError::BadRequest(_))));
+    let conn = db.read().unwrap();
+    let counts: (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM projects), (SELECT COUNT(*) FROM audit_log)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (0, 0));
 }
 
 /// Check if the authenticated user can manage a project (update settings, manage structure).

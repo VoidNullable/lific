@@ -19,7 +19,7 @@
 //! code here at all: `project_members` writes flow through the normal
 //! query layer, and migration 028's triggers capture them the same way
 //! every other entity is captured (actor attribution via the
-//! `_actor_state` stamp `DbPool::write()` sets — see `src/actor.rs`).
+//! `_actor_state` stamp the write transaction sets — see `src/actor.rs`).
 
 use axum::{
     Extension,
@@ -562,7 +562,7 @@ mod tests {
         // set reproduces that attribution for this test, without needing a
         // second full auth stack — `oneshot()` polls the router's future
         // in-task, so the task-local set here is still visible when the
-        // handler calls `DbPool::write()`.
+        // handler starts its write transaction.
         crate::actor::scope(
             crate::actor::ActorCtx {
                 user_id: Some(lead_id),

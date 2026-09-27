@@ -68,14 +68,7 @@ async fn run_purge_blocking(pool: &DbPool, trash_days: u32) {
 }
 
 fn purge_once(pool: &DbPool, trash_days: u32) {
-    let conn = match pool.write() {
-        Ok(conn) => conn,
-        Err(e) => {
-            warn!(error = %e, "could not acquire write connection for trash purge");
-            return;
-        }
-    };
-    match trash::purge_tombstones(&conn, trash_days) {
+    match pool.transaction(|conn| trash::purge_tombstones(conn, trash_days)) {
         Ok(counts) if counts.is_empty() => {}
         Ok(counts) => info!(
             issues = counts.issues,

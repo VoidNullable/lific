@@ -53,7 +53,8 @@ pub fn run(
             role,
             all,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let u = db::queries::users::get_user_by_username(&conn, &user)?;
 
             if all {
@@ -69,7 +70,8 @@ pub fn run(
                         Err(e) => return Err(e.into()),
                     }
                 }
-                drop(conn);
+                conn.commit()?;
+                drop(writer);
                 if json {
                     let out = serde_json::json!({
                         "user": u.username,
@@ -99,7 +101,8 @@ pub fn run(
                 let ident = project.expect("clap: --project required unless --all");
                 let pid = db::queries::resolve_project_identifier(&conn, &ident)?;
                 let member = db::queries::members::add_member(&conn, pid, u.id, &role)?;
-                drop(conn);
+                conn.commit()?;
+                drop(writer);
                 if json {
                     let out = serde_json::json!({
                         "project": ident,
@@ -120,11 +123,13 @@ pub fn run(
             user,
             role,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let u = db::queries::users::get_user_by_username(&conn, &user)?;
             let pid = db::queries::resolve_project_identifier(&conn, &project)?;
             let member = db::queries::members::change_role(&conn, pid, u.id, &role)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
             if json {
                 let out = serde_json::json!({
                     "project": project,
@@ -140,11 +145,13 @@ pub fn run(
             }
         }
         MemberAction::Remove { project, user } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let u = db::queries::users::get_user_by_username(&conn, &user)?;
             let pid = db::queries::resolve_project_identifier(&conn, &project)?;
             db::queries::members::remove_member_guarded(&conn, pid, u.id)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
             if json {
                 let out = serde_json::json!({
                     "project": project,

@@ -353,7 +353,8 @@ pub(super) async fn auth_auto_login(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
 ) -> Result<impl IntoResponse, LificError> {
-    let conn = db.write()?;
+    let mut writer = db.writer()?;
+    let conn = writer.transaction()?;
     let settings = crate::db::queries::settings::get(&conn)?;
     // LIF-297: `[auth] required = false` implies single-user mode for the
     // browser too — an instance that lets anonymous API callers act as the
@@ -382,7 +383,8 @@ pub(super) async fn auth_auto_login(
         admin.id,
         Some(settings.session_lifetime_days * 24),
     )?;
-    drop(conn);
+    conn.commit()?;
+    drop(writer);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -420,8 +422,7 @@ pub(super) async fn auth_logout(
         .ok_or_else(|| LificError::BadRequest("missing authorization header".into()))?;
 
     if token.starts_with("lific_sess_") {
-        let conn = db.write()?;
-        crate::db::queries::users::delete_session(&conn, token)?;
+        db.transaction(|conn| crate::db::queries::users::delete_session(conn, token))?;
     }
 
     // Clear the session cookie

@@ -164,7 +164,8 @@ pub fn close_referenced<S: AsRef<str>>(
     let mut skips = Vec::new();
 
     for identifier in issue_refs::closing_references_in(messages) {
-        let conn = pool.write()?;
+        let mut writer = pool.writer()?;
+        let conn = writer.transaction()?;
         let issue = match queries::resolve_identifier(&conn, &identifier)
             .and_then(|id| queries::get_issue(&conn, id))
         {
@@ -196,6 +197,7 @@ pub fn close_referenced<S: AsRef<str>>(
                 },
             )?;
         }
+        conn.commit()?;
         acted.push(identifier);
     }
 

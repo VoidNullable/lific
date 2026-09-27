@@ -518,10 +518,11 @@ impl LificMcp {
         f(&conn).map_err(sanitize_error)
     }
 
-    /// LIF-155: stamp the actor from the tool task's request context. The HTTP
-    /// request task-local does not survive rmcp's internal spawn, so
-    /// [`Self::call_tool`] scopes it again from the HTTP request extensions.
-    fn stamp_request_actor(conn: &rusqlite::Connection) {
+    /// LIF-155: stamp the actor from the request user. rmcp spawns tool tasks,
+    /// so the request task-local does not survive; the MCP request-user global
+    /// remains scoped by the serialization lock. Return stamping errors so the
+    /// audit actor and tool write stay in the same transaction.
+    fn stamp_request_actor(conn: &rusqlite::Connection) -> Result<(), crate::error::LificError> {
         let user = current_auth_user();
         crate::actor::stamp(
             conn,
@@ -529,16 +530,15 @@ impl LificMcp {
                 user_id: user.map(|user| user.id),
                 transport: crate::actor::Transport::Mcp,
             },
-        );
+        )?;
+        Ok(())
     }
 
     fn write<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
     {
-        let conn = self.db.write().map_err(sanitize_error)?;
-        Self::stamp_request_actor(&conn);
-        f(&conn).map_err(sanitize_error)
+        self.transaction(f)
     }
 
     fn transaction<F, T>(&self, f: F) -> Result<T, String>
@@ -547,7 +547,7 @@ impl LificMcp {
     {
         self.db
             .transaction(|conn| {
-                Self::stamp_request_actor(conn);
+                Self::stamp_request_actor(conn)?;
                 f(conn)
             })
             .map_err(sanitize_error)

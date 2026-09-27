@@ -558,7 +558,8 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     // signup policy from TOML. Once seeded, the DB row is authoritative
     // and admins edit it live via the UI/CLI (LIF-210).
     {
-        let conn = pool.write()?;
+        let mut writer = pool.writer()?;
+        let conn = writer.transaction()?;
         db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
 
         // LIF-215: single-user web auto-login hands an admin session to
@@ -570,7 +571,8 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // passwordless admin. On a genuinely local instance with an https
         // public_url on a private network, keep the loud warning.
         let auto_login = db::queries::settings::get(&conn)?.web_auto_login;
-        drop(conn);
+        conn.commit()?;
+        drop(writer);
         if auto_login && let Some(exposure) = reachability.public_exposure() {
             return Err(format!(
                 "refusing to start: single-user web auto-login is enabled while \
@@ -2034,6 +2036,119 @@ mod authless_mcp_tests {
                 "{project} issue attributed to {actor:?}"
             );
             assert_eq!(transport, "mcp");
+
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_rest_and_mcp_writes_keep_their_audit_actors() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = db::open(&directory.path().join("requests.db")).unwrap();
+        let (admin, member, project_id) = {
+            let conn = pool.write().unwrap();
+            db::queries::settings::ensure(&conn, false).unwrap();
+            let admin = db::queries::users::create_passwordless_admin(&conn, "Operator").unwrap();
+            let member = db::queries::users::create_user(
+                &conn,
+                &db::models::CreateUser {
+                    username: "member".into(),
+                    email: "member@example.test".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let project = db::queries::create_project(
+                &conn,
+                &db::models::CreateProject {
+                    name: "Concurrent requests".into(),
+                    identifier: "CONC".into(),
+                    lead_user_id: Some(member.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            (admin, member, project.id)
+        };
+        let rest = api::test_helpers::app_as_user(pool.clone(), &admin);
+        let mcp = build_authless_mcp_router(
+            pool.clone(),
+            "test-token",
+            Some(db::models::AuthUser {
+                id: member.id,
+                username: member.username,
+                display_name: member.display_name,
+                is_admin: false,
+            }),
+            vec!["localhost".into()],
+            None,
+            realtime::RealtimeHub::new(),
+        );
+
+        let rest_call = async {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"project_id": project_id, "title": "REST write"})
+                        .to_string(),
+                ))
+                .unwrap();
+            let response = actor::scope(
+                actor::ActorCtx {
+                    user_id: Some(admin.id),
+                    transport: actor::Transport::Web,
+                },
+                rest.oneshot(request),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        };
+        let mcp_call = async {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/mcp/test-token")
+                .header("host", "localhost")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", "2025-06-18")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {
+                            "name": "create_issue",
+                            "arguments": {"project": "CONC", "title": "MCP write"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = mcp.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(value["result"]["isError"], true, "{value}");
+        };
+        tokio::join!(rest_call, mcp_call);
+
+        let conn = pool.read().unwrap();
+        for (title, user_id, transport) in [
+            ("REST write", admin.id, "web"),
+            ("MCP write", member.id, "mcp"),
+        ] {
+            let actual: (Option<i64>, String) = conn
+                .query_row(
+                    "SELECT actor_user_id, transport FROM audit_log
+                     WHERE entity_type = 'issue' AND action = 'create' AND new_value = ?1",
+                    [title],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual, (Some(user_id), transport.into()), "{title}");
         }
     }
 

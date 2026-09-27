@@ -34,7 +34,8 @@ pub fn run(
                 }
             };
 
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             // LIF-261: seed the settings row NOW, before this user
             // exists, so a CLI-first admin creation (`lific user create
             // --admin` before any `lific start`) still counts the DB as
@@ -53,7 +54,8 @@ pub fn run(
                     is_bot: bot,
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 let out = serde_json::json!({
@@ -123,7 +125,8 @@ pub fn run(
                 }
             };
 
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let user = db::queries::users::get_user_by_username(&conn, &username)?;
             // An operator reset is a recovery action, so it carries the same
             // blast radius as the account holder changing their own password:
@@ -140,7 +143,8 @@ pub fn run(
                 db::queries::users::update_password(&conn, user.id, &pw)?;
                 db::queries::users::lock_down_account(&conn, user.id)
             })?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 let out = serde_json::json!({
@@ -162,8 +166,11 @@ pub fn run(
             }
         }
         UserAction::Promote { username } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             db::queries::users::set_admin(&conn, &username, true)?;
+            conn.commit()?;
+            drop(writer);
             if json {
                 let out = serde_json::json!({ "promoted": username });
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -172,8 +179,11 @@ pub fn run(
             }
         }
         UserAction::Demote { username } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             db::queries::users::set_admin(&conn, &username, false)?;
+            conn.commit()?;
+            drop(writer);
             if json {
                 let out = serde_json::json!({ "demoted": username });
                 println!("{}", serde_json::to_string_pretty(&out)?);

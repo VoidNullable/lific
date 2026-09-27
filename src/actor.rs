@@ -2,10 +2,9 @@
 //! through which door.
 //!
 //! The audit log's capture triggers (migration 018) read actor identity
-//! from the one-row `_actor_state` table, which `DbPool::write()` stamps
-//! from this module just before handing out the exclusive write
-//! connection. Identity flows in via a tokio task-local that each entry
-//! surface sets at its boundary:
+//! from the one-row `_actor_state` table, which the write transaction stamps
+//! before running the mutation. Identity flows in via a tokio task-local
+//! that each entry surface sets at its boundary:
 //!
 //! - REST middleware (`auth::require_api_key`) — transport `web` for
 //!   session tokens, `api` for API keys / OAuth tokens
@@ -13,8 +12,8 @@
 //! - CLI (`main`) — no task-local; sets the process-wide default to `cli`
 //!
 //! Resolution order in [`current`]: task-local → process default →
-//! `system`. The single-writer architecture (one Mutex-guarded write
-//! connection) is what makes stamping a plain table race-free.
+//! `system`. An immediate SQLite transaction keeps the stamp and mutation
+//! together across connections and processes.
 
 use std::sync::OnceLock;
 
@@ -80,15 +79,16 @@ pub fn current() -> ActorCtx {
 }
 
 /// Stamp the actor onto a write connection's `_actor_state` row so the
-/// audit triggers attribute the writes that follow. Best-effort by design:
-/// a failed stamp must never block the actual mutation (worst case the
-/// audit row carries the previous actor; the table always exists after
-/// migration 018).
-pub fn stamp(conn: &rusqlite::Connection, ctx: &ActorCtx) {
-    let _ = conn.execute(
+/// audit triggers attribute the writes that follow. Callers must refuse the
+/// mutation if stamping fails, or the audit row could carry a previous actor.
+pub fn stamp(conn: &rusqlite::Connection, ctx: &ActorCtx) -> rusqlite::Result<()> {
+    let updated = conn.execute(
         "UPDATE _actor_state SET user_id = ?1, transport = ?2 WHERE id = 1",
         rusqlite::params![ctx.user_id, ctx.transport.as_str()],
-    );
+    )?;
+    (updated == 1)
+        .then_some(())
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 #[cfg(test)]

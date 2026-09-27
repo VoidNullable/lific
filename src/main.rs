@@ -1379,8 +1379,7 @@ async fn cmd_init(
     }
     let pool = db::open(&cfg.database.path)?;
     {
-        let conn = pool.write()?;
-        db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
+        pool.transaction(|conn| db::queries::settings::ensure(conn, cfg.auth.allow_signup))?;
     }
 
     // LIFIC-25: on a fresh install (no human operator yet) the operator picks
@@ -1409,7 +1408,6 @@ async fn cmd_init(
         // Write web_auto_login to the DB beside the admin (it lives in the
         // database, not the config). On for login-free so the browser signs the
         // operator in; off for password mode.
-        let conn = pool.write()?;
         let password = if mode.passwordless() {
             None
         } else {
@@ -1420,12 +1418,14 @@ async fn cmd_init(
         };
         // Shared with `start --init-if-missing` (LIF-468) so both first-run
         // paths agree on what a fresh instance looks like.
-        let admin = first_boot::create_first_admin(
-            &conn,
-            &op_name,
-            password.as_deref(),
-            mode.web_auto_login(),
-        )?;
+        let admin = pool.transaction(|conn| {
+            first_boot::create_first_admin(
+                conn,
+                &op_name,
+                password.as_deref(),
+                mode.web_auto_login(),
+            )
+        })?;
         info!(operator = %admin.username, mode = mode.as_str(), "created first human admin");
         Some((admin, mode))
     } else {

@@ -148,9 +148,10 @@ pub fn ensure_import_bot(
     display: &str,
 ) -> Result<i64, LificError> {
     let tool_id = format!("import-{source_slug}");
-    let conn = pool.write()?;
-    let bot = queries::users::ensure_bot(&conn, owner_id, &tool_id, display)?;
-    Ok(bot.id)
+    pool.transaction(|conn| {
+        let bot = queries::users::ensure_bot(conn, owner_id, &tool_id, display)?;
+        Ok(bot.id)
+    })
 }
 
 /// Resolve the human who will own the import bot: explicit username, else the
@@ -247,7 +248,8 @@ pub fn apply_issue(
     bot_id: Option<i64>,
     issue: &NormalizedIssue,
 ) -> Result<ApplyOutcome, LificError> {
-    let conn = pool.write()?;
+    let mut writer = pool.writer()?;
+    let conn = writer.transaction()?;
     if source_exists(&conn, &issue.source)? {
         return Ok(ApplyOutcome::Skipped);
     }
@@ -290,6 +292,7 @@ pub fn apply_issue(
         Ok(())
     })?;
 
+    conn.commit()?;
     Ok(ApplyOutcome::Created {
         comments_created,
         labels_created,

@@ -410,12 +410,12 @@ pub fn list_api_keys(db: &DbPool) -> Result<Vec<ApiKeyInfo>, crate::error::Lific
 
 /// Revoke a key by name.
 pub fn revoke_api_key(db: &DbPool, name: &str) -> Result<(), crate::error::LificError> {
-    let conn = db.write()?;
-    let changed = conn.execute(
-        "UPDATE api_keys SET revoked = 1 WHERE name = ?1 AND revoked = 0",
-        params![name],
-    )?;
-    drop(conn);
+    let changed = db.transaction(|conn| {
+        Ok(conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE name = ?1 AND revoked = 0",
+            params![name],
+        )?)
+    })?;
     if changed == 0 {
         return Err(crate::error::LificError::NotFound(format!(
             "no active key named '{name}'"
