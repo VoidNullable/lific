@@ -120,11 +120,6 @@ fn independent_pool_contention_times_out_then_commits_without_partial_rows() {
     let path = directory.path().join("independent.db");
     let first_pool = open(&path).unwrap();
     let second_pool = open(&path).unwrap();
-    second_pool
-        .lock_writer()
-        .unwrap()
-        .busy_timeout(Duration::from_millis(50))
-        .unwrap();
     let project_id = {
         let conn = first_pool.write().unwrap();
         queries::create_project(
@@ -188,14 +183,102 @@ fn independent_pool_contention_times_out_then_commits_without_partial_rows() {
 }
 
 #[test]
+fn request_transaction_fails_fast_while_archive_holds_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = open(&directory.path().join("request-writer.db")).unwrap();
+    let (held_tx, wait_for_hold) = mpsc::channel();
+    let (release_tx, wait_for_release) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let holder_pool = db.clone();
+        let holder = scope.spawn(move || {
+            holder_pool
+                .transaction(|_| {
+                    held_tx.send(()).unwrap();
+                    wait_for_release
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        wait_for_hold.recv_timeout(Duration::from_secs(10)).unwrap();
+        let started = std::time::Instant::now();
+        let result = db.try_transaction(|_| Ok(()));
+        assert!(
+            matches!(result, Err(LificError::Unavailable(_))),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+    });
+}
+
+#[test]
+fn request_transaction_fails_fast_while_an_external_writer_holds_sqlite() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("external-request-writer.db");
+    let db = open(&path).unwrap();
+    let external = Connection::open(path).unwrap();
+    external.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+    let started = std::time::Instant::now();
+    let result = db.try_transaction(|_| Ok(()));
+    assert!(
+        matches!(result, Err(LificError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_millis(100));
+
+    external.execute_batch("ROLLBACK;").unwrap();
+    db.try_transaction(|_| Ok(())).unwrap();
+}
+
+#[test]
+fn checkpoint_reports_a_reader_that_blocks_wal_truncation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checkpoint.db");
+    let db = open(&path).unwrap();
+    db.transaction(|conn| {
+        queries::create_project(
+            conn,
+            &CreateProject {
+                name: "Before snapshot".into(),
+                identifier: "BEFOR".into(),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let reader = Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM projects;")
+        .unwrap();
+    db.transaction(|conn| {
+        queries::create_project(
+            conn,
+            &CreateProject {
+                name: "After snapshot".into(),
+                identifier: "AFTER".into(),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(matches!(db.checkpoint(), Err(LificError::Unavailable(_))));
+    reader.execute_batch("ROLLBACK;").unwrap();
+    db.checkpoint().unwrap();
+}
+
+#[test]
 fn external_sqlite_writer_uses_the_database_busy_timeout() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("external.db");
     let db = open(&path).unwrap();
-    {
-        let conn = db.write().unwrap();
-        conn.busy_timeout(Duration::from_millis(50)).unwrap();
-    }
     let mut external = Connection::open(&path).unwrap();
     let transaction = external
         .transaction_with_behavior(TransactionBehavior::Immediate)

@@ -9,6 +9,7 @@ use crossbeam_queue::ArrayQueue;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::LificError;
@@ -16,6 +17,7 @@ use crate::error::LificError;
 /// Number of read connections in the pool.
 /// SQLite WAL mode supports unlimited concurrent readers.
 const READ_POOL_SIZE: usize = 8;
+const WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Database pool with read/write splitting.
 ///
@@ -50,11 +52,50 @@ pub(crate) struct Writer<'a>(std::sync::MutexGuard<'a, Connection>);
 impl Writer<'_> {
     /// Reserve SQLite's writer before stamping the audit actor.
     pub(crate) fn transaction(&mut self) -> Result<Transaction<'_>, LificError> {
+        self.0.busy_timeout(WRITE_BUSY_TIMEOUT)?;
         let transaction = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         crate::actor::stamp(&transaction, &crate::actor::current())?;
         Ok(transaction)
+    }
+
+    /// Reserve SQLite's writer without waiting for a connection in another process.
+    pub(crate) fn try_transaction(&mut self) -> Result<Transaction<'_>, LificError> {
+        self.0.busy_timeout(Duration::ZERO)?;
+        let transaction = match self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                return Err(unavailable_if_busy(error));
+            }
+        };
+        transaction.busy_timeout(WRITE_BUSY_TIMEOUT)?;
+        crate::actor::stamp(&transaction, &crate::actor::current()).map_err(unavailable_if_busy)?;
+        Ok(transaction)
+    }
+}
+
+fn unavailable_if_busy(error: rusqlite::Error) -> LificError {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            LificError::Unavailable("database writer is busy".into())
+        }
+        error => LificError::Database(error),
+    }
+}
+
+fn unavailable_on_transaction(error: LificError) -> LificError {
+    match error {
+        LificError::Database(error) => unavailable_if_busy(error),
+        error => error,
     }
 }
 
@@ -124,8 +165,23 @@ impl DbPool {
             .map_err(|error| LificError::Internal(format!("write lock poisoned: {error}")))
     }
 
+    fn try_lock_writer(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LificError> {
+        self.writer.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => {
+                LificError::Unavailable("database writer is busy".into())
+            }
+            std::sync::TryLockError::Poisoned(error) => {
+                LificError::Internal(format!("write lock poisoned: {error}"))
+            }
+        })
+    }
+
     pub(crate) fn writer(&self) -> Result<Writer<'_>, LificError> {
         self.lock_writer().map(Writer)
+    }
+
+    pub(crate) fn try_writer(&self) -> Result<Writer<'_>, LificError> {
+        self.try_lock_writer().map(Writer)
     }
 
     /// Autocommit access for test fixtures only. Production writes must use a transaction.
@@ -138,8 +194,12 @@ impl DbPool {
 
     /// Checkpoint outside a transaction; SQLite cannot checkpoint an active writer.
     pub(crate) fn checkpoint(&self) -> Result<(), LificError> {
-        self.lock_writer()?
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let connection = self.lock_writer()?;
+        let busy: i64 =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(LificError::Unavailable("database WAL is busy".into()));
+        }
         Ok(())
     }
 
@@ -156,6 +216,18 @@ impl DbPool {
         let transaction = writer.transaction()?;
         let result = operation(&transaction)?;
         transaction.commit()?;
+        Ok(result)
+    }
+
+    /// Run a request write without blocking on either writer lock.
+    pub(crate) fn try_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LificError>,
+    ) -> Result<T, LificError> {
+        let mut writer = self.try_writer()?;
+        let transaction = writer.try_transaction()?;
+        let result = operation(&transaction).map_err(unavailable_on_transaction)?;
+        transaction.commit().map_err(unavailable_if_busy)?;
         Ok(result)
     }
 }

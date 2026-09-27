@@ -1042,6 +1042,10 @@ pub async fn require_api_key(
         Err(ApiKeyReject::Db) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
         }
+        Err(ApiKeyReject::Busy) => {
+            return crate::error::LificError::Unavailable("database writer is busy".into())
+                .into_response();
+        }
         Err(ApiKeyReject::NotFound) => {
             warn!("rejected invalid API key");
             return (
@@ -1117,6 +1121,8 @@ enum ApiKeyIdentity {
 enum ApiKeyReject {
     /// A database read/write failed (backend fault, not a bad key).
     Db,
+    /// The database writer is occupied; retry authentication after it clears.
+    Busy,
     /// The key didn't pass the format checksum.
     BadChecksum,
     /// The key is well-formed but matches no active key.
@@ -1265,7 +1271,7 @@ fn migrate_api_key_verifier(
 ) -> Result<bool, ApiKeyReject> {
     let encoded_verifier = verifier.encode();
     let updated = db
-        .transaction(|tx| {
+        .try_transaction(|tx| {
             Ok(tx.execute(
                 "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2 AND key_hash = ?3 \
                  AND key_id = ?4 AND revoked = 0 \
@@ -1273,7 +1279,10 @@ fn migrate_api_key_verifier(
                 params![encoded_verifier, key.id, original_hash, key_id],
             )?)
         })
-        .map_err(|_| ApiKeyReject::Db)?;
+        .map_err(|error| match error {
+            crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
+            _ => ApiKeyReject::Db,
+        })?;
     if updated == 1 {
         return Ok(true);
     }
@@ -1430,6 +1439,7 @@ pub fn resolve_api_key_user(db: &DbPool, token: &str) -> Result<Option<AuthUser>
         })
         .map_err(|reject| match reject {
             ApiKeyReject::Db => "database error".to_string(),
+            ApiKeyReject::Busy => "database writer is busy".to_string(),
             ApiKeyReject::BadChecksum => "invalid API key checksum".to_string(),
             ApiKeyReject::NotFound => "invalid API key".to_string(),
             ApiKeyReject::HashMismatch => "API key hash verification failed".to_string(),

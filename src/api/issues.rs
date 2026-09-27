@@ -69,7 +69,7 @@ pub(super) async fn create_issue(
     // LIF-262/LIF-409: the description's attachment references are linked by
     // `create_issue` itself, inside its savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let issue = db.transaction(|conn| {
+    let issue = db.try_transaction(|conn| {
         // The gate above ran on a read connection before this write began.
         // Re-run it here so the role that decides which attachment references
         // may be linked is read on the connection that writes those links,
@@ -113,7 +113,7 @@ pub(super) fn commit_issue_update(
 ) -> Result<Issue, LificError> {
     let user = super::require_user(identity)?;
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let issue = db.transaction(|conn| {
+    let issue = db.try_transaction(|conn| {
         // Same recheck as the create path, against the issue's project as it
         // stands inside this transaction rather than as it read a moment ago.
         // An update cannot move an issue between projects, so reading it here

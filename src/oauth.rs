@@ -513,12 +513,18 @@ async fn register_client(
     }
 
     let db = state.db;
-    let mut writer = match db.writer() {
+    let mut writer = match db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match writer.transaction() {
+    let conn = match writer.try_transaction() {
         Ok(conn) => conn,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
     // Drop grants that can never authenticate anything again, so the client
@@ -1135,12 +1141,18 @@ async fn authorize_approve(
     // lockdown either commits first (and this transaction finds no session) or
     // commits after (and burns the code this one wrote). There is no order in
     // which an approval outlives the session that authorized it.
-    let mut writer = match oauth.db.writer() {
+    let mut writer = match oauth.db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let tx = match writer.transaction() {
+    let tx = match writer.try_transaction() {
         Ok(tx) => tx,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to open OAuth authorization transaction");
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -1576,12 +1588,18 @@ async fn device_authorization(
     let mut user_code = generate_user_code();
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEVICE_CODE_EXPIRES_IN as i64);
 
-    let mut writer = match state.db.writer() {
+    let mut writer = match state.db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match writer.transaction() {
+    let conn = match writer.try_transaction() {
         Ok(conn) => conn,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
     if let Err(error) = cleanup_expired_device_codes(&conn) {
@@ -1943,12 +1961,18 @@ async fn device_approve(
     // used to take its own write lock, which is why this handler had to
     // resolve the bot before opening its own, and why a lockdown could land
     // between the two.
-    let mut writer = match oauth.db.writer() {
+    let mut writer = match oauth.db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let tx = match writer.transaction() {
+    let tx = match writer.try_transaction() {
         Ok(tx) => tx,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to open device approval transaction");
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -2092,12 +2116,18 @@ async fn token_exchange(
     // the token. Splitting the read from the burn is what let a recovery land
     // in between and hand out a 30-day token against a code it had already
     // invalidated.
-    let mut writer = match state.db.writer() {
+    let mut writer = match state.db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match writer.transaction() {
+    let conn = match writer.try_transaction() {
         Ok(tx) => tx,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to open OAuth token transaction");
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -2298,12 +2328,18 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     // approved-row read used to sit outside the transaction that consumed it,
     // so a recovery that denied the grant between the two still handed the
     // polling device a token.
-    let mut writer = match state.db.writer() {
+    let mut writer = match state.db.try_writer() {
         Ok(c) => c,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-    let conn = match writer.transaction() {
+    let conn = match writer.try_transaction() {
         Ok(tx) => tx,
+        Err(LificError::Unavailable(_)) => {
+            return LificError::Unavailable("database writer is busy".into()).into_response();
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to open device token transaction");
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -2592,19 +2628,19 @@ async fn revoke_token(
         return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
     }
 
-    // RFC 7009 says the server MUST respond with 200 even if the token
-    // is invalid, already revoked, or unrecognized -- to prevent token scanning.
+    // RFC 7009 requires 200 for invalid, already revoked, or unknown tokens.
+    // Database failure is different: reporting success would leave a live
+    // token in place while telling the client it had been revoked.
     // Hash the token before lookup since we store SHA-256 hashes.
     let token_hash = sha256_hex(req.token.as_bytes());
-    // RFC 7009: always return 200, but log DB errors instead of silently discarding
-    if let Err(error) = state.db.transaction(|conn| {
+    if let Err(error) = state.db.try_transaction(|conn| {
         conn.execute(
             "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
             params![token_hash],
         )?;
         Ok(())
     }) {
-        tracing::error!(%error, "failed to revoke OAuth token");
+        return error.into_response();
     }
 
     StatusCode::OK.into_response()
@@ -4033,6 +4069,68 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Token should now be invalid
+        assert!(resolve_oauth_credential(&db, token).is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_token_reports_busy_database_and_can_be_retried() {
+        let (app, db) = test_oauth_app();
+        let token = "lific_at_test-revoke-busy-token";
+        let token_hash = sha256_hex(token.as_bytes());
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('busy-client', 'Test', '[\"http://localhost\"]')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, 'busy-client', ?2, 'mcp')",
+                params![token_hash, expires],
+            )
+            .unwrap();
+        }
+
+        let held_db = db.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            held_db
+                .transaction(|_| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held_rx.recv().unwrap();
+
+        let revoke = || {
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/revoke")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+        };
+        let response = revoke().await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .unwrap(),
+            "2"
+        );
+        assert!(resolve_oauth_credential(&db, token).is_ok());
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(revoke().await.unwrap().status(), StatusCode::OK);
         assert!(resolve_oauth_credential(&db, token).is_err());
     }
 

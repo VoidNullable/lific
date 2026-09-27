@@ -650,7 +650,7 @@ fn with_write<F, T>(db: &DbPool, f: F) -> Result<T, LificError>
 where
     F: FnOnce(&rusqlite::Connection) -> Result<T, LificError>,
 {
-    db.transaction(|conn| f(conn))
+    db.try_transaction(|conn| f(conn))
 }
 
 #[test]

@@ -320,7 +320,7 @@ pub(super) async fn bind_repo(
     // reaches the writer; re-run authoritatively inside the transaction.
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
 
-    db.transaction(|tx| {
+    db.try_transaction(|tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         let fresh_identity = Some(crate::auth::fresh_identity(
             &fresh,
@@ -378,7 +378,7 @@ pub(super) async fn delete_repo_binding(
     })?;
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
 
-    db.transaction(|tx| {
+    db.try_transaction(|tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         let fresh_identity = Some(crate::auth::fresh_identity(
             &fresh,
@@ -420,7 +420,7 @@ pub(super) async fn merge_repo_bindings(
         authz::require_role(&db, &identity, project_id, Role::Lead)?;
     }
 
-    db.transaction(|tx| {
+    db.try_transaction(|tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         let fresh_identity = Some(crate::auth::fresh_identity(
             &fresh,

@@ -113,7 +113,7 @@ pub(super) async fn create_project(
     // transaction, so the token is captured here and judged there.
     let session_token = crate::auth::recent_session_token(&headers).ok();
 
-    let project = db.transaction(|tx| {
+    let project = db.try_transaction(|tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         let effective =
             crate::authz::effective_user(tx, &Some(crate::auth::fresh_auth_user(&fresh)))
@@ -173,7 +173,7 @@ pub(super) async fn update_project(
         None
     };
 
-    let project = db.transaction(|tx| {
+    let project = db.try_transaction(|tx| {
         // When this grants a lead membership the gate re-runs against the
         // freshly read session user, so a lead revoked since the request
         // arrived cannot hand the role to anyone.
@@ -216,7 +216,7 @@ pub(super) async fn reorder_projects(
     Json(input): Json<ReorderProjects>,
 ) -> Result<Json<Vec<Project>>, LificError> {
     let user = require_user(&identity)?;
-    let projects = db.transaction(|tx| {
+    let projects = db.try_transaction(|tx| {
         let visible = sidebar_visibility(tx, user.id)?;
         crate::db::queries::reorder_projects(tx, user.id, &input.ids, &visible)
     })?;
@@ -234,7 +234,7 @@ pub(super) async fn delete_project_handler(
     // the writer; re-run authoritatively inside the transaction below.
     require_project_delete(&db, &identity, id)?;
     let caller = super::require_user(&identity)?;
-    let (project, audience) = db.transaction(|tx| {
+    let (project, audience) = db.try_transaction(|tx| {
         // Deleting a project destroys everything in it, so the decision is
         // made from state read here rather than from the snapshot the
         // middleware attached before the request was routed.

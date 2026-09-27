@@ -133,7 +133,7 @@ pub(super) async fn add_project_member(
     let session_token = crate::auth::recent_session_token(&headers)?;
     let role = input.role.as_deref().unwrap_or("viewer").to_string();
 
-    let member = db.transaction(|tx| {
+    let member = db.try_transaction(|tx| {
         // A session token is always a human's, so the identity the middleware
         // resolved IS the session's user; `revalidate_recent_session` asserts
         // exactly that. Bot callers cannot reach here at all, because they do
@@ -180,7 +180,7 @@ pub(super) async fn update_project_member(
     let session_token = crate::auth::recent_session_token(&headers).ok();
     let granter = super::require_user(&identity).ok();
 
-    let member = db.transaction(|tx| {
+    let member = db.try_transaction(|tx| {
         let current = members::get_member_role(tx, project_id, user_id)?;
         let is_increase = current.is_none_or(|role| requested > role);
         if is_increase {
@@ -231,7 +231,7 @@ pub(super) async fn remove_project_member(
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
     let caller = super::require_user(&identity)?;
-    db.transaction(|tx| {
+    db.try_transaction(|tx| {
         // Same reasoning as the downgrade path: the authoritative check reads
         // the caller inside the transaction, so a demoted admin or a removed
         // lead cannot act on a stale snapshot.
