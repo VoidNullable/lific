@@ -29,6 +29,10 @@ use tower_http::compression::Compression;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
+#[cfg(test)]
+#[path = "server_mcp_concurrency_tests.rs"]
+mod mcp_concurrency_tests;
+
 use crate::config::{self, Config};
 use crate::{
     actor, api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, resolve_caller, storage,

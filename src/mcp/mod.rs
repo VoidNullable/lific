@@ -571,6 +571,17 @@ impl ServerHandler for LificMcp {
             let tool = request.name.clone();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            // A request-local rendezvous lets transport tests prove that two
+            // calls reached dispatch, rather than merely starting two futures.
+            #[cfg(test)]
+            if let Some(barrier) = tool_context
+                .request_context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<Arc<tokio::sync::Barrier>>())
+            {
+                barrier.wait().await;
+            }
             self.dispatch_tool(|| self.tool_router.call(tool_context))
                 .await
                 .map_err(|error| {
