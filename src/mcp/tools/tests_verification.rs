@@ -33,7 +33,7 @@ fn comment_kinds(m: &LificMcp) -> Vec<String> {
 
 #[test]
 fn closing_with_evidence_records_a_marked_verification_comment() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
 
@@ -61,7 +61,7 @@ fn closing_with_evidence_records_a_marked_verification_comment() {
 
 #[test]
 fn closing_without_evidence_writes_no_comment() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
 
@@ -74,7 +74,7 @@ fn closing_without_evidence_writes_no_comment() {
 
 #[test]
 fn ordinary_comments_stay_unmarked() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
     m.add_comment(Parameters(AddCommentInput {
@@ -88,7 +88,7 @@ fn ordinary_comments_stay_unmarked() {
 
 #[test]
 fn evidence_is_refused_without_a_close_and_changes_nothing() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
 
@@ -116,7 +116,7 @@ fn evidence_is_refused_without_a_close_and_changes_nothing() {
 
 #[test]
 fn evidence_on_an_already_done_issue_is_refused_and_rolled_back() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
     close(&m, "VER-1", None);
@@ -135,7 +135,7 @@ fn evidence_on_an_already_done_issue_is_refused_and_rolled_back() {
 
 #[test]
 fn verification_kind_reaches_the_changes_feed_and_rest_json() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
     close(&m, "VER-1", Some("checked by hand"));
@@ -184,7 +184,7 @@ fn verification_kind_reaches_the_changes_feed_and_rest_json() {
 
 #[test]
 fn a_viewer_cannot_close_with_evidence() {
-    let (m, _admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+    let (m, _admin, lead, _maintainer, viewer, _non_member, _project_id) =
         super::tests::setup_membership_mcp();
     let as_user = |user: &models::AuthUser, f: &dyn Fn() -> String| {
         tokio::runtime::Builder::new_current_thread()

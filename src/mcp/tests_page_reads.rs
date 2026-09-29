@@ -40,7 +40,7 @@ const NESTED: &str = "Intro line.\n\n## Alpha\nalpha body\n\n### Alpha one\nfirs
 
 #[test]
 fn a_page_within_the_budget_reads_exactly_as_before() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "SML");
     // Exactly at the budget still counts as within it.
     let content = format!("## Heading\n{}", "x".repeat(PAGE_READ_BUDGET - 11));
@@ -62,7 +62,7 @@ fn a_page_within_the_budget_reads_exactly_as_before() {
 
 #[test]
 fn section_returns_one_heading_and_nothing_after_it() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "SEC");
     let identifier = seed_page(&m, "SEC", NESTED);
 
@@ -76,7 +76,7 @@ fn section_returns_one_heading_and_nothing_after_it() {
 
 #[test]
 fn section_includes_nested_subsections_until_a_sibling_heading() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "NST");
     let identifier = seed_page(&m, "NST", NESTED);
 
@@ -96,7 +96,7 @@ fn section_includes_nested_subsections_until_a_sibling_heading() {
 
 #[test]
 fn section_matches_an_anchor_or_the_heading_text_in_any_case() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "ANC");
     let identifier = seed_page(
         &m,
@@ -120,7 +120,7 @@ fn section_matches_an_anchor_or_the_heading_text_in_any_case() {
 
 #[test]
 fn an_ambiguous_section_lists_each_candidate_with_its_anchor() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "AMB");
     let identifier = seed_page(
         &m,
@@ -152,7 +152,7 @@ fn an_ambiguous_section_lists_each_candidate_with_its_anchor() {
 
 #[test]
 fn an_unknown_section_is_an_error_that_points_at_the_outline() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "UNK");
     let identifier = seed_page(&m, "UNK", NESTED);
 
@@ -163,7 +163,7 @@ fn an_unknown_section_is_an_error_that_points_at_the_outline() {
 
 #[test]
 fn outline_lists_headings_with_levels_section_sizes_and_the_seq() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "OUT");
     let identifier = seed_page(&m, "OUT", NESTED);
     let seq = page_seq(&m, &identifier);
@@ -209,7 +209,7 @@ fn headings_inside_fenced_code_blocks_are_not_headings() {
 
 #[test]
 fn an_oversized_page_returns_its_outline_and_opening_with_the_section_call() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "BIG");
     let mut content = String::from("Opening paragraph.\n\n");
     for week in 1..=40 {
@@ -264,7 +264,7 @@ fn an_oversized_page_returns_its_outline_and_opening_with_the_section_call() {
 
 #[test]
 fn an_oversized_page_without_headings_says_it_cannot_be_sectioned() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "FLT");
     let identifier = seed_page(&m, "FLT", &"flat line\n".repeat(PAGE_READ_BUDGET / 5));
 
@@ -277,7 +277,7 @@ fn an_oversized_page_without_headings_says_it_cannot_be_sectioned() {
 
 #[test]
 fn an_oversized_section_is_itself_outlined() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "BSC");
     let mut content = String::from("## Log\n");
     for day in 1..=3 {
@@ -300,7 +300,7 @@ fn an_oversized_section_is_itself_outlined() {
 
 #[test]
 fn an_oversized_page_with_a_huge_outline_drops_deeper_headings_first() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "DEP");
     let mut content = String::new();
     for part in 1..=300 {
@@ -369,7 +369,7 @@ fn numbered_lines(count: usize) -> String {
 
 #[test]
 fn since_seq_returns_only_the_changed_hunks_and_the_current_seq() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "DIF");
     let identifier = seed_page(&m, "DIF", &numbered_lines(30));
     let created = page_seq(&m, &identifier);
@@ -417,7 +417,7 @@ fn since_seq_returns_only_the_changed_hunks_and_the_current_seq() {
 
 #[test]
 fn since_seq_between_versions_diffs_from_the_version_current_then() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "MID");
     seed_project(&m, "Other", "OTH");
     let identifier = seed_page(&m, "MID", &numbered_lines(10));
@@ -435,7 +435,7 @@ fn since_seq_between_versions_diffs_from_the_version_current_then() {
 
 #[test]
 fn since_seq_reports_unchanged_content_when_only_metadata_moved() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "SAM");
     let identifier = seed_page(&m, "SAM", "body\n");
     let before = page_seq(&m, &identifier);
@@ -464,7 +464,7 @@ fn since_seq_reports_unchanged_content_when_only_metadata_moved() {
 
 #[test]
 fn an_unknown_since_seq_falls_back_to_the_full_page_with_a_note() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "FBK");
     let identifier = seed_page(&m, "FBK", "first\n");
     let created = page_seq(&m, &identifier);
@@ -487,7 +487,7 @@ fn an_unknown_since_seq_falls_back_to_the_full_page_with_a_note() {
 
 #[test]
 fn since_seq_cannot_be_combined_with_a_section_or_outline() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "CMB");
     let identifier = seed_page(&m, "CMB", NESTED);
     let result = m.get_page(Parameters(GetPageInput {
@@ -504,7 +504,7 @@ fn since_seq_cannot_be_combined_with_a_section_or_outline() {
 
 #[test]
 fn page_history_keeps_the_latest_fifty_versions() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "CAP");
     let identifier = seed_page(&m, "CAP", "version 0\n");
     let created = page_seq(&m, &identifier);
@@ -522,7 +522,7 @@ fn page_history_keeps_the_latest_fifty_versions() {
 
 #[test]
 fn page_history_drops_old_versions_past_the_size_cap() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "SZC");
     let big = "x".repeat(400_000);
     let identifier = seed_page(&m, "SZC", &format!("v0\n{big}"));
@@ -541,7 +541,7 @@ fn page_history_drops_old_versions_past_the_size_cap() {
 
 #[test]
 fn page_history_is_deleted_with_the_page() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "DEL");
     let identifier = seed_page(&m, "DEL", "one\n");
     edit(&m, &identifier, "one", "two");
@@ -569,7 +569,7 @@ const OVERSIZE_NOTE: &str = "over the 30,000-char read budget, so get_page retur
 
 #[test]
 fn create_page_warns_only_when_the_content_exceeds_the_read_budget() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "WCR");
     let create = |content: String| {
         m.create_page(Parameters(CreatePageInput {
@@ -592,7 +592,7 @@ fn create_page_warns_only_when_the_content_exceeds_the_read_budget() {
 
 #[test]
 fn update_page_warns_only_when_the_resulting_content_exceeds_the_read_budget() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "WUP");
     let identifier = seed_page(&m, "WUP", "short");
     let update = |content: Option<String>, title: Option<&str>| {
@@ -623,7 +623,7 @@ fn update_page_warns_only_when_the_resulting_content_exceeds_the_read_budget() {
 
 #[test]
 fn edit_page_warns_only_when_the_edited_content_exceeds_the_read_budget() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "WED");
     let identifier = seed_page(
         &m,
@@ -698,7 +698,7 @@ fn amendment_log() -> (String, String) {
 
 #[test]
 fn a_headingless_oversized_section_can_be_walked_to_the_end_by_offset() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "WLK");
     let (page, section) = amendment_log();
     assert!(section.chars().count() > 3 * PAGE_READ_BUDGET);
@@ -745,7 +745,7 @@ fn a_headingless_oversized_section_can_be_walked_to_the_end_by_offset() {
 
 #[test]
 fn an_oversized_page_can_be_walked_to_the_end_by_offset() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "WPG");
     let content = amendment_log().0;
     let identifier = seed_page(&m, "WPG", &content);
@@ -770,7 +770,7 @@ fn an_oversized_page_can_be_walked_to_the_end_by_offset() {
 
 #[test]
 fn a_cut_falls_on_a_line_end_near_the_budget_or_exactly_at_it() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "CUT");
     // 1,500-char lines: the budget lands mid-line, within reach of a line end.
     let line = format!("{}\n", "a".repeat(1_500));
@@ -795,7 +795,7 @@ fn a_cut_falls_on_a_line_end_near_the_budget_or_exactly_at_it() {
 
 #[test]
 fn an_offset_at_or_past_the_end_is_an_error() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "END");
     let identifier = seed_page(&m, "END", NESTED);
     let beta = "## Beta\nbeta body\n".chars().count();
@@ -823,7 +823,7 @@ fn an_offset_at_or_past_the_end_is_an_error() {
 
 #[test]
 fn offset_cannot_be_combined_with_outline_or_since_seq() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "OCB");
     let identifier = seed_page(&m, "OCB", NESTED);
 
@@ -849,7 +849,7 @@ fn offset_cannot_be_combined_with_outline_or_since_seq() {
 
 #[test]
 fn a_cut_offers_sections_only_when_the_unread_part_has_headings() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "MSG");
     // A heading at the top only: the outline shows, but nothing after the
     // cut can be read by section.
@@ -880,7 +880,7 @@ fn a_cut_offers_sections_only_when_the_unread_part_has_headings() {
 
 #[test]
 fn a_continuation_selects_an_ambiguous_section_by_its_anchor() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "DUP");
     let content = format!("## Notes\nshort\n## Notes\n{}", "- entry\n".repeat(8_000));
     let identifier = seed_page(&m, "DUP", &content);

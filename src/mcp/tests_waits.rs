@@ -6,7 +6,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use super::*;
 use crate::db::queries::waits::pin_today;
 
-fn mcp() -> (LificMcp, McpTestGuard) {
+fn mcp() -> LificMcp {
     let db = crate::db::open_memory().expect("test db");
     {
         let conn = db.write().unwrap();
@@ -18,7 +18,7 @@ fn mcp() -> (LificMcp, McpTestGuard) {
         .unwrap();
     }
     let m = LificMcp::new(db);
-    let guard = acquire_test_guard();
+    crate::mcp::set_test_direct_request_user(None);
     let created = m.manage_resource(Parameters(ManageResourceInput {
         resource_type: "project".into(),
         action: "create".into(),
@@ -36,7 +36,7 @@ fn mcp() -> (LificMcp, McpTestGuard) {
         }));
         assert!(created.starts_with("Created"), "{created}");
     }
-    (m, guard)
+    m
 }
 
 fn wait_on(m: &LificMcp, input: LinkIssuesInput) -> String {
@@ -72,7 +72,7 @@ fn board(m: &LificMcp) -> String {
 
 #[test]
 fn a_user_wait_is_added_shown_and_cleared_through_link_and_unlink() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     let added = wait_on(
         &m,
         LinkIssuesInput {
@@ -124,7 +124,7 @@ fn a_user_wait_is_added_shown_and_cleared_through_link_and_unlink() {
 
 #[test]
 fn a_date_wait_holds_then_comes_due_then_goes_overdue() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     let _day = pin_today("2026-09-25");
     let added = wait_on(
         &m,
@@ -167,7 +167,7 @@ fn a_date_wait_holds_then_comes_due_then_goes_overdue() {
 
 #[test]
 fn wait_arguments_are_checked_before_anything_is_written() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     let unknown = wait_on(
         &m,
         LinkIssuesInput {
@@ -256,7 +256,7 @@ fn a_wait_publishes_the_issue_update_at_its_new_seq() {
     let realtime = crate::realtime::RealtimeHub::new();
     let mut rx = realtime.subscribe();
     let m = LificMcp::with_realtime(db, realtime);
-    let _guard = acquire_test_guard();
+    crate::mcp::set_test_direct_request_user(None);
     m.manage_resource(Parameters(ManageResourceInput {
         resource_type: "project".into(),
         action: "create".into(),
@@ -295,7 +295,7 @@ fn a_wait_publishes_the_issue_update_at_its_new_seq() {
 
 #[test]
 fn adding_or_clearing_a_wait_requires_maintainer_on_the_waiting_issue() {
-    let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) = {
+    let (m, _admin, lead, _maintainer, viewer, non_member, _project_id) = {
         let (db, admin, lead, maintainer, viewer, non_member, project_id) =
             crate::api::test_helpers::setup_membership_test();
         let au = |u: models::User| models::AuthUser {
@@ -312,7 +312,6 @@ fn adding_or_clearing_a_wait_requires_maintainer_on_the_waiting_issue() {
             au(viewer),
             au(non_member),
             project_id,
-            acquire_test_guard(),
         )
     };
     let as_user = |user: &models::AuthUser, f: &dyn Fn() -> String| {
@@ -376,7 +375,7 @@ fn a_revocation_between_the_gate_and_the_write_refuses_the_wait() {
     let (db, _admin, lead, maintainer, _viewer, _non_member, project_id) =
         crate::api::test_helpers::setup_membership_test();
     let m = LificMcp::new(db);
-    let _guard = acquire_test_guard();
+    crate::mcp::set_test_direct_request_user(None);
     let au = |u: &models::User| models::AuthUser {
         id: u.id,
         username: u.username.clone(),

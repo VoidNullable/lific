@@ -14,7 +14,7 @@ fn activity(m: &LificMcp, identifier: &str, since: Option<&str>) -> String {
 
 #[test]
 fn since_returns_only_later_entries_oldest_first() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Cursor", "CUR");
     seed_issue(&m, "CUR", "Earlier work");
     // One-second timestamps: move the first batch back instead of sleeping.
@@ -54,7 +54,7 @@ fn since_returns_only_later_entries_oldest_first() {
 
 #[test]
 fn since_past_the_last_entry_says_nothing_happened() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Cursor", "CUR");
     let out = activity(&m, "CUR", Some("2999-01-01"));
     assert_eq!(out, "No activity for CUR after 2999-01-01 00:00:00 UTC.");
@@ -62,7 +62,7 @@ fn since_past_the_last_entry_says_nothing_happened() {
 
 #[test]
 fn an_unparseable_since_is_an_error() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Cursor", "CUR");
     let out = activity(&m, "CUR", Some("last tuesday"));
     assert!(out.starts_with("Error: "), "got: {out}");

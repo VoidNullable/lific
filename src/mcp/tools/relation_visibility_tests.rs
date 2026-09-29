@@ -61,7 +61,7 @@ async fn reads_as(
 
 #[tokio::test]
 async fn issue_reads_leave_out_relations_to_projects_the_caller_cannot_view() {
-    let (m, admin, _, _, viewer, _, project_id, _guard) = super::tests::setup_membership_mcp();
+    let (m, admin, _, _, viewer, _, project_id) = super::tests::setup_membership_mcp();
     let [blocker, visible, hidden] = seed(&m, project_id);
 
     for (surface, output) in reads_as(&m, &viewer, &blocker, &visible).await {
@@ -92,7 +92,7 @@ async fn issue_reads_leave_out_relations_to_projects_the_caller_cannot_view() {
 
 #[tokio::test]
 async fn write_echoes_leave_out_relations_to_projects_the_caller_cannot_view() {
-    let (m, _, _, maintainer, _, _, project_id, _guard) = super::tests::setup_membership_mcp();
+    let (m, _, _, maintainer, _, _, project_id) = super::tests::setup_membership_mcp();
     let [blocker, _, hidden] = seed(&m, project_id);
     let m2 = m.clone();
     let blocker2 = blocker.clone();

@@ -78,8 +78,8 @@ fn section<'a>(output: &'a str, heading: &str) -> &'a str {
 }
 
 /// A project with one of everything the briefing reports.
-fn seeded() -> (LificMcp, McpTestGuard, String) {
-    let (m, guard) = mcp();
+fn seeded() -> (LificMcp, String) {
+    let m = mcp();
     seed_project(&m, "Briefing", "BRF");
     issue(&m, "BRF", "Blocker work", "todo", "high"); // BRF-1
     issue(&m, "BRF", "Blocked work", "todo", "urgent"); // BRF-2
@@ -128,12 +128,12 @@ fn seeded() -> (LificMcp, McpTestGuard, String) {
         ..Default::default()
     }));
     assert!(!edited.starts_with("Error"), "got: {edited}");
-    (m, guard, cursor)
+    (m, cursor)
 }
 
 #[test]
 fn a_briefing_reports_every_section_with_its_items_since_the_cursor() {
-    let (m, _guard, cursor) = seeded();
+    let (m, cursor) = seeded();
     let out = briefing(
         &m,
         Some("BRF"),
@@ -218,7 +218,7 @@ fn a_briefing_reports_every_section_with_its_items_since_the_cursor() {
 
 #[test]
 fn without_since_there_are_no_changes_and_recent_pages_stand_in_for_named_ones() {
-    let (m, _guard, _cursor) = seeded();
+    let (m, _cursor) = seeded();
     let out = briefing(&m, Some("BRF"), None, &[]);
     assert!(!out.contains("## Since"), "{out}");
     let pages = section(&out, "Recently updated pages");
@@ -232,7 +232,7 @@ fn without_since_there_are_no_changes_and_recent_pages_stand_in_for_named_ones()
 
 #[test]
 fn a_cursor_after_everything_reports_no_changes_and_omits_the_section() {
-    let (m, _guard, _cursor) = seeded();
+    let (m, _cursor) = seeded();
     let out = briefing(&m, Some("BRF"), Some("2999-01-01"), &[]);
     assert!(
         out.contains("No changes since 2999-01-01 00:00:00 UTC."),
@@ -244,7 +244,7 @@ fn a_cursor_after_everything_reports_no_changes_and_omits_the_section() {
 
 #[test]
 fn an_empty_project_omits_every_section() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Quiet", "QUI");
     let out = briefing(&m, Some("QUI"), None, &[]);
     assert!(!out.contains("##"), "{out}");
@@ -256,7 +256,7 @@ fn an_empty_project_omits_every_section() {
 
 #[test]
 fn a_large_project_stays_under_the_budget_and_says_what_it_trimmed() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Crowded", "BIG");
     let long = "x".repeat(150);
     for index in 0..30 {
@@ -312,7 +312,7 @@ fn a_large_project_stays_under_the_budget_and_says_what_it_trimmed() {
 
 #[test]
 fn a_bound_session_briefs_the_bound_project_and_an_unbound_one_asks_for_it() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Bound", "BND");
     issue(&m, "BND", "Bound work", "active", "high");
     let unbound = briefing(&m, None, None, &[]);
@@ -326,7 +326,7 @@ fn a_bound_session_briefs_the_bound_project_and_an_unbound_one_asks_for_it() {
 
 #[test]
 fn an_unparseable_since_is_an_error() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Quiet", "QUI");
     let out = briefing(&m, Some("QUI"), Some("soon"), &[]);
     assert!(out.starts_with("Error: "), "{out}");
@@ -348,8 +348,7 @@ fn as_user(user: &models::AuthUser, f: impl FnOnce() -> String) -> String {
 
 #[test]
 fn a_briefing_is_gated_like_list_issues_and_never_names_invisible_records() {
-    let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) =
-        setup_membership_mcp();
+    let (m, _admin, lead, _maintainer, viewer, non_member, _project_id) = setup_membership_mcp();
     let created = as_user(&lead, || {
         m.create_issue(Parameters(CreateIssueInput {
             project: Some("MEM".into()),
@@ -461,7 +460,7 @@ fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
 
 #[test]
 fn briefing_names_holding_waits_as_blockers_and_lists_due_date_waits() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     let _day = crate::db::queries::waits::pin_today("2026-09-25");
     seed_project(&m, "Waits", "WTB");
     issue(&m, "WTB", "Needs a decision", "todo", "high"); // WTB-1
@@ -543,8 +542,7 @@ fn briefing_names_holding_waits_as_blockers_and_lists_due_date_waits() {
 /// issue's identifier to anyone who can view the plan's project.
 #[test]
 fn a_next_step_linked_into_an_invisible_project_is_not_named() {
-    let (m, admin, _lead, _maintainer, viewer, _non_member, project_id, _guard) =
-        setup_membership_mcp();
+    let (m, admin, _lead, _maintainer, viewer, _non_member, project_id) = setup_membership_mcp();
     {
         let conn = m.db.write().unwrap();
         let foreign = queries::create_project(
@@ -601,7 +599,7 @@ fn a_next_step_linked_into_an_invisible_project_is_not_named() {
 /// written later in that same second was never reported by any briefing.
 #[test]
 fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Cursor", "CSR");
     issue(&m, "CSR", "Before", "todo", "none");
     m.write(|conn| {
@@ -657,7 +655,7 @@ fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
 /// hid every eligible issue and the section vanished without a word.
 #[test]
 fn excluded_rows_ahead_of_an_eligible_issue_do_not_hide_it() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Crowd", "CRW");
     let project_id = m
         .read(|conn| queries::resolve_project_identifier(conn, "CRW"))

@@ -786,9 +786,10 @@ fn build_authless_mcp_router(
             let issue_links =
                 mcp_issue_link_context(&request, public_url.as_deref(), &allowed_hosts_for_links);
             if let Some(issue_links) = issue_links {
-                request
-                    .extensions_mut()
-                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
+                request.extensions_mut().insert(Arc::new(mcp::HttpRequestData {
+                    user,
+                    issue_links,
+                }));
             } else {
                 request.extensions_mut().insert(user);
             }
@@ -1758,6 +1759,162 @@ mod authless_mcp_tests {
             }
         });
         Body::from(serde_json::to_vec(&body).unwrap())
+    }
+
+    async fn tool_call(
+        router: &Router,
+        token: &str,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/mcp/{token}"))
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_mcp_calls_keep_identity_and_link_origin_isolated() {
+        let pool = db::open_memory().unwrap();
+        let (left_user, right_user) = {
+            let conn = pool.write().unwrap();
+            let left_user =
+                db::queries::users::create_passwordless_admin(&conn, "Left MCP Caller").unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('right-mcp-caller', 'right-mcp-caller@test.local', 'x', 'Right MCP Caller', 1, 0)",
+                [],
+            )
+            .unwrap();
+            let right_user_id = conn.last_insert_rowid();
+            let right_user = db::models::AuthUser {
+                id: right_user_id,
+                username: "right-mcp-caller".into(),
+                display_name: "Right MCP Caller".into(),
+                is_admin: true,
+            };
+            for identifier in ["LEFT", "RIGHT"] {
+                db::queries::create_project(
+                    &conn,
+                    &db::models::CreateProject {
+                        name: format!("{identifier} MCP"),
+                        identifier: identifier.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            (left_user, right_user)
+        };
+        let left_user = db::models::AuthUser {
+            id: left_user.id,
+            username: left_user.username,
+            display_name: left_user.display_name,
+            is_admin: true,
+        };
+        let left_token = "left-mcp-context-test-token";
+        let left_router = build_authless_mcp_router(
+            pool.clone(),
+            left_token,
+            Some(left_user),
+            vec!["localhost".into()],
+            Some("https://left-tracker.example/base".into()),
+            realtime::RealtimeHub::new(),
+        );
+        let right_token = "right-mcp-context-test-token";
+        let right_router = build_authless_mcp_router(
+            pool,
+            right_token,
+            Some(right_user),
+            vec!["localhost".into()],
+            Some("https://right-tracker.example/base".into()),
+            realtime::RealtimeHub::new(),
+        );
+
+        let (left_created, right_created) = tokio::join!(
+            tool_call(
+                &left_router,
+                left_token,
+                1,
+                "create_issue",
+                serde_json::json!({"project": "LEFT", "title": "Scoped left caller"}),
+            ),
+            tool_call(
+                &right_router,
+                right_token,
+                1,
+                "create_issue",
+                serde_json::json!({"project": "RIGHT", "title": "Scoped right caller"}),
+            ),
+        );
+        assert_ne!(left_created["result"]["isError"], true, "{left_created}");
+        assert_ne!(right_created["result"]["isError"], true, "{right_created}");
+        let left_output = left_created["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            left_output.contains("https://left-tracker.example/base/LEFT/issues/LEFT-1"),
+            "left HTTP-origin metadata did not reach its tool: {left_output}"
+        );
+        let right_output = right_created["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            right_output.contains("https://right-tracker.example/base/RIGHT/issues/RIGHT-1"),
+            "right HTTP-origin metadata did not reach its tool: {right_output}"
+        );
+
+        let (left_activity, right_activity) = tokio::join!(
+            tool_call(
+                &left_router,
+                left_token,
+                2,
+                "get_activity",
+                serde_json::json!({"identifier": "LEFT-1"}),
+            ),
+            tool_call(
+                &right_router,
+                right_token,
+                2,
+                "get_activity",
+                serde_json::json!({"identifier": "RIGHT-1"}),
+            ),
+        );
+        assert_ne!(left_activity["result"]["isError"], true, "{left_activity}");
+        assert_ne!(
+            right_activity["result"]["isError"], true,
+            "{right_activity}"
+        );
+        let left_output = left_activity["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let right_output = right_activity["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            left_output.contains("Left MCP Caller") && left_output.contains("via mcp"),
+            "left HTTP caller was not attributed: {left_output}"
+        );
+        assert!(
+            right_output.contains("Right MCP Caller") && right_output.contains("via mcp"),
+            "right HTTP caller was not attributed: {right_output}"
+        );
     }
 
     /// The whole point: a request to /mcp/<token> with NO Authorization header

@@ -13,7 +13,7 @@ fn search(m: &LificMcp, query: &str) -> String {
 
 #[test]
 fn search_labels_partial_matches_when_no_result_has_every_word() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     seed_issue(&m, "TST", "Parser rejects empty input");
     seed_issue(&m, "TST", "Search ranking ignores empty titles");
@@ -36,7 +36,7 @@ fn search_labels_partial_matches_when_no_result_has_every_word() {
 
 #[test]
 fn search_with_a_full_match_renders_as_before() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     seed_issue(&m, "TST", "Search ranking ignores empty titles");
     seed_issue(&m, "TST", "Search is slow");
@@ -61,7 +61,7 @@ fn create(m: &LificMcp, title: &str, status: Option<&str>, description: Option<&
 
 #[test]
 fn create_issue_lists_open_issues_that_share_its_wording() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     seed_issue(&m, "TST", "Search ranking ignores empty titles");
     seed_issue(&m, "TST", "Billing export");
@@ -78,7 +78,7 @@ fn create_issue_lists_open_issues_that_share_its_wording() {
 
 #[test]
 fn create_issue_never_lists_closed_issues() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     create(
         &m,
@@ -95,7 +95,7 @@ fn create_issue_never_lists_closed_issues() {
 
 #[test]
 fn create_issue_never_lists_the_issue_it_just_created() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
 
     let result = create(&m, "Search ranking breaks on long queries", None, None);
@@ -108,7 +108,7 @@ fn create_issue_never_lists_the_issue_it_just_created() {
 
 #[test]
 fn create_issue_ignores_overlap_in_stopwords_or_a_single_description_word() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     seed_issue(&m, "TST", "Add the export button");
     create(
@@ -130,7 +130,7 @@ fn create_issue_ignores_overlap_in_stopwords_or_a_single_description_word() {
 
 #[test]
 fn create_issue_lists_at_most_three_similar_issues() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     for suffix in ["one", "two", "three", "four"] {
         seed_issue(&m, "TST", &format!("Search ranking regression {suffix}"));
@@ -165,7 +165,7 @@ fn issue_count(m: &LificMcp) -> i64 {
 
 #[test]
 fn create_issue_batch_creates_every_item_and_returns_each_identifier() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
 
     let result = create_batch(
@@ -197,7 +197,7 @@ fn create_issue_batch_creates_every_item_and_returns_each_identifier() {
 
 #[test]
 fn create_issue_batch_with_an_invalid_item_creates_nothing_and_names_it() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
 
     let unknown_module = create_batch(
@@ -240,7 +240,7 @@ fn create_issue_batch_with_an_invalid_item_creates_nothing_and_names_it() {
 
 #[test]
 fn create_issue_batch_refuses_top_level_fields_and_empty_batches() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
 
     let mixed = m.create_issue(Parameters(CreateIssueInput {
@@ -265,7 +265,7 @@ fn create_issue_batch_refuses_top_level_fields_and_empty_batches() {
 
 #[test]
 fn create_issue_batch_hints_existing_duplicates_but_not_its_own_items() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Test", "TST");
     seed_issue(&m, "TST", "Search ranking ignores empty titles");
 

@@ -15,7 +15,7 @@ fn parse<T: serde::de::DeserializeOwned>(arguments: serde_json::Value) -> T {
 
 #[test]
 fn edit_issue_accepts_camel_case_keys() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Camel", "CML");
     m.create_issue(Parameters(CreateIssueInput {
         project: Some("CML".into()),
@@ -39,7 +39,7 @@ fn edit_issue_accepts_camel_case_keys() {
 
 #[test]
 fn edit_page_accepts_camel_case_keys() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Camel", "CML");
     m.create_page(Parameters(CreatePageInput {
         project: Some("CML".into()),
@@ -62,7 +62,7 @@ fn edit_page_accepts_camel_case_keys() {
 
 #[test]
 fn edit_comment_accepts_camel_case_keys() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Camel", "CML");
     seed_issue(&m, "CML", "Commented");
     let added = m.add_comment(Parameters(AddCommentInput {
@@ -87,7 +87,7 @@ fn edit_comment_accepts_camel_case_keys() {
 
 #[test]
 fn edit_plan_step_accepts_camel_case_keys() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Camel", "CML");
     let created = m.create_plan(Parameters(CreatePlanInput {
         project: Some("CML".into()),
@@ -171,7 +171,7 @@ fn page_in(m: &LificMcp, identifier: &str) -> models::Page {
 
 #[test]
 fn issue_writes_resolve_escaped_module_and_label_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     let created = m.create_issue(Parameters(CreateIssueInput {
         project: Some("NAM".into()),
@@ -207,7 +207,7 @@ fn issue_writes_resolve_escaped_module_and_label_names() {
 
 #[test]
 fn issue_filters_resolve_escaped_module_and_label_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     m.create_issue(Parameters(CreateIssueInput {
         project: Some("NAM".into()),
@@ -256,7 +256,7 @@ fn issue_filters_resolve_escaped_module_and_label_names() {
 
 #[test]
 fn page_writes_and_listings_resolve_escaped_folder_and_label_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     let created = m.create_page(Parameters(CreatePageInput {
         project: Some("NAM".into()),
@@ -312,7 +312,7 @@ fn project_id(m: &LificMcp) -> i64 {
 
 #[test]
 fn manage_resource_updates_resolve_escaped_current_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     for (resource_type, current, renamed) in [
         ("module", "Infra &amp; Ops", "Platform"),
@@ -529,7 +529,7 @@ fn quoted_literal_names_win_before_html_decoding_in_updates_and_deletes() {
 
 #[test]
 fn delete_resolves_escaped_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     for (resource_type, name) in [
         ("module", "Infra &amp; Ops"),
@@ -555,7 +555,7 @@ fn delete_resolves_escaped_names() {
 
 #[test]
 fn a_name_that_literally_contains_an_entity_matches_itself_first() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     // Both "Q&A" and the literal "Q&amp;A" exist; the literal wins.
     m.create_issue(Parameters(CreateIssueInput {
@@ -598,7 +598,7 @@ fn a_name_that_literally_contains_an_entity_matches_itself_first() {
 
 #[test]
 fn an_escaped_name_that_matches_nothing_reports_the_name_as_sent() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     let result = m.create_issue(Parameters(CreateIssueInput {
         project: Some("NAM".into()),
@@ -713,7 +713,7 @@ mod wire {
 
 #[tokio::test]
 async fn a_misspelled_optional_parameter_names_the_valid_one() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Wire", "WIR");
     seed_issue(&m, "WIR", "Spelled");
     let mut session = wire::Session::start(m.clone()).await;
@@ -743,7 +743,7 @@ async fn a_misspelled_optional_parameter_names_the_valid_one() {
 
 #[tokio::test]
 async fn unknown_fields_in_nested_plan_steps_are_rejected() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Wire", "WIR");
     let mut session = wire::Session::start(m.clone()).await;
 
@@ -768,7 +768,7 @@ async fn unknown_fields_in_nested_plan_steps_are_rejected() {
 
 #[tokio::test]
 async fn camel_case_edit_keys_survive_unknown_field_rejection() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Wire", "WIR");
     m.create_issue(Parameters(CreateIssueInput {
         project: Some("WIR".into()),
@@ -831,7 +831,7 @@ fn every_tool_input_rejects_unknown_fields() {
 
 #[tokio::test]
 async fn project_export_pages_through_markdown_without_paths() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Export", "EXQ");
     for (title, body) in [
         ("First", "first body"),
@@ -892,7 +892,7 @@ async fn project_export_pages_through_markdown_without_paths() {
 
 #[test]
 fn create_issue_batch_items_resolve_escaped_module_and_label_names() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_escapable_names(&m);
     let result = m.create_issue(Parameters(CreateIssueInput {
         project: Some("NAM".into()),
@@ -915,7 +915,7 @@ fn create_issue_batch_items_resolve_escaped_module_and_label_names() {
 /// project export frontmatter.
 #[tokio::test]
 async fn export_leaves_out_relations_to_projects_the_caller_cannot_view() {
-    let (m, admin, _, _, viewer, _, project_id, _guard) = super::tests::setup_membership_mcp();
+    let (m, admin, _, _, viewer, _, project_id) = super::tests::setup_membership_mcp();
     let [blocker, visible, hidden] = {
         let conn = m.db.write().unwrap();
         crate::export::seed_hidden_relation(&conn, project_id)

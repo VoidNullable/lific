@@ -34,7 +34,7 @@ fn set_status(m: &LificMcp, identifier: &str, status: &str) -> String {
 
 #[test]
 fn get_issue_shows_checklist_progress_without_fenced_examples() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Checklist", "CHK");
     create(&m, "With criteria", Some(CRITERIA));
 
@@ -44,7 +44,7 @@ fn get_issue_shows_checklist_progress_without_fenced_examples() {
 
 #[test]
 fn get_issue_has_no_checklist_line_without_task_items() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Checklist", "CHK");
     create(
         &m,
@@ -61,7 +61,7 @@ fn get_issue_has_no_checklist_line_without_task_items() {
 
 #[test]
 fn list_issues_marks_only_issues_with_task_items() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Checklist", "CHK");
     create(&m, "With criteria", Some(CRITERIA));
     create(&m, "Plain", Some("No task list here."));
@@ -87,7 +87,7 @@ fn list_issues_marks_only_issues_with_task_items() {
 
 #[test]
 fn closing_with_unchecked_items_succeeds_with_a_warning() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Checklist", "CHK");
     create(&m, "With criteria", Some(CRITERIA));
 
@@ -102,7 +102,7 @@ fn closing_with_unchecked_items_succeeds_with_a_warning() {
 
 #[test]
 fn no_warning_when_every_item_is_checked_or_there_is_no_list() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Checklist", "CHK");
     create(&m, "All checked", Some("- [x] one\n- [X] two"));
     create(&m, "Plain", None);
