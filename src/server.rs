@@ -1766,6 +1766,7 @@ mod authless_mcp_tests {
         id: u64,
         name: &str,
         arguments: serde_json::Value,
+        barrier: mcp::TestToolCallBarrier,
     ) -> serde_json::Value {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1773,7 +1774,7 @@ mod authless_mcp_tests {
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments}
         });
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(Method::POST)
             .uri(format!("/mcp/{token}"))
             .header("host", "localhost")
@@ -1782,15 +1783,17 @@ mod authless_mcp_tests {
             .header("MCP-Protocol-Version", "2025-06-18")
             .body(Body::from(body.to_string()))
             .unwrap();
+        request.extensions_mut().insert(barrier);
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_http_mcp_calls_keep_identity_and_link_origin_isolated() {
-        let pool = db::open_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open(&dir.path().join("lific.db")).unwrap();
         let (left_user, right_user) = {
             let conn = pool.write().unwrap();
             let left_user =
@@ -1846,22 +1849,38 @@ mod authless_mcp_tests {
             realtime::RealtimeHub::new(),
         );
 
-        let (left_created, right_created) = tokio::join!(
-            tool_call(
-                &left_router,
-                left_token,
-                1,
-                "create_issue",
-                serde_json::json!({"project": "LEFT", "title": "Scoped left caller"}),
-            ),
-            tool_call(
-                &right_router,
-                right_token,
-                1,
-                "create_issue",
-                serde_json::json!({"project": "RIGHT", "title": "Scoped right caller"}),
-            ),
-        );
+        let arrivals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let create_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (left_created, right_created) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    tool_call(
+                        &left_router,
+                        left_token,
+                        1,
+                        "create_issue",
+                        serde_json::json!({"project": "LEFT", "title": "Scoped left caller"}),
+                        mcp::TestToolCallBarrier {
+                            barrier: Arc::clone(&create_barrier),
+                            arrivals: Arc::clone(&arrivals),
+                        },
+                    ),
+                    tool_call(
+                        &right_router,
+                        right_token,
+                        1,
+                        "create_issue",
+                        serde_json::json!({"project": "RIGHT", "title": "Scoped right caller"}),
+                        mcp::TestToolCallBarrier {
+                            barrier: Arc::clone(&create_barrier),
+                            arrivals: Arc::clone(&arrivals),
+                        },
+                    ),
+                )
+            })
+            .await
+            .expect("both create_issue tool scopes should overlap");
+        assert_eq!(arrivals.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_ne!(left_created["result"]["isError"], true, "{left_created}");
         assert_ne!(right_created["result"]["isError"], true, "{right_created}");
         let left_output = left_created["result"]["content"][0]["text"]
@@ -1879,22 +1898,37 @@ mod authless_mcp_tests {
             "right HTTP-origin metadata did not reach its tool: {right_output}"
         );
 
-        let (left_activity, right_activity) = tokio::join!(
-            tool_call(
-                &left_router,
-                left_token,
-                2,
-                "get_activity",
-                serde_json::json!({"identifier": "LEFT-1"}),
-            ),
-            tool_call(
-                &right_router,
-                right_token,
-                2,
-                "get_activity",
-                serde_json::json!({"identifier": "RIGHT-1"}),
-            ),
-        );
+        let activity_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (left_activity, right_activity) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    tool_call(
+                        &left_router,
+                        left_token,
+                        2,
+                        "get_activity",
+                        serde_json::json!({"identifier": "LEFT-1"}),
+                        mcp::TestToolCallBarrier {
+                            barrier: Arc::clone(&activity_barrier),
+                            arrivals: Arc::clone(&arrivals),
+                        },
+                    ),
+                    tool_call(
+                        &right_router,
+                        right_token,
+                        2,
+                        "get_activity",
+                        serde_json::json!({"identifier": "RIGHT-1"}),
+                        mcp::TestToolCallBarrier {
+                            barrier: Arc::clone(&activity_barrier),
+                            arrivals: Arc::clone(&arrivals),
+                        },
+                    ),
+                )
+            })
+            .await
+            .expect("both get_activity tool scopes should overlap");
+        assert_eq!(arrivals.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_ne!(left_activity["result"]["isError"], true, "{left_activity}");
         assert_ne!(
             right_activity["result"]["isError"], true,

@@ -103,6 +103,13 @@ thread_local! {
     static TEST_ISSUE_LINK_CONTEXT_READS: Cell<usize> = const { Cell::new(0) };
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestToolCallBarrier {
+    pub barrier: Arc<tokio::sync::Barrier>,
+    pub arrivals: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 /// Scope the authenticated user for an MCP operation. The scope is task-local,
 /// so concurrent requests cannot overwrite each other's identity.
 ///
@@ -680,10 +687,29 @@ impl ServerHandler for LificMcp {
                 .and_then(|parts| parts.extensions.get::<McpRequestContext>())
                 .cloned()
                 .unwrap_or_default();
+            #[cfg(test)]
+            let test_tool_barrier = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<TestToolCallBarrier>())
+                .cloned();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            let dispatch =
-                || self.dispatch_tool(request_context, || self.tool_router.call(tool_context));
+            let dispatch = || {
+                #[cfg(test)]
+                let test_tool_barrier = test_tool_barrier.clone();
+                async move {
+                    #[cfg(test)]
+                    if let Some(test_tool_barrier) = test_tool_barrier {
+                        test_tool_barrier
+                            .arrivals
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        test_tool_barrier.barrier.wait().await;
+                    }
+                    self.dispatch_tool(request_context, || self.tool_router.call(tool_context))
+                        .await
+                }
+            };
             let result = match http_context {
                 Some(http) => scope_request_data(RequestData::Http(http), dispatch()).await,
                 None if self.transport == McpTransport::Http => {
