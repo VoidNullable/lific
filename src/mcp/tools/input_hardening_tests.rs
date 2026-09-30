@@ -334,7 +334,7 @@ fn manage_resource_updates_resolve_escaped_current_names() {
 
 #[test]
 fn manage_resource_accepts_single_and_double_quoted_arguments() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Quoted", "QTE");
 
     let created = m.manage_resource(Parameters(parse(json!({
@@ -373,7 +373,7 @@ fn manage_resource_accepts_single_and_double_quoted_arguments() {
 
 #[test]
 fn manage_resource_unquotes_project_module_and_update_fields() {
-    let (m, _guard) = mcp();
+    let m = mcp();
 
     let project = m.manage_resource(Parameters(parse(json!({
         "resource_type": "\"project\"",
@@ -421,7 +421,7 @@ fn manage_resource_unquotes_project_module_and_update_fields() {
 
 #[test]
 fn manage_resource_prefers_an_exact_quoted_current_name() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Quoted", "NAM");
     let pid = project_id(&m);
     m.write(|conn| {
@@ -474,7 +474,7 @@ fn manage_resource_prefers_an_exact_quoted_current_name() {
 
 #[test]
 fn quoted_literal_names_win_before_html_decoding_in_updates_and_deletes() {
-    let (m, _guard) = mcp();
+    let m = mcp();
     seed_project(&m, "Names", "NAM");
     let pid = project_id(&m);
     for (resource_type, table) in [
