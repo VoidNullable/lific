@@ -1519,6 +1519,23 @@ fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Res
         .map_err(|e| e.to_string())
 }
 
+fn require_step_issue_role_mcp_conn(
+    conn: &rusqlite::Connection,
+    step_id: i64,
+    min: models::Role,
+) -> Result<(), crate::error::LificError> {
+    if let Some(issue_id) = queries::plans::step_issue_id(conn, step_id)? {
+        let project_id = queries::get_issue(conn, issue_id)?.project_id;
+        let identity = crate::resolve_caller::resolve_caller_conn(
+            conn,
+            super::current_auth_user(),
+            crate::actor::Transport::Mcp,
+        )?;
+        crate::authz::require_role_conn(conn, &identity, project_id, min)?;
+    }
+    Ok(())
+}
+
 /// Gate for module/label/folder ("structure") mutations — Maintainer once
 /// enforcement is on, Lead in legacy mode (matches REST).
 fn require_structure_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
@@ -1649,22 +1666,6 @@ impl LificMcp {
     ) -> Result<(), String> {
         let project_id = self.read(|conn| parent.project_id(conn))?;
         require_page_role_mcp(&self.db, project_id, minimum_role)
-    }
-
-    /// LIF-198: if `step_id` has a linked issue, require `min` role on that
-    /// issue's own project too — the same "both sides" check `link_issues`
-    /// applies, since a step's issue can live in a different project than
-    /// the plan it belongs to.
-    fn require_step_issue_role_mcp(&self, step_id: i64, min: models::Role) -> Result<(), String> {
-        match self.read(|conn| queries::plans::step_issue_id(conn, step_id))? {
-            Some(issue_id) => {
-                let project_id = self
-                    .read(|conn| queries::get_issue(conn, issue_id))?
-                    .project_id;
-                require_role_mcp(&self.db, project_id, min)
-            }
-            None => Ok(()),
-        }
     }
 
     /// LIF-198: require `min` role on the project of the issue identified
@@ -4652,6 +4653,14 @@ impl LificMcp {
     }
 
     fn update_plan_step_inner(&self, input: UpdatePlanStepInput) -> Result<String, String> {
+        self.update_plan_step_inner_before_write(input, || {})
+    }
+
+    fn update_plan_step_inner_before_write(
+        &self,
+        input: UpdatePlanStepInput,
+        before_write: impl FnOnce(),
+    ) -> Result<String, String> {
         // LIF-198: Maintainer on the plan's own project gates every mutation
         // below (plan-level and step-level alike).
         let plan_project_id = self.read(|conn| {
@@ -4670,11 +4679,6 @@ impl LificMcp {
         if let Some(ref ident) = input.add_child_issue {
             self.require_issue_ident_role_mcp(ident, models::Role::Maintainer)?;
         }
-        if input.done == Some(true)
-            && let Some(step_id) = input.step_id
-        {
-            self.require_step_issue_role_mcp(step_id, models::Role::Maintainer)?;
-        }
         // LIF-407: re-anchoring the plan resolves an arbitrary issue
         // identifier too (plan-level update only — `anchor_issue` is ignored
         // when `step_id` is set).
@@ -4684,8 +4688,9 @@ impl LificMcp {
             self.require_issue_ident_role_mcp(ident, models::Role::Maintainer)?;
         }
 
+        before_write();
         let context = current_issue_link_context();
-        let (notes, plan, events) = self.write(|conn| {
+        let (notes, plan, events) = self.transaction(|conn| {
             let plan_id = queries::plans::resolve_plan_identifier(conn, &input.plan)?;
             let mut notes: Vec<String> = Vec::new();
             let mut events = Vec::new();
@@ -4744,6 +4749,17 @@ impl LificMcp {
                             notes.push(format!("Detached issue from step #{step_id}"));
                         }
                         if let Some(done) = input.done {
+                            if done {
+                                // The linked issue can change after this
+                                // request starts. Read it and authorize it
+                                // inside the same immediate transaction that
+                                // propagates the step completion.
+                                require_step_issue_role_mcp_conn(
+                                    conn,
+                                    step_id,
+                                    models::Role::Maintainer,
+                                )?;
+                            }
                             let effect = queries::plans::set_step_done(conn, step_id, done)?;
                             enum IssueEffect<'a> {
                                 MarkedDone(&'a str),
@@ -8378,7 +8394,7 @@ mod tests {
         seed_project(&m, "Attach", "ATC");
         seed_issue(&m, "ATC", "Commented");
         let att = seed_attachment(&m, "comment.png");
-        let _user_guard = seed_user(&m);
+        seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
             identifier: "ATC-1".into(),
@@ -8400,7 +8416,7 @@ mod tests {
         seed_issue(&m, "ATD", "Commented");
         let old = seed_attachment(&m, "old-comment.png");
         let new = seed_attachment(&m, "new-comment.png");
-        let _user_guard = seed_user(&m);
+        seed_user(&m);
 
         let created = m.add_comment(Parameters(AddCommentInput {
             identifier: "ATD-1".into(),
@@ -10859,7 +10875,7 @@ mod tests {
 
         // Author posts a comment.
         let cid = {
-            let _g = act_as(&author);
+            act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
                 identifier: "PRJ-1".into(),
                 content: "mine".into(),
@@ -11033,7 +11049,7 @@ mod tests {
         let m = mcp();
         let cid = seed_own_comment(&m, "secret phrase");
         let other = make_user(&m, "other", false);
-        let _as_other = act_as(&other);
+        act_as(&other);
 
         // A needle that does not match must not produce "not found", which
         // would tell a non-author something about the body.
@@ -11056,7 +11072,7 @@ mod tests {
         let admin = make_user(&m, "boss", true);
 
         let cid = {
-            let _g = act_as(&author);
+            act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
                 identifier: "PRJ-1".into(),
                 content: "regular user's comment".into(),
@@ -12795,7 +12811,7 @@ mod tests {
 
     #[test]
     fn get_attachment_returns_absolute_download_url_for_http_mcp() {
-        let (m, _guard) = mcp();
+        let m = mcp();
         let (store, _tmp) = attachment_store_tempdir();
         let m = m.with_attachment_store(store);
         let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody");
@@ -14302,6 +14318,108 @@ mod authz_gating_tests {
             }))
         });
         assert!(!is_forbidden(&allowed), "got: {allowed}");
+    }
+
+    #[test]
+    fn concurrent_plan_step_link_change_cannot_bypass_issue_authorization() {
+        use std::sync::{Arc, mpsc};
+
+        let (m, admin, lead, _maintainer, _viewer, _non_member, _) = setup_membership_mcp();
+        let plan = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: Some("MEM".into()),
+                title: "Race target".into(),
+                steps: Some(vec![PlanStepInput {
+                    title: "Unlinked step".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }))
+        });
+        assert!(plan.starts_with("Created"), "got: {plan}");
+        let step_id: i64 = plan
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let (foreign_project_id, foreign_issue_id) = {
+            let conn = m.db.write().unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Secret".into(),
+                    identifier: "SEC".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: project.id,
+                    title: "Restricted issue".into(),
+                    status: models::Status::Active,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            (project.id, issue.id)
+        };
+        {
+            let conn = m.db.write().unwrap();
+            crate::db::queries::members::upsert_member(
+                &conn,
+                foreign_project_id,
+                admin.id,
+                models::Role::Maintainer,
+            )
+            .unwrap();
+        }
+
+        let m = Arc::new(m);
+        let (checked_tx, checked_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let caller = lead;
+        let for_caller = Arc::clone(&m);
+        let caller = std::thread::spawn(move || {
+            crate::mcp::set_test_direct_request_user(Some(caller));
+            for_caller.update_plan_step_inner_before_write(
+                UpdatePlanStepInput {
+                    plan: "MEM-PLAN-1".into(),
+                    step_id: Some(step_id),
+                    done: Some(true),
+                    ..Default::default()
+                },
+                || {
+                    checked_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                },
+            )
+        });
+
+        // Caller A pauses before the write. Caller B, authorized on both
+        // projects, attaches SEC-1; A then resumes and must authorize the
+        // current link before the step can close it.
+        checked_rx.recv().unwrap();
+        let attached = as_user(&admin, || {
+            m.update_plan_step(Parameters(UpdatePlanStepInput {
+                plan: "MEM-PLAN-1".into(),
+                step_id: Some(step_id),
+                attach_issue: Some("SEC-1".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(attached.contains("Attached SEC-1"), "got: {attached}");
+        resume_tx.send(()).unwrap();
+
+        let denied = caller.join().unwrap().unwrap_err();
+        assert!(denied.contains("Forbidden"), "got: {denied}");
+        let conn = m.db.read().unwrap();
+        let issue = crate::db::queries::get_issue(&conn, foreign_issue_id).unwrap();
+        assert_eq!(issue.status, models::Status::Active);
     }
 
     // ── Workspace-level (project-less) pages: admin-only ─────────

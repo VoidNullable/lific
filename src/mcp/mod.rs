@@ -682,7 +682,8 @@ impl ServerHandler for LificMcp {
                 .unwrap_or_default();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            let dispatch = || self.dispatch_tool(request_context, || self.tool_router.call(tool_context));
+            let dispatch =
+                || self.dispatch_tool(request_context, || self.tool_router.call(tool_context));
             let result = match http_context {
                 Some(http) => scope_request_data(RequestData::Http(http), dispatch()).await,
                 None if self.transport == McpTransport::Http => {
@@ -742,7 +743,7 @@ mod tests {
             with_request_context(
                 Some(user),
                 IssueLinkContext::parse(&format!("https://{name}.example")),
-                async move {
+                || async move {
                     barrier.wait().await;
                     tokio::task::yield_now().await;
                     (

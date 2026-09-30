@@ -786,10 +786,9 @@ fn build_authless_mcp_router(
             let issue_links =
                 mcp_issue_link_context(&request, public_url.as_deref(), &allowed_hosts_for_links);
             if let Some(issue_links) = issue_links {
-                request.extensions_mut().insert(Arc::new(mcp::HttpRequestData {
-                    user,
-                    issue_links,
-                }));
+                request
+                    .extensions_mut()
+                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
             } else {
                 request.extensions_mut().insert(user);
             }
@@ -2245,5 +2244,152 @@ mod authless_mcp_tests {
 
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod authenticated_mcp_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn tool_call(
+        router: &Router,
+        bearer: &str,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn authenticated_mcp_calls_use_the_current_linked_issue_membership() {
+        let (db, _admin, lead, maintainer, _viewer, _outsider, project_id) =
+            crate::api::test_helpers::setup_membership_test();
+        let lead_key = crate::auth::create_api_key(&db, "plan-race-lead", Some(lead.id)).unwrap();
+        let maintainer_key =
+            crate::auth::create_api_key(&db, "plan-race-maintainer", Some(maintainer.id)).unwrap();
+
+        let (step_id, issue_id, secret_project_id) = {
+            let conn = db.write().unwrap();
+            let secret_project = db::queries::create_project(
+                &conn,
+                &db::models::CreateProject {
+                    name: "Secret".into(),
+                    identifier: "SEC".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let issue = db::queries::create_issue(
+                &conn,
+                &db::models::CreateIssue {
+                    project_id: secret_project.id,
+                    title: "Restricted issue".into(),
+                    status: db::models::Status::Active,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            db::queries::members::upsert_member(
+                &conn,
+                secret_project.id,
+                maintainer.id,
+                db::models::Role::Maintainer,
+            )
+            .unwrap();
+            let plan = db::queries::plans::create_plan(
+                &conn,
+                &db::models::CreatePlan {
+                    project_id,
+                    title: "Authorization race".into(),
+                    issue_id: None,
+                    steps: vec![db::models::CreatePlanStep {
+                        title: "Unlinked step".into(),
+                        description: String::new(),
+                        issue_id: None,
+                        done: false,
+                        steps: Vec::new(),
+                    }],
+                },
+            )
+            .unwrap();
+            (plan.steps[0].id, issue.id, secret_project.id)
+        };
+
+        let attachment_dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.auth.required = true;
+        cfg.server.host = "127.0.0.1".into();
+        let trusted_proxies =
+            Arc::<[ratelimit::IpNetwork]>::from(cfg.server.trusted_proxy_ranges().unwrap());
+        let router = build_app_with_store(
+            &cfg,
+            db.clone(),
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            storage::AttachmentStore::new(attachment_dir.path().to_path_buf()),
+        );
+
+        // Both credentials call the same production /mcp route. The
+        // maintainer can link the restricted issue; the lead cannot complete
+        // a step after that mutable link has changed.
+        let attached = tool_call(
+            &router,
+            &maintainer_key,
+            1,
+            "update_plan_step",
+            serde_json::json!({
+                "plan": "MEM-PLAN-1",
+                "step_id": step_id,
+                "attach_issue": "SEC-1"
+            }),
+        )
+        .await;
+        let attached_text = attached["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            attached_text.contains("Attached") && attached_text.contains("SEC-1"),
+            "{attached_text}"
+        );
+
+        let denied = tool_call(
+            &router,
+            &lead_key,
+            2,
+            "update_plan_step",
+            serde_json::json!({
+                "plan": "MEM-PLAN-1",
+                "step_id": step_id,
+                "done": true
+            }),
+        )
+        .await;
+        let denied_text = denied["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(denied_text.contains("Error: Forbidden:"), "{denied_text}");
+
+        let conn = db.read().unwrap();
+        let issue = db::queries::get_issue(&conn, issue_id).unwrap();
+        assert_eq!(issue.project_id, secret_project_id);
+        assert_eq!(issue.status, db::models::Status::Active);
     }
 }
