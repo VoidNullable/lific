@@ -659,11 +659,6 @@ impl ServerHandler for LificMcp {
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
-            let workers = tokio::runtime::Handle::current().metrics().num_workers();
-            let _permit = MCP_TOOL_PERMITS
-                .acquire_many(mcp_tool_permits_per_call(workers))
-                .await
-                .expect("MCP tool semaphore is never closed");
             let http_context = context
                 .extensions
                 .get_mut::<axum::http::request::Parts>()
@@ -706,6 +701,11 @@ impl ServerHandler for LificMcp {
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         test_tool_barrier.barrier.wait().await;
                     }
+                    let workers = tokio::runtime::Handle::current().metrics().num_workers();
+                    let _permit = MCP_TOOL_PERMITS
+                        .acquire_many(mcp_tool_permits_per_call(workers))
+                        .await
+                        .expect("MCP tool semaphore is never closed");
                     self.dispatch_tool(request_context, || self.tool_router.call(tool_context))
                         .await
                 }
