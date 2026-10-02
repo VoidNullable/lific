@@ -11,19 +11,24 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
+#[cfg(any(not(feature = "topcoat-spike"), test))]
+use axum::http::StatusCode;
+#[cfg(any(not(feature = "topcoat-spike"), test))]
+use axum::routing::get;
 use axum::{
     Router,
     body::Body,
     extract::Request,
-    http::{HeaderName, HeaderValue, Method, StatusCode, header},
+    http::{HeaderName, HeaderValue, Method, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::any,
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpServerConfig, StreamableHttpService},
 };
+#[cfg(any(not(feature = "topcoat-spike"), test))]
 use rust_embed::Embed;
 use tower_http::compression::Compression;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -39,9 +44,11 @@ use crate::{
 #[derive(Embed)]
 #[folder = "web/dist/"]
 #[allow(dead_code)]
+#[cfg(any(not(feature = "topcoat-spike"), test))]
 struct WebAssets;
 
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
+#[cfg(any(not(feature = "topcoat-spike"), test))]
 async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
 
@@ -90,6 +97,52 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
             "Frontend not built. Run: cd web && bun run build",
         )
             .into_response(),
+    }
+}
+
+#[cfg(feature = "topcoat-spike")]
+mod topcoat_spike {
+    use topcoat::{Result, router::page, view::view};
+
+    #[page("/__topcoat-spike")]
+    async fn home() -> Result<impl topcoat::view::View> {
+        Ok(view! {
+            <!DOCTYPE html>
+            <html>
+                <body><h1>"Topcoat migration spike"</h1></body>
+            </html>
+        })
+    }
+
+    pub(super) fn router() -> topcoat::router::Router {
+        use topcoat::router::RouterBuilderDiscoverExt;
+
+        topcoat::router::Router::builder().discover().build()
+    }
+}
+
+#[cfg(all(test, feature = "topcoat-spike"))]
+mod topcoat_spike_tests {
+    use super::topcoat_spike;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn topcoat_spike_route_renders_its_server_page() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-spike")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Topcoat migration spike"));
     }
 }
 
@@ -461,8 +514,15 @@ pub(crate) fn build_app_with_store(
     // published projects are reachable through it (the flag is checked in the
     // SQL of every read), and only with `GET`.
     let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
+    #[cfg(feature = "topcoat-spike")]
+    let app = app.fallback_service(topcoat::router::tower::TowerService::new(
+        topcoat_spike::router(),
+    ));
+    #[cfg(not(feature = "topcoat-spike"))]
+    let app = app.fallback(get(serve_frontend));
+
     with_compression(
-        app.fallback(get(serve_frontend))
+        app
             // Top-level CORS layer.
             //
             // This wraps EVERYTHING (REST API, /mcp, OAuth, frontend). Two
@@ -1737,6 +1797,19 @@ mod public_surface_tests {
         let d = deploy();
         let response = anonymous(&d.app, "GET", "/public/PUB").await;
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "topcoat-spike")]
+    #[tokio::test]
+    async fn topcoat_spike_fallback_preserves_axum_health_route() {
+        let d = deploy();
+        let health = anonymous(&d.app, "GET", "/api/health").await;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(body_string(health).await, "ok");
+
+        let page = anonymous(&d.app, "GET", "/__topcoat-spike").await;
+        assert_eq!(page.status(), StatusCode::OK);
+        assert!(body_string(page).await.contains("Topcoat migration spike"));
     }
 }
 

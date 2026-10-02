@@ -18,6 +18,13 @@ include = [
     "README.md",
 ]
 
+[features]
+default = []
+# Temporary migration spike: compile the Topcoat 0.9 frontend adapter only
+# when explicitly requested. Topcoat 0.9 requires Rust 1.98; the normal Lific
+# build remains compatible with the repository's Rust 1.88 toolchain.
+topcoat-spike = ["dep:topcoat"]
+
 [lints.clippy]
 branches_sharing_code = "deny"
 cast_sign_loss = "deny"
@@ -42,6 +49,7 @@ unused_async = "deny"
 [dependencies]
 # HTTP
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
+topcoat = { version = "=0.9.0", optional = true, default-features = false, features = ["discover", "router", "tower", "view"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br"] }
