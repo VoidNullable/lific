@@ -121,6 +121,28 @@ fn project_row_names_leads_and_maintainers_counts_viewers_and_shows_your_role() 
 }
 
 #[test]
+fn a_single_person_instance_leaves_the_roster_out_until_asked_or_joined() {
+    let (m, _guard) = super::tests::mcp();
+    super::tests::seed_project(&m, "Solo", "SOL");
+    let pid = super::tests::project_id_for(&m, "SOL");
+
+    assert_eq!(
+        row(&projects(&m, None, json!({})), "SOL"),
+        "- SOL | Solo | no issues"
+    );
+    assert_ends(
+        row(&projects(&m, None, json!({"show_members": []})), "SOL"),
+        " | no members | you: admin | no issues",
+    );
+
+    add_member(&m, pid, "partner", models::Role::Viewer);
+    assert_ends(
+        row(&projects(&m, None, json!({})), "SOL"),
+        " | 1 viewer | you: admin | no issues",
+    );
+}
+
+#[test]
 fn roster_names_five_per_role_and_show_members_lists_chosen_roles_in_full() {
     let (m, _admin, lead, _maintainer, _viewer, _non_member, pid, _guard) = setup_membership_mcp();
     for name in ["m2", "m3", "m4", "m5", "m6", "m7"] {

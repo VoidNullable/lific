@@ -423,6 +423,18 @@ pub fn has_human_users(conn: &Connection) -> Result<bool, LificError> {
     Ok(exists)
 }
 
+/// True when more than one active human account exists. On a single-person
+/// instance every roster names only that person, so MCP project listings
+/// leave the roster out unless asked.
+pub fn has_several_active_humans(conn: &Connection) -> Result<bool, LificError> {
+    let several: bool = conn.query_row(
+        "SELECT COUNT(*) > 1 FROM users WHERE is_bot = 0 AND is_active = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(several)
+}
+
 /// Whether a human *administrator* exists.
 ///
 /// Narrower than [`has_human_users`] on purpose (LIF-468): an instance holding

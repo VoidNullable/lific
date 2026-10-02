@@ -457,7 +457,7 @@ pub struct ListResourcesInput {
     )]
     pub statuses: Option<Vec<String>>,
     #[schemars(
-        description = "Projects only: roles to list every member of by name: lead, maintainer, viewer, or all. Default names up to 5 leads and maintainers and counts viewers; [] prints counts only"
+        description = "Projects only: roles to list every member of by name: lead, maintainer, viewer, or all. Default names up to 5 leads and maintainers and counts viewers, and a single-person instance shows no roster; [] prints counts only"
     )]
     pub show_members: Option<Vec<String>>,
 }

@@ -3843,7 +3843,7 @@ No issues found."
                 };
                 let visible = visible_project_ids_mcp(&self.db)?;
                 let identity = super::current_identity(&self.db).map(|identity| identity.user);
-                let (ps, stats, rosters, caller, counts) = self.read(|conn| {
+                let (ps, stats, rosters, caller, counts, team) = self.read(|conn| {
                     Ok((
                         queries::list_projects(conn)?,
                         queries::project_agent_stats(conn)?,
@@ -3852,8 +3852,11 @@ No issues found."
                         // owner, so "you" matches what the caller may see.
                         crate::authz::effective_user(conn, &identity),
                         queries::count_issues_by_status_all(conn)?,
+                        queries::users::has_several_active_humans(conn)?,
                     ))
                 })?;
+                // A single-person instance's roster is always just its owner.
+                let show_roster = team || show_members.is_some();
                 let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
                 if let Some(pid) = only {
                     ps.retain(|project| project.id == pid);
@@ -3891,15 +3894,17 @@ No issues found."
                         stats.get(&project.id).map_or(Ok(()), |stats| {
                             write!(output, "{}", ProjectAgentStats { stats, now })
                         })?;
-                        write!(
-                            output,
-                            "{}",
-                            roles::ProjectRoster {
-                                members: rosters.get(&project.id).map_or(&[], Vec::as_slice),
-                                caller: caller.as_ref(),
-                                show: show_members.as_deref(),
-                            }
-                        )?;
+                        if show_roster {
+                            write!(
+                                output,
+                                "{}",
+                                roles::ProjectRoster {
+                                    members: rosters.get(&project.id).map_or(&[], Vec::as_slice),
+                                    caller: caller.as_ref(),
+                                    show: show_members.as_deref(),
+                                }
+                            )?;
+                        }
                         write!(
                             output,
                             "{}",
@@ -5835,7 +5840,7 @@ mod tests {
         result
     }
 
-    fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
+    pub(super) fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
         mcp.read(|conn| queries::resolve_project_identifier(conn, identifier))
             .expect("project id")
     }
@@ -7922,12 +7927,13 @@ mod tests {
             "got: {recent}"
         );
         assert!(recent.contains(" ago) | "), "got: {recent}");
-        // GitHub #87 appends the roster and status counts after the stats.
+        // GitHub #87 appends status counts after the stats; a single-person
+        // instance leaves the roster out.
         assert_eq!(
             result
                 .lines()
                 .find(|line| line.starts_with("- EMP | Empty")),
-            Some("- EMP | Empty | no members | you: admin | no issues"),
+            Some("- EMP | Empty | no issues"),
             "fresh empty project must have no stats suffix: {result}"
         );
         assert!(
