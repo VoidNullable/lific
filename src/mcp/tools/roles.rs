@@ -27,6 +27,32 @@ pub(super) const COUNT_ORDER: [models::Status; 5] = [
 /// so a large team doesn't flood every project row.
 const ROSTER_NAME_CAP: usize = 5;
 
+/// On a single-person instance the owner answers for every project, including
+/// ones created without a lead (CLI, imports). Credit an admin caller without
+/// a membership row as lead, so `members: ["me"]` finds their own work.
+pub(super) fn credit_solo_owner(
+    rosters: &mut std::collections::HashMap<i64, Vec<models::MemberWithUser>>,
+    project_ids: impl IntoIterator<Item = i64>,
+    caller: Option<&models::AuthUser>,
+) {
+    let Some(caller) = caller.filter(|caller| caller.is_admin) else {
+        return;
+    };
+    for project_id in project_ids {
+        let roster = rosters.entry(project_id).or_default();
+        if !roster.iter().any(|member| member.user_id == caller.id) {
+            roster.push(models::MemberWithUser {
+                project_id,
+                user_id: caller.id,
+                role: models::Role::Lead,
+                created_at: String::new(),
+                username: caller.username.clone(),
+                display_name: caller.display_name.clone(),
+            });
+        }
+    }
+}
+
 /// A list value trimmed and stripped of one pair of wrapping quotes, as the
 /// other MCP arguments are (`'alice'` and `"todo"` arrive from some clients).
 fn unquoted(raw: &str) -> &str {

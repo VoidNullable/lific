@@ -2208,14 +2208,24 @@ No issues found."
             None => None,
         };
         let visible = visible_project_ids_mcp(&self.db)?;
-        let (projects, rosters) = self.read(|conn| {
+        let identity = super::current_identity(&self.db).map(|identity| identity.user);
+        let (projects, mut rosters, caller, team) = self.read(|conn| {
             Ok((
                 queries::list_projects(conn)?,
                 queries::members::rosters_by_project(conn)?,
+                crate::authz::effective_user(conn, &identity),
+                queries::users::has_several_active_humans(conn)?,
             ))
         })?;
-        let roster = |pid: i64| rosters.get(&pid).map_or(&[][..], Vec::as_slice);
         let mut projects = filter_visible(projects, &visible, |p| Some(p.id));
+        if !team {
+            roles::credit_solo_owner(
+                &mut rosters,
+                projects.iter().map(|project| project.id),
+                caller.as_ref(),
+            );
+        }
+        let roster = |pid: i64| rosters.get(&pid).map_or(&[][..], Vec::as_slice);
         if let Some(pid) = only {
             projects.retain(|project| project.id == pid);
             if let Some(project) = projects.first()
@@ -3843,7 +3853,7 @@ No issues found."
                 };
                 let visible = visible_project_ids_mcp(&self.db)?;
                 let identity = super::current_identity(&self.db).map(|identity| identity.user);
-                let (ps, stats, rosters, caller, counts, team) = self.read(|conn| {
+                let (ps, stats, mut rosters, caller, counts, team) = self.read(|conn| {
                     Ok((
                         queries::list_projects(conn)?,
                         queries::project_agent_stats(conn)?,
@@ -3860,6 +3870,13 @@ No issues found."
                 let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
                 if let Some(pid) = only {
                     ps.retain(|project| project.id == pid);
+                }
+                if !team {
+                    roles::credit_solo_owner(
+                        &mut rosters,
+                        ps.iter().map(|project| project.id),
+                        caller.as_ref(),
+                    );
                 }
                 let filter = self.read(|conn| {
                     Ok(roles::MemberFilter::parse(
