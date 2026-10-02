@@ -37,7 +37,7 @@ use crate::{
 /// Embedded frontend assets compiled from web/dist/.
 /// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
 #[derive(Embed)]
-#[folder = "web/dist/"]
+#[folder = "$LIFIC_WEB_DIST/"]
 #[allow(dead_code)]
 struct WebAssets;
 

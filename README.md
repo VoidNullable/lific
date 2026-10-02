@@ -46,6 +46,12 @@ lific init              # config, database and your admin account, then
 lific connect           # writes MCP config into your AI clients
 ```
 
+Installing directly from Git builds the embedded web UI from source, so Bun must be installed first:
+
+```bash
+cargo install --git https://github.com/VoidNullable/lific --branch master --locked
+```
+
 That's the whole thing. `lific init` asks your name and how you want to sign in (login-free for a private local instance, or passwords), then sets everything up in your OS's standard locations (config in `~/.config/lific/`, data in `~/.local/share/lific/` on Linux; macOS and Windows equivalents) so it works the same from any directory. Use `lific init --here` if you'd rather keep a directory-local instance (`./lific.toml` + `./lific.db`). It registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS, a per-user startup entry on Windows), so it isn't a process tied to your terminal: it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
 Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging)? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
