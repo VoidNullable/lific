@@ -102,16 +102,56 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
 
 #[cfg(feature = "topcoat-spike")]
 mod topcoat_spike {
-    use topcoat::{Result, router::page, view::view};
+    use topcoat::{
+        Result,
+        router::{Slot, layout, page, response::Response, route},
+        view::{View, view},
+    };
 
-    #[page("/__topcoat-spike")]
-    async fn home() -> Result<impl topcoat::view::View> {
+    #[layout("/")]
+    async fn document_layout(slot: Slot<'_>) -> Result<impl View> {
         Ok(view! {
             <!DOCTYPE html>
-            <html>
-                <body><h1>"Topcoat migration spike"</h1></body>
+            <html lang="en">
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <title>"Lific Topcoat experiment"</title>
+                    <link rel="stylesheet" href="/__topcoat-spike.css">
+                </head>
+                <body>
+                    <a class="skip-link" href="#main-content">"Skip to content"</a>
+                    <header class="topcoat-scaffold__header">
+                        <a href="/__topcoat-spike">"Lific"</a>
+                        <nav aria-label="Primary">
+                            <a href="/__topcoat-spike">"Experiment home"</a>
+                        </nav>
+                    </header>
+                    <main id="main-content">(slot)</main>
+                </body>
             </html>
         })
+    }
+
+    #[page("/__topcoat-spike")]
+    async fn home() -> Result<impl View> {
+        Ok(view! {
+            <section class="topcoat-scaffold">
+                <h1>"Topcoat migration spike"</h1>
+                <p>
+                    "The feature-gated application scaffold is mounted behind the existing Axum routes."
+                </p>
+            </section>
+        })
+    }
+
+    #[route(GET "/__topcoat-spike.css")]
+    async fn stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .body(topcoat::router::Body::from(include_str!(
+                "assets/topcoat-spike.css"
+            )))?)
     }
 
     pub(super) fn router() -> topcoat::router::Router {
@@ -143,6 +183,50 @@ mod topcoat_spike_tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("Topcoat migration spike"));
+    }
+
+    #[tokio::test]
+    async fn topcoat_scaffold_page_uses_the_shared_document_layout() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-spike")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("<nav aria-label=\"Primary\">"));
+        assert!(body.contains("/__topcoat-spike.css"));
+        assert!(body.contains("<main id=\"main-content\">"));
+    }
+
+    #[tokio::test]
+    async fn topcoat_scaffold_stylesheet_serves_css_content_type_and_body() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-spike.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/css; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains(".topcoat-scaffold"));
+        assert!(body.contains("max-width: 72rem"));
     }
 }
 

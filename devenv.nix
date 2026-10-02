@@ -212,7 +212,7 @@ in
   languages.rust = {
     enable = true;
     channel = "stable";
-    version = "1.88.0";
+    version = "1.99.0";
   };
 
   languages.javascript = {
@@ -473,8 +473,20 @@ in
     };
     "lific:rust-test" = {
       cwd = repoRoot;
-      exec = "cargo test --all-targets --locked";
+      exec = ''
+        cargo test --all-targets --locked
+        cargo test --all-targets --locked --features topcoat-spike
+      '';
       after = [ "lific:web:build" ] ++ lib.optionals config.devenv.isTesting [ "lific:web:check" ];
+    };
+    "lific:topcoat:install-cli" = {
+      cwd = repoRoot;
+      exec = "cargo install --locked --version 0.9.0 topcoat-cli";
+    };
+    "lific:topcoat:fmt" = {
+      cwd = repoRoot;
+      exec = "${config.devenv.state}/cargo-install/bin/topcoat fmt src/server.rs";
+      after = [ "lific:topcoat:install-cli" ];
     };
     "lific:web:check" = {
       cwd = "${repoRoot}/web";

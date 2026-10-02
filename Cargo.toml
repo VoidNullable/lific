@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/VoidNullable/lific"
 keywords = ["issue-tracker", "project-management", "mcp", "sqlite", "local-first"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.88"
+rust-version = "1.99.0"
 include = [
     "src/**/*",
     "build.rs",
@@ -20,9 +20,8 @@ include = [
 
 [features]
 default = []
-# Temporary migration spike: compile the Topcoat 0.9 frontend adapter only
-# when explicitly requested. Topcoat 0.9 requires Rust 1.98; the normal Lific
-# build remains compatible with the repository's Rust 1.88 toolchain.
+# Temporary migration experiment: compile the pinned Topcoat 0.9 frontend
+# scaffold only when explicitly requested.
 topcoat-spike = ["dep:topcoat"]
 
 [lints.clippy]
