@@ -238,7 +238,7 @@ pub(super) async fn upload_attachment(
                 Some(_) => store.thumb_exists(&sha)?,
                 None => false,
             };
-            let result = db.transaction(|conn| {
+            let result = with_write(&db, |conn| {
                 let mut att =
                     q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
                 store.write_unlocked(&bytes)?;

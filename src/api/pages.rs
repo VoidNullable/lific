@@ -135,7 +135,7 @@ pub(super) async fn create_page(
     // LIF-262/LIF-409: `create_page` links the content's attachment references
     // inside its own savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let page = db.transaction(|conn| {
+    let page = with_write(&db, |conn| {
         // The gate above ran on a read connection before this write began.
         // Re-run it on the connection that writes the links, in one immediate
         // transaction, so the authorization deciding which references may be
@@ -160,7 +160,7 @@ pub(super) async fn update_page(
     require_page_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let page = db.transaction(|conn| {
+    let page = with_write(&db, |conn| {
         // Same recheck as the create path, against the page's project as it
         // stands inside this transaction rather than as it read a moment ago.
         // An update cannot move a page between projects.

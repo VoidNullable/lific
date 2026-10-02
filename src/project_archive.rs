@@ -1846,8 +1846,8 @@ pub fn import_with(
     check_store(store)?;
     store.with_lock(|store| {
         check_store(store)?;
-        let mut conn = pool.write()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut writer = pool.writer()?;
+        let tx = writer.transaction()?;
         let grant = authorize(&tx)?;
         let admin = grant.user_id;
         let m = &staged.manifest;
@@ -1925,7 +1925,7 @@ pub fn import_with(
             // Never remove a pre-existing/shared blob, including a blob whose
             // metadata existed before import but whose file was missing.
             for hash in added {
-                let referenced: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM attachments WHERE sha256 = ?1)", [&hash], |r| r.get(0)).unwrap_or(true);
+                let referenced: bool = pool.read()?.query_row("SELECT EXISTS(SELECT 1 FROM attachments WHERE sha256 = ?1)", [&hash], |r| r.get(0)).unwrap_or(true);
                 if !referenced { let _ = store.delete_unlocked(&hash); }
             }
             return Err(e);

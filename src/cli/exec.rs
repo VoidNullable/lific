@@ -290,7 +290,8 @@ fn issue(
             module,
             labels,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
 
             let module_id = module
@@ -318,7 +319,8 @@ fn issue(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&issue, ResourceKind::Issue);
@@ -336,7 +338,8 @@ fn issue(
             module,
             labels,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let id = queries::resolve_identifier(&conn, identifier)?;
 
             let module_id = if let Some(name) = module {
@@ -367,7 +370,8 @@ fn issue(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&issue, ResourceKind::Issue);
@@ -416,7 +420,8 @@ fn project(
             identifier,
             description,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             // LIF-409: match `POST /api/projects`, where the creator leads the
             // project it just made and gets the matching `lead` membership
             // row. Without this the CLI produced an unowned project that only
@@ -437,7 +442,8 @@ fn project(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&project, ResourceKind::Project);
@@ -451,7 +457,8 @@ fn project(
             name,
             description,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let id = queries::resolve_project_identifier(&conn, identifier)?;
             let project = queries::update_project(
                 &conn,
@@ -462,7 +469,8 @@ fn project(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&project, ResourceKind::Project);
@@ -537,7 +545,8 @@ fn page(
             content,
             labels,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = project
                 .as_deref()
                 .map(|ident| queries::resolve_project_identifier(&conn, ident))
@@ -565,7 +574,8 @@ fn page(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&page, ResourceKind::Page);
@@ -581,7 +591,8 @@ fn page(
             folder,
             labels,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let id = queries::resolve_page_identifier(&conn, identifier)?;
 
             let folder_id = folder
@@ -605,7 +616,8 @@ fn page(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_resources(&page, ResourceKind::Page);
@@ -715,7 +727,8 @@ fn comment(
             content,
             user,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let issue_id = queries::resolve_identifier(&conn, identifier)?;
             let parent = queries::comments::CommentParent::Issue(issue_id);
 
@@ -752,7 +765,8 @@ fn comment(
                 content,
                 member_scoped,
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_comments(&comment, identifier);
@@ -791,7 +805,8 @@ fn module(
             description,
             status,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let module = queries::create_module(
                 &conn,
@@ -803,7 +818,8 @@ fn module(
                     emoji: None,
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_modules(&module, project);
@@ -819,7 +835,8 @@ fn module(
             description,
             status,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let module_id = queries::resolve_module_name(&conn, project_id, name)?;
             let module = queries::update_module(
@@ -832,7 +849,8 @@ fn module(
                     ..Default::default()
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 out.json_modules(&module, project);
@@ -842,11 +860,13 @@ fn module(
         }
 
         ModuleAction::Delete { project, name } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let module_id = queries::resolve_module_name(&conn, project_id, name)?;
             queries::delete_module(&conn, module_id)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&render::Deleted::named(name));
@@ -883,7 +903,8 @@ fn label(
             name,
             color,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let label = queries::create_label(
                 &conn,
@@ -893,7 +914,8 @@ fn label(
                     color: color.clone(),
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&label);
@@ -908,7 +930,8 @@ fn label(
             new_name,
             color,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let label_id = queries::resolve_label_name(&conn, project_id, name)?;
             let label = queries::update_label(
@@ -919,7 +942,8 @@ fn label(
                     color: color.clone(),
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&label);
@@ -929,11 +953,13 @@ fn label(
         }
 
         LabelAction::Delete { project, name } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let label_id = queries::resolve_label_name(&conn, project_id, name)?;
             queries::delete_label(&conn, label_id)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&render::Deleted::named(name));
@@ -966,7 +992,8 @@ fn folder(
         }
 
         FolderAction::Create { project, name } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let folder = queries::create_folder(
                 &conn,
@@ -976,7 +1003,8 @@ fn folder(
                     name: name.clone(),
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&folder);
@@ -990,7 +1018,8 @@ fn folder(
             name,
             new_name,
         } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let folder_id = queries::resolve_folder_name(&conn, project_id, name)?;
             let folder = queries::update_folder(
@@ -1000,7 +1029,8 @@ fn folder(
                     name: Some(new_name.clone()),
                 },
             )?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&folder);
@@ -1010,11 +1040,13 @@ fn folder(
         }
 
         FolderAction::Delete { project, name } => {
-            let conn = pool.write()?;
+            let mut writer = pool.writer()?;
+            let conn = writer.transaction()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
             let folder_id = queries::resolve_folder_name(&conn, project_id, name)?;
             queries::delete_folder(&conn, folder_id)?;
-            drop(conn);
+            conn.commit()?;
+            drop(writer);
 
             if json {
                 print_json(&render::Deleted::named(name));

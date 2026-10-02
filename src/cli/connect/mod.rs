@@ -482,10 +482,11 @@ fn mint_for_tool(source: &KeySource, spec: &ClientSpec, pool: &DbPool) -> Result
             };
             let bot_username = format!("{}-{}", spec.id, owner_username);
             let bot_id = {
-                let conn = pool.write().map_err(|e| e.to_string())?;
-                crate::db::queries::users::ensure_bot(&conn, *owner_id, spec.id, spec.display)
-                    .map_err(|e| e.to_string())?
-                    .id
+                pool.transaction(|conn| {
+                    crate::db::queries::users::ensure_bot(conn, *owner_id, spec.id, spec.display)
+                })
+                .map_err(|e| e.to_string())?
+                .id
             };
             // LIF-391: the key is bound to the bot as it is minted, never
             // created unbound and patched afterwards.

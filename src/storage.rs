@@ -715,11 +715,19 @@ pub fn sweep_orphans(
     let mut collected = 0;
     for orphan in orphans {
         let removed = store.with_lock(|store| {
-            let conn = pool.write()?;
-            let Some(sha256) = q::delete_orphan_attachment(&conn, orphan.id)? else {
+            let removed = pool.transaction(|conn| {
+                let removed = q::delete_orphan_attachment(conn, orphan.id)?;
+                removed
+                    .map(|sha256| {
+                        let unreferenced = q::count_rows_for_sha(conn, &sha256)? == 0;
+                        Ok((sha256, unreferenced))
+                    })
+                    .transpose()
+            })?;
+            let Some((sha256, unreferenced)) = removed else {
                 return Ok(false);
             };
-            if q::count_rows_for_sha(&conn, &sha256)? == 0 {
+            if unreferenced {
                 store.delete_unlocked(&sha256)?;
             }
             Ok(true)
@@ -768,8 +776,7 @@ pub fn backfill_attachment_text(
             continue;
         }
         {
-            let conn = pool.write()?;
-            q::set_extracted_text(&conn, id, &text)?;
+            pool.transaction(|conn| q::set_extracted_text(conn, id, &text))?;
         }
         indexed += 1;
     }

@@ -410,12 +410,12 @@ pub fn list_api_keys(db: &DbPool) -> Result<Vec<ApiKeyInfo>, crate::error::Lific
 
 /// Revoke a key by name.
 pub fn revoke_api_key(db: &DbPool, name: &str) -> Result<(), crate::error::LificError> {
-    let conn = db.write()?;
-    let changed = conn.execute(
-        "UPDATE api_keys SET revoked = 1 WHERE name = ?1 AND revoked = 0",
-        params![name],
-    )?;
-    drop(conn);
+    let changed = db.transaction(|conn| {
+        Ok(conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE name = ?1 AND revoked = 0",
+            params![name],
+        )?)
+    })?;
     if changed == 0 {
         return Err(crate::error::LificError::NotFound(format!(
             "no active key named '{name}'"
@@ -1042,6 +1042,10 @@ pub async fn require_api_key(
         Err(ApiKeyReject::Db) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
         }
+        Err(ApiKeyReject::Busy) => {
+            return crate::error::LificError::Unavailable("database writer is busy".into())
+                .into_response();
+        }
         Err(ApiKeyReject::NotFound) => {
             warn!("rejected invalid API key");
             return (
@@ -1117,6 +1121,8 @@ enum ApiKeyIdentity {
 enum ApiKeyReject {
     /// A database read/write failed (backend fault, not a bad key).
     Db,
+    /// The database writer is occupied; retry authentication after it clears.
+    Busy,
     /// The key didn't pass the format checksum.
     BadChecksum,
     /// The key is well-formed but matches no active key.
@@ -1265,15 +1271,18 @@ fn migrate_api_key_verifier(
 ) -> Result<bool, ApiKeyReject> {
     let encoded_verifier = verifier.encode();
     let updated = db
-        .transaction(|tx| {
+        .request_transaction(|tx| {
             Ok(tx.execute(
                 "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2 AND key_hash = ?3 \
                  AND key_id = ?4 AND revoked = 0 \
                  AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))",
-                params![encoded_verifier, key.id, original_hash, key_id],
+                params![&encoded_verifier, key.id, original_hash, key_id],
             )?)
         })
-        .map_err(|_| ApiKeyReject::Db)?;
+        .map_err(|error| match error {
+            crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
+            _ => ApiKeyReject::Db,
+        })?;
     if updated == 1 {
         return Ok(true);
     }
@@ -1430,6 +1439,7 @@ pub fn resolve_api_key_user(db: &DbPool, token: &str) -> Result<Option<AuthUser>
         })
         .map_err(|reject| match reject {
             ApiKeyReject::Db => "database error".to_string(),
+            ApiKeyReject::Busy => "database writer is busy".to_string(),
             ApiKeyReject::BadChecksum => "invalid API key checksum".to_string(),
             ApiKeyReject::NotFound => "invalid API key".to_string(),
             ApiKeyReject::HashMismatch => "API key hash verification failed".to_string(),
@@ -2277,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_legacy_authentications_both_succeed_during_migration() {
+    fn concurrent_legacy_authentications_can_retry_after_migration_contention() {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use std::sync::{Arc, Barrier};
 
@@ -2325,9 +2335,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        for worker in workers {
-            assert!(worker.join().unwrap().is_ok());
-        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(outcomes.iter().any(Result::is_ok));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Ok(_) | Err(ApiKeyReject::Busy)))
+        );
+        assert!(validate_api_key(&setup_pool, &key).is_ok());
         let conn = setup_pool.read().unwrap();
         let verifier: String = conn
             .query_row(

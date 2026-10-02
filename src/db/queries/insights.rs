@@ -555,7 +555,8 @@ mod tests {
                 user_id: Some(alice),
                 transport: crate::actor::Transport::Web,
             },
-        );
+        )
+        .unwrap();
         quick_issue(&conn, pid, "A1", Priority::None);
         quick_issue(&conn, pid, "A2", Priority::None);
         drop(conn);

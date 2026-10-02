@@ -247,19 +247,13 @@ fn prune_audit_log(pool: &DbPool, audit_retention_days: Option<u32>) {
         return;
     };
 
-    let conn = match pool.write() {
-        Ok(conn) => conn,
-        Err(e) => {
-            warn!(error = %e, "could not acquire write connection for audit log pruning");
-            return;
-        }
-    };
-
     let cutoff = format!("-{days} days");
-    match conn.execute(
-        "DELETE FROM audit_log WHERE ts < datetime('now', ?1)",
-        rusqlite::params![cutoff],
-    ) {
+    match pool.transaction(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM audit_log WHERE ts < datetime('now', ?1)",
+            rusqlite::params![cutoff],
+        )?)
+    }) {
         Ok(0) => {}
         Ok(deleted) => info!(
             deleted,
@@ -389,12 +383,9 @@ fn rotate_backups(backup_dir: &Path, db_stem: &str, retain: usize) {
 /// Checkpoint the WAL into the main database file.
 /// Call this on clean shutdown so the .db file is fully self-contained.
 pub fn checkpoint_wal(pool: &DbPool) {
-    match pool.write() {
-        Ok(conn) => match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-            Ok(()) => info!("WAL checkpointed on shutdown"),
-            Err(e) => warn!(error = %e, "WAL checkpoint failed"),
-        },
-        Err(e) => warn!(error = %e, "could not acquire write connection for checkpoint"),
+    match pool.checkpoint() {
+        Ok(()) => info!("WAL checkpointed on shutdown"),
+        Err(e) => warn!(error = %e, "WAL checkpoint failed"),
     }
 }
 

@@ -17,7 +17,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::with_read;
+use super::{with_read, with_write};
 
 /// `GET /api/clock`: the server's calendar day and UTC offset, which decide
 /// whether a date wait is holding, due or overdue. The web client computes
@@ -53,7 +53,7 @@ pub(super) async fn add_wait(
     let project_id = with_read(&db, |conn| queries::issue_project_id(conn, id))?;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let (wait, seq) = db.transaction(|conn| {
+    let (wait, seq) = with_write(&db, |conn| {
         authz::require_role_conn(conn, &identity, project_id, Role::Maintainer)?;
         let wait = waits::add_wait(conn, id, &input, Some(user.id))?;
         Ok((wait, queries::issue_seq(conn, id)?))
@@ -76,7 +76,7 @@ pub(super) async fn clear_wait(
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| queries::issue_project_id(conn, id))?;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
-    let seq = db.transaction(|conn| {
+    let seq = with_write(&db, |conn| {
         authz::require_role_conn(conn, &identity, project_id, Role::Maintainer)?;
         waits::clear_wait(conn, id, wait_id)?;
         queries::issue_seq(conn, id)

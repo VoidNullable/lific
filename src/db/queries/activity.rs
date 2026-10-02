@@ -635,7 +635,8 @@ mod tests {
                 user_id: Some(bot_id),
                 transport: Transport::Mcp,
             },
-        );
+        )
+        .unwrap();
         let issue = queries::create_issue(&conn, &new_issue(pid, "By bot")).unwrap();
         drop(conn);
 
@@ -701,7 +702,8 @@ mod tests {
                 user_id: Some(uid),
                 transport: Transport::Api,
             },
-        );
+        )
+        .unwrap();
         let issue = queries::create_issue(&conn, &new_issue(pid, "Orphan")).unwrap();
         conn.execute("DELETE FROM users WHERE id = ?1", [uid])
             .unwrap();
@@ -795,7 +797,8 @@ mod tests {
                 user_id: Some(alice),
                 transport: Transport::Web,
             },
-        );
+        )
+        .unwrap();
         queries::create_issue(&conn, &new_issue(pid, "a1")).unwrap();
         queries::create_issue(&conn, &new_issue(pid, "a2")).unwrap();
 
@@ -805,7 +808,8 @@ mod tests {
                 user_id: Some(bot),
                 transport: Transport::Mcp,
             },
-        );
+        )
+        .unwrap();
         queries::create_issue(&conn, &new_issue(pid, "b1")).unwrap();
         queries::create_issue(&conn, &new_issue(pid, "b2")).unwrap();
         queries::create_issue(&conn, &new_issue(pid, "b3")).unwrap();

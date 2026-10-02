@@ -149,7 +149,7 @@ pub(super) async fn auth_signup(
     // own implicit transaction, so a failure after the insert (or a crash)
     // left an account nobody could sign in to, and the zero-user count was
     // only as atomic as the connection happened to be.
-    let (user, session) = db.transaction(|conn| {
+    let (user, session) = with_write(&db, |conn| {
         // Authoritative re-check: the policy could have been changed by an
         // admin between the read above and this write.
         let settings = crate::db::queries::settings::get(conn)?;
@@ -295,7 +295,7 @@ pub(super) async fn auth_login(
     // the session, or a password change committed during those tens of
     // milliseconds hands out a week-long credential for the old password.
     let verified_hash = user.password_hash.clone();
-    let (user, session) = db.transaction(|tx| {
+    let (user, session) = with_write(&db, |tx| {
         let user = crate::db::queries::users::finalize_login(tx, user.id, &verified_hash)?;
         let lifetime_days = crate::db::queries::settings::get(tx)?.session_lifetime_days;
         let session =
@@ -353,7 +353,8 @@ pub(super) async fn auth_auto_login(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
 ) -> Result<impl IntoResponse, LificError> {
-    let conn = db.write()?;
+    let mut writer = db.request_writer()?;
+    let conn = writer.transaction()?;
     let settings = crate::db::queries::settings::get(&conn)?;
     // LIF-297: `[auth] required = false` implies single-user mode for the
     // browser too — an instance that lets anonymous API callers act as the
@@ -382,7 +383,8 @@ pub(super) async fn auth_auto_login(
         admin.id,
         Some(settings.session_lifetime_days * 24),
     )?;
-    drop(conn);
+    conn.commit()?;
+    drop(writer);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -420,8 +422,9 @@ pub(super) async fn auth_logout(
         .ok_or_else(|| LificError::BadRequest("missing authorization header".into()))?;
 
     if token.starts_with("lific_sess_") {
-        let conn = db.write()?;
-        crate::db::queries::users::delete_session(&conn, token)?;
+        with_write(&db, |conn| {
+            crate::db::queries::users::delete_session(conn, token)
+        })?;
     }
 
     // Clear the session cookie
@@ -563,7 +566,7 @@ pub(super) async fn instance_settings_patch(
     // The reachability guard above is a precheck on the request; the
     // authorization check and the persisted mutation are one transaction, so a
     // lockdown cannot land between them.
-    let (s, authz_changed) = db.transaction(move |tx| {
+    let (s, authz_changed) = with_write(&db, move |tx| {
         let fresh = crate::auth::revalidate_recent_session(tx, &session_token, admin.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
         let previous_authz_enforced = crate::db::queries::settings::get(tx)?.authz_enforced;
@@ -759,7 +762,7 @@ pub(super) async fn refresh_session(
         }
     };
 
-    let (user, session) = db.transaction(|tx| {
+    let (user, session) = with_write(&db, |tx| {
         // The presented session must still be live, and must still be this
         // caller's. Not `revalidate_recent_session`: an old session is exactly
         // what this endpoint is for.
@@ -935,7 +938,7 @@ pub(super) async fn change_password(
     .await
     .map_err(|e| LificError::Internal(format!("password hashing task failed: {e}")))??;
 
-    let session = db.transaction(|tx| {
+    let session = with_write(&db, |tx| {
         // Everything established off-writer is re-established here. A second
         // password change, or an operator reset, that committed while Argon2
         // was running means the "current password" just verified is already
@@ -1062,7 +1065,7 @@ pub(super) async fn create_key(
     }
 
     let prepared = crate::auth::PreparedApiKey::generate()?;
-    let plaintext = db.transaction(|tx| {
+    let plaintext = with_write(&db, |tx| {
         crate::auth::revalidate_recent_session(tx, &session_token, user.id)?;
         // LIF-391: the key is created already bound to the caller, in one write.
         prepared.insert(tx, &name, None, Some(user.id))
@@ -1085,7 +1088,7 @@ pub(super) async fn revoke_key(
     // "am I an admin, so may I revoke somebody else's key" question is
     // answered from state read inside this transaction, not from the snapshot
     // the middleware attached before the request was routed.
-    db.transaction(|tx| {
+    with_write(&db, |tx| {
         let caller = crate::auth::fresh_caller(tx, user.id)?;
         crate::db::queries::users::revoke_user_key(tx, id, caller.id, caller.is_admin)
     })?;
@@ -1171,7 +1174,7 @@ pub(super) async fn create_bot(
     let bot_username = format!("{tool}-{}", user.username);
 
     let prepared = crate::auth::PreparedApiKey::generate()?;
-    let (bot_user, plaintext_key) = db.transaction(|tx| {
+    let (bot_user, plaintext_key) = with_write(&db, |tx| {
         crate::auth::revalidate_recent_session(tx, &session_token, user.id)?;
 
         // Reuse the shared find-or-create seam (LIFIC-13) so a web-connected
@@ -1213,7 +1216,7 @@ pub(super) async fn disconnect_bot(
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
 
-    db.transaction(|tx| {
+    with_write(&db, |tx| {
         let caller = crate::auth::fresh_caller(tx, user.id)?;
         crate::db::queries::users::disconnect_bot(tx, id, caller.id, caller.is_admin)
     })?;
@@ -1228,7 +1231,7 @@ pub(super) async fn delete_bot(
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
 
-    db.transaction(|tx| {
+    with_write(&db, |tx| {
         let caller = crate::auth::fresh_caller(tx, user.id)?;
         crate::db::queries::users::delete_bot(tx, id, caller.id, caller.is_admin)
     })?;
@@ -1348,7 +1351,7 @@ pub(super) async fn create_user_handler(
         _ => format!("{username}@local"),
     };
 
-    let user = db.transaction(|tx| {
+    let user = with_write(&db, |tx| {
         // Authoritative: `require_admin` above ran on the middleware's
         // snapshot, which predates this transaction. A demotion committed
         // since is only visible here.
@@ -1389,7 +1392,7 @@ pub(super) async fn promote_user(
     require_admin(&identity)?;
     let admin = require_user(&identity)?;
     let session_token = crate::auth::recent_session_token(&headers)?;
-    let user = db.transaction(|tx| {
+    let user = with_write(&db, |tx| {
         let fresh = crate::auth::revalidate_recent_session(tx, &session_token, admin.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
         crate::db::queries::users::set_admin_guarded(tx, id, true)
@@ -1409,7 +1412,7 @@ pub(super) async fn demote_user(
     // Ungated on recency (this reduces access), but the admin check is
     // re-run inside the transaction: a caller demoted since the request
     // arrived must not be able to demote anyone else on the way out.
-    let user = db.transaction(|tx| {
+    let user = with_write(&db, |tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
         crate::db::queries::users::set_admin_guarded(tx, id, false)
@@ -1432,7 +1435,7 @@ pub(super) async fn deactivate_user(
     // ids are collected there too: `set_active` deletes the sessions of the
     // account *and* of every bot it owns, and a live websocket for any of them
     // has to be told, not left to notice on its next periodic revalidation.
-    let (user, scoped) = db.transaction(|tx| {
+    let (user, scoped) = with_write(&db, |tx| {
         let fresh = crate::auth::fresh_caller(tx, caller.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
         let user = crate::db::queries::users::set_active(tx, id, false)?;
@@ -1472,7 +1475,7 @@ pub(super) async fn reactivate_user(
     require_admin(&identity)?;
     let admin = require_user(&identity)?;
     let session_token = crate::auth::recent_session_token(&headers)?;
-    let user = db.transaction(|tx| {
+    let user = with_write(&db, |tx| {
         let fresh = crate::auth::revalidate_recent_session(tx, &session_token, admin.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
         crate::db::queries::users::set_active(tx, id, true)

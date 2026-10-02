@@ -114,8 +114,7 @@ pub fn run(
             let conn = pool.read()?;
             let u = db::queries::users::get_user_by_username(&conn, &user)?;
             drop(conn);
-            let conn = pool.write()?;
-            db::queries::users::assign_key_to_user(&conn, &name, u.id)?;
+            pool.transaction(|conn| db::queries::users::assign_key_to_user(conn, &name, u.id))?;
             if json {
                 let out = serde_json::json!({ "name": name, "user": user });
                 println!("{}", serde_json::to_string_pretty(&out)?);
