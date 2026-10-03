@@ -186,3 +186,14 @@ test('a recovered completion never publishes failed issue identifiers after the 
  await resumeDeletions({sessionStorage,identity:()=>account,api:{remove:async()=>{throw Error('Secret issue failed');}},sync:{refreshProject:()=>new Promise(resolve=>finishRefresh=resolve)},schedule:handler=>{queued=handler;return 1;},onComplete:results=>completed.push(results)});
  const pending=queued();while(!finishRefresh)await new Promise(resolve=>setImmediate(resolve));account='new-owner';finishRefresh();await pending;assert.deepEqual(completed,[]);
 });
+test('single issue route persists its deferred delete for the list screen to resume',async()=>{
+ const {queueDeletion}=require('./issue-list.js'),{webcrypto}=require('node:crypto'),previous=globalThis.crypto,values=new Map();
+ globalThis.crypto=webcrypto;
+ try {
+  const sessionStorage={getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)};
+  const result=await queueDeletion([{id:9,project_id:7,identifier:'ENG-9'}],{sessionStorage,identity:()=> 'private:token'},5000);
+  const records=JSON.parse(sessionStorage.getItem('lific:issue-list:deferred-deletions'));
+  assert.equal(result.queued,true);assert.equal(records.length,1);assert.equal(records[0].rows[0].identifier,'ENG-9');
+  assert.ok(records[0].deadline>Date.now());
+ } finally {globalThis.crypto=previous;}
+});

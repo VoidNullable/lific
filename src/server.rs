@@ -150,6 +150,11 @@ mod topcoat_spike {
                     <link rel="stylesheet" href=(super::topcoat_frontend::palette::STYLESHEET_PATH)>
                     <link rel="stylesheet" href=(super::topcoat_frontend::dashboard::STYLESHEET_PATH)>
                     <link rel="stylesheet" href=(super::topcoat_frontend::issue_list::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_detail::route::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_detail::fields::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_detail::editor::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_detail::collaboration::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_create::STYLESHEET_PATH)>
                     <link rel="stylesheet" href=(super::topcoat_frontend::project_settings::STYLESHEET_PATH)>
                     <script type="module" src="/__topcoat-runtime.js"></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::ROUTE_SCRIPT_PATH)></script>
@@ -164,6 +169,11 @@ mod topcoat_spike {
                     <script defer="defer" src=(super::topcoat_frontend::palette::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::dashboard::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::issue_list::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_detail::fields::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_detail::editor::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_detail::collaboration::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_detail::route::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_create::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::project_settings::SCRIPT_PATH)></script>
                     <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
@@ -232,10 +242,20 @@ mod topcoat_spike {
                     route.project,
                     super::topcoat_frontend::issue_list::Layout::List,
                 ),
+                Page::IssueNew => super::topcoat_frontend::issue_create::screen(
+                    cx,
+                    route.project.unwrap_or_default(),
+                ),
                 Page::Board => super::topcoat_frontend::issue_list::screen(
                     cx,
                     route.project,
                     super::topcoat_frontend::issue_list::Layout::Board,
+                ),
+                Page::IssueDetail(identifier) => super::topcoat_frontend::issue_detail::route::screen(
+                    cx,
+                    route.project.unwrap_or_default(),
+                    identifier,
+                    false,
                 ),
                 _ => super::topcoat_frontend::shell::placeholder(cx, &route),
             },
@@ -249,6 +269,12 @@ mod topcoat_spike {
                     cx,
                     route.project,
                     super::topcoat_frontend::issue_list::Layout::Board,
+                ),
+                Page::IssueDetail(identifier) => super::topcoat_frontend::issue_detail::route::screen(
+                    cx,
+                    route.project.unwrap_or_default(),
+                    identifier,
+                    true,
                 ),
                 _ => super::topcoat_frontend::shell::placeholder(cx, &route),
             },
@@ -513,6 +539,106 @@ mod topcoat_spike {
             ))?)
     }
 
+    #[route(GET "/__topcoat-issue-detail.css")]
+    async fn issue_detail_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::route::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-detail.js")]
+    async fn issue_detail_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::route::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-fields.css")]
+    async fn issue_fields_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::fields::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-fields.js")]
+    async fn issue_fields_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::fields::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-editor.css")]
+    async fn issue_editor_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::editor::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-editor.js")]
+    async fn issue_editor_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::editor::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-collaboration.css")]
+    async fn issue_collaboration_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::collaboration::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-collaboration.js")]
+    async fn issue_collaboration_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_detail::collaboration::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-create.css")]
+    async fn issue_create_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_create::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-create.js")]
+    async fn issue_create_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_create::SCRIPT,
+            ))?)
+    }
+
     #[route(GET "/__topcoat-preferences.js")]
     async fn preferences_script() -> Result<Response> {
         Ok(Response::builder()
@@ -588,6 +714,12 @@ mod topcoat_spike_tests {
         assert!(body.contains("/__topcoat-dashboard.js"));
         assert!(body.contains("/__topcoat-issue-list.css"));
         assert!(body.contains("/__topcoat-issue-list.js"));
+        assert!(body.contains("/__topcoat-issue-detail.css"));
+        assert!(body.contains("/__topcoat-issue-detail.js"));
+        assert!(body.contains("/__topcoat-issue-fields.js"));
+        assert!(body.contains("/__topcoat-issue-editor.js"));
+        assert!(body.contains("/__topcoat-issue-collaboration.js"));
+        assert!(body.contains("/__topcoat-issue-create.js"));
         assert!(body.contains("/__topcoat-project-settings.css"));
         assert!(body.contains("/__topcoat-project-settings.js"));
         assert!(body.contains("/__topcoat-runtime.js"));
@@ -684,6 +816,38 @@ mod topcoat_spike_tests {
                 body.contains(&format!("data-layout=\"{layout}\"")),
                 "{path}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn topcoat_issue_create_and_detail_routes_mount_their_feature_slices() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for (path, expected) in [
+            (
+                "/LIF/issues/new?status=active&module=7",
+                "data-topcoat-issue-create=\"\"",
+            ),
+            ("/LIF/issues/LIF-42", "data-topcoat-issue-detail=\"\""),
+            (
+                "/public/LIF/issues/LIF-42",
+                "data-topcoat-issue-detail=\"\"",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains(expected), "{path}");
+            if path.contains("/public/") {
+                assert!(body.contains("data-issue-scope=\"public\""));
+            }
+            if path.contains("issues/LIF-42") {
+                assert!(body.contains("data-topcoat-issue-editor=\"\""), "{path}");
+                assert!(body.contains("data-topcoat-collaboration=\"\""), "{path}");
+            }
         }
     }
 
@@ -832,6 +996,41 @@ mod topcoat_spike_tests {
                 "/__topcoat-issue-list.css",
                 "text/css; charset=utf-8",
                 ".tc-issues",
+            ),
+            (
+                "/__topcoat-issue-detail.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatIssueDetail",
+            ),
+            (
+                "/__topcoat-issue-detail.css",
+                "text/css; charset=utf-8",
+                ".tc-issue-detail",
+            ),
+            (
+                "/__topcoat-issue-fields.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatIssueFields",
+            ),
+            (
+                "/__topcoat-issue-editor.js",
+                "text/javascript; charset=utf-8",
+                "lificIssueEditor",
+            ),
+            (
+                "/__topcoat-issue-collaboration.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatIssueCollaboration",
+            ),
+            (
+                "/__topcoat-issue-create.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatIssueCreate",
+            ),
+            (
+                "/__topcoat-issue-create.css",
+                "text/css; charset=utf-8",
+                ".tc-issue-create",
             ),
             (
                 "/__topcoat-project-settings.js",

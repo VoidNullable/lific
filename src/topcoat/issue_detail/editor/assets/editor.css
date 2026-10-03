@@ -1,0 +1,14 @@
+.tc-issue-editor { min-width: 0; color: var(--text, #20232a); }
+.tc-issue-editor__toolbar { display: flex; align-items: center; gap: .5rem; margin-block: .5rem; }
+.tc-issue-editor__status { margin: .25rem 0; color: var(--text-muted, #6b7280); font-size: .8rem; }
+.tc-issue-editor__error { color: var(--danger, #b42318); }
+.tc-issue-editor__conflict { margin-block: .75rem; padding: .75rem; border: 1px solid var(--warning, #b54708); border-radius: .375rem; }
+.tc-issue-editor__conflict pre { overflow: auto; white-space: pre-wrap; font-family: inherit; }
+.tc-issue-editor__input { box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; padding: .75rem; border: 1px solid var(--border, #d1d5db); border-radius: .375rem; background: var(--surface, white); color: inherit; font: 400 .9rem/1.55 ui-monospace, monospace; }
+.tc-issue-editor__preview { min-height: 3rem; overflow-wrap: anywhere; line-height: 1.6; }
+.tc-issue-editor__preview :first-child { margin-top: 0; }
+.tc-issue-editor__preview :last-child { margin-bottom: 0; }
+.tc-issue-editor__preview pre { overflow: auto; padding: .75rem; background: var(--surface-raised, #f3f4f6); border-radius: .375rem; }
+.tc-issue-editor__preview code { font-family: ui-monospace, monospace; }
+.tc-issue-editor__preview blockquote { margin-inline: 0; padding-inline-start: .75rem; border-inline-start: 3px solid var(--border, #d1d5db); color: var(--text-muted, #6b7280); }
+.tc-issue-editor__image { max-width: 100%; max-height: 32rem; object-fit: contain; vertical-align: middle; }

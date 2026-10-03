@@ -1,0 +1,10 @@
+# Issue collaboration panel
+
+`empty_panel(cx, route, capabilities)` renders stable panel DOM while the issue request is pending. Once the route has an issue, call
+`LificTopcoatIssueCollaboration.mount(root, { route, issue, capabilities })`.
+
+The `issue` value is the API issue DTO. The route carries `{ issue_id, generation }`; capabilities carries independent `edit` and `comment` booleans. The route project identifier and public/private scope come from the enclosing issue-detail route. Mount fills in issue identity, relationships, waits, and role state before loading comments, activity, and attachment metadata. Calling `mount` again disposes the previous instance first. The returned controller also exposes `update(issue, capabilities)`, which updates issue-derived panels without replacing comment, relation, or wait drafts.
+
+The panel dispatches `lific:issue-detail-intent` with `{ route, action }`. A panel mutation action has `{ type: 'mutate_panel', panel, operation, ...input }`; issue lifecycle actions have `{ type: 'delete' }` or `{ type: 'restore' }`. The route should send `lific:issue-detail-applied` with `{ route, panel, issue }` after a successful panel write, `lific:issue-detail-error` with `{ route, panel, operation, action, error }` after a failed write, and `lific:issue-detail-conflict` with `{ route, panel, operation, action, current }` for a stale write. Failed actions keep their form values and display the route error, so the user can retry. Successful actions clear only the draft that was submitted. Comment success refreshes the comment window and activity; relationship and wait rendering uses the returned issue DTO, including omitted empty arrays.
+
+Comment edit controls are restricted to the current author and are still checked by the server. Project-role capabilities gate composer, relation, wait, and delete controls. Mention candidates are project-scoped. Relation links stay in the current project's private or public route. Attachment transfers use the shared attachment helper with an issue target and refresh the attachment list after upload; original files remain native authenticated download links.

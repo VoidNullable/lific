@@ -1,5 +1,10 @@
 //! Shared contracts for independently implemented issue-detail components.
 
+pub(crate) mod collaboration;
+pub(crate) mod editor;
+pub(crate) mod fields;
+pub(crate) mod route;
+
 use super::api::dto::issue::Issue;
 
 /// A new generation belongs to every route activation, including revisits.

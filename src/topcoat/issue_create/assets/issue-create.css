@@ -1,0 +1,25 @@
+.tc-issue-create { min-height: 100%; color: var(--text, #202124); }
+.tc-issue-create [hidden] { display: none !important; }
+.tc-issue-create__header { display: flex; align-items: center; gap: .75rem; min-height: 3.25rem; padding: .5rem 1rem; border-bottom: 1px solid var(--border, #ddd); }
+.tc-issue-create__header h1 { margin: 0; font-size: .95rem; font-weight: 500; }
+.tc-issue-create__header [data-issue-create-error] { margin: 0 0 0 auto; color: var(--error, #b42318); }
+.tc-issue-create__header button, .tc-issue-create__header a { color: inherit; font: inherit; cursor: pointer; }
+.tc-issue-create__header button { padding: .4rem .65rem; border: 0; border-radius: .35rem; background: transparent; }
+.tc-issue-create__header [data-issue-create-submit] { color: var(--accent-text, white); background: var(--accent, #2563eb); }
+.tc-issue-create__header button:disabled { opacity: .45; cursor: not-allowed; }
+.tc-issue-create__body { display: grid; grid-template-columns: minmax(0, 1fr) 14rem; max-width: 60rem; min-height: calc(100vh - 8rem); margin: auto; }
+.tc-issue-create__body main { min-width: 0; padding: 1.5rem; }
+.tc-issue-create__body aside { display: grid; align-content: start; gap: .45rem; padding: 1.5rem 1rem; border-left: 1px solid var(--border, #ddd); }
+.tc-issue-create__body input[data-issue-create-title] { display: block; width: 100%; margin: .25rem 0 1.25rem; padding: .3rem 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; font-size: 1.45rem; }
+.tc-issue-create__body textarea { display: block; width: 100%; min-height: 8rem; resize: vertical; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; line-height: 1.7; }
+.tc-issue-create__body select { width: 100%; margin-bottom: .8rem; padding: .4rem; border: 1px solid var(--border, #ddd); border-radius: .35rem; background: var(--surface, white); color: inherit; }
+.tc-issue-create__body fieldset { display: grid; gap: .4rem; margin: .25rem 0; padding: 0; border: 0; }
+.tc-issue-create__body fieldset label { display: flex; gap: .45rem; align-items: center; }
+.tc-issue-create__label-create { display: flex; gap: .4rem; align-items: center; margin-top: .6rem; }
+.tc-issue-create__label-create input[type="text"] { flex: 1; min-width: 0; padding: .35rem; border: 1px solid var(--border, #ddd); border-radius: .3rem; background: var(--surface, white); color: inherit; }
+.tc-issue-create__label-create input[type="color"] { width: 2rem; height: 2rem; padding: .1rem; border: 1px solid var(--border, #ddd); border-radius: .3rem; background: var(--surface, white); }
+.tc-issue-create__label-create button { padding: .35rem .5rem; border: 0; border-radius: .3rem; background: var(--accent, #2563eb); color: var(--accent-text, white); cursor: pointer; }
+.tc-issue-create__label-create button:disabled { opacity: .5; cursor: wait; }
+.tc-issue-create__attachments { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding-top: .75rem; border-top: 1px solid var(--border, #ddd); color: var(--text-muted, #686868); font-size: .8rem; }
+.tc-issue-create__attachments ul { flex-basis: 100%; margin: 0; padding-left: 1.2rem; }
+@media (max-width: 48rem) { .tc-issue-create__header { flex-wrap: wrap; } .tc-issue-create__header [data-issue-create-error] { order: 1; flex-basis: 100%; } .tc-issue-create__body { grid-template-columns: minmax(0, 1fr); } .tc-issue-create__body aside { border-top: 1px solid var(--border, #ddd); border-left: 0; } }

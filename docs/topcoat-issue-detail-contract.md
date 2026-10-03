@@ -9,14 +9,16 @@ and publishes its `seq` as the next `expected_seq`. Backend DTOs stay unchanged.
 | Owner | Files it owns | Interface |
 | --- | --- | --- |
 | Shared contract | `src/topcoat/issue_detail/mod.rs` | Props, intents, completion events, pure revision and draft coordinator |
-| Route and scalar fields | `src/topcoat/issue_detail/route.rs`, `fields.rs`, `assets/route.js`, `assets/fields.js`, matching CSS | Compose panels, resolve permissions, own the write queue; `ScalarProps`, `ScalarChange`, `DetailIntent` |
-| Markdown editor | `src/topcoat/issue_detail/editor.rs`, `assets/editor.js`, matching CSS | Markdown input, preview, attachments, debounce and queued save requests; `EditorProps`, `EditorSave` |
-| Collaboration | `src/topcoat/issue_detail/collaboration.rs`, `assets/collaboration.js`, matching CSS | Comments, relations, waits and their paging/dialog state; `CollaborationProps`, `Panel` |
+| Route and scalar fields | `src/topcoat/issue_detail/route.rs`, `fields.rs`, `assets/route.js`, `assets/fields.js`, matching CSS | Compose panels, resolve permissions, own the browser write queue; `ScalarProps`, `ScalarChange`, `DetailIntent` |
+| Markdown editor | `src/topcoat/issue_detail/editor/`, `assets/editor.js`, matching CSS | Markdown input, preview, attachments, debounce and queued save requests; `EditorProps`, `EditorSave` |
+| Collaboration | `src/topcoat/issue_detail/collaboration/`, `assets/collaboration.js`, matching CSS | Comments, relations, waits and their paging/dialog state; `CollaborationProps`, `Panel` |
 
 The route integrator registers modules and assets. Each component exports its
-renderer and runtime initializer from its own files. Component workers do not
-edit shared registrations or another component's files. JavaScript adapters use
-the same event payloads; the Rust coordinator is the reference for transitions.
+renderer and runtime initializer from its own directory. The server renders
+stable mount points before issue data is fetched; the route hydrates each
+component after resolving the issue and project permissions. JavaScript
+adapters use the same event payloads; the Rust coordinator is the reference for
+route generations, sequences and draft transitions.
 
 ## Dispatch and completion
 

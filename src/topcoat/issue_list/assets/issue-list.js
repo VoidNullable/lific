@@ -84,6 +84,13 @@
  function storeDeletion(env,record) {
   try {if(!env.sessionStorage||record.owner===null)return false;env.sessionStorage.setItem(DELETIONS_KEY,JSON.stringify([...deletionRecords(env).filter(r=>r.id!==record.id),record]));return true;}catch{return false;}
  }
+ async function queueDeletion(rows,env,delay=5000) {
+  const identity=env.identity?.(),owner=await deletionOwner(identity);
+  if(identity!==env.identity?.())return {queued:false,reason:'identity_changed'};
+  if(owner===null||!Array.isArray(rows)||!rows.length)return {queued:false,reason:'storage_unavailable'};
+  const record={id:globalThis.crypto?.randomUUID?.()??`delete-${Date.now()}-${Math.random()}`,owner,deadline:Date.now()+delay,rows};
+  return storeDeletion(env,record)?{queued:true,record}:{queued:false,reason:'storage_unavailable'};
+ }
  function discardDeletion(env,id) {try{env.sessionStorage?.setItem(DELETIONS_KEY,JSON.stringify(deletionRecords(env).filter(record=>record.id!==id)));for(const [listener,storage]of deletionListeners)if(storage===env.sessionStorage)listener();}catch{/* A replayed DELETE is idempotent if removal of its record fails. */}}
  async function performDeletion(record,env) {
   if(runningDeletions.has(record.id))return runningDeletions.get(record.id);
@@ -400,7 +407,7 @@
   void controller.load();
   return {controller,dispose(){win.removeEventListener('click',beforeNavigation,true);win.removeEventListener('lific:navigate',beforeNavigation,true);doc.removeEventListener('lific:subtab-change',subtabChanged);peekGeneration++;peekController?.abort();if(peek.open)peek.close();controller.dispose();for(const [name,handler]of Object.entries(listeners))root.removeEventListener(name,handler);for(const name of ['lific:account-change','lific:session-change','lific:scope-change'])win.removeEventListener(name,accountChanged);win.removeEventListener('lific:realtime',realtime);}};
  }
- const exports={parseConfig,queryConfig,configQuery,visibleIssues,groups,boardLanes,Controller,createApi,exportSelected,resumeDeletions,attach};
+ const exports={parseConfig,queryConfig,configQuery,visibleIssues,groups,boardLanes,Controller,createApi,exportSelected,resumeDeletions,queueDeletion,attach};
  if(typeof module!=='undefined')module.exports=exports;
  if(typeof window!=='undefined') {
   window.LificTopcoatIssueList=exports;
