@@ -29,6 +29,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         window.issue = {id:7,project_id:3,seq:4,sequence:7,identifier:'ENG-7',title:'First title',description:'Saved body',status:'backlog',priority:'none',module_id:null,labels:[],created_at:'2026-10-01',updated_at:'2026-10-02'};
         window.calls=[];window.roleDenied=false;window.holdResolve=false;window.holdDescription=false;window.holdLabel=false;window.lificSession={state:{user:{id:1},publicProject:null,loading:false},request:async(path,options={})=>{
           calls.push({path,options});
+          if(path===window.failNextPath){window.failNextPath=null;return {ok:false,status:503,error:'Temporary issue loading failure'};}
           if(path==='/issues/resolve/ENG-7')return window.holdResolve
             ? await new Promise(resolve=>{window.releaseResolve=()=>resolve({ok:true,data:issue});}) : {ok:true,data:issue};
           if(path==='/projects/3/my-role')return window.roleDenied
@@ -38,6 +39,8 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
           if(path==='/labels'&&options.method==='POST')return window.holdLabel
             ? await new Promise(resolve=>{window.releaseLabel=()=>resolve({ok:true,data:{name:JSON.parse(options.body).name,color:JSON.parse(options.body).color}});})
             : {ok:true,data:{name:JSON.parse(options.body).name,color:JSON.parse(options.body).color}};
+          if(path==='/issues/7/comments'&&options.method==='POST')return await new Promise(resolve=>{window.releasePanel=()=>{issue={...issue,seq:issue.seq+1};resolve({ok:true,data:{id:11,content:JSON.parse(options.body).content}});};});
+          if(path==='/issues/7'&&!options.method)return {ok:true,data:issue};
           if(path==='/issues/7'&&options.method==='PUT'){
             if(window.holdConflict)return await new Promise(resolve=>{window.releaseConflict=()=>resolve({ok:false,status:409,error:'Issue changed elsewhere',current:{...issue,seq:issue.seq+1,description:'External body'}});});
             if(window.holdDescription&&Object.hasOwn(JSON.parse(options.body),'description'))return await new Promise(resolve=>{window.releaseDescription=()=>{const patch=JSON.parse(options.body);issue={...issue,...patch,seq:issue.seq+1};resolve({ok:true,data:issue});};});
@@ -69,6 +72,16 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         const writes = await page.evaluate(() => calls.filter(call=>call.options.method==='PUT').map(call=>JSON.parse(call.options.body)));
         assert.equal(writes.length,2); assert.equal(writes[0].expected_seq,4); assert.equal(writes[1].expected_seq,5);
         assert.equal(writes[0].title,'Second title'); assert.equal(writes[1].description,'Changed **body**');
+      });
+      await t.test('blank title commits on blur and Enter leave the saved title and request count unchanged',async()=>{
+        const title=page.locator('[data-field="title"]');
+        const writes=await page.evaluate(()=>calls.filter(call=>call.options.method==='PUT').length);
+        await title.fill('   ');await title.blur();
+        assert.equal(await title.inputValue(),'Second title');
+        await title.fill('');await title.press('Enter');
+        assert.equal(await title.inputValue(),'Second title');
+        assert.equal(await page.evaluate(()=>calls.filter(call=>call.options.method==='PUT').length),writes);
+        assert.equal(await page.evaluate(()=>issue.title),'Second title');
       });
       await t.test('date edits and exact-name labels preserve labels containing commas', async () => {
         const dueDate=page.locator('[data-field="target_date"]'); await dueDate.fill('2026-10-15');
@@ -107,6 +120,27 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         await page.evaluate(()=>{issue={...issue,seq:issue.seq+1,description:'Remote update'};dispatchEvent(new CustomEvent('lific:realtime',{detail:{type:'issue.updated',project_id:3,issue_id:7,seq:issue.seq}}));});
         await page.waitForFunction(()=>document.querySelector('[data-editor-input]').value==='Remote update');
         assert.equal(await page.locator('[data-detail-title]').textContent(),'Second title');
+      });
+      await t.test('description and panel acknowledgements preserve a title draft entered while each request is in flight',async()=>{
+        await page.evaluate(()=>{window.holdDescription=true;window.releaseDescription=null;lificIssueDetail.editor.queue.edit('Description with pending title');});
+        await page.waitForFunction(()=>typeof releaseDescription==='function');
+        const title=page.locator('[data-field="title"]');await title.fill('Focused title draft');
+        await page.evaluate(()=>{holdDescription=false;releaseDescription();});
+        await page.waitForFunction(()=>issue.description==='Description with pending title'&&!lificIssueDetail.editor.queue.state().dirty);
+        assert.equal(await title.inputValue(),'Focused title draft');
+        assert.equal(await title.evaluate(node=>node===document.activeElement),true);
+        await title.press('Escape');
+        await page.evaluate(()=>{
+          window.releasePanel=null;window.panelDone=false;
+          const controller=lificIssueDetail;
+          window.panelWrite=controller.accept({route:controller.route,action:{type:'mutate_panel',operation:'create_comment',content:'Panel write'}}).then(()=>{panelDone=true;});
+        });
+        await page.waitForFunction(()=>typeof releasePanel==='function');
+        await title.fill('Another focused title draft');
+        await page.evaluate(()=>releasePanel());await page.waitForFunction(()=>panelDone);
+        assert.equal(await title.inputValue(),'Another focused title draft');
+        assert.equal(await title.evaluate(node=>node===document.activeElement),true);
+        await title.press('Escape');
       });
       await t.test('refresh preserves a scalar draft started while the issue read is in flight', async () => {
         await page.evaluate(()=>{window.holdResolve=true;dispatchEvent(new CustomEvent('lific:realtime',{detail:{type:'issue.updated',project_id:3,issue_id:7}}));});
@@ -174,6 +208,19 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         await page.evaluate(() => {window.holdLabel=false;window.releaseLabel();});
         await page.waitForTimeout(0);
         assert.equal(await page.evaluate(() => window.lificIssueDetail.labels.some(label => label.name === 'old account label')),false);
+      });
+      await t.test('resolve and metadata failures recover through Retry without reloading the document',async()=>{
+        for(const path of ['/issues/resolve/ENG-7','/projects/3/my-role','/modules?project_id=3','/labels?project_id=3']) {
+          await page.evaluate(async failedPath=>{window.failNextPath=failedPath;await lificIssueDetail.load();},path);
+          assert.equal(await page.locator('[data-detail-content]').isVisible(),false);
+          assert.match(await page.locator('[data-detail-error]').textContent(),/Temporary issue loading failure/);
+          const attempts=await page.evaluate(failedPath=>calls.filter(call=>call.path===failedPath).length,path);
+          await page.getByRole('button',{name:'Retry',exact:true}).click();
+          await page.locator('[data-detail-content]').waitFor({state:'visible'});
+          assert.equal(await page.locator('[data-detail-error]').isVisible(),false);
+          assert.equal(await page.locator('[data-field="title"]').inputValue(),'Second title');
+          assert.ok(await page.evaluate(({failedPath,attempts})=>calls.filter(call=>call.path===failedPath).length>attempts,{failedPath:path,attempts}));
+        }
       });
     } finally {await browser.close();}
   });

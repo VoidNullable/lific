@@ -8,6 +8,7 @@ pub(crate) mod identity;
 pub(crate) mod issue_create;
 pub(crate) mod issue_detail;
 pub(crate) mod issue_list;
+pub(crate) mod pages;
 pub(crate) mod palette;
 pub(crate) mod project_settings;
 pub(crate) mod session;

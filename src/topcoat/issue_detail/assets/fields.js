@@ -61,7 +61,7 @@
     }
     function render() {
       if (!alive) return;
-      fields.title.value = issue.title || '';
+      if(document.activeElement!==fields.title) fields.title.value = issue.title || '';
       fields.status.value = STATUSES.includes(issue.status) ? issue.status : 'backlog';
       fields.priority.value = PRIORITIES.includes(issue.priority) ? issue.priority : 'none';
       fillModules(fields.module_id, modules, issue.module_id);
@@ -101,13 +101,18 @@
         if (statusNode) statusNode.textContent = error?.message || 'Could not save this field.';
       } finally {busy = false; render();}
     }
+    function commitTitle() {
+      const title=fields.title.value.trim();
+      if(title) void change('title',title);
+      else fields.title.value=issue.title || '';
+    }
     listen(fields.title, 'keydown', event => {
       if (event.key === 'Escape') {fields.title.value = issue.title || ''; fields.title.blur();}
       else if (event.key === 'Enter' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) {
-        event.preventDefault(); void change('title', fields.title.value.trim()); fields.title.blur();
+        event.preventDefault(); commitTitle(); fields.title.blur();
       }
     });
-    listen(fields.title, 'blur', () => void change('title', fields.title.value.trim()));
+    listen(fields.title, 'blur', commitTitle);
     for (const key of ['status', 'priority']) listen(fields[key], 'change', () => void change(key, fields[key].value));
     listen(fields.module_id, 'change', () => void change('module_id', fields.module_id.value === '' ? null : Number(fields.module_id.value)));
     listen(fields.target_date, 'change', () => void change('target_date', fields.target_date.value || null));

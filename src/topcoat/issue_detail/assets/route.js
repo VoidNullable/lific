@@ -159,7 +159,10 @@
       } catch (error) {
         if (!this.current(generation)) return;
         this.loading.hidden = true; this.content.hidden = true; this.root.setAttribute('aria-busy', 'false');
-        this.errorNode.textContent = error?.message || 'Could not load this issue.'; this.errorNode.hidden = false;
+        const retry=document.createElement('button');retry.type='button';retry.className='tc-button';retry.textContent='Retry';
+        retry.addEventListener('click',()=>void this.load(),{once:true});
+        this.errorNode.replaceChildren(document.createTextNode(error?.message || 'Could not load this issue.'),' ',retry);
+        this.errorNode.hidden = false;
       }
     }
     render(issue, modules, labels) {

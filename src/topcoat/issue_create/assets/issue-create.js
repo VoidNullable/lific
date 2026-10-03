@@ -22,12 +22,14 @@
   }
 
   function controller(env, identifier = '') {
-    const state = {phase: 'loading', project: null, role: null, modules: [], labelOptions: [], ...model({search: env.search || ''}), error: ''};
+    const state = {phase: 'loading', project: null, role: null, modules: [], labelOptions: [], uploads: [], ...model({search: env.search || ''}), error: ''};
     const transfers = new Set();
+    const transferById = new Map();
     let disposed = false;
     let generation = 0;
     let loadedAudience = null;
     let pendingUploads = 0;
+    let uploadSequence = 0;
     const publish = patch => {Object.assign(state, patch); env.onChange?.(state);};
     const editable = role => !!role && (role.is_admin || !role.enforced || ['maintainer', 'lead'].includes(role.role));
     const audience = () => {
@@ -89,21 +91,31 @@
       env.navigate(`/${encodeURIComponent(identifier)}/issues`);
     }
 
-    async function upload(files, initialSelection = null) {
+    async function upload(files, initialSelection = null, retryId = null) {
       const current = generation;
       let selection = initialSelection || env.selection?.() || {start: state.description.length, end: state.description.length};
       for (const file of files || []) {
         if (disposed || current !== generation) break;
+        const id = retryId ?? ++uploadSequence; retryId = null;
+        const existing = state.uploads.find(item => item.id === id);
+        const record = {id,file,name:file.name,status:'uploading',progress:null,error:''};
+        publish({error:'',uploads:existing ? state.uploads.map(item=>item.id===id?record:item) : [...state.uploads,record]});
         pendingUploads++;
         env.onPending?.(pendingUploads);
-        const transfer = env.attachments.upload(file);
+        const transfer = env.attachments.upload(file,{onProgress:progress=>{
+          const percent=progress.total ? Math.min(100,Math.round(progress.loaded/progress.total*100)) : null;
+          publish({uploads:state.uploads.map(item=>item.id===id?{...item,progress:percent}:item)});
+        }});
         transfers.add(transfer);
+        transferById.set(id,transfer);
         const result = await transfer.result;
         transfers.delete(transfer);
+        if(transferById.get(id)===transfer)transferById.delete(id);
         if (disposed || current !== generation) break;
         pendingUploads--;
         env.onPending?.(pendingUploads);
         if (result.ok) {
+          selection = env.selection?.() || selection;
           const snippet = env.attachments.markdown(result.data);
           const text = state.description;
           const start = Math.max(0, Math.min(text.length, selection.start));
@@ -114,9 +126,20 @@
           const suffix = after && !after.startsWith('\n') ? '\n' : '';
           const caret = before.length + prefix.length + snippet.length;
           publish({description: `${before}${prefix}${snippet}${suffix}${after}`, caret});
+          publish({uploads:state.uploads.map(item=>item.id===id?{...item,status:'complete',progress:100,error:''}:item)});
           selection = {start: caret, end: caret};
-        } else if (!result.canceled) publish({error: result.error});
+        } else if (result.canceled) {
+          publish({uploads:state.uploads.map(item=>item.id===id?{...item,status:'cancelled',error:result.error||'Upload canceled.'}:item)});
+        } else {
+          publish({error: result.error,uploads:state.uploads.map(item=>item.id===id?{...item,status:'failed',error:result.error||'Upload failed.'}:item)});
+        }
       }
+    }
+    function cancelUpload(id) {transferById.get(id)?.abort();}
+    function retryUpload(id) {
+      const item=state.uploads.find(upload=>upload.id===id);
+      if(!item||!['failed','cancelled'].includes(item.status))return false;
+      void upload([item.file],env.selection?.(),id);return true;
     }
 
     function toggleLabel(name) {
@@ -152,10 +175,10 @@
       if (nextAudience === loadedAudience) return;
       generation++;
       for (const transfer of transfers) transfer.abort();
-      transfers.clear(); pendingUploads = 0; loadedAudience = null;
+      transfers.clear(); transferById.clear(); pendingUploads = 0; loadedAudience = null;
       env.onPending?.(pendingUploads);
       publish({phase:'loading',project:null,role:null,modules:[],labelOptions:[],title:'',description:'',labels:[],moduleId:null,
-        saving:false,creatingLabel:false,error:'',...model({search:env.search || ''})});
+        uploads:[],saving:false,creatingLabel:false,error:'',...model({search:env.search || ''})});
       void load();
     }
     const win = env.window || globalThis;
@@ -166,10 +189,11 @@
       for (const name of ['lific:account-change','lific:scope-change','lific:session-change']) win.removeEventListener?.(name,onAudienceChange);
       win.removeEventListener?.('storage',onAudienceChange);
     }
-    return {env, state, transfers, load, create, discard, upload, toggleLabel, createLabel, canCreate, dispose() {
+    return {env, state, transfers, load, create, discard, upload, cancelUpload, retryUpload, toggleLabel, createLabel, canCreate, dispose() {
       disposed = true; generation++;
       stopListening();
       for (const transfer of transfers) transfer.abort(); transfers.clear();
+      transferById.clear();
     }};
   }
 
@@ -199,7 +223,9 @@
     const descriptionSelection = () => description.ownerDocument.activeElement === description
       ? {start: description.selectionStart, end: description.selectionEnd}
       : {start: description.value.length, end: description.value.length};
-    const createController = controller({...env, api, attachments, navigate, search, onChange: state => {
+    const createController = controller({...env, api, attachments, navigate, search,
+      selection:()=>({start:description.selectionStart,end:description.selectionEnd}),
+      onChange: state => {
       root.setAttribute('aria-busy', String(state.phase === 'loading'));
       loading.hidden = state.phase !== 'loading';
       denied.hidden = state.phase !== 'denied';
@@ -228,6 +254,26 @@
           return wrapper;
         }));
       }
+      const uploadList=root.querySelector('[data-issue-create-uploads]');
+      if(uploadList)uploadList.replaceChildren(...state.uploads.map(item=>{
+        const row=document.createElement('li');row.dataset.uploadId=String(item.id);
+        const name=document.createElement('span');name.textContent=item.name;row.append(name);
+        const status=document.createElement('span');status.textContent=item.status==='uploading'
+          ? (item.progress===null?'Uploading…':`Uploading ${item.progress}%`)
+          : item.status==='failed'?`Failed: ${item.error}`:item.status==='cancelled'?'Canceled; retry available':item.status==='complete'?'Uploaded':'';
+        row.append(status);
+        if(item.status==='uploading'){
+          const progress=document.createElement('progress');progress.max=100;
+          if(item.progress!==null)progress.value=item.progress;
+          progress.setAttribute('aria-label',`Upload progress for ${item.name}`);row.append(progress);
+          const cancel=document.createElement('button');cancel.type='button';cancel.textContent='Cancel';cancel.setAttribute('aria-label',`Cancel ${item.name}`);
+          cancel.addEventListener('click',()=>createController.cancelUpload(item.id));row.append(cancel);
+        }else if(item.status==='failed'||item.status==='cancelled'){
+          const retry=document.createElement('button');retry.type='button';retry.textContent='Retry';retry.setAttribute('aria-label',`Retry ${item.name}`);
+          retry.addEventListener('click',()=>createController.retryUpload(item.id));row.append(retry);
+        }
+        return row;
+      }));
       submit.disabled = !createController.canCreate();
       submit.textContent = state.saving ? 'Creating…' : 'Create issue';
       labelSubmit.disabled = !!state.creatingLabel;

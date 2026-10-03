@@ -261,6 +261,21 @@ mod topcoat_spike {
                     identifier,
                     false,
                 ),
+                Page::Pages => route.project.map_or_else(
+                    || super::topcoat_frontend::shell::placeholder(cx, &route),
+                    |project| super::topcoat_frontend::pages::list(cx, project, false),
+                ),
+                Page::Record(page_id) => route.project.map_or_else(
+                    || super::topcoat_frontend::shell::placeholder(cx, &route),
+                    |project| {
+                        super::topcoat_frontend::pages::detail(
+                            cx,
+                            project,
+                            page_id.parse().expect("page routes contain numeric ids"),
+                            false,
+                        )
+                    },
+                ),
                 _ => super::topcoat_frontend::shell::placeholder(cx, &route),
             },
             Layout::Public => match route.page {
@@ -278,6 +293,17 @@ mod topcoat_spike {
                     cx,
                     route.project.unwrap_or_default(),
                     identifier,
+                    true,
+                ),
+                Page::Pages => super::topcoat_frontend::pages::list(
+                    cx,
+                    route.project.unwrap_or_default(),
+                    true,
+                ),
+                Page::Record(page_id) => super::topcoat_frontend::pages::detail(
+                    cx,
+                    route.project.unwrap_or_default(),
+                    page_id.parse().expect("page routes contain numeric ids"),
                     true,
                 ),
                 _ => super::topcoat_frontend::shell::placeholder(cx, &route),
@@ -667,6 +693,26 @@ mod topcoat_spike {
             ))?)
     }
 
+    #[route(GET "/__topcoat-pages.css")]
+    async fn pages_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::pages::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-pages.js")]
+    async fn pages_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::pages::SCRIPT,
+            ))?)
+    }
+
     #[route(GET "/__topcoat-preferences.js")]
     async fn preferences_script() -> Result<Response> {
         Ok(Response::builder()
@@ -894,6 +940,29 @@ mod topcoat_spike_tests {
                 assert!(body.contains("data-topcoat-collaboration=\"\""), "{path}");
             }
         }
+        for (path, expected, scope) in [
+            ("/LIF/pages", "data-topcoat-pages=\"list\"", "private"),
+            ("/LIF/pages/7", "data-topcoat-pages=\"detail\"", "private"),
+            ("/public/LIF/pages", "data-topcoat-pages=\"list\"", "public"),
+            (
+                "/public/LIF/pages/7",
+                "data-topcoat-pages=\"detail\"",
+                "public",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains(expected), "{path}");
+            assert!(
+                body.contains(&format!("data-page-scope=\"{scope}\"")),
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1096,6 +1165,16 @@ mod topcoat_spike_tests {
                 "/__topcoat-identity.css",
                 "text/css; charset=utf-8",
                 ".tc-identity",
+            ),
+            (
+                "/__topcoat-pages.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatPages",
+            ),
+            (
+                "/__topcoat-pages.css",
+                "text/css; charset=utf-8",
+                ".tc-pages",
             ),
         ] {
             let response = router
