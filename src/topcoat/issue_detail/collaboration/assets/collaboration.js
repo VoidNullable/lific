@@ -8,13 +8,58 @@
   const read = async path => { const result = await request(path); if (!result.ok) throw new Error(result.error); return result.data; };
   const send = (root, action) => root.dispatchEvent(new CustomEvent('lific:issue-detail-intent', {bubbles:true, detail:{route:JSON.parse(root.dataset.route), action}}));
 
-  function commentMarkup(comment, canEdit) {
+  function referenceSummary(content) {
+    const issues = new Set(String(content).match(/\b[A-Z][A-Z0-9_-]*-[1-9][0-9]*\b/g) || []);
+    const attachments = new Set(String(content).match(/\/api\/attachments\/(\d+)/g) || []);
+    const mentions = new Set(String(content).match(/(?:^|\s)@[\w-]+/g) || []);
+    return {issues:issues.size,attachments:attachments.size,mentions:mentions.size};
+  }
+
+  function commentMarkup(comment, canEdit, draft = null) {
     const owner = canEdit && comment.user_id === api().state.user?.id;
-    return `<li class="tc-comment" data-comment-id="${comment.id}"><header><strong>${escape(comment.author_display_name || comment.author)}</strong><time datetime="${escape(comment.created_at)}">${escape(date(comment.created_at))}</time>${comment.kind === 'verification' ? '<span class="tc-comment__badge">Verification</span>' : ''}</header><p data-comment-content="">${escape(comment.content).replace(/\n/g,'<br>')}</p>${owner ? `<div class="tc-comment__actions"><button type="button" data-comment-edit="${comment.id}">Edit</button><button type="button" data-comment-delete="${comment.id}">Delete</button></div>` : ''}</li>`;
+    const body = draft ? `<div data-comment-editor=""><textarea data-comment-edit-draft="${comment.id}" aria-label="Edit comment" ${canEdit ? '' : 'readonly'}>${escape(draft.content)}</textarea><div class="tc-collab__upload-tools"><label>Attach files <input type="file" multiple data-comment-files="${comment.id}" ${canEdit ? '' : 'disabled'}></label><span data-comment-upload-status="${comment.id}" role="status"></span></div><button type="button" data-comment-save="${comment.id}" ${!canEdit||draft.uploading ? 'disabled' : ''}>Save comment</button><button type="button" data-comment-cancel="${comment.id}">Cancel</button></div>` : `<div class="tc-comment__body" data-comment-content="">${escape(comment.content)}</div>`;
+    const refs=referenceSummary(comment.content);
+    return `<li class="tc-comment" id="comment-${comment.id}" data-comment-id="${comment.id}"><header><strong>${escape(comment.author_display_name || comment.author)}</strong><time datetime="${escape(comment.created_at)}">${escape(date(comment.created_at))}</time><a class="tc-comment__permalink" href="#comment-${comment.id}" aria-label="Link to this comment">#</a>${comment.kind === 'verification' ? '<span class="tc-comment__badge">Verification</span>' : ''}</header>${body}${refs.issues||refs.attachments||refs.mentions?`<small class="tc-comment__references">References: ${refs.issues?`${refs.issues} issue${refs.issues===1?'':'s'}`:''}${refs.attachments?`${refs.issues?', ':''}${refs.attachments} attachment${refs.attachments===1?'':'s'}`:''}${refs.mentions?`${refs.issues||refs.attachments?', ':''}${refs.mentions} mention${refs.mentions===1?'':'s'}`:''}</small>`:''}${owner ? `<div class="tc-comment__actions"><button type="button" data-comment-edit="${comment.id}">Edit</button><button type="button" data-comment-delete="${comment.id}">Delete</button></div>` : ''}</li>`;
+  }
+
+  function decorateCommentReferences(node) {
+    const walker=node.ownerDocument.createTreeWalker(node,NodeFilter.SHOW_TEXT);
+    const textNodes=[];while(walker.nextNode())textNodes.push(walker.currentNode);
+    for(const textNode of textNodes){
+      if(textNode.parentElement?.closest('code,pre,a,script,style,.tc-comment__mention'))continue;
+      const text=textNode.nodeValue, pattern=/(@[\w-]+|\b[A-Z][A-Z0-9_-]*-[1-9][0-9]*\b)/g;
+      if(!pattern.test(text))continue;pattern.lastIndex=0;const fragment=node.ownerDocument.createDocumentFragment();let offset=0,match;
+      while((match=pattern.exec(text))){fragment.append(text.slice(offset,match.index));const token=match[0];
+        if(token.startsWith('@')){const span=node.ownerDocument.createElement('span');span.className='tc-comment__mention';span.textContent=token;fragment.append(span);}
+        else {const a=node.ownerDocument.createElement('a');a.href=issueHref(node.closest('[data-topcoat-collaboration]'),token);a.textContent=token;fragment.append(a);}
+        offset=pattern.lastIndex;
+      }
+      fragment.append(text.slice(offset));textNode.replaceWith(fragment);
+    }
+  }
+
+  function renderCommentBodies(root) {
+    for(const body of root.querySelectorAll('[data-comment-content]')){
+      const source=body.textContent||'';
+      if(globalThis.lificIssueEditor?.renderMarkdown)globalThis.lificIssueEditor.renderMarkdown(body,source);
+      else body.innerHTML=escape(source).replace(/\n/g,'<br>');
+      decorateCommentReferences(body);
+    }
+  }
+
+  function renderCommentList(root, comments, canEdit = root.dataset.commentEnabled === 'true') {
+    const active=root.ownerDocument.activeElement,activeField=active?.matches?.('[data-comment-edit-draft]')&&root.contains(active)?active:null;
+    let focusedId=null;
+    for(const state of root._commentEdits?.values?.()||[])state.focused=false;
+    if(activeField){focusedId=Number(activeField.dataset.commentEditDraft);const state=root._commentEdits.get(focusedId)||{};Object.assign(state,{content:activeField.value,selectionStart:activeField.selectionStart,selectionEnd:activeField.selectionEnd,focused:true});root._commentEdits.set(focusedId,state);}
+    root.querySelector('[data-comment-count]').textContent=String(comments.length);
+    root.querySelector('[data-comment-thread]').innerHTML=comments.length?`<ol>${comments.map(item=>commentMarkup(item,canEdit,root._commentEdits?.get(Number(item.id)))).join('')}</ol>`:'<p class="tc-collab__muted">No comments yet</p>';
+    renderCommentBodies(root);
+    if(focusedId!==null){const state=root._commentEdits.get(focusedId),field=root.querySelector(`[data-comment-edit-draft="${focusedId}"]`);if(field){field.focus();field.setSelectionRange(state.selectionStart??field.value.length,state.selectionEnd??state.selectionStart??field.value.length);}}
   }
 
   function issueHref(root, identifier) {
-    const project=root.dataset.projectIdentifier;
+    const project=String(identifier).match(/^([A-Za-z][A-Za-z0-9_-]*)-[1-9][0-9]*$/)?.[1];
     if(!project)return '#';
     const local=`/${encodeURIComponent(project)}/issues/${encodeURIComponent(identifier)}`;
     if(root.dataset.publicScope!=='true'&&api().state.publicProject===null)return local;
@@ -49,10 +94,26 @@
   function renderAttachments(root, items) {
     const target = root.querySelector('[data-issue-attachments]');
     const privateScope = api().state.publicProject === null;
-    target.innerHTML = `<ul class="tc-attachments">${(items || []).map(item => `<li class="tc-attachment" data-attachment-id="${item.id}" data-attachment-kind="${globalThis.LificTopcoatAttachments?.viewerKind(item) || 'file'}"><a href="${escape(api().resolve(`/attachments/${item.id}`).url)}" download="${escape(item.filename)}">${escape(item.filename)}</a><span>${Number(item.size_bytes)} bytes</span>${item.mime.startsWith('image/') ? `<img data-attachment-image="${item.id}" alt="${escape(item.alt_text || item.filename)}" loading="lazy">` : ''}${item.uploader_id === api().state.user?.id || api().affordances().manage ? `<button type="button" data-attachment-delete="${item.id}">Delete</button>` : ''}<p data-attachment-message="" role="status"></p></li>`).join('')}</ul>${privateScope ? `<form class="tc-attachment-upload" data-attachment-upload="" data-attachment-entity="issue" data-attachment-entity-id="${root.dataset.issueId}"><label>Attach files <input type="file" multiple data-attachment-files=""></label><button type="submit">Upload</button><button type="button" data-attachment-cancel hidden>Cancel</button><progress data-attachment-progress max="1" value="0" hidden aria-label="Upload progress"></progress><p data-attachment-status role="status"></p></form>` : ''}`;
+    if (!target.querySelector('[data-issue-attachment-list]')) target.innerHTML=`<ul class="tc-attachments" data-issue-attachment-list=""></ul>${privateScope ? `<form class="tc-attachment-upload" data-attachment-upload=""><label>Attach files <input type="file" multiple data-attachment-files=""></label><button type="submit">Upload</button><button type="button" data-attachment-cancel hidden>Cancel</button><progress data-attachment-progress max="1" value="0" hidden aria-label="Upload progress"></progress><p data-attachment-status role="status"></p></form>` : ''}`;
+    const list=target.querySelector('[data-issue-attachment-list]'),rows=items||[],wanted=new Set(rows.map(item=>String(item.id)));
+    for(const card of list.querySelectorAll('[data-attachment-id]'))if(!wanted.has(card.dataset.attachmentId))card.remove();
+    for(const item of rows){
+      if(list.querySelector(`[data-attachment-id="${Number(item.id)}"]`))continue;
+      const kind=globalThis.LificTopcoatAttachments?.viewerKind(item)||'file',url=api().resolve(`/attachments/${item.id}`).url,card=document.createElement('li');
+      card.className='tc-attachment';card.dataset.attachmentId=String(item.id);card.dataset.attachmentKind=kind;
+      const link=document.createElement('a');link.href=url;link.download=item.filename;link.textContent=item.filename;card.append(link);
+      const size=document.createElement('span');size.textContent=`${Number(item.size_bytes)} bytes`;card.append(size);
+      if(kind==='image'){const image=document.createElement('img');image.dataset.attachmentImage=String(item.id);image.alt=item.alt_text||item.filename;image.loading='lazy';card.append(image);}
+      if(kind==='video'||kind==='audio'){const media=document.createElement(kind);media.controls=true;media.preload='none';media.src=url;card.append(media);}
+      const preview=document.createElement('button');preview.type='button';preview.setAttribute(kind==='image'?'data-attachment-original':'data-attachment-preview','');preview.setAttribute('aria-label',`${kind==='image'?'Original':'Preview'} ${item.filename}`);preview.textContent=kind==='image'?'Original':'Preview';card.append(preview);
+      const content=document.createElement('pre');content.dataset.attachmentContent='';content.hidden=true;card.append(content);
+      if(item.uploader_id===api().state.user?.id||api().affordances().manage){const remove=document.createElement('button');remove.type='button';remove.dataset.attachmentDelete=String(item.id);remove.textContent='Delete';card.append(remove);}
+      const message=document.createElement('p');message.dataset.attachmentMessage='';message.setAttribute('role','status');card.append(message);list.append(card);
+      if(kind==='image'&&root._attachmentClient){void root._attachmentClient.thumbnail(Number(item.id)).then(result=>{if(card.isConnected&&result.ok){const src=URL.createObjectURL(result.blob);root._attachmentObjectUrls||=new Set();root._attachmentObjectUrls.add(src);card.querySelector('img').src=src;}else if(card.isConnected&&result.status===404)card.querySelector('img').src=url;});}
+    }
     const helper = globalThis.LificTopcoatAttachments;
-    if (helper) root._attachmentMount?.dispose?.(), root._attachmentMount = helper.attach(target, {
-      client:helper.createClient({session:api()}),
+    if (helper && !root._attachmentMount) root._attachmentMount = helper.attach(target, {
+      client:root._attachmentClient ||= helper.createClient({session:api()}),
       target:{entity_type:'issue',entity_id:Number(root.dataset.issueId)},
       onUploaded:async()=>refreshAttachments(root),
       onDeleted:async()=>refreshAttachments(root),
@@ -64,21 +125,64 @@
     if (root.isConnected && (current === null || current === root._collabGeneration)) renderAttachments(root, rows);
   }
 
-  async function refreshComments(root, current = null, before = null) {
+  async function fetchCommentPage(root, current, before) {
     const params=new URLSearchParams({order:'desc',limit:'51'});
     if(before){params.set('before_created_at',before.created_at);params.set('before_id',String(before.id));}
     const result=await request(`/issues/${root.dataset.issueId}/comments?${params}`);
     if(!result.ok)throw new Error(result.error);
-    const rows=result.data;
+    const rows=Array.isArray(result.data)?result.data:(result.data?.items||[]);
+    return {page:rows.slice(0,50).reverse(),hasOlder:rows.length>50||result.headers?.get('x-comment-has-more')==='true'};
+  }
+
+  async function refreshComments(root, current = null, before = null) {
+    const existing=root._comments||[];
+    const first=await fetchCommentPage(root,current,before);
     if (!root.isConnected || (current !== null && current !== root._collabGeneration)) return;
-    const overFetched=Array.isArray(rows)&&rows.length>50, page=(Array.isArray(rows)?rows.slice(0,50):rows.items||[]).reverse();
-    const comments=before?page.concat(root._comments||[]):page;
-    const older=overFetched||result.headers?.get('x-comment-has-more')==='true';
-    root._nextCommentCursor=page.length?{created_at:page[0].created_at,id:page[0].id}:before;
+    let page=first.page,older=first.hasOlder;
+    let comments;
+    let cursor=page.length?{created_at:page[0].created_at,id:page[0].id}:before;
+    if(before){
+      const byId=new Map(existing.map(item=>[Number(item.id),item]));for(const item of page)byId.set(Number(item.id),item);
+      comments=[...byId.values()].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))||Number(a.id)-Number(b.id));
+      root._commentsWindowExpanded=true;
+    } else if(root._commentsWindowExpanded&&existing.length){
+      const priorIds=new Set(existing.map(item=>Number(item.id)));
+      const newRows=page.filter(item=>!priorIds.has(Number(item.id))).length;
+      const desired=existing.length+newRows, seen=new Map(page.map(item=>[Number(item.id),item]));
+      comments=page;
+      while(comments.length<desired&&older){
+        if(!cursor)break;
+        const next=await fetchCommentPage(root,current,cursor);
+        if(!root.isConnected||(current!==null&&current!==root._collabGeneration))return;
+        page=next.page;older=next.hasOlder;
+        for(const item of page)seen.set(Number(item.id),item);
+        comments=[...seen.values()].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))||Number(a.id)-Number(b.id));
+        if(!page.length)break;
+        const nextCursor={created_at:page[0].created_at,id:page[0].id};
+        if(cursor.created_at===nextCursor.created_at&&Number(cursor.id)===Number(nextCursor.id))break;
+        cursor=nextCursor;
+      }
+    } else comments=first.page;
+    root._commentsHasOlder=older;
+    root._nextCommentCursor=cursor;
     const olderButton=root.querySelector('[data-comments-older]');olderButton.hidden=!older;olderButton.disabled=false;
-    root.querySelector('[data-comment-count]').textContent = String(comments.length);
-    root.querySelector('[data-comment-thread]').innerHTML = comments.length ? `<ol>${comments.map(item => commentMarkup(item, root.dataset.commentEnabled === 'true')).join('')}</ol>` : '<p class="tc-collab__muted">No comments yet</p>';
     root._comments = comments;
+    renderCommentList(root,comments);
+    if(!before)await resolveCommentHash(root,current);
+  }
+
+  async function resolveCommentHash(root,current=null) {
+    const match=globalThis.location?.hash?.match(/^#comment-([1-9][0-9]*)$/)||globalThis.location?.hash?.match(/[?&]comment=([1-9][0-9]*)/);
+    if(!match)return false;
+    const targetId=match[1];if(root._commentTargetDone===targetId)return false;if(root._commentTargetPromise&&root._commentTargetId===targetId)return root._commentTargetPromise;
+    const id=Number(targetId),promise=(async()=>{let budget=10;
+      while(root.isConnected&&root._comments?.every(item=>Number(item.id)!==id)&&!root.querySelector('[data-comments-older]').hidden&&budget-->0){const cursor=root._nextCommentCursor;if(!cursor)break;await refreshComments(root,current,cursor);}
+      const target=root.querySelector(`#comment-${id}`);
+      if(target){target.classList.add('tc-comment--target');target.scrollIntoView?.({block:'center'});return true;}
+      return false;
+    })();
+    root._commentTargetId=targetId;root._commentTargetPromise=promise;
+    try{return await promise;}finally{root._commentTargetDone=targetId;if(root._commentTargetPromise===promise){root._commentTargetPromise=null;root._commentTargetId=null;}}
   }
 
   async function refresh(root) {
@@ -122,8 +226,12 @@
     if(composer)composer.hidden=!commentAllowed;if(relationForm)relationForm.hidden=!editAllowed;if(waitForm)waitForm.hidden=!editAllowed;if(deleteButton)deleteButton.hidden=!editAllowed;
     let disposed = false;
     let generation = 0;
+    let audienceGeneration = 0;
     root._collabGeneration = (root._collabGeneration || 0) + 1;
     const initialRoute = root.dataset.route;
+    root._commentEdits ||= new Map();
+    root._commentUploads ||= new Map();
+    root._composerClient ||= globalThis.LificTopcoatAttachments?.createClient({session:api()});
     const say = message => { root.querySelector('[data-collab-status]').textContent = message; };
     const pendingActions=[];
     const snapshotForm=form=>Object.fromEntries(new FormData(form).entries());
@@ -137,6 +245,11 @@
       const pending=takeAction(detail);if(!pending)return;
       if(pending.action.operation==='create_comment'){
         const input=root.querySelector('[data-comment-draft]');if(input&&input.value===pending.draft)input.value='';
+      } else if(pending.action.operation==='edit_comment') {
+        const id=Number(pending.action.comment_id),draft=root._commentEdits.get(id);
+        if(draft?.content===pending.draft)root._commentEdits.delete(id);
+      } else if(pending.action.operation==='delete_comment') {
+        root._commentEdits.delete(Number(pending.action.comment_id));
       } else if(pending.action.operation==='link_relation'&&pending.form){
         const values=snapshotForm(pending.form);if(values.target===pending.values.target&&values.kind===pending.values.kind)pending.form.reset();
       } else if(pending.action.operation==='add_wait'&&pending.form){
@@ -153,6 +266,36 @@
     try { waits = JSON.parse(root.dataset.waits || '[]'); } catch { /* Missing optional wait snapshot. */ }
     renderWaits(root, waits);
     const keepFocus = (node, offset) => { node.focus(); if (typeof offset === 'number') node.setSelectionRange(offset, offset); };
+    function commentTextarea(id='new') { return id==='new'?root.querySelector('[data-comment-draft]'):root.querySelector(`[data-comment-edit-draft="${Number(id)}"]`); }
+    function updateUploadGate(id, uploading) {
+      const form=id==='new'?root.querySelector('[data-comment-compose]'):root.querySelector(`[data-comment-id="${Number(id)}"] [data-comment-editor]`);
+      const submit=id==='new'?form?.querySelector('[type="submit"]'):form?.querySelector(`[data-comment-save="${Number(id)}"]`);
+      if(submit)submit.disabled=uploading;
+      const status=root.querySelector(`[data-comment-upload-status="${id}"]`);if(status)status.textContent=uploading?'Uploading attachments…':'';
+    }
+    function cancelCommentUploads(id) {
+      const queue=root._commentUploads.get(id);if(!queue)return;
+      queue.cancelled=true;queue.files.length=0;queue.active?.abort?.();
+      if(root._commentUploads.get(id)===queue)root._commentUploads.delete(id);
+      const state=id==='new'?null:root._commentEdits.get(Number(id));if(state)state.uploading=false;
+      updateUploadGate(id,false);
+    }
+    async function uploadCommentFiles(id, files) {
+      const selected=Array.from(files||[]);if(!selected.length||!root._composerClient)return;
+      if(root.dataset.commentEnabled!=='true'){say('Comment permissions are unavailable.');return;}
+      const field=commentTextarea(id);if(!field)return;
+      const state=id==='new'?null:(root._commentEdits.get(Number(id))||{content:field.value});
+      const caretStart=field.selectionStart??field.value.length,caretEnd=field.selectionEnd??caretStart;
+      if(state)root._commentEdits.set(Number(id),state);
+      const queue=root._commentUploads.get(id)||{files:[],running:false,generation:audienceGeneration,cancelled:false};queue.files.push(...selected);root._commentUploads.set(id,queue);queue.caret={start:caretStart,end:caretEnd};queue.textSnapshot=field.value;queue.editState=state;
+      if(state){state.content=field.value;state.uploading=true;state.selectionStart=caretStart;state.selectionEnd=caretEnd;root._commentEdits.set(Number(id),state);}
+      updateUploadGate(id,true);let failed=[];
+      if(queue.running)return;queue.running=true;
+      try {while(queue.files.length){if(disposed||!root.isConnected||queue.cancelled||queue.generation!==audienceGeneration||state&&root._commentEdits.get(Number(id))!==state){queue.files.length=0;break;}const file=queue.files.shift();const transfer=root._composerClient.upload(file,{target:null});queue.active=transfer;let result;try{result=await transfer.result;}catch(error){if(queue.cancelled||disposed||queue.generation!==audienceGeneration)break;failed.push(`${file.name}: ${error.message}`);continue;}if(disposed||!root.isConnected||queue.cancelled||queue.generation!==audienceGeneration||state&&root._commentEdits.get(Number(id))!==state){queue.files.length=0;break;}if(!result.ok){failed.push(`${file.name}: ${result.error}`);continue;}
+          const current=commentTextarea(id);if(!current)continue;const changedDuringTransfer=current.value!==queue.textSnapshot;const selection=changedDuringTransfer?{start:current.selectionStart??current.value.length,end:current.selectionEnd??current.selectionStart??current.value.length}:queue.caret;const text=current.value,start=Math.min(selection?.start??text.length,text.length),end=Math.min(selection?.end??start,text.length),before=text.slice(0,start),after=text.slice(end),markdown=globalThis.LificTopcoatAttachments.markdown(result.data),prefix=before&&!/\s$/.test(before)?' ':'',suffix=after&&!/^\s/.test(after)?' ':'';const snippet=`${before}${prefix}${markdown}${suffix}${after}`;current.value=snippet;const caret=start+prefix.length+markdown.length;current.focus();current.setSelectionRange(caret,caret);queue.caret={start:caret,end:caret};queue.textSnapshot=snippet;
+          if(state){state.content=snippet;state.selectionStart=caret;state.selectionEnd=caret;}
+        }} finally {const stillCurrent=!disposed&&root.isConnected&&!queue.cancelled&&queue.generation===audienceGeneration&&(!state||root._commentEdits.get(Number(id))===state);if(!stillCurrent)queue.files.length=0;queue.running=false;queue.active=null;if(state&&stillCurrent){state.uploading=false;root._commentEdits.set(Number(id),state);}if(!queue.files.length&&root._commentUploads.get(id)===queue)root._commentUploads.delete(id);if(stillCurrent)updateUploadGate(id,false);if(failed.length&&stillCurrent){const status=root.querySelector(`[data-comment-upload-status="${id}"]`);if(status)status.textContent=failed.join(' ');}}
+    }
     let candidates = [];
     let mentionMatches = [], mentionIndex = 0;
     const candidateGeneration=generation;
@@ -163,6 +306,7 @@
       if (form.matches('[data-comment-compose]')) {
         event.preventDefault();
         const input = form.querySelector('[data-comment-draft]'), content = input.value.trim();
+        if(root._commentUploads.get('new')?.running||root._commentUploads.get('new')?.files.length){say('Wait for comment attachments to finish uploading.');return;}
         if (!content) return;
         const action={type:'mutate_panel',panel:'comments',operation:'create_comment',content};trackAction(action,form,input.value);
         send(root,action);keepFocus(input,input.value.length);
@@ -180,8 +324,10 @@
       }
     }
     async function onClick(event) {
+      const original=event.target.closest('[data-attachment-original]');
+      if(original){const card=original.closest('[data-attachment-id]'),image=card?.querySelector('[data-attachment-image]');if(image&&root._composerClient)image.src=root._composerClient.url(Number(card.dataset.attachmentId),'original');return;}
       const older=event.target.closest('[data-comments-older]');
-      if(older){older.disabled=true;const cursor=root._nextCommentCursor;try{if(cursor)await refreshComments(root,root._collabGeneration,cursor);}catch(error){say(error.message);}root.querySelector('[data-comments-older]').focus();return;}
+      if(older){older.disabled=true;root._commentTargetDone=null;const cursor=root._nextCommentCursor;try{if(cursor)await refreshComments(root,root._collabGeneration,cursor);}catch(error){say(error.message);}root.querySelector('[data-comments-older]').focus();return;}
       const edit = event.target.closest('[data-comment-edit]');
       const remove = event.target.closest('[data-comment-delete]');
       const unlink = event.target.closest('[data-relation-remove]');
@@ -190,21 +336,20 @@
       if (edit) {
         const id = Number(edit.dataset.commentEdit), row = edit.closest('[data-comment-id]'), comment = root._comments.find(item => item.id === id);
         if (!comment || row.querySelector('textarea')) return;
-        const field = document.createElement('textarea'); field.value = comment.content; field.setAttribute('aria-label','Edit comment');
-        const save = document.createElement('button'); save.type='button'; save.textContent='Save comment'; save.dataset.commentSave=String(id);
-        const cancel = document.createElement('button'); cancel.type='button'; cancel.textContent='Cancel'; cancel.dataset.commentCancel='';
-        const holder = document.createElement('div'); holder.dataset.commentEditor=''; holder.append(field,save,cancel);
-        row.querySelector('[data-comment-content]').replaceWith(holder); field.focus();
+        root._commentEdits.set(id,{content:comment.content,selectionStart:comment.content.length,selectionEnd:comment.content.length,uploading:false});
+        await refreshComments(root,root._collabGeneration);const field=commentTextarea(id);field?.focus();field?.setSelectionRange(field.value.length,field.value.length);
       }
       const save = event.target.closest('[data-comment-save]');
       if (save) {
         const row = save.closest('[data-comment-id]'), field = row.querySelector('textarea'), content = field.value.trim();
-        if (content) {const action={type:'mutate_panel',panel:'comments',operation:'edit_comment',comment_id:Number(save.dataset.commentSave),content};trackAction(action);send(root,action);}
+        if (content&&!root._commentUploads.get(String(save.dataset.commentSave))?.running&&!root._commentUploads.get(String(save.dataset.commentSave))?.files.length) {const action={type:'mutate_panel',panel:'comments',operation:'edit_comment',comment_id:Number(save.dataset.commentSave),content};trackAction(action,null,field.value);send(root,action);}
       }
-      if (event.target.closest('[data-comment-cancel]')) void refreshComments(root);
+      const cancelEdit=event.target.closest('[data-comment-cancel]');if(cancelEdit){const id=String(cancelEdit.dataset.commentCancel);cancelCommentUploads(id);root._commentEdits.delete(Number(id));void refreshComments(root);}
       if (remove) {
         const id = Number(remove.dataset.commentDelete);
-        if (globalThis.confirm('Delete this comment?')) {const action={type:'mutate_panel',panel:'comments',operation:'delete_comment',comment_id:id};trackAction(action);send(root,action);}
+        const comment=root._comments.find(item=>Number(item.id)===id), refs=referenceSummary(comment?.content||''), impact=[];if(refs.issues)impact.push(`${refs.issues} issue reference${refs.issues===1?'':'s'}`);if(refs.attachments)impact.push(`${refs.attachments} attachment reference${refs.attachments===1?'':'s'}`);if(refs.mentions)impact.push(`${refs.mentions} mention${refs.mentions===1?'':'s'}`);
+        const warning=impact.length?` This comment contains ${impact.join(', ')}.`:'';
+        if (globalThis.confirm(`Delete this comment?${warning} Its references will no longer be visible.`)) {const action={type:'mutate_panel',panel:'comments',operation:'delete_comment',comment_id:id};trackAction(action);send(root,action);}
       }
       if (unlink) {const action={type:'mutate_panel',panel:'relations',operation:'unlink_relation',source:root.dataset.identifier,target:unlink.dataset.relationRemove};trackAction(action);send(root,action);}
       if (reverse) {const action={type:'mutate_panel',panel:'relations',operation:'reverse_relation',source:reverse.dataset.relationReverseSource,target:reverse.dataset.relationReverseTarget};trackAction(action);send(root,action);}
@@ -213,6 +358,8 @@
       if (event.target.closest('[data-issue-restore]')) send(root,{type:'restore'});
     }
     function onInput(event) {
+      const activeField=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(activeField){const id=activeField.matches('[data-comment-draft]')?'new':activeField.dataset.commentEditDraft,queue=root._commentUploads.get(id);if(queue?.running){queue.caret={start:activeField.selectionStart??activeField.value.length,end:activeField.selectionEnd??activeField.selectionStart??activeField.value.length};queue.textSnapshot=activeField.value;}}
+      const editField=event.target.closest('[data-comment-edit-draft]');if(editField){const id=Number(editField.dataset.commentEditDraft),state=root._commentEdits.get(id)||{};Object.assign(state,{content:editField.value,selectionStart:editField.selectionStart,selectionEnd:editField.selectionEnd,focused:document.activeElement===editField});root._commentEdits.set(id,state);return;}
       if (!event.target.matches('[data-comment-draft]')) return;
       const node = event.target, caret = node.selectionStart, match = node.value.slice(0,caret).match(/(?:^|\s)@([\w-]*)$/), list = root.querySelector('[data-mention-list]');
       if (!match) { list.hidden = true; mentionMatches=[]; return; }
@@ -235,10 +382,12 @@
       const choice = event.target.closest('[data-mention-user]'); if (!choice) return;
       chooseMention(Number(choice.dataset.mentionIndex));
     }
+    function onPaste(event){const field=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(!field)return;const files=Array.from(event.clipboardData?.items||[]).map(item=>item.kind==='file'?item.getAsFile():null).filter(Boolean);if(files.length){event.preventDefault();void uploadCommentFiles(field.dataset.commentEditDraft||'new',files);}}
+    function onDrop(event){const field=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(!field)return;const files=Array.from(event.dataTransfer?.files||[]);if(files.length){event.preventDefault();void uploadCommentFiles(field.dataset.commentEditDraft||'new',files);}}
     function onApplied(event) {
       if (event.detail?.route?.issue_id !== Number(root.dataset.issueId) || event.detail?.route?.generation !== JSON.parse(initialRoute).generation) return;
       if(event.detail.panel)commitDraft(event.detail);
-      if (event.detail.panel === 'comments') void refreshComments(root,root._collabGeneration);
+      if (event.detail.panel === 'comments') void refreshComments(root,root._collabGeneration).catch(error=>{if(root.isConnected)say(`Saved, but comments could not refresh: ${error.message}`);});
       publishIssuePanels(event.detail.issue);
       if (event.detail.panel === 'comments' || event.detail.panel === 'relations' || event.detail.panel === 'waits') void read(`/issues/${root.dataset.issueId}/activity?limit=100`).then(data=>{if(root.isConnected)renderActivity(root,data.items || []);});
       if (event.detail.kind === 'deleted' || event.detail.deleted) { root.querySelector('[data-issue-delete]')?.setAttribute('hidden',''); root.querySelector('[data-issue-restore]')?.removeAttribute('hidden'); }
@@ -257,9 +406,13 @@
       takeAction(event.detail);say(event.detail.error||'Could not save. Your draft is still here; try again.');
     }
     function onScope() {
-      generation++; root._collabGeneration++;
+      generation++;audienceGeneration++;root._collabGeneration++;
+      for(const id of [...root._commentUploads.keys()])cancelCommentUploads(id);
+      for(const state of root._commentEdits.values())state.uploading=false;
+      root._attachmentMount?.dispose?.();root._attachmentMount=null;
+      for(const src of root._attachmentObjectUrls||[])URL.revokeObjectURL(src);root._attachmentObjectUrls?.clear?.();
       root.dataset.publicScope=String(api().state.publicProject!==null);
-      root.querySelector('[data-comment-thread]').innerHTML=''; root.querySelector('[data-comments-older]').hidden=true;root.querySelector('[data-issue-history]').innerHTML=''; root.querySelector('[data-issue-attachments]').replaceChildren(); root._comments=[]; candidates=[];
+      root.querySelector('[data-comment-thread]').innerHTML=''; root.querySelector('[data-comments-older]').hidden=true;root.querySelector('[data-issue-history]').innerHTML=''; root.querySelector('[data-issue-attachments]').replaceChildren(); root._comments=[];root._commentsWindowExpanded=false; candidates=[];
       const affordances=api().affordances(), comment=affordances.comment===true, edit=affordances.edit===true;
       root.dataset.commentEnabled=String(comment);root.dataset.editEnabled=String(edit);
       const compose=root.querySelector('[data-comment-compose]'), relation=root.querySelector('[data-relation-create]'), wait=root.querySelector('[data-wait-create]'), del=root.querySelector('[data-issue-delete]');
@@ -273,9 +426,22 @@
       const user = root.querySelector('[data-wait-user-field]'), from = root.querySelector('[data-wait-date-field]'), until = root.querySelector('[data-wait-until-field]'), dateMode = event.target.value === 'date';
       user.hidden=dateMode; from.hidden=!dateMode; until.hidden=!dateMode;
     }
-    root.addEventListener('submit',onSubmit); root.addEventListener('click',onClick); root.addEventListener('input',onInput); root.addEventListener('click',onMention);
-    root.addEventListener('change',onWaitKind);root.addEventListener('keydown',onKeydown); window.addEventListener('lific:issue-detail-applied',onApplied); window.addEventListener('lific:issue-detail-conflict',onConflict); window.addEventListener('lific:account-change',onScope); window.addEventListener('lific:scope-change',onScope);
-    window.addEventListener('lific:issue-detail-error',onError);
+    function onFileChange(event){const input=event.target.closest('[data-comment-files]');if(input&&input.files?.length){void uploadCommentFiles(input.dataset.commentFiles,input.files);input.value='';}}
+    function onHashChange(){const hash=globalThis.location?.hash||'';if(root._commentLastHash!==undefined&&root._commentLastHash!==hash)root._commentTargetDone=null;root._commentLastHash=hash;void resolveCommentHash(root,root._collabGeneration);}
+    root.addEventListener('submit',onSubmit); root.addEventListener('click',onClick); root.addEventListener('input',onInput); root.addEventListener('click',onMention);root.addEventListener('paste',onPaste);root.addEventListener('drop',onDrop);
+    root.addEventListener('change',onWaitKind);root.addEventListener('change',onFileChange);root.addEventListener('keydown',onKeydown); window.addEventListener('lific:issue-detail-applied',onApplied); window.addEventListener('lific:issue-detail-conflict',onConflict); window.addEventListener('lific:account-change',onScope); window.addEventListener('lific:scope-change',onScope);
+    window.addEventListener('lific:issue-detail-error',onError);window.addEventListener('hashchange',onHashChange);
+    function setCapabilities(capabilities={}) {
+      const comment=capabilities.comment===true,edit=capabilities.edit===true;
+      if(!comment&&root.dataset.commentEnabled==='true'){
+        for(const [id,queue] of root._commentUploads){queue.cancelled=true;queue.files.length=0;queue.active?.abort?.();const state=id==='new'?null:root._commentEdits.get(Number(id));if(state)state.uploading=false;updateUploadGate(id,false);}
+        root._commentUploads.clear();
+      }
+      root.dataset.commentEnabled=String(comment);root.dataset.editEnabled=String(edit);
+      if(composer)composer.hidden=!comment;if(relationForm)relationForm.hidden=!edit;if(waitForm)waitForm.hidden=!edit;if(deleteButton)deleteButton.hidden=!edit;
+      renderRelations(root);renderWaits(root,JSON.parse(root.dataset.waits||'[]'));
+      renderCommentList(root,root._comments||[],comment);
+    }
     root._issueCollaboration={
       refresh:()=>refresh(root),
       update(issue,capabilities) {
@@ -283,14 +449,15 @@
         root._collabGeneration++;
         root.dataset.issueId=String(issue.id);root.dataset.projectId=String(issue.project_id);root.dataset.identifier=String(issue.identifier||'');
         root.dataset.waits=JSON.stringify(issue.waits||[]);
-        if(capabilities){root.dataset.commentEnabled=String(capabilities.comment===true);root.dataset.editEnabled=String(capabilities.edit===true);composer.hidden=!capabilities.comment;relationForm.hidden=!capabilities.edit;waitForm.hidden=!capabilities.edit;deleteButton.hidden=!capabilities.edit;}
+        if(capabilities)setCapabilities(capabilities);
         publishIssuePanels(issue);
       },
-      dispose(){disposed=true;generation++;root._collabGeneration++;root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);root.removeEventListener('input',onInput);root.removeEventListener('change',onWaitKind);root.removeEventListener('keydown',onKeydown);window.removeEventListener('lific:issue-detail-applied',onApplied);window.removeEventListener('lific:issue-detail-conflict',onConflict);window.removeEventListener('lific:issue-detail-error',onError);window.removeEventListener('lific:account-change',onScope);window.removeEventListener('lific:scope-change',onScope);root._attachmentMount?.dispose?.();}
+      setCapabilities,
+      dispose(){disposed=true;generation++;audienceGeneration++;root._collabGeneration++;for(const id of [...root._commentUploads.keys()])cancelCommentUploads(id);root._commentUploads.clear();for(const src of root._attachmentObjectUrls||[])URL.revokeObjectURL(src);root._attachmentObjectUrls?.clear?.();root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);root.removeEventListener('input',onInput);root.removeEventListener('paste',onPaste);root.removeEventListener('drop',onDrop);root.removeEventListener('change',onWaitKind);root.removeEventListener('change',onFileChange);root.removeEventListener('keydown',onKeydown);window.removeEventListener('lific:issue-detail-applied',onApplied);window.removeEventListener('lific:issue-detail-conflict',onConflict);window.removeEventListener('lific:issue-detail-error',onError);window.removeEventListener('hashchange',onHashChange);window.removeEventListener('lific:account-change',onScope);window.removeEventListener('lific:scope-change',onScope);root._attachmentMount?.dispose?.();root._attachmentMount=null;root.querySelector('[data-issue-attachments]')?.replaceChildren();}
     };
     void refresh(root);
     return root._issueCollaboration;
   }
-  globalThis.LificTopcoatIssueCollaboration={mount,commentMarkup,renderRelations,renderWaits,renderActivity};
+  globalThis.LificTopcoatIssueCollaboration={mount,commentMarkup,decorateCommentReferences,renderRelations,renderWaits,renderActivity};
   if (typeof document !== 'undefined') for (const root of document.querySelectorAll('[data-topcoat-collaboration]')) if (Number(root.dataset.issueId)) mount(root);
 })();

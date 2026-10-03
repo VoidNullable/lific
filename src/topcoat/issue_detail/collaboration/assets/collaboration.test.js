@@ -13,8 +13,10 @@ test('comment rows escape server content and only offer author controls when ena
   const comment = {id:7,user_id:3,author:'<script>',author_display_name:'<Admin>',created_at:'invalid',content:'<img src=x onerror=alert(1)>\n@sam'};
   const owner = ui.commentMarkup(comment, true);
   assert.match(owner, /&lt;Admin&gt;/);
-  assert.match(owner, /&lt;img src=x onerror=alert\(1\)&gt;<br>@sam/);
+  assert.match(owner, /&lt;img src=x onerror=alert\(1\)&gt;\n@sam/);
   assert.match(owner, /data-comment-edit="7"/);
+  assert.match(owner, /id="comment-7"/);
+  assert.match(owner, /href="#comment-7"/);
   assert.doesNotMatch(ui.commentMarkup(comment, false), /data-comment-delete/);
 });
 

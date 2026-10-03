@@ -79,6 +79,7 @@ fn render<'a>(
                 <form data-comment-compose="" hidden="hidden">
                     <label for="tc-comment-draft">"Write a comment"</label>
                     <textarea id="tc-comment-draft" data-comment-draft="" rows="4" required="" aria-label="Write a comment"></textarea>
+                    <div class="tc-collab__upload-tools"><label>"Attach files"<input type="file" multiple="" data-comment-files="new" /></label><span data-comment-upload-status="new" role="status"></span></div>
                     <div data-mention-list="" role="listbox" hidden="hidden" aria-label="Mention suggestions"></div>
                     <button class="tc-button" type="submit">"Comment"</button>
                 </form>
@@ -181,6 +182,7 @@ mod tests {
             "data-comment-count",
             "data-comments-older",
             "data-comment-compose",
+            "data-comment-files",
             "data-relation-list",
             "data-relation-create",
             "data-wait-list",
