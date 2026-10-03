@@ -123,7 +123,12 @@
             audienceChanged();
             if(env.session.state.publicProject!==null) return;
             if(event.type==='activity.baseline') {activityBaseline=event.day_count;notify();return;}
-            if(event.type==='resync.required') {activityBaseline=null;for(const model of models.values())schedule(model);send({type:'activity.baseline.request'});return;}
+            if(event.type==='resync.required') {
+                activityBaseline=null;
+                for(const model of models.values())schedule(model);
+                send({type:'activity.baseline.request'});
+                notify();env.event?.(event);return;
+            }
             const model=models.get(event.project_id);
             if(model && (event.type==='sync_required'||event.seq===undefined||!Number.isSafeInteger(event.seq)||event.seq>model.cursor)) schedule(model);
             env.event?.(event);
@@ -226,7 +231,8 @@
     globalThis.LificSync={createClient};
     if(typeof window==='undefined') return;
     const client=createClient({session:window.lificSession,token:()=>localStorage.getItem('lific_token'),
-        delay:setTimeout,cancel:clearTimeout,interval:setInterval,clearInterval,
+        delay:window.setTimeout.bind(window),cancel:window.clearTimeout.bind(window),
+        interval:window.setInterval.bind(window),clearInterval:window.clearInterval.bind(window),
         socket:url=>new WebSocket(url),locks:navigator.locks,
         channel:typeof BroadcastChannel==='function'?name=>new BroadcastChannel(name):null,
         fingerprint:globalThis.crypto?.subtle?async token=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))),byte=>byte.toString(16).padStart(2,'0')).join(''):null,

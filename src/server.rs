@@ -114,7 +114,7 @@ mod topcoat_spike {
     use topcoat::{
         Result,
         router::{Slot, layout, page, response::Response, route},
-        view::{View, view},
+        view::{View, ViewExt, view},
     };
 
     #[layout("/")]
@@ -146,15 +146,25 @@ mod topcoat_spike {
                     <link rel="stylesheet" href=(super::topcoat_frontend::shell::projects::STYLESHEET_PATH)>
                     <link rel="stylesheet" href=(super::topcoat_frontend::shell::recents::STYLESHEET_PATH)>
                     <link rel="stylesheet" href=(super::topcoat_frontend::shell::page_chrome::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::attachments::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::palette::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::dashboard::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::issue_list::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::project_settings::STYLESHEET_PATH)>
                     <script type="module" src="/__topcoat-runtime.js"></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::ROUTE_SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::session::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::attachments::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::sync::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::mobile::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::projects::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::recents::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::page_chrome::SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_frontend::shell::BOOTSTRAP_SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::palette::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::dashboard::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::issue_list::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::project_settings::SCRIPT_PATH)></script>
                     <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
                 <body (session_attributes)>
@@ -197,7 +207,53 @@ mod topcoat_spike {
         if let Some(destination) = route.redirect.as_deref() {
             return Err(topcoat::router::error::redirect_permanent(destination).into());
         }
-        let content = super::topcoat_frontend::shell::placeholder(cx, &route);
+        use super::topcoat_frontend::shell::{Layout, Page};
+        let content = match route.layout {
+            Layout::Private => match route.page {
+                Page::Home => super::topcoat_frontend::dashboard::home(cx),
+                Page::Overview => route.project.map_or_else(
+                    || super::topcoat_frontend::shell::placeholder(cx, &route),
+                    |identifier| {
+                        view! { cx =>
+                            <div class="tc-project-overview">
+                                (super::topcoat_frontend::dashboard::overview(cx, identifier))
+                                (super::topcoat_frontend::project_settings::administration(cx, identifier))
+                            </div>
+                        }
+                        .boxed()
+                    },
+                ),
+                Page::ProjectNew => super::topcoat_frontend::project_settings::new_project(cx),
+                Page::ProjectImport => {
+                    super::topcoat_frontend::project_settings::archive_import(cx)
+                }
+                Page::Issues => super::topcoat_frontend::issue_list::screen(
+                    cx,
+                    route.project,
+                    super::topcoat_frontend::issue_list::Layout::List,
+                ),
+                Page::Board => super::topcoat_frontend::issue_list::screen(
+                    cx,
+                    route.project,
+                    super::topcoat_frontend::issue_list::Layout::Board,
+                ),
+                _ => super::topcoat_frontend::shell::placeholder(cx, &route),
+            },
+            Layout::Public => match route.page {
+                Page::Issues => super::topcoat_frontend::issue_list::screen(
+                    cx,
+                    route.project,
+                    super::topcoat_frontend::issue_list::Layout::List,
+                ),
+                Page::Board => super::topcoat_frontend::issue_list::screen(
+                    cx,
+                    route.project,
+                    super::topcoat_frontend::issue_list::Layout::Board,
+                ),
+                _ => super::topcoat_frontend::shell::placeholder(cx, &route),
+            },
+            Layout::Auth => super::topcoat_frontend::shell::placeholder(cx, &route),
+        };
         Ok(super::topcoat_frontend::shell::shell(cx, &route, content))
     }
 
@@ -347,6 +403,116 @@ mod topcoat_spike {
             ))?)
     }
 
+    #[route(GET "/__topcoat-palette.css")]
+    async fn palette_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::palette::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-palette.js")]
+    async fn palette_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::palette::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-attachments.css")]
+    async fn attachments_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::attachments::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-attachments.js")]
+    async fn attachments_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::attachments::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-project-settings.css")]
+    async fn project_settings_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::project_settings::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-project-settings.js")]
+    async fn project_settings_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::project_settings::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-dashboard.css")]
+    async fn dashboard_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::dashboard::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-dashboard.js")]
+    async fn dashboard_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::dashboard::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-dashboard-mascot.png")]
+    async fn dashboard_mascot() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "image/png")
+            .header("cache-control", "public, max-age=86400")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::dashboard::MASCOT.to_vec(),
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-list.css")]
+    async fn issue_list_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_list::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-issue-list.js")]
+    async fn issue_list_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::issue_list::SCRIPT,
+            ))?)
+    }
+
     #[route(GET "/__topcoat-preferences.js")]
     async fn preferences_script() -> Result<Response> {
         Ok(Response::builder()
@@ -416,6 +582,14 @@ mod topcoat_spike_tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("/__topcoat-spike.css"));
+        assert!(body.contains("/__topcoat-attachments.css"));
+        assert!(body.contains("/__topcoat-attachments.js"));
+        assert!(body.contains("/__topcoat-dashboard.css"));
+        assert!(body.contains("/__topcoat-dashboard.js"));
+        assert!(body.contains("/__topcoat-issue-list.css"));
+        assert!(body.contains("/__topcoat-issue-list.js"));
+        assert!(body.contains("/__topcoat-project-settings.css"));
+        assert!(body.contains("/__topcoat-project-settings.js"));
         assert!(body.contains("/__topcoat-runtime.js"));
         assert!(body.contains("<main id=\"main-content\">"));
         assert!(!body.contains("topcoat-scaffold__header"));
@@ -491,6 +665,91 @@ mod topcoat_spike_tests {
     }
 
     #[tokio::test]
+    async fn topcoat_public_issue_routes_mount_the_shared_list_and_board() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for (path, layout) in [
+            ("/public/LIF/issues", "list"),
+            ("/public/LIF/board", "board"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains("data-lific-public-project=\"LIF\""), "{path}");
+            assert!(body.contains("data-topcoat-issue-list=\"\""), "{path}");
+            assert!(
+                body.contains(&format!("data-layout=\"{layout}\"")),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn topcoat_dashboard_mascot_is_served_without_vite() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-dashboard-mascot.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "image/png"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+    }
+
+    #[tokio::test]
+    async fn topcoat_project_overview_and_settings_alias_share_one_composed_screen() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for path in ["/LIF/overview", "/LIF/settings"] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(
+                body.contains("data-topcoat-dashboard=\"overview\""),
+                "{path}"
+            );
+            assert!(
+                body.contains("data-topcoat-project-settings=\"settings\""),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn topcoat_project_setup_routes_mount_create_and_archive_import_modes() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for (path, mode) in [("/projects/new", "new"), ("/projects/import", "archive")] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                String::from_utf8_lossy(&body)
+                    .contains(&format!("data-topcoat-project-settings=\"{mode}\"")),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn topcoat_shell_and_sync_assets_are_discovered_without_vite() {
         let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
         for (path, content_type, expected) in [
@@ -533,6 +792,56 @@ mod topcoat_spike_tests {
                 "/__topcoat-bootstrap.js",
                 "text/javascript; charset=utf-8",
                 "LificTopcoatProjects",
+            ),
+            (
+                "/__topcoat-palette.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatPalette",
+            ),
+            (
+                "/__topcoat-palette.css",
+                "text/css; charset=utf-8",
+                ".tc-palette",
+            ),
+            (
+                "/__topcoat-attachments.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatAttachments",
+            ),
+            (
+                "/__topcoat-attachments.css",
+                "text/css; charset=utf-8",
+                ".tc-attachments",
+            ),
+            (
+                "/__topcoat-dashboard.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatDashboard",
+            ),
+            (
+                "/__topcoat-dashboard.css",
+                "text/css; charset=utf-8",
+                ".tc-dashboard",
+            ),
+            (
+                "/__topcoat-issue-list.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatIssueList",
+            ),
+            (
+                "/__topcoat-issue-list.css",
+                "text/css; charset=utf-8",
+                ".tc-issues",
+            ),
+            (
+                "/__topcoat-project-settings.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatProjectSettings",
+            ),
+            (
+                "/__topcoat-project-settings.css",
+                "text/css; charset=utf-8",
+                ".tc-project-settings",
             ),
         ] {
             let response = router

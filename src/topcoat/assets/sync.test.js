@@ -17,6 +17,20 @@ function fixture(request,overrides={}) {
     return {client,state,sockets,setToken:value=>token=value};
 }
 const row=(id,seq,title='live')=>({kind:'issue',id,seq,deleted:false,title});
+test('resync socket frames notify subscribers and forward invalidation even without cached models or a baseline',async t=>{
+    const forwarded=[];let notifications=0;
+    const f=fixture(async()=>({ok:true,data:{}}),{event:event=>forwarded.push(event),notify:()=>notifications++});
+    t.after(()=>f.client.dispose());
+    await f.client.connect();
+    const ws=f.sockets[0];ws.readyState=1;ws.emit('open');
+    const before=notifications;
+    ws.emit('message',{data:JSON.stringify({type:'resync.required'})});
+    assert.equal(forwarded.length,1);
+    assert.equal(forwarded[0].type,'resync.required');
+    assert.equal(notifications,before+1);
+    assert.equal(f.client.state.activityBaseline,null);
+    assert.ok(ws.frames.filter(frame=>frame.type==='activity.baseline.request').length>=2);
+});
 test('snapshot races, sparse sequences, filtered pages, tombstones and replay duplicates reconcile',async()=>{
     const paths=[];
     const f=fixture(async path=>{paths.push(path);if(path.endsWith('/index'))return {ok:true,data:{cursor:10,issues:[row(1,15)],pages:[]}};

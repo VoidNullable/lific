@@ -381,6 +381,12 @@ in
         cargo test --locked --no-default-features --features topcoat-spike controls_preferences_ -- --include-ignored
         node --test src/topcoat/shell/assets/mobile.test.js
         node --test src/topcoat/shell/assets/recents.browser.test.js
+        node --test src/topcoat/palette/assets/palette.browser.test.js
+        node --test src/topcoat/attachments/assets/attachments.browser.test.js
+        node --test src/topcoat/dashboard/assets/dashboard.browser.test.js
+        node --test src/topcoat/dashboard/assets/dashboard.session.browser.test.js
+        node --test src/topcoat/issue_list/assets/issue-list.browser.test.js
+        node --test src/topcoat/project_settings/assets/project-settings.browser.test.js
           '';
           after = [ "lific:install:e2e" ];
         };
@@ -646,6 +652,11 @@ in
         node --test src/topcoat/shell/assets/page-chrome.test.js
         node --test src/topcoat/shell/assets/projects.test.js
         node --test src/topcoat/shell/assets/recents.test.js
+        node --test src/topcoat/palette/assets/palette.test.js
+        node --test src/topcoat/attachments/assets/attachments.test.js
+        node --test src/topcoat/dashboard/assets/dashboard.test.js
+        node --test src/topcoat/issue_list/assets/issue-list.test.js
+        node --test src/topcoat/project_settings/assets/project-settings.test.js
       '';
     };
     "lific:topcoat:install-cli" = {

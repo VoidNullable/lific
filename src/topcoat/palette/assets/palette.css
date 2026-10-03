@@ -1,0 +1,36 @@
+.tc-palette {width: min(36rem, calc(100% - 2rem)); padding: 0; margin: 14dvh auto 0; max-height: 75dvh; color: var(--tc-text, #222); background: var(--tc-surface, white); border: 1px solid var(--tc-border, #ddd); border-radius: .75rem; box-shadow: 0 1rem 3rem #0004;}
+.tc-palette::backdrop {background: var(--tc-backdrop, #0004);}
+.tc-palette__input-row {display: flex; gap: .65rem; align-items: center; padding: .75rem 1rem; border-bottom: 1px solid var(--tc-border, #ddd);}
+.tc-palette input {flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: inherit; font: inherit;}
+.tc-palette [data-palette-mode] {color: var(--tc-accent, #365d9a); font-size: .8rem;}
+.tc-palette [data-palette-results] {overflow-y: auto; max-height: 26rem; padding: .4rem 0; overscroll-behavior: contain;}
+.tc-palette__group {padding: .5rem 1rem .25rem; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--tc-muted, #666);}
+.tc-palette [role=option] {display: flex; width: 100%; gap: .8rem; padding: .55rem 1rem; border: 0; text-align: left; background: transparent; color: inherit; cursor: pointer; font: inherit;}
+.tc-palette [role=option][aria-selected=true] {background: var(--tc-bg, #edf3fa);}
+.tc-palette__label {display: flex; flex: 1; min-width: 0; flex-direction: column;}
+.tc-palette__label span {overflow: hidden; white-space: nowrap; text-overflow: ellipsis;}
+.tc-palette__sub, .tc-palette__hint {font-size: .75rem; color: var(--tc-muted, #666);}
+.tc-palette [data-palette-status], .tc-palette [data-palette-error] {margin: .6rem 1rem; font-size: .8rem;}
+.tc-palette [data-palette-error] {color: var(--tc-danger, #a22);}
+.tc-palette footer {padding: .5rem 1rem; border-top: 1px solid var(--tc-border, #ddd); font-size: .7rem; color: var(--tc-muted, #666);}
+.tc-shortcut-help {width: min(35rem, calc(100% - 2rem)); max-height: 76dvh; margin: 10dvh auto 0; padding: 1rem; border: 1px solid var(--tc-border, #ddd); border-radius: .75rem; color: var(--tc-text, #222); background: var(--tc-surface, white); box-shadow: 0 1rem 3rem #0004;}
+.tc-shortcut-help::backdrop {background: var(--tc-backdrop, #0004);}
+.tc-shortcut-help header {display: flex; justify-content: space-between; align-items: center; gap: 1rem;}
+.tc-shortcut-help h2 {font-size: 1rem; margin: 0;}
+.tc-shortcut-help h3 {font-size: .75rem; color: var(--tc-muted, #666);}
+.tc-shortcut-help ul {padding: 0; list-style: none;}
+.tc-shortcut-help li {display: flex; justify-content: space-between; gap: 1rem; margin-bottom: .5rem; font-size: .8rem;}
+.tc-shortcut-help kbd {border: 1px solid var(--tc-border, #ddd); border-radius: .25rem; padding: .1rem .4rem; white-space: nowrap;}
+@media (max-width: 39.99rem) {
+  .tc-palette {margin: 0; width: 100%; max-width: none; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0;}
+  .tc-palette[open] {display: flex; flex-direction: column;}
+  .tc-palette__input-row {padding-top: max(.75rem, env(safe-area-inset-top));}
+  .tc-palette [data-palette-results] {flex: 1; min-height: 0; max-height: none; padding-bottom: env(safe-area-inset-bottom);}
+  .tc-palette [data-palette-close] {min-width: 2.75rem; min-height: 2.75rem;}
+  .tc-palette footer {display: none;}
+  .tc-shortcut-help {margin: auto 0 0; width: 100%; max-width: none; max-height: 85dvh; border-radius: 1rem 1rem 0 0; box-sizing: border-box; padding-bottom: max(1rem, env(safe-area-inset-bottom));}
+  .tc-shortcut-help [data-shortcut-close] {min-height: 2.75rem; min-width: 2.75rem;}
+}
+
+.tc-palette, .tc-shortcut-help {font-family: var(--tc-font, system-ui);}
+.tc-palette input:focus-visible {outline: 2px solid var(--tc-focus, #365d9a); outline-offset: 4px;}

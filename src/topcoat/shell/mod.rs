@@ -353,6 +353,7 @@ fn navigation<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, label: &'static str) -> B
 pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a>) -> BoxView<'a> {
     let is_public = route.layout == Layout::Public;
     let is_auth = route.layout == Layout::Auth;
+    let is_private = route.layout == Layout::Private;
     let layout_name = match route.layout {
         Layout::Auth => "auth",
         Layout::Private => "private",
@@ -409,6 +410,9 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                 if is_public {
                     <span class="tc-shell__hint">"Public project · Read only"</span>
                 }
+                if is_private {
+                    <button type="button" class="tc-button" data-palette-open="" aria-haspopup="dialog">"Jump to…"</button>
+                }
                 if is_auth {
                     <nav class="tc-shell__auth-links" aria-label="Account">
                         <a href="/login" aria-current=(auth_link.then_some("page"))>"Log in"</a>
@@ -429,6 +433,10 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                         <div data-topcoat-projects-mount=""></div>
                         (recent_panel)
                         (desktop_navigation)
+                        if is_private {
+                            <button type="button" class="tc-button" data-shortcut-open=""
+                                aria-label="Keyboard shortcuts" aria-haspopup="dialog">"?"</button>
+                        }
                         <div class="tc-shell__sidebar-resize" data-sidebar-resize="" role="separator"
                             tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical"
                             aria-controls="tc-sidebar"
@@ -441,6 +449,9 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                     (content)
                 </main>
             </div>
+            if is_private {
+                (super::palette::palette(cx))
+            }
         </div>
     }
     .boxed()
@@ -578,6 +589,30 @@ mod tests {
             "/unknown",
         ] {
             assert_eq!(ParsedRoute::parse(path).page, Page::NotFound, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn palette_is_available_only_in_private_shell_with_accessible_search_controls() {
+        let cx = Cx::default();
+        for (path, available) in [
+            ("/LIF/issues", true),
+            ("/public/LIF/issues", false),
+            ("/login", false),
+        ] {
+            let route = ParsedRoute::parse(path);
+            let html = shell(&cx, &route, placeholder(&cx, &route))
+                .single()
+                .await
+                .unwrap()
+                .render(&cx);
+            assert_eq!(html.contains("data-topcoat-palette"), available, "{path}");
+            assert_eq!(html.contains("data-palette-open"), available, "{path}");
+            if available {
+                assert!(html.contains("role=\"combobox\""));
+                assert!(html.contains("aria-controls=\"tc-palette-results\""));
+                assert!(html.contains("aria-label=\"Close search\""));
+            }
         }
     }
 
