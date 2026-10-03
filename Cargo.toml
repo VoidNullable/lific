@@ -19,7 +19,8 @@ include = [
 ]
 
 [features]
-default = []
+default = ["vite-frontend"]
+vite-frontend = ["dep:rust-embed", "dep:mime_guess"]
 # Temporary migration experiment: compile the pinned Topcoat 0.9 frontend
 # scaffold only when explicitly requested.
 topcoat-spike = ["dep:topcoat"]
@@ -37,7 +38,7 @@ match_wildcard_for_single_variants = "deny"
 needless_collect = "deny"
 or_fun_call = "deny"
 redundant_clone = "deny"
-unchecked_duration_subtraction = "deny"
+unchecked_time_subtraction = "deny"
 unnecessary_struct_initialization = "deny"
 unnecessary_wraps = "deny"
 # Defer format-string interpolation cleanup to the dedicated formatting pass.
@@ -48,7 +49,7 @@ unused_async = "deny"
 [dependencies]
 # HTTP
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
-topcoat = { version = "=0.9.0", optional = true, default-features = false, features = ["discover", "router", "tower", "view"] }
+topcoat = { version = "=0.9.0", optional = true, default-features = false, features = ["asset", "discover", "router", "runtime", "tower", "view"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br"] }
@@ -101,8 +102,8 @@ keyring = { version = "3", features = [
 ] }
 
 # Static assets (embedded frontend)
-rust-embed = { version = "8", features = ["mime-guess"] }
-mime_guess = "2"
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+mime_guess = { version = "2", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Backup/restore archive format (LIF-266): `lific dump` / `lific restore`
 # produce a single self-contained tar.gz (gitea-dump style). flate2 is already

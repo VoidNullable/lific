@@ -17,6 +17,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  topcoat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Restore the Devenv toolchain
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: devenv-tools-${{ runner.os }}-${{ runner.arch }}-topcoat-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix') }}
+          restore-prefixes-first-match: devenv-tools-${{ runner.os }}-${{ runner.arch }}-topcoat-
+          paths: ~/.cache/nix
+          gc-max-store-size: 0
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: devenv
+      - name: Install devenv
+        shell: bash
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - name: Prepare the Topcoat environment
+        run: devenv --profile topcoat shell -- true
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv --profile topcoat shell -- {0}
+          prefix-key: devenv-rust-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          shared-key: linux-debug-topcoat
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          cache-workspace-crates: true
+      - name: Test the Topcoat feature without Vite
+        run: devenv --profile topcoat tasks run lific:topcoat:test
+      - name: Check Topcoat formatting and lint
+        run: devenv --profile topcoat shell -- bash -euo pipefail -c 'cargo fmt -- --check && cargo clippy --all-targets --locked --no-default-features --features topcoat-spike -- -D warnings'
+      - name: Run Topcoat browser tests
+        run: devenv --profile topcoat-e2e tasks run lific:topcoat:e2e
+
   check:
     runs-on: ubuntu-latest
     steps:

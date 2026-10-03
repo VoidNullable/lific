@@ -11,9 +11,9 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-#[cfg(any(not(feature = "topcoat-spike"), test))]
+#[cfg(any(feature = "vite-frontend", test))]
 use axum::http::StatusCode;
-#[cfg(any(not(feature = "topcoat-spike"), test))]
+#[cfg(feature = "vite-frontend")]
 use axum::routing::get;
 use axum::{
     Router,
@@ -28,7 +28,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpServerConfig, StreamableHttpService},
 };
-#[cfg(any(not(feature = "topcoat-spike"), test))]
+#[cfg(feature = "vite-frontend")]
 use rust_embed::Embed;
 use tower_http::compression::Compression;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -44,16 +44,29 @@ use crate::{
 #[allow(dead_code)] // This API boundary is introduced ahead of its screen handlers.
 mod topcoat_api;
 
+#[cfg(feature = "topcoat-spike")]
+#[path = "topcoat_controls.rs"]
+#[allow(dead_code)] // Shared controls are consumed as frontend screens migrate.
+mod topcoat_controls;
+
+#[cfg(feature = "topcoat-spike")]
+#[path = "topcoat_session.rs"]
+#[allow(dead_code)] // Session APIs are consumed as authenticated screens migrate.
+mod topcoat_session;
+
+#[cfg(all(feature = "topcoat-spike", feature = "vite-frontend"))]
+compile_error!("use --no-default-features with topcoat-spike to omit the Vite frontend");
+
 /// Embedded frontend assets compiled from web/dist/.
 /// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
+#[cfg(feature = "vite-frontend")]
 #[derive(Embed)]
 #[folder = "web/dist/"]
 #[allow(dead_code)]
-#[cfg(any(not(feature = "topcoat-spike"), test))]
 struct WebAssets;
 
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
-#[cfg(any(not(feature = "topcoat-spike"), test))]
+#[cfg(feature = "vite-frontend")]
 async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
 
@@ -107,6 +120,8 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
 
 #[cfg(feature = "topcoat-spike")]
 mod topcoat_spike {
+    #[cfg(test)]
+    use topcoat::view::attributes;
     use topcoat::{
         Result,
         router::{Slot, layout, page, response::Response, route},
@@ -114,7 +129,12 @@ mod topcoat_spike {
     };
 
     #[layout("/")]
-    async fn document_layout(slot: Slot<'_>) -> Result<impl View> {
+    async fn document_layout(cx: &topcoat::context::Cx, slot: Slot<'_>) -> Result<impl View> {
+        let session_attributes = super::topcoat_session::bootstrap_attributes(
+            cx,
+            &super::topcoat_session::Scope::Private,
+            false,
+        );
         Ok(view! {
             <!DOCTYPE html>
             <html lang="en">
@@ -123,8 +143,11 @@ mod topcoat_spike {
                     <meta name="viewport" content="width=device-width, initial-scale=1">
                     <title>"Lific Topcoat experiment"</title>
                     <link rel="stylesheet" href="/__topcoat-spike.css">
+                    <script type="module" src="/__topcoat-runtime.js"></script>
+                    <script defer="defer" src=(super::topcoat_session::SCRIPT_PATH)></script>
+                    <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
-                <body>
+                <body (session_attributes)>
                     <a class="skip-link" href="#main-content">"Skip to content"</a>
                     <header class="topcoat-scaffold__header">
                         <a href="/__topcoat-spike">"Lific"</a>
@@ -150,19 +173,68 @@ mod topcoat_spike {
         })
     }
 
+    #[cfg(test)]
+    #[page("/__topcoat-runtime-test")]
+    async fn runtime_test_page(cx: &topcoat::context::Cx) -> Result<impl View> {
+        let mut increment = super::topcoat_controls::Button::new("Increment");
+        increment.attrs = attributes! { cx =>
+            id="increment"
+            @click="() => { const count = document.querySelector('#click-count'); count.textContent = String(Number(count.textContent) + 1); }"
+        };
+        let mut disabled = super::topcoat_controls::Button::new("Disabled");
+        disabled.disabled = true;
+        disabled.attrs = attributes! { cx =>
+            id="disabled"
+            @click="() => { const count = document.querySelector('#click-count'); count.textContent = String(Number(count.textContent) + 100); }"
+        };
+        Ok(view! { cx =>
+            <section>
+                (super::topcoat_controls::button(cx, increment))
+                (super::topcoat_controls::button(cx, disabled))
+                <output id="click-count">"0"</output>
+            </section>
+        })
+    }
+
     #[route(GET "/__topcoat-spike.css")]
     async fn stylesheet() -> Result<Response> {
+        let css = format!(
+            "{}\n{}",
+            include_str!("assets/topcoat-spike.css"),
+            super::topcoat_controls::STYLESHEET
+        );
         Ok(Response::builder()
             .header("content-type", "text/css; charset=utf-8")
+            .body(topcoat::router::Body::from(css))?)
+    }
+
+    #[route(GET "/__topcoat-preferences.js")]
+    async fn preferences_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .body(topcoat::router::Body::from(
+                super::topcoat_controls::PREFERENCES_SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-runtime.js")]
+    async fn runtime_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
             .body(topcoat::router::Body::from(include_str!(
-                "assets/topcoat-spike.css"
+                "assets/topcoat-runtime.js"
             )))?)
     }
 
     pub(super) fn router() -> topcoat::router::Router {
         use topcoat::router::RouterBuilderDiscoverExt;
+        use topcoat::runtime::RouterBuilderRuntimeExt;
 
-        topcoat::router::Router::builder().discover().build()
+        topcoat::router::Router::builder()
+            .discover()
+            .runtime()
+            .build()
     }
 }
 
@@ -206,6 +278,7 @@ mod topcoat_spike_tests {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("<nav aria-label=\"Primary\">"));
         assert!(body.contains("/__topcoat-spike.css"));
+        assert!(body.contains("/__topcoat-runtime.js"));
         assert!(body.contains("<main id=\"main-content\">"));
     }
 
@@ -232,6 +305,112 @@ mod topcoat_spike_tests {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains(".topcoat-scaffold"));
         assert!(body.contains("max-width: 72rem"));
+        assert!(body.contains(".tc-button"));
+        assert!(body.contains("--tc-accent"));
+    }
+
+    #[tokio::test]
+    async fn topcoat_preferences_script_serves_as_a_javascript_module() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-preferences.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/javascript; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("lific.topcoat.preferences"));
+        assert!(body.contains("data-tc-preference"));
+    }
+
+    #[tokio::test]
+    async fn topcoat_runtime_script_serves_as_a_javascript_module() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/__topcoat-runtime.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/javascript; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            body.as_ref(),
+            include_str!("assets/topcoat-runtime.js").as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires devenv --profile topcoat-e2e with repository Playwright/Chromium"]
+    async fn controls_runtime_executes_control_handlers_from_the_shared_layout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(topcoat::router::tower::TowerService::new(
+            topcoat_spike::router(),
+        ));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let playwright = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("e2e/node_modules/playwright/index.mjs");
+        let script = r#"
+            import assert from 'node:assert/strict';
+            const { chromium } = await import(process.env.LIFIC_PLAYWRIGHT_MODULE);
+            const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
+            try {
+                const page = await browser.newPage();
+                const failures = [];
+                page.on('pageerror', error => failures.push(error.message));
+                await page.goto(process.env.LIFIC_TOPCOAT_RUNTIME_URL);
+                await page.getByRole('button', { name: 'Increment' }).click();
+                await page.waitForFunction(() => document.querySelector('#click-count').textContent === '1');
+                await page.getByRole('button', { name: 'Disabled' }).click({ force: true });
+                assert.equal(await page.locator('#click-count').textContent(), '1');
+                assert.deepEqual(failures, []);
+                console.log('Topcoat runtime dispatched the enabled button handler and kept the disabled control inert');
+            } finally { await browser.close(); }
+        "#;
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("bun")
+                .args(["--eval", script])
+                .env("LIFIC_PLAYWRIGHT_MODULE", playwright)
+                .env(
+                    "LIFIC_TOPCOAT_RUNTIME_URL",
+                    format!("http://{address}/__topcoat-runtime-test"),
+                )
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        server.abort();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -607,7 +786,7 @@ pub(crate) fn build_app_with_store(
     let app = app.fallback_service(topcoat::router::tower::TowerService::new(
         topcoat_spike::router(),
     ));
-    #[cfg(not(feature = "topcoat-spike"))]
+    #[cfg(feature = "vite-frontend")]
     let app = app.fallback(get(serve_frontend));
 
     with_compression(
@@ -1527,7 +1706,7 @@ mod compression_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vite-frontend"))]
 mod frontend_security_headers_tests {
     use super::*;
     use tower::ServiceExt;

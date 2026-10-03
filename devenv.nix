@@ -128,6 +128,23 @@ let
     '';
     doCheck = false;
   };
+  lificTopcoatPackage = rustPlatform.buildRustPackage {
+    pname = "lific-topcoat";
+    version = lificVersion;
+    src = source [
+      ./Cargo.toml
+      ./Cargo.lock
+      ./build.rs
+      ./src
+      ./migrations
+      ./LICENSE
+      ./README.md
+    ];
+    cargoLock.lockFile = ./Cargo.lock;
+    buildType = "dist";
+    cargoBuildFlags = [ "--no-default-features" "--features" "topcoat-spike" ];
+    doCheck = false;
+  };
   playwrightBrowsers = pkgs.playwright-driver.browsers.override {
     withChromium = true;
     withChromiumHeadlessShell = true;
@@ -230,6 +247,74 @@ in
   # Each profile adds an explicit frozen install prerequisite so direct task
   # invocations are reproducible without relying on shell entry.
   profiles = {
+    topcoat.module = {
+      languages.javascript.enable = lib.mkForce false;
+      languages.javascript.directory = lib.mkForce "${repoRoot}/.topcoat";
+      outputs = lib.mkForce {
+        lific = lificTopcoatPackage;
+        lific-topcoat = lificTopcoatPackage;
+      };
+      tasks."devenv:git-hooks:run".after = lib.mkForce [ ];
+      git-hooks.hooks.clippy.settings.extraArgs = lib.mkForce
+        "--all-targets --locked --no-default-features --features topcoat-spike";
+      tasks."lific:debug-build".exec = lib.mkForce
+        "cargo build --locked --no-default-features --features topcoat-spike";
+      tasks."lific:debug-build".after = lib.mkForce [ "lific:topcoat:build" ];
+      tasks."lific:check".after = lib.mkForce [ "lific:topcoat:test" ];
+      processes.frontend.start.enable = lib.mkForce false;
+      processes.backend.after = lib.mkForce [ "lific:topcoat:build" ];
+      processes.backend.exec = lib.mkForce ''
+        ${lib.optionalString config.devenv.isTesting ''
+          export LIFIC_DEV_DB="$(mktemp -d "$DEVENV_RUNTIME/lific-test.XXXXXX")/lific.db"
+        ''}
+        exec cargo run --locked --no-default-features --features topcoat-spike -- \
+          --config ${devConfig} \
+          --db "$LIFIC_DEV_DB" \
+          start --init-if-missing --host 127.0.0.1 \
+          --port "$LIFIC_DEV_PORT"
+      '';
+    };
+    topcoat-e2e.module = {
+      languages.javascript.directory = "${repoRoot}/e2e";
+      packages = [ playwrightBrowsers ];
+      env.PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
+      env.PLAYWRIGHT_EXECUTABLE_PATH = "${playwrightChromium}";
+      outputs = lib.mkForce {
+        lific = lificTopcoatPackage;
+        lific-topcoat = lificTopcoatPackage;
+      };
+      tasks."devenv:git-hooks:run".after = lib.mkForce [ ];
+      git-hooks.hooks.clippy.settings.extraArgs = lib.mkForce
+        "--all-targets --locked --no-default-features --features topcoat-spike";
+      processes.frontend.start.enable = lib.mkForce false;
+      processes.backend.after = lib.mkForce [ "lific:topcoat:build" ];
+      processes.backend.exec = lib.mkForce ''
+        ${lib.optionalString config.devenv.isTesting ''
+          export LIFIC_DEV_DB="$(mktemp -d "$DEVENV_RUNTIME/lific-test.XXXXXX")/lific.db"
+        ''}
+        exec cargo run --locked --no-default-features --features topcoat-spike -- \
+          --config ${devConfig} \
+          --db "$LIFIC_DEV_DB" \
+          start --init-if-missing --host 127.0.0.1 \
+          --port "$LIFIC_DEV_PORT"
+      '';
+      tasks = {
+        "lific:install:e2e" = {
+          cwd = "${repoRoot}/e2e";
+          exec = lockedBunInstall "e2e";
+          before = [ "devenv:enterShell" ];
+        };
+        "lific:topcoat:e2e" = {
+          cwd = repoRoot;
+          exec = ''
+            set -e
+            cargo test --locked --no-default-features --features topcoat-spike controls_runtime_executes_control_handlers_from_the_shared_layout -- --include-ignored
+            cargo test --locked --no-default-features --features topcoat-spike controls_tooltip_stays_inside_viewport_edges_with_enlarged_text -- --include-ignored
+          '';
+          after = [ "lific:install:e2e" ];
+        };
+      };
+    };
     docs.module = {
       # Documentation needs Bun, not the Rust toolchain or source hooks.
       languages.rust.enable = lib.mkForce false;
@@ -406,12 +491,11 @@ in
 
   outputs = {
     lific = lificPackage;
+    lific-topcoat = lificTopcoatPackage;
     web = webBundle;
   };
 
-  packages = [
-    bun2nix
-  ]
+  packages = lib.optionals config.languages.javascript.enable [ bun2nix ]
   ++ (with pkgs; [
     curl
     file
@@ -473,12 +557,17 @@ in
     };
     "lific:rust-test" = {
       cwd = repoRoot;
-      exec = ''
-        cargo test --all-targets --locked
-        cargo test --all-targets --locked --features topcoat-spike
-      '';
+      exec = "cargo test --all-targets --locked";
       after = [ "lific:web:build" ] ++ lib.optionals config.devenv.isTesting [ "lific:web:check" ];
     };
+    "lific:topcoat:build" = {
+      cwd = repoRoot;
+      exec = "cargo build --locked --no-default-features --features topcoat-spike";
+    };
+      "lific:topcoat:test" = {
+        cwd = repoRoot;
+        exec = "cargo test --all-targets --locked --no-default-features --features topcoat-spike";
+      };
     "lific:topcoat:install-cli" = {
       cwd = repoRoot;
       exec = "cargo install --locked --version 0.9.0 topcoat-cli";
@@ -617,6 +706,7 @@ in
     wait_for_processes 60
     curl --fail --silent --show-error --connect-timeout 1 --max-time 5 \
       http://127.0.0.1:${toString config.processes.backend.ports.http.value}/api/health
+  '' + lib.optionalString config.processes.frontend.start.enable ''
     curl --fail --silent --show-error --connect-timeout 1 --max-time 5 \
       http://127.0.0.1:${toString config.processes.frontend.ports.http.value}/ | grep -q '<html'
     curl --fail --silent --show-error --connect-timeout 1 --max-time 5 \

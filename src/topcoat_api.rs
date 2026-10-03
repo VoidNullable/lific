@@ -195,25 +195,103 @@ impl ApiError {
 }
 
 /// Small HTTP client for Lific's existing `/api` routes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApiBaseUrl(reqwest::Url);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum ApiBaseUrlError {
+    #[error("invalid API base URL")]
+    InvalidUrl,
+    #[error("API base URL must use HTTPS or loopback HTTP")]
+    InsecureRemoteHttp,
+    #[error("API base URL scheme must be HTTP or HTTPS")]
+    UnsupportedScheme,
+    #[error("API base URL must not contain credentials, a query, or a fragment")]
+    CredentialsOrSuffixNotAllowed,
+}
+
+impl ApiBaseUrl {
+    pub(crate) fn parse(base_url: &str) -> Result<Self, ApiBaseUrlError> {
+        let mut url = reqwest::Url::parse(base_url).map_err(|_| ApiBaseUrlError::InvalidUrl)?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ApiBaseUrlError::CredentialsOrSuffixNotAllowed);
+        }
+
+        match url.scheme() {
+            "https" => {}
+            "http" if is_loopback_host(&url) => {}
+            "http" => return Err(ApiBaseUrlError::InsecureRemoteHttp),
+            _ => return Err(ApiBaseUrlError::UnsupportedScheme),
+        }
+
+        let base_path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(if base_path.is_empty() {
+            "/"
+        } else {
+            &base_path
+        });
+        Ok(Self(url))
+    }
+
+    fn request_url(&self, request_path: &str) -> reqwest::Url {
+        let (path, query) = request_path.split_once('?').unwrap_or((request_path, ""));
+        let path = path.trim_start_matches('/');
+        let base_path = self.0.path().trim_end_matches('/');
+        let joined_path = if path.is_empty() {
+            if base_path.is_empty() {
+                "/".to_owned()
+            } else {
+                base_path.to_owned()
+            }
+        } else if base_path.is_empty() {
+            format!("/{path}")
+        } else {
+            format!("{base_path}/{path}")
+        };
+
+        let mut url = self.0.clone();
+        url.set_path(&joined_path);
+        url.set_query((!query.is_empty()).then_some(query));
+        url
+    }
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse::<std::net::IpAddr>()
+        .map_or_else(
+            |_| host.eq_ignore_ascii_case("localhost"),
+            |address| address.is_loopback(),
+        )
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ApiClient {
     client: reqwest::Client,
-    base_url: String,
+    base_url: ApiBaseUrl,
     bearer_token: Option<String>,
 }
 
 impl ApiClient {
-    pub(crate) fn new(base_url: impl Into<String>, bearer_token: Option<&str>) -> Self {
+    pub(crate) fn new(base_url: ApiBaseUrl, bearer_token: Option<&str>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            base_url,
             bearer_token: bearer_token.map(str::to_owned),
         }
     }
 
     pub(crate) fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        let url = format!("{}{}", self.base_url, path);
-        let request = self.client.request(method, url);
+        let request = self.client.request(method, self.base_url.request_url(path));
         match self.bearer_token.as_deref() {
             Some(token) => request.bearer_auth(token),
             None => request,
@@ -332,11 +410,79 @@ fn header_string(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiClient, ApiError,
+        ApiBaseUrl, ApiBaseUrlError, ApiClient, ApiError,
         dto::{issue::Issue, project::Project},
     };
     use reqwest::{Method, StatusCode};
     use serde_json::{Value, json};
+
+    fn client(base_url: impl AsRef<str>, bearer_token: Option<&str>) -> ApiClient {
+        ApiClient::new(ApiBaseUrl::parse(base_url.as_ref()).unwrap(), bearer_token)
+    }
+
+    #[test]
+    fn api_base_url_accepts_https_and_loopback_http() {
+        assert!(ApiBaseUrl::parse("https://lific.example/proxy").is_ok());
+        assert!(ApiBaseUrl::parse("http://127.0.0.1:8080").is_ok());
+        assert!(ApiBaseUrl::parse("http://[::1]:8080").is_ok());
+        assert!(ApiBaseUrl::parse("http://localhost:8080").is_ok());
+    }
+
+    #[test]
+    fn api_base_url_rejects_remote_cleartext_http() {
+        assert_eq!(
+            ApiBaseUrl::parse("http://lific.example"),
+            Err(ApiBaseUrlError::InsecureRemoteHttp)
+        );
+        assert_eq!(
+            ApiBaseUrl::parse("http://192.0.2.10:8080"),
+            Err(ApiBaseUrlError::InsecureRemoteHttp)
+        );
+    }
+
+    #[test]
+    fn request_path_cannot_change_authority_or_drop_base_path() {
+        let client = client("http://127.0.0.1:8123/proxy/api-root", Some("token"));
+        let request = client
+            .request(
+                Method::GET,
+                "//attacker.example/steal?search=one%20two&sort=recent",
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(request.url().scheme(), "http");
+        assert_eq!(request.url().host_str(), Some("127.0.0.1"));
+        assert_eq!(request.url().port(), Some(8123));
+        assert_eq!(
+            request.url().path(),
+            "/proxy/api-root/attacker.example/steal"
+        );
+        let query: std::collections::HashMap<_, _> = request
+            .url()
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(query["search"], "one two");
+        assert_eq!(query["sort"], "recent");
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer token"
+        );
+
+        let absolute = client
+            .request(Method::GET, "https://attacker.example/steal")
+            .build()
+            .unwrap();
+        assert_eq!(absolute.url().host_str(), Some("127.0.0.1"));
+        assert_eq!(absolute.url().port(), Some(8123));
+        assert!(
+            absolute
+                .url()
+                .path()
+                .contains("https://attacker.example/steal")
+        );
+    }
 
     #[test]
     fn project_and_issue_json_decode_without_changing_the_wire_fields() {
@@ -450,7 +596,7 @@ mod tests {
                 .unwrap();
         });
 
-        let client = ApiClient::new(format!("http://{address}"), None);
+        let client = client(format!("http://{address}"), None);
         let response = client
             .send_json_with_headers::<Vec<Value>>(client.request(Method::GET, "/api/comments"))
             .await
@@ -499,7 +645,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = ApiClient::new(format!("http://{address}"), None);
+        let client = client(format!("http://{address}"), None);
 
         let json_error = client
             .send_json::<Value>(client.request(Method::GET, "/api/json-error"))
@@ -521,7 +667,7 @@ mod tests {
 
     #[test]
     fn request_builder_encodes_query_and_bearer_auth() {
-        let client = ApiClient::new("https://lific.example", Some("token value"));
+        let client = client("https://lific.example", Some("token value"));
         let request = client
             .request(Method::GET, "/api/issues")
             .query(&[("project_id", "7"), ("search", "A & B")])
@@ -543,7 +689,7 @@ mod tests {
 
     #[test]
     fn json_body_preserves_expected_seq_and_json_content_type() {
-        let client = ApiClient::new("https://lific.example", None);
+        let client = client("https://lific.example", None);
         let request = client
             .request(Method::PUT, "/api/issues/31")
             .json(&json!({ "title": "Updated", "expected_seq": 4 }))
@@ -593,7 +739,7 @@ mod tests {
                 .unwrap();
         });
 
-        let client = ApiClient::new(format!("http://{address}"), Some("token"));
+        let client = client(format!("http://{address}"), Some("token"));
         let response: Value = client
             .send_json(client.multipart(
                 "/api/project-archives",
@@ -618,7 +764,7 @@ mod tests {
 
     #[test]
     fn download_request_uses_authenticated_get_and_keeps_response_headers() {
-        let client = ApiClient::new("https://lific.example", Some("token"));
+        let client = client("https://lific.example", Some("token"));
         let request = client
             .download_request("/api/export/projects/ENG")
             .build()
