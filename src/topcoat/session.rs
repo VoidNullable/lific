@@ -16,7 +16,7 @@ use topcoat::{
     view::{Attributes, attributes},
 };
 
-use super::topcoat_api::{ApiBaseUrl, ApiClient};
+use super::api::{ApiBaseUrl, ApiClient};
 
 pub(crate) const SCRIPT_PATH: &str = "/__topcoat-session.js";
 

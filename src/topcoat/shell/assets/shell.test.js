@@ -46,7 +46,7 @@ function fixture(initial = {}, options = {}) {
     getComputedStyle: () => ({fontSize: String(fontSize)}),
     ResizeObserver: class {constructor(callback) {resize = callback;} observe() {}},
   };
-  vm.runInNewContext(fs.readFileSync(`${__dirname}/topcoat-shell.js`, 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(`${__dirname}/shell.js`, 'utf8'), context);
   return {shell, sidebar, toggle, handle, body, storage,
     setFont(size) { fontSize = size; resize?.([{contentRect: {width: size}}]); },
     hideProbe() { resize?.([{contentRect: {width: 0}}]); },

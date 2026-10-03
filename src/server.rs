@@ -40,29 +40,8 @@ use crate::{
 };
 
 #[cfg(feature = "topcoat-spike")]
-#[path = "topcoat_api.rs"]
-#[allow(dead_code)] // This API boundary is introduced ahead of its screen handlers.
-mod topcoat_api;
-
-#[cfg(feature = "topcoat-spike")]
-#[path = "topcoat_controls.rs"]
-#[allow(dead_code)] // Shared controls are consumed as frontend screens migrate.
-mod topcoat_controls;
-
-#[cfg(feature = "topcoat-spike")]
-#[path = "topcoat_session.rs"]
-#[allow(dead_code)] // Session APIs are consumed as authenticated screens migrate.
-mod topcoat_session;
-
-#[cfg(feature = "topcoat-spike")]
-#[path = "topcoat_shell.rs"]
-#[allow(dead_code)] // Route families are consumed as screens migrate.
-mod topcoat_shell;
-
-#[cfg(feature = "topcoat-spike")]
-#[path = "topcoat_sync.rs"]
-#[allow(dead_code)] // Read models are consumed as screens migrate.
-mod topcoat_sync;
+#[path = "topcoat/mod.rs"]
+mod topcoat_frontend;
 
 #[cfg(all(feature = "topcoat-spike", feature = "vite-frontend"))]
 compile_error!("use --no-default-features with topcoat-spike to omit the Vite frontend");
@@ -144,15 +123,16 @@ mod topcoat_spike {
         let route_target = uri
             .path_and_query()
             .map_or_else(|| uri.path(), |path| path.as_str());
-        let route = super::topcoat_shell::ParsedRoute::parse(route_target);
+        let route = super::topcoat_frontend::shell::ParsedRoute::parse(route_target);
         let title = route.page.title();
         let scope = match (route.layout, route.project) {
-            (super::topcoat_shell::Layout::Public, Some(project)) => {
-                super::topcoat_session::Scope::public(project)
+            (super::topcoat_frontend::shell::Layout::Public, Some(project)) => {
+                super::topcoat_frontend::session::Scope::public(project)
             }
-            _ => super::topcoat_session::Scope::Private,
+            _ => super::topcoat_frontend::session::Scope::Private,
         };
-        let session_attributes = super::topcoat_session::bootstrap_attributes(cx, &scope, false);
+        let session_attributes =
+            super::topcoat_frontend::session::bootstrap_attributes(cx, &scope, false);
         Ok(view! {
             <!DOCTYPE html>
             <html lang="en">
@@ -161,11 +141,20 @@ mod topcoat_spike {
                     <meta name="viewport" content="width=device-width, initial-scale=1">
                     <title>(title)</title>
                     <link rel="stylesheet" href="/__topcoat-spike.css">
-                    <link rel="stylesheet" href=(super::topcoat_shell::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::shell::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::shell::mobile::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::shell::projects::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::shell::recents::STYLESHEET_PATH)>
+                    <link rel="stylesheet" href=(super::topcoat_frontend::shell::page_chrome::STYLESHEET_PATH)>
                     <script type="module" src="/__topcoat-runtime.js"></script>
-                    <script defer="defer" src=(super::topcoat_shell::ROUTE_SCRIPT_PATH)></script>
-                    <script defer="defer" src=(super::topcoat_session::SCRIPT_PATH)></script>
-                    <script defer="defer" src=(super::topcoat_sync::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::ROUTE_SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::session::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::sync::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::mobile::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::projects::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::recents::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::page_chrome::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_frontend::shell::BOOTSTRAP_SCRIPT_PATH)></script>
                     <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
                 <body (session_attributes)>
@@ -204,23 +193,23 @@ mod topcoat_spike {
         let route_target = uri
             .path_and_query()
             .map_or_else(|| uri.path(), |path| path.as_str());
-        let route = super::topcoat_shell::ParsedRoute::parse(route_target);
+        let route = super::topcoat_frontend::shell::ParsedRoute::parse(route_target);
         if let Some(destination) = route.redirect.as_deref() {
             return Err(topcoat::router::error::redirect_permanent(destination).into());
         }
-        let content = super::topcoat_shell::placeholder(cx, &route);
-        Ok(super::topcoat_shell::shell(cx, &route, content))
+        let content = super::topcoat_frontend::shell::placeholder(cx, &route);
+        Ok(super::topcoat_frontend::shell::shell(cx, &route, content))
     }
 
     #[cfg(test)]
     #[page("/__topcoat-runtime-test")]
     async fn runtime_test_page(cx: &topcoat::context::Cx) -> Result<impl View> {
-        let mut increment = super::topcoat_controls::Button::new("Increment");
+        let mut increment = super::topcoat_frontend::controls::Button::new("Increment");
         increment.attrs = attributes! { cx =>
             id="increment"
             @click="() => { const count = document.querySelector('#click-count'); count.textContent = String(Number(count.textContent) + 1); }"
         };
-        let mut disabled = super::topcoat_controls::Button::new("Disabled");
+        let mut disabled = super::topcoat_frontend::controls::Button::new("Disabled");
         disabled.disabled = true;
         disabled.attrs = attributes! { cx =>
             id="disabled"
@@ -228,8 +217,8 @@ mod topcoat_spike {
         };
         Ok(view! { cx =>
             <section>
-                (super::topcoat_controls::button(cx, increment))
-                (super::topcoat_controls::button(cx, disabled))
+                (super::topcoat_frontend::controls::button(cx, increment))
+                (super::topcoat_frontend::controls::button(cx, disabled))
                 <output id="click-count">"0"</output>
             </section>
         })
@@ -239,9 +228,9 @@ mod topcoat_spike {
     async fn stylesheet() -> Result<Response> {
         let css = format!(
             "{}\n{}\n{}",
-            include_str!("assets/topcoat-spike.css"),
-            super::topcoat_controls::STYLESHEET,
-            super::topcoat_shell::STYLESHEET
+            include_str!("topcoat/assets/spike.css"),
+            super::topcoat_frontend::controls::STYLESHEET,
+            super::topcoat_frontend::shell::STYLESHEET
         );
         Ok(Response::builder()
             .header("content-type", "text/css; charset=utf-8")
@@ -254,7 +243,7 @@ mod topcoat_spike {
             .header("content-type", "text/css; charset=utf-8")
             .header("cache-control", "no-cache")
             .body(topcoat::router::Body::from(
-                super::topcoat_shell::STYLESHEET,
+                super::topcoat_frontend::shell::STYLESHEET,
             ))?)
     }
 
@@ -264,7 +253,97 @@ mod topcoat_spike {
             .header("content-type", "text/javascript; charset=utf-8")
             .header("cache-control", "no-cache")
             .body(topcoat::router::Body::from(
-                super::topcoat_shell::ROUTE_SCRIPT,
+                super::topcoat_frontend::shell::ROUTE_SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-mobile.css")]
+    async fn mobile_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::mobile::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-projects.css")]
+    async fn projects_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::projects::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-recents.css")]
+    async fn recents_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::recents::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-page-chrome.css")]
+    async fn page_chrome_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::page_chrome::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-mobile.js")]
+    async fn mobile_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::mobile::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-projects.js")]
+    async fn projects_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::projects::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-recents.js")]
+    async fn recents_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::recents::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-page-chrome.js")]
+    async fn page_chrome_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::page_chrome::SCRIPT,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-bootstrap.js")]
+    async fn bootstrap_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_frontend::shell::BOOTSTRAP_SCRIPT,
             ))?)
     }
 
@@ -273,7 +352,7 @@ mod topcoat_spike {
         Ok(Response::builder()
             .header("content-type", "text/javascript; charset=utf-8")
             .body(topcoat::router::Body::from(
-                super::topcoat_controls::PREFERENCES_SCRIPT,
+                super::topcoat_frontend::controls::PREFERENCES_SCRIPT,
             ))?)
     }
 
@@ -283,7 +362,7 @@ mod topcoat_spike {
             .header("content-type", "text/javascript; charset=utf-8")
             .header("cache-control", "no-cache")
             .body(topcoat::router::Body::from(include_str!(
-                "assets/topcoat-runtime.js"
+                "topcoat/assets/runtime.js"
             )))?)
     }
 
@@ -430,6 +509,31 @@ mod topcoat_spike_tests {
                 "text/javascript; charset=utf-8",
                 "lificSync",
             ),
+            (
+                "/__topcoat-mobile.css",
+                "text/css; charset=utf-8",
+                ".tc-mobile",
+            ),
+            (
+                "/__topcoat-projects.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatProjects",
+            ),
+            (
+                "/__topcoat-recents.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatRecents",
+            ),
+            (
+                "/__topcoat-page-chrome.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatPageChrome",
+            ),
+            (
+                "/__topcoat-bootstrap.js",
+                "text/javascript; charset=utf-8",
+                "LificTopcoatProjects",
+            ),
         ] {
             let response = router
                 .clone()
@@ -523,7 +627,7 @@ mod topcoat_spike_tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             body.as_ref(),
-            include_str!("assets/topcoat-runtime.js").as_bytes()
+            include_str!("topcoat/assets/runtime.js").as_bytes()
         );
     }
 

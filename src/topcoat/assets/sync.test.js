@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const context = {globalThis:{}, console,AbortController};
-vm.runInNewContext(fs.readFileSync(`${__dirname}/topcoat-sync.js`, 'utf8'),context);
+vm.runInNewContext(fs.readFileSync(`${__dirname}/sync.js`, 'utf8'),context);
 const {createClient} = context.globalThis.LificSync;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture(request,overrides={}) {

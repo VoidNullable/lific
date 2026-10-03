@@ -14,7 +14,7 @@
 use topcoat::router::{response::Response, route};
 
 pub(crate) const SCRIPT_PATH: &str = "/__topcoat-sync.js";
-pub(crate) const BROWSER_SCRIPT: &str = include_str!("assets/topcoat-sync.js");
+pub(crate) const BROWSER_SCRIPT: &str = include_str!("assets/sync.js");
 
 #[route(GET "/__topcoat-sync.js")]
 async fn browser_script() -> topcoat::Result<Response> {

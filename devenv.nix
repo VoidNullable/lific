@@ -379,6 +379,8 @@ in
         cargo test --locked --no-default-features --features topcoat-spike controls_runtime_executes_control_handlers_from_the_shared_layout -- --include-ignored
         cargo test --locked --no-default-features --features topcoat-spike controls_tooltip_stays_inside_viewport_edges_with_enlarged_text -- --include-ignored
         cargo test --locked --no-default-features --features topcoat-spike controls_preferences_ -- --include-ignored
+        node --test src/topcoat/shell/assets/mobile.test.js
+        node --test src/topcoat/shell/assets/recents.browser.test.js
           '';
           after = [ "lific:install:e2e" ];
         };
@@ -637,8 +639,13 @@ in
       cwd = repoRoot;
       exec = ''
         cargo test --all-targets --locked --no-default-features --features topcoat-spike
-        node --test src/assets/topcoat-sync.test.js
-        node --test src/assets/topcoat-shell.test.js
+        node --test src/topcoat/assets/sync.test.js
+        node --test src/topcoat/assets/controls.test.mjs
+        node --test src/topcoat/shell/assets/shell.test.js
+        node --test src/topcoat/shell/assets/bootstrap.test.js
+        node --test src/topcoat/shell/assets/page-chrome.test.js
+        node --test src/topcoat/shell/assets/projects.test.js
+        node --test src/topcoat/shell/assets/recents.test.js
       '';
     };
     "lific:topcoat:install-cli" = {

@@ -4,9 +4,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     db::models::AuthUser,
-    server::{
-        topcoat_api::dto::project::Project as ProjectDto,
-        topcoat_session::{Affordances, ProjectRole},
+    server::topcoat_frontend::{
+        api::dto::project::Project as ProjectDto,
+        session::{Affordances, ProjectRole},
     },
 };
 

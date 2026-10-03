@@ -1,0 +1,22 @@
+.tc-projects { display: flex; flex-direction: column; gap: 0.5rem; margin: 1.25rem 0; }
+.tc-projects__heading { margin: 0; padding: 0 0.75rem; font-size: 0.875rem; color: var(--tc-muted); }
+.tc-projects__create, .tc-projects__rename { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.tc-projects__create { padding: 0 0.5rem; }
+.tc-projects__input { min-width: 0; width: 7rem; min-height: 2.25rem; padding: 0.35rem; border: 1px solid var(--tc-border); border-radius: var(--tc-radius); background: var(--tc-surface); color: inherit; font: inherit; }
+.tc-projects__action { min-height: 2.25rem; padding: 0.35rem 0.5rem; border: 1px solid var(--tc-border); border-radius: var(--tc-radius); background: var(--tc-surface); color: inherit; font: inherit; cursor: pointer; }
+.tc-projects__action:hover { border-color: var(--tc-accent); }
+.tc-projects__groups { display: flex; flex-direction: column; gap: 0.25rem; }
+.tc-projects__group { min-width: 0; }
+.tc-projects__group-heading { display: flex; align-items: center; gap: 0.25rem; min-height: 2.5rem; margin: 0; font-size: 0.875rem; }
+.tc-projects__group-actions { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-left: auto; }
+.tc-projects__disclosure { flex: none; width: 2.5rem; min-height: 2.5rem; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.tc-projects__disclosure:hover { background: var(--tc-surface); }
+.tc-projects__group-name { overflow-wrap: anywhere; }
+.tc-projects__project-list { display: flex; flex-direction: column; gap: 0.125rem; padding-left: 1rem; }
+.tc-projects__project { display: flex; align-items: center; min-height: 2.5rem; padding: 0.4rem 0.75rem; border-radius: var(--tc-radius); overflow-wrap: anywhere; text-decoration: none; }
+.tc-projects__project:hover { background: var(--tc-surface); }
+.tc-projects__project:focus-visible,
+.tc-projects__disclosure:focus-visible { outline: 3px solid var(--tc-focus); outline-offset: 2px; }
+.tc-projects__group[aria-dropeffect="move"] { outline: 2px dashed var(--tc-accent); outline-offset: 2px; }
+.tc-projects__error { margin: 0; padding: 0.5rem 0.75rem; color: var(--tc-danger, #a21d2b); font-size: 0.875rem; }
+.tc-projects__error[hidden], .tc-projects__project-list[hidden] { display: none; }

@@ -7,13 +7,18 @@ use topcoat::{
     view::{BoxView, ViewExt, view},
 };
 
-#[path = "topcoat_shell/context.rs"]
 pub(super) mod context;
+pub(crate) mod mobile;
+pub(crate) mod page_chrome;
+pub(crate) mod projects;
+pub(crate) mod recents;
 
-pub(crate) const STYLESHEET: &str = include_str!("assets/topcoat-shell.css");
+pub(crate) const STYLESHEET: &str = include_str!("assets/shell.css");
 pub(crate) const STYLESHEET_PATH: &str = "/__topcoat-shell.css";
-pub(crate) const ROUTE_SCRIPT: &str = include_str!("assets/topcoat-shell.js");
+pub(crate) const ROUTE_SCRIPT: &str = include_str!("assets/shell.js");
 pub(crate) const ROUTE_SCRIPT_PATH: &str = "/__topcoat-shell.js";
+pub(crate) const BOOTSTRAP_SCRIPT: &str = include_str!("assets/bootstrap.js");
+pub(crate) const BOOTSTRAP_SCRIPT_PATH: &str = "/__topcoat-bootstrap.js";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Layout {
@@ -360,8 +365,42 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
     };
     let auth_link = route.page == Page::Login;
     let signup_link = route.page == Page::Signup;
-    let mobile_navigation = navigation(cx, route, "Mobile navigation");
     let desktop_navigation = navigation(cx, route, "Desktop navigation");
+    let shell_context = match route.layout {
+        Layout::Auth => context::ShellContext::auth(route).expect("auth route layout"),
+        Layout::Public => context::ShellContext::public(route).expect("public route project"),
+        Layout::Private => {
+            context::ShellContext::private(route, None, None, None).expect("private route layout")
+        }
+    };
+    let mobile_navigation = mobile::mobile_navigation(cx, &shell_context);
+    let recent_panel = recents::panel(cx, &shell_context);
+    let project_crumb = route.project.map(|project| context::Breadcrumb {
+        label: project.to_owned(),
+        href: Some(route.project_href(if is_public { "issues" } else { "overview" })),
+    });
+    let resource_crumb = route.page.resource().map(|resource| context::Breadcrumb {
+        label: resource.to_owned(),
+        href: None,
+    });
+    let mut breadcrumbs = Vec::new();
+    if let Some(project) = project_crumb {
+        breadcrumbs.push(project);
+    }
+    if let Some(resource) = resource_crumb {
+        breadcrumbs.push(resource);
+    }
+    let page_metadata = context::PageMetadata {
+        title: route.page.title().to_owned(),
+        breadcrumbs,
+        tabs: Vec::new(),
+        trailing_actions: Vec::new(),
+    };
+    let page_chrome = if is_auth {
+        view! { cx => <span hidden="hidden"></span> }.boxed()
+    } else {
+        page_chrome::page_chrome(cx, route, "route", None, &page_metadata)
+    };
     view! { cx =>
         <div class="tc-shell" data-layout=(layout_name)>
             <a class="tc-shell__skip" href="#main-content">"Skip to content"</a>
@@ -380,16 +419,15 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                         aria-label="Collapse sidebar" aria-expanded="true" aria-controls="tc-sidebar">
                         "Collapse sidebar"
                     </button>
-                    <details class="tc-shell__mobile">
-                        <summary>"Navigation"</summary>
-                        (mobile_navigation)
-                    </details>
+                    (mobile_navigation)
                 }
             </header>
             <div class="tc-shell__body">
                 if !is_auth {
                     <span class="tc-shell__sidebar-probe" data-sidebar-probe="" aria-hidden="true"></span>
                     <aside class="tc-shell__desktop" id="tc-sidebar">
+                        <div data-topcoat-projects-mount=""></div>
+                        (recent_panel)
                         (desktop_navigation)
                         <div class="tc-shell__sidebar-resize" data-sidebar-resize="" role="separator"
                             tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical"
@@ -398,7 +436,10 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                             title="Use Left and Right arrows to resize. Double click to reset."></div>
                     </aside>
                 }
-                <main class="tc-shell__main" id="main-content" tabindex="-1">(content)</main>
+                <main class="tc-shell__main" id="main-content" tabindex="-1">
+                    (page_chrome)
+                    (content)
+                </main>
             </div>
         </div>
     }
@@ -551,9 +592,10 @@ mod tests {
             .render(&cx);
         assert!(html.contains("href=\"#main-content\""));
         assert!(html.contains("id=\"main-content\" tabindex=\"-1\""));
-        assert!(html.contains("<summary>Navigation</summary>"));
+        assert!(html.contains("data-mobile-navigation"));
+        assert!(html.contains("data-mobile-open"));
         assert!(html.contains("aria-label=\"Desktop navigation\""));
-        assert!(html.contains("aria-label=\"Mobile navigation\""));
+        assert!(html.contains("aria-label=\"Navigation\""));
         assert!(html.contains("href=\"/LIF/issues\" aria-current=\"page\""));
         assert!(html.contains("Issue detail"));
         assert!(html.contains("LIF-205"));

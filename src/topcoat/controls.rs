@@ -10,8 +10,8 @@ use topcoat::{
     view::{Attributes, BoxView, View, ViewExt, attributes, view},
 };
 
-pub(crate) const STYLESHEET: &str = include_str!("assets/topcoat-controls.css");
-pub(crate) const PREFERENCES_SCRIPT: &str = include_str!("assets/topcoat-preferences.js");
+pub(crate) const STYLESHEET: &str = include_str!("assets/controls.css");
+pub(crate) const PREFERENCES_SCRIPT: &str = include_str!("assets/preferences.js");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Theme {
@@ -401,15 +401,80 @@ pub(crate) fn dialog<'a>(
     title: &'a str,
     body: impl View + 'a,
 ) -> BoxView<'a> {
+    dialog_with_options(
+        cx,
+        id,
+        title,
+        body,
+        DialogOptions {
+            class: "tc-dialog",
+            role: None,
+            describedby: None,
+            autofocus_close: false,
+        },
+    )
+}
+
+/// A native modal dialog presented as a bottom sheet on narrow viewports.
+/// It uses the same focus trap, Escape dismissal, and close control as a dialog.
+pub(crate) fn sheet<'a>(
+    cx: &'a Cx,
+    id: &'a str,
+    title: &'a str,
+    body: impl View + 'a,
+) -> BoxView<'a> {
+    dialog_with_options(
+        cx,
+        id,
+        title,
+        body,
+        DialogOptions {
+            class: "tc-dialog tc-sheet",
+            role: None,
+            describedby: None,
+            autofocus_close: false,
+        },
+    )
+}
+
+struct DialogOptions<'a> {
+    class: &'a str,
+    role: Option<&'a str>,
+    describedby: Option<String>,
+    autofocus_close: bool,
+}
+
+fn dialog_with_options<'a>(
+    cx: &'a Cx,
+    id: &'a str,
+    title: &'a str,
+    body: impl View + 'a,
+    options: DialogOptions<'a>,
+) -> BoxView<'a> {
     let title_id = format!("{id}-title");
     let body = body.boxed();
+    let close_attrs = attributes! {
+        cx =>
+        class="tc-button"
+        type="submit"
+        aria-label="Close dialog"
+        autofocus=(options.autofocus_close)
+    };
+    let dialog_attrs = attributes! {
+        cx =>
+        class=(options.class)
+        id=(id)
+        role=(options.role)
+        aria-labelledby=(title_id.clone())
+        aria-describedby=(options.describedby)
+    };
     view! {
         cx =>
-        <dialog class="tc-dialog" id=(id) aria-labelledby=(title_id.clone())>
+        <dialog (dialog_attrs)>
             <header class="tc-dialog__header">
                 <h2 id=(title_id)>(title)</h2>
                 <form method="dialog">
-                    <button class="tc-button" type="submit" aria-label="Close dialog">
+                    <button (close_attrs)>
                         "Close"
                     </button>
                 </form>
@@ -484,14 +549,21 @@ pub(crate) fn confirmation<'a>(
     actions: impl View + 'a,
 ) -> BoxView<'a> {
     let actions = actions.boxed();
-    dialog(
+    let message_id = format!("{id}-message");
+    dialog_with_options(
         cx,
         id,
         title,
         view! {
             cx =>
-            <p>(message)</p>
+            <p id=(message_id)>(message)</p>
             <div class="tc-actions">(actions)</div>
+        },
+        DialogOptions {
+            class: "tc-dialog",
+            role: Some("alertdialog"),
+            describedby: Some(format!("{id}-message")),
+            autofocus_close: true,
         },
     )
 }
@@ -1095,6 +1167,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controls_sheet_is_a_named_native_modal_with_bottom_sheet_styles() {
+        let cx = &Cx::default();
+        let html = render(
+            cx,
+            sheet(
+                cx,
+                "filters",
+                "Issue filters",
+                view! { cx => <p>"Choose filters"</p> },
+            ),
+        )
+        .await;
+        assert!(html.contains("<dialog"));
+        assert!(html.contains("class=\"tc-dialog tc-sheet\""));
+        assert!(html.contains("aria-labelledby=\"filters-title\""));
+        assert!(html.contains("method=\"dialog\""));
+        assert!(STYLESHEET.contains(".tc-sheet"));
+        assert!(STYLESHEET.contains("@media (min-width: 40rem)"));
+        assert!(STYLESHEET.contains("max-height: min(85dvh"));
+        assert!(!html.contains(" open"));
+    }
+
+    #[tokio::test]
     async fn controls_dialog_ids_are_escaped_as_data_and_never_interpolated_into_script() {
         let cx = Cx::default();
         let html = render(&cx, dialog_trigger(&cx, "confirm\";alert(1)//", "Open")).await;
@@ -1271,6 +1366,10 @@ mod tests {
         assert!(html.contains("<dialog"));
         assert!(html.contains("aria-labelledby=\"delete-title\""));
         assert!(html.contains("Delete &lt;draft&gt;?"));
+        assert!(html.contains("role=\"alertdialog\""));
+        assert!(html.contains("aria-describedby=\"delete-message\""));
+        assert!(html.contains("id=\"delete-message\""));
+        assert!(html.contains("autofocus=\"\""));
         assert!(html.contains("tc-button--danger"));
         assert!(html.contains("data-topcoat-on:click=\"() => console.log('confirmed')\""));
         assert!(html.contains("method=\"dialog\""));
