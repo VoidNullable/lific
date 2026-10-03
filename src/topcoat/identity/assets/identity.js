@@ -8,6 +8,46 @@
   const validEmail = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   const recentAuth = result => result?.status === 403 &&
     (result.code === 'recent_auth_required' || /recent.{0,20}(session|auth)|sign in again/i.test(result.error ?? ''));
+  const detectOs = navigator => /Win/i.test(navigator?.userAgent||'')?'windows':/Mac/i.test(navigator?.userAgent||'')?'mac':'linux';
+
+  function toolSetup(tool, origin, key, os='linux') {
+    const url=`${origin}/mcp`, auth=`Bearer ${key}`;
+    const templates={
+      codex:{name:'Codex',path:{linux:'~/.codex/config.toml',mac:'~/.codex/config.toml',windows:'%USERPROFILE%\\.codex\\config.toml'},
+        instructions:'Add this block to config.toml, then set the key in your shell environment.',usesEnvKey:true,
+        config:`[mcp_servers.lific]\ntransport.type = "http"\ntransport.url = "${url}"\ntransport.bearer_token_env_var = "LIFIC_API_KEY"`},
+      vscode:{name:'VS Code',path:{linux:'~/.config/Code/User/mcp.json or .vscode/mcp.json',mac:'~/Library/Application Support/Code/User/mcp.json or .vscode/mcp.json',windows:'%APPDATA%\\Code\\User\\mcp.json or .vscode\\mcp.json'},
+        instructions:'Add this block under "servers". Reload VS Code or run “MCP: List Servers”. VS Code 1.101+ with GitHub Copilot is required.',config:JSON.stringify({servers:{lific:{type:'http',url,headers:{Authorization:auth}}}},null,2)},
+      zed:{name:'Zed',path:{linux:'~/.config/zed/settings.json',mac:'~/.config/zed/settings.json',windows:'%APPDATA%\\Zed\\settings.json'},
+        instructions:'Add this block under "context_servers" in Zed settings, then reload the context server.',config:JSON.stringify({context_servers:{lific:{url,headers:{Authorization:auth}}}},null,2)},
+      opencode:{name:'OpenCode',path:{linux:'~/.config/opencode/opencode.json',mac:'~/.config/opencode/opencode.json',windows:'%USERPROFILE%\\.config\\opencode\\opencode.json'},
+        instructions:'Add this entry under the "mcp" section in opencode.json.',config:JSON.stringify({lific:{type:'remote',url,headers:{Authorization:auth}}},null,2)},
+      cursor:{name:'Cursor',path:{linux:'~/.cursor/mcp.json (global) · .cursor/mcp.json (project)',mac:'~/.cursor/mcp.json (global) · .cursor/mcp.json (project)',windows:'%USERPROFILE%\\.cursor\\mcp.json (global) · .cursor\\mcp.json (project)'},
+        instructions:'Add this block to the "mcpServers" section, then reload Cursor.',config:JSON.stringify({lific:{url,headers:{Authorization:auth}}},null,2)},
+      'claude-code':{name:'Claude Code',path:{linux:'~/.claude.json (user scope)',mac:'~/.claude.json (user scope)',windows:'%USERPROFILE%\\.claude.json (user scope)'},
+        instructions:'Run the command below, replacing <key> with your API key. Or add the configuration block to the "mcpServers" section manually.',
+        commands:[`claude mcp add --transport http --scope user lific ${url} --header "Authorization: Bearer <key>"`],
+        config:JSON.stringify({lific:{type:'http',url,headers:{Authorization:auth}}},null,2)},
+      pi:{name:'Pi',path:{linux:'~/.pi/agent/mcp.json',mac:'~/.pi/agent/mcp.json',windows:'%USERPROFILE%\\.pi\\agent\\mcp.json'},
+        instructions:'Install the adapter, then restart Pi. Add the configuration block to the "mcpServers" section. Set LIFIC_API_KEY in your shell environment.',
+        commands:['pi install npm:pi-mcp-adapter'],usesEnvKey:true,
+        config:JSON.stringify({lific:{url,auth:'bearer',bearerTokenEnv:'LIFIC_API_KEY',lifecycle:'keep-alive'}},null,2)},
+      claude:{name:'Claude Desktop',path:{linux:null,mac:'~/Library/Application Support/Claude/claude_desktop_config.json',windows:'%APPDATA%\\Claude\\claude_desktop_config.json'},
+        instructions:'Claude Desktop needs the mcp-remote proxy. Add this block under "mcpServers", then fully restart Claude Desktop.',
+        config:JSON.stringify({lific:{command:'npx',args:['-y','mcp-remote',url],env:{AUTHORIZATION:auth}}},null,2)},
+    };
+    const template=Object.hasOwn(templates,tool)?templates[tool]:null;
+    if(!template)return {name:'Custom MCP client',path:null,paths:null,os,instructions:'Use this endpoint and Authorization header in your client’s HTTP MCP configuration.',config:JSON.stringify({url,headers:{Authorization:auth}},null,2),environment:null};
+    const environment=template.usesEnvKey
+      ? os==='windows'?`setx LIFIC_API_KEY "${key}"`:`export LIFIC_API_KEY="${key}"`
+      : null;
+    const environmentNote=template.usesEnvKey
+      ? os==='windows'?'setx applies to new terminals. Reopen your terminal after setting the key.':os==='mac'
+        ? 'This sets the key for the current shell. Add the command to ~/.zshrc to keep it. '
+        : 'This sets the key for the current shell. Add the command to ~/.bashrc or ~/.profile to keep it.'
+      : null;
+    return {name:template.name,path:template.path[os]??null,paths:template.path,os,instructions:template.instructions,commands:template.commands||[],config:template.config,environment,environmentNote};
+  }
 
   function controller(env) {
     const state = {busy:false, error:'', instance:null, user:null, keys:[], bots:[], users:[], settings:null,
@@ -29,12 +69,14 @@
       return true;
     };
     const loadAccountData = async () => {
+      if(!state.instance) await loadInstance();
       const [keys, bots] = await Promise.all([api('/auth/keys'), api('/auth/bots')]);
       update({keys:done(keys) ?? [], bots:done(bots) ?? [], sectionError:!keys.ok ? keys.error : (!bots.ok ? bots.error : '')});
       return keys.ok && bots.ok;
     };
     const loadAdmin = async () => {
       if (!state.user?.is_admin) return false;
+      if(!state.instance) await loadInstance();
       const [settings, users] = await Promise.all([api('/instance/settings'), api('/users')]);
       if (settings.ok) update({settings:settings.data});
       if (users.ok) update({users:users.data});
@@ -78,17 +120,17 @@
       const result = await send('/auth/keys', 'POST', {name:name.trim()});
       if (result.ok) {
         const value=result.data.key;
-        update({secret:{kind:'API key',value,config:JSON.stringify({mcpServers:{lific:{url:`${globalThis.location.origin}/mcp`,headers:{Authorization:`Bearer ${value}`}}}},null,2)}});
+        update({secret:{kind:'API key',value,toolId:'custom',...toolSetup('custom',globalThis.location.origin,value,env.os||'linux')}});
         await loadAccountData();
       }
       return result;
     });
     const revokeKey = id => send(`/auth/keys/${encodeURIComponent(id)}`, 'DELETE');
-    const connectBot = tool => runSensitive(async () => {
-      const result = await send('/auth/bots', 'POST', {tool});
+    const connectBot = (tool, displayName='') => runSensitive(async () => {
+      const result = await send('/auth/bots', 'POST', {tool,...(displayName.trim()?{display_name:displayName.trim()}: {})});
       if (result.ok) {
         const value=result.data.key;
-        update({secret:{kind:'Connected tool key',value,config:JSON.stringify({mcpServers:{[tool]:{url:`${globalThis.location.origin}/mcp`,headers:{Authorization:`Bearer ${value}`}}}},null,2)}});
+        update({secret:{kind:'Connected tool key',value,toolId:tool,...toolSetup(tool,globalThis.location.origin,value,env.os||'linux')}});
         await loadAccountData();
       }
       return result;
@@ -132,21 +174,37 @@
     const reauthenticate = async password => {
       const pending = state.pendingAction;
       if (!pending) return {ok:false, error:'There is no pending action.'};
-      const refreshed = await send('/auth/me/refresh', 'POST', password ? {password} : {});
+      if(!state.instance) await loadInstance();
+      const passwordless=state.instance?.web_auto_login===true||state.instance?.auth_required===false;
+      const refreshed = await send('/auth/me/refresh', 'POST', passwordless ? undefined : (password ? {password} : {}));
       if (!refreshed.ok) return refreshed;
       env.session.saveSession(refreshed.data.token);
-      const retry = pending.kind === 'settings'
-        ? await send('/instance/settings', 'PATCH', state.pendingPatch)
-        : await pending.action();
-      if (retry.ok) {
-        update({pendingAction:null, pendingPatch:{}, sectionError:''});
-        if (pending.kind === 'settings') update({settings:retry.data});
-        else await loadAdmin();
-      } else {
-        update({pendingAction:recentAuth(retry) ? pending : null,
-          sectionError:recentAuth(retry) ? 'Sign in again, then retry this action.' : retry.error});
+      if(pending.kind!=='settings') {
+        const retry=await pending.action();
+        if(retry.ok){update({pendingAction:null,pendingPatch:{},sectionError:''});await loadAccountData();await loadAdmin();}
+        else update({pendingAction:recentAuth(retry)?pending:null,sectionError:recentAuth(retry)?'Sign in again, then retry this action.':retry.error});
+        return retry;
       }
-      return retry;
+      for (;;) {
+        const patch={...state.pendingPatch};
+        state.pendingPatch={};
+        const retry=await send('/instance/settings','PATCH',patch);
+        if(!retry.ok) {
+          update({pendingAction:recentAuth(retry)?pending:null,pendingPatch:recentAuth(retry)?{...patch,...state.pendingPatch}:{},
+          sectionError:recentAuth(retry)?'Sign in again, then retry this change.':retry.error});
+        if(!recentAuth(retry)) {
+          const error=retry.error;
+          await loadAdmin();
+          update({sectionError:error});
+        }
+          return retry;
+        }
+        update({settings:retry.data,sectionError:''});
+        if(Object.keys(state.pendingPatch).length===0) {
+          update({pendingAction:null,pendingPatch:{}});
+          return retry;
+        }
+      }
     };
     const appearance = () => {
       const defaults={theme:'system',accent:'indigo',density:'comfortable',fontScale:'normal',motion:'system'};
@@ -227,7 +285,9 @@
       <label>New password<input name="next" type="password" autocomplete="new-password" minlength="8" required></label><button class="tc-button" type="submit">Change password</button><p data-password-result role="status"></p></form></section>
       <section><h2>API keys</h2><form data-key><label>Key name<input name="name" required maxlength="80"></label><button class="tc-button" type="submit">Create key</button></form>
       ${s.keys.map(key=>`<p>${escapeHtml(key.name)} · ${escapeHtml(key.created_at)} ${key.revoked?'· Revoked':`<button class="tc-button" data-revoke-key="${escapeHtml(key.id)}">Revoke</button>`}</p>`).join('')}</section>
-      <section><h2>Connected tools</h2><form data-bot><label>Tool ID<input name="tool" placeholder="codex" pattern="[A-Za-z0-9_-]{1,48}" required></label><button class="tc-button" type="submit">Connect tool</button></form>
+      <section><h2>Connected tools</h2><form data-bot><label>Client template<select name="tool"><option value="codex">Codex</option><option value="vscode">VS Code</option><option value="zed">Zed</option><option value="opencode">OpenCode</option><option value="cursor">Cursor</option><option value="claude-code">Claude Code</option><option value="claude">Claude Desktop</option><option value="pi">Pi</option><option value="custom">Custom HTTP MCP client</option></select></label>
+      <label data-custom-tool hidden>Custom tool ID<input name="custom_tool" placeholder="my-agent" pattern="[A-Za-z0-9_-]{1,48}"></label><label>Display name (optional)<input name="display_name" maxlength="80"></label>
+      <button class="tc-button" type="submit">Connect tool</button></form>
       ${s.bots.map(bot=>`<p>${escapeHtml(bot.display_name || bot.username)} · ${bot.connected?'Connected':'Disconnected'}
       ${bot.connected?`<button class="tc-button" data-bot-action="disconnect" data-id="${escapeHtml(bot.id)}">Disconnect</button>`:''}
       <button class="tc-button" data-bot-action="delete" data-id="${escapeHtml(bot.id)}">Delete</button></p>`).join('')}</section>
@@ -241,11 +301,13 @@
     });
     root.querySelector('[data-password]')?.addEventListener('submit', async e => {
       e.preventDefault(); const form=e.currentTarget,d=new FormData(form),out=await app.changePassword(d.get('current'),d.get('next'));
-      root.querySelector('[data-password-result]').textContent=out.ok?'Password changed. Other sessions and connected tools were revoked.':out.error;
-      if(out.ok) form.reset();
+      if(out.ok) {form.reset();renderSettings(root,app);root.querySelector('[data-password-result]').textContent='Password changed. Other sessions and connected tools were revoked.';}
+      else root.querySelector('[data-password-result]').textContent=out.error;
     });
     root.querySelector('[data-key]')?.addEventListener('submit', async e => {e.preventDefault(); const d=new FormData(e.currentTarget),out=await app.createKey(d.get('name')); if(!out.ok&&!out.pending) alert(out.error); else if(out.pending) renderSettings(root,app); else showSecret(root,app);});
-    root.querySelector('[data-bot]')?.addEventListener('submit', async e => {e.preventDefault(); const d=new FormData(e.currentTarget),out=await app.connectBot(d.get('tool')); if(!out.ok&&!out.pending) alert(out.error); else if(out.pending) renderSettings(root,app); else showSecret(root,app);});
+    const botForm=root.querySelector('[data-bot]');
+    botForm?.querySelector('[name=tool]')?.addEventListener('change',event=>{botForm.querySelector('[data-custom-tool]').hidden=event.currentTarget.value!=='custom';});
+    botForm?.addEventListener('submit', async e => {e.preventDefault(); const d=new FormData(botForm),tool=d.get('tool')==='custom'?d.get('custom_tool'):d.get('tool'),out=await app.connectBot(tool,d.get('display_name')); if(!out.ok&&!out.pending) alert(out.error); else if(out.pending) renderSettings(root,app); else showSecret(root,app);});
     root.querySelectorAll('[data-revoke-key]').forEach(button => button.addEventListener('click', async () => {
       if(confirm('Revoke this API key?')) {const out=await app.revokeKey(button.dataset.revokeKey); if(!out.ok) alert(out.error); await app.loadAccountData(); renderSettings(root,app);}
     }));
@@ -258,32 +320,78 @@
     root.querySelectorAll('[data-pref]').forEach(select => select.addEventListener('change', () => app.saveAppearance(select.dataset.pref, select.value)));
     root.querySelector('[data-reauth]')?.addEventListener('submit', async e=>{
       e.preventDefault(); const password=new FormData(e.currentTarget).get('password'), out=await app.reauthenticate(password);
-      if(out.ok){await app.loadAccountData();renderSettings(root,app);}
+      if(out.ok){await app.loadAccountData();renderSettings(root,app);if(app.state.secret)showSecret(root,app);}
       else {const error=root.querySelector('[data-reauth-error]');if(error)error.textContent=out.error;}
     });
     root.querySelector('[data-cancel-reauth]')?.addEventListener('click',()=>{app.state.pendingAction=null;app.state.pendingPatch={};renderSettings(root,app);});
   }
 
   function envNavigate(app, path) { app.logout ? app.logout() : location.assign(path); }
+  async function copyText(value) {
+    try {
+      if(globalThis.navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch {}
+    const focused=document.activeElement;
+    let textarea;
+    try {
+      textarea=document.createElement('textarea');
+      textarea.value=value;
+      textarea.setAttribute('readonly','');
+      textarea.style.position='fixed';
+      textarea.style.left='-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      return document.execCommand('copy')===true;
+    } catch {
+      return false;
+    } finally {
+      textarea?.remove();
+      focused?.focus();
+    }
+  }
+
   function showSecret(root, app) {
     const secret = app.state.secret, node = root.querySelector('[data-secret]');
     if (!secret || !node) return;
     node.hidden = false;
-    node.innerHTML = `<h3>${escapeHtml(secret.kind)} (shown once)</h3><code>${escapeHtml(secret.value)}</code><button class="tc-button" data-copy-secret>Copy key</button>
-      ${secret.config?`<pre><code>${escapeHtml(secret.config)}</code></pre><button class="tc-button" data-copy-config>Copy client configuration</button>`:''}`;
-    node.querySelector('[data-copy-secret]').addEventListener('click', async () => {
-      await navigator.clipboard.writeText(secret.value); node.querySelector('[data-copy-secret]').textContent = 'Copied';
-    });
-    node.querySelector('[data-copy-config]')?.addEventListener('click', async () => {
-      await navigator.clipboard.writeText(secret.config); node.querySelector('[data-copy-config]').textContent='Copied';
+    node.innerHTML = `<h3>${escapeHtml(secret.kind)} · ${escapeHtml(secret.name||'Custom MCP client')} (shown once)</h3>
+      ${secret.paths?`<label>Operating system<select data-secret-os>${Object.keys(secret.paths).filter(os=>secret.paths[os]).map(os=>`<option value="${os}" ${secret.os===os?'selected':''}>${os==='mac'?'macOS':os[0].toUpperCase()+os.slice(1)}</option>`).join('')}</select></label>`:''}
+      ${secret.path?`<p>Configuration file: <code>${escapeHtml(secret.path)}</code></p>`:''}
+      <p>${escapeHtml(secret.instructions||'')}</p><code data-secret-value>${escapeHtml(secret.value)}</code><button class="tc-button" data-copy-secret>Copy key</button>
+      ${(secret.commands||[]).map((command,index)=>`<pre><code data-setup-command>${escapeHtml(command)}</code></pre><button class="tc-button" data-copy-command="${index}">Copy setup command</button>`).join('')}
+      ${secret.environment?`<p>${escapeHtml(secret.environmentNote||'Set this key in your shell environment.')}</p><pre><code>${escapeHtml(secret.environment)}</code></pre><button class="tc-button" data-copy-environment>Copy environment command</button>`:''}
+      ${secret.config?`<pre><code data-client-config>${escapeHtml(secret.config)}</code></pre><button class="tc-button" data-copy-config>Copy client configuration</button>`:''}
+      <p data-copy-result role="status" hidden></p>`;
+    const bindCopy=(button,value)=>{
+      if(!button)return;
+      const label=button.textContent;
+      button.addEventListener('click',async()=>{
+        const copied=await copyText(value),result=node.querySelector('[data-copy-result]');
+        button.textContent=copied?'Copied':label;
+        result.hidden=false;
+        result.setAttribute('role',copied?'status':'alert');
+        result.textContent=copied?'Copied to clipboard.':"Couldn't copy to clipboard. Select the text and copy it manually.";
+      });
+    };
+    bindCopy(node.querySelector('[data-copy-secret]'),secret.value);
+    bindCopy(node.querySelector('[data-copy-config]'),secret.config);
+    bindCopy(node.querySelector('[data-copy-environment]'),secret.environment);
+    node.querySelectorAll('[data-copy-command]').forEach(button=>bindCopy(button,secret.commands[Number(button.dataset.copyCommand)]));
+    node.querySelector('[data-secret-os]')?.addEventListener('change',event=>{
+      const details=toolSetup(secret.toolId,globalThis.location.origin,secret.value,event.currentTarget.value);
+      Object.assign(secret,details);showSecret(root,app);
     });
   }
 
   function renderReauth(root, app) {
     const state = app.state;
     if (!state.pendingAction) return '';
-    return `<section class="tc-identity__reauth"><h2>Confirm your identity</h2><p>This action needs a recent sign-in. Enter your password to continue.</p>
-      <form data-reauth><label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    const passwordless=state.instance?.web_auto_login===true;
+    return `<section class="tc-identity__reauth"><h2>Confirm your identity</h2><p>This action needs a recent sign-in. ${passwordless?'Continue to refresh your passwordless session.':'Enter your password to continue.'}</p>
+      <form data-reauth>${passwordless?'':'<label>Password<input name="password" type="password" autocomplete="current-password" required></label>'}
       <button class="tc-button" type="submit">Confirm and continue</button><button class="tc-button" type="button" data-cancel-reauth>Cancel</button><p role="alert" data-reauth-error></p></form></section>`;
   }
 
@@ -311,9 +419,9 @@
       void app.saveSettings({[key]:value}).then(out=>{if(!out.ok&&!out.pending) renderInstance(root,app); else if(app.state.pendingAction) renderInstance(root,app);});
     }));
     root.querySelector('[data-create-user]')?.addEventListener('submit',async e=>{
-      e.preventDefault();const d=new FormData(e.currentTarget),out=await app.createUser(d.get('username'),d.get('password'),d.get('email'));
+      e.preventDefault();const form=e.currentTarget,d=new FormData(form),out=await app.createUser(d.get('username'),d.get('password'),d.get('email'));
       root.querySelector('[data-create-result]').textContent=out.ok?'Account created.':out.pending?'Confirm your identity to create this account.':out.error;
-      if(out.ok){e.currentTarget.reset();await app.loadAdmin();renderInstance(root,app);}
+      if(out.ok){form.reset();await app.loadAdmin();renderInstance(root,app);}
       else if(out.pending)renderInstance(root,app);
     });
     root.querySelectorAll('[data-user-action]').forEach(button=>button.addEventListener('click',async()=>{
@@ -332,7 +440,7 @@
   async function attach(root, env={}) {
     const mode=root?.dataset.topcoatIdentity, session=env.session||globalThis.lificSession;
     if(!root||!session||!['login','signup','settings','instance'].includes(mode))return null;
-    const app=controller({session,navigate:path=>env.navigate?env.navigate(path):globalThis.location.assign(path),preferences:env.preferences||globalThis.LificTopcoatPreferences});
+    const app=controller({session,navigate:path=>env.navigate?env.navigate(path):globalThis.location.assign(path),preferences:env.preferences||globalThis.LificTopcoatPreferences,os:env.os||detectOs(globalThis.navigator)});
     const status=root.querySelector('[data-identity-status]'), content=root.querySelector('[data-identity-content]');
     root._app=app;
     root.setAttribute('aria-busy','true');
@@ -363,7 +471,7 @@
     return app;
   }
 
-  const testApi = {controller, validUsername, validEmail, recentAuth, renderAuth, renderSettings, renderInstance, attach};
+  const testApi = {controller, validUsername, validEmail, recentAuth, toolSetup, detectOs, renderAuth, renderSettings, renderInstance, attach, showSecret};
   globalThis.LificTopcoatIdentity = testApi;
   if (typeof document !== 'undefined') {
     const root=document.querySelector('[data-topcoat-identity]');
