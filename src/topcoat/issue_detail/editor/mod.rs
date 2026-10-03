@@ -19,6 +19,15 @@ pub(crate) fn editor(cx: &Cx) -> BoxView<'_> {
                 <button class="tc-button" type="button" data-editor-preview-toggle="" aria-pressed="false">"Preview"</button>
                 <button class="tc-button" type="button" data-editor-save="" disabled="disabled">"Save"</button>
             </div>
+            <section class="tc-issue-editor__attachments" data-editor-attachments="" aria-label="Description attachments">
+                <form data-attachment-upload="">
+                    <label>"Attach files "<input type="file" multiple="multiple" data-attachment-files="" /></label>
+                    <button class="tc-button" type="submit">"Upload"</button>
+                    <button class="tc-button" type="button" data-attachment-cancel="" hidden="hidden">"Cancel"</button>
+                    <progress data-attachment-progress="" max="1" value="0" hidden="hidden" aria-label="Upload progress"></progress>
+                    <p data-attachment-status="" role="status"></p>
+                </form>
+            </section>
             <p class="tc-issue-editor__status" data-editor-status="" role="status" aria-live="polite">"Saved"</p>
             <p class="tc-issue-editor__error" data-editor-error="" role="alert" hidden="hidden"></p>
             <section class="tc-issue-editor__conflict" data-editor-conflict="" hidden="hidden" aria-live="assertive">

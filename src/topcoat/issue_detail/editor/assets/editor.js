@@ -5,23 +5,24 @@
   function createSaveQueue({text = '', savedDescription = '', expectedSeq = 0, debounceMs = 650, save, onChange = () => {}}) {
     let current = String(text), saved = String(savedDescription), seq = Number(expectedSeq);
     let dirty = current !== saved, conflict = false, error = '', timer = null, running = null;
-    let requested = false, revision = 0, disposed = false;
+    let requested = false, revision = 0, disposed = false, blocked = false;
 
     function state() {return {text: current, savedDescription: saved, dirty, expectedSeq: seq, conflict, error};}
     function changed() {onChange(state());}
     function schedule() {
-      if (debounceMs < 0 || disposed || !dirty || conflict || requested) return;
+      if (debounceMs < 0 || disposed || blocked || !dirty || conflict || requested) return;
       clearTimeout(timer);
       timer = setTimeout(() => {timer = null; flush();}, debounceMs);
     }
     function edit(next) {
       current = String(next); revision++; dirty = current !== saved; error = '';
+      conflict = conflict && dirty;
       schedule();
       changed();
       return state();
     }
     async function drain() {
-      while (!disposed && requested && dirty && !conflict) {
+      while (!disposed && !blocked && requested && dirty && !conflict) {
         requested = false;
         const sent = current, sentRevision = revision, sentSeq = seq;
         error = '';
@@ -31,7 +32,7 @@
           if (result?.status === 'conflict') {
             saved = String(result.currentDescription ?? result.current_description ?? saved);
             seq = Math.max(seq, Number(result.expectedSeq ?? result.expected_seq ?? seq));
-            dirty = current !== saved; conflict = true; requested = false;
+            dirty = current !== saved; conflict = dirty; requested = false;
             changed();
             break;
           }
@@ -57,7 +58,7 @@
     }
     function flush() {
       clearTimeout(timer); timer = null;
-      if (disposed || !dirty) return Promise.resolve(state());
+      if (disposed || blocked || !dirty) return Promise.resolve(state());
       conflict = false;
       requested = true;
       changed();
@@ -74,12 +75,30 @@
         if (nextSaved !== undefined) saved = String(nextSaved);
         if (nextText !== undefined && (!dirty || String(nextText) === current)) current = String(nextText);
         dirty = current !== saved;
+        conflict = conflict && dirty;
       }
       changed();
       return state();
     }
+    function setBlocked(value) {
+      if (disposed) return state();
+      blocked = !!value;
+      if (blocked) {clearTimeout(timer); timer = null;}
+      else schedule();
+      changed();
+      return state();
+    }
+    function setConflict({currentDescription, current_description, expectedSeq, expected_seq} = {}) {
+      if (disposed) return state();
+      saved = String(currentDescription ?? current_description ?? saved);
+      seq = Math.max(seq, Number(expectedSeq ?? expected_seq ?? seq));
+      dirty = current !== saved; conflict = dirty; requested = false;
+      clearTimeout(timer); timer = null;
+      changed();
+      return state();
+    }
     function dispose() {disposed = true; requested = false; clearTimeout(timer); timer = null;}
-    return {edit, flush, state, setCanonical, dispose};
+    return {edit, flush, state, setCanonical, setBlocked, setConflict, dispose};
   }
 
   function appendInline(parent, source) {
@@ -89,24 +108,26 @@
       if (match.index > offset) parent.append(document.createTextNode(source.slice(offset, match.index)));
       const [, image, label, rawUrl, title, bold, boldAlt, code, italic, italicAlt] = match;
       if (rawUrl) {
-        let url;
-        try {url = new URL(rawUrl, document.baseURI);} catch {_text(parent, match[0]); offset = pattern.lastIndex; continue;}
-        if (!['http:', 'https:', 'mailto:'].includes(url.protocol) && !rawUrl.startsWith('/') && !rawUrl.startsWith('#')) {
+        const attachment = rawUrl.match(/^\/api\/attachments\/(\d+)$/);
+        let url = null;
+        if (attachment) {
+          if (typeof globalThis.lificSession?.resolve === 'function') {
+            const resolved = globalThis.lificSession.resolve(`/attachments/${attachment[1]}`);
+            if (['private', 'public'].includes(resolved?.kind) && typeof resolved.url === 'string') {
+              try {url = new URL(resolved.url, document.baseURI);} catch {url = null;}
+            }
+          }
+        } else {
+          try {url = new URL(rawUrl, document.baseURI);} catch {url = null;}
+        }
+        const validLink = url && ['http:', 'https:', 'mailto:'].includes(url.protocol);
+        const validMedia = url && ['http:', 'https:'].includes(url.protocol);
+        if ((!validMedia && image) || (!validLink && !image)) {
           _text(parent, match[0]); offset = pattern.lastIndex; continue;
         }
         if (image) {
-          if (!['http:', 'https:'].includes(url.protocol)) {
-            _text(parent, match[0]); offset = pattern.lastIndex; continue;
-          }
-          const attachment = rawUrl.match(/^\/api\/attachments\/(\d+)$/);
-          if (attachment && typeof globalThis.lificSession?.resolve === 'function') {
-            const resolved = globalThis.lificSession.resolve(`/attachments/${attachment[1]}`);
-            if (!['private', 'public'].includes(resolved?.kind) || typeof resolved.url !== 'string') {
-              _text(parent, match[0]); offset = pattern.lastIndex; continue;
-            }
-            url = new URL(resolved.url, document.baseURI);
-          }
-          if (!['http:', 'https:'].includes(url.protocol)) {
+          const session = globalThis.lificSession;
+          if (session?.state?.publicProject != null && !attachment) {
             _text(parent, match[0]); offset = pattern.lastIndex; continue;
           }
           const imageNode = document.createElement('img');
@@ -133,6 +154,107 @@
   }
   function _text(parent, text) {parent.append(document.createTextNode(text));}
 
+  function listMarker(line) {
+    const match = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (!match) return null;
+    const indent = match[1].replace(/\t/g, '    ').length;
+    return {indent, ordered: /^\d/.test(match[2]), content: match[3]};
+  }
+
+  function parseList(container, lines, start) {
+    const first = listMarker(lines[start]);
+    const list = document.createElement(first.ordered ? 'ol' : 'ul');
+    let index = start;
+    while (index < lines.length) {
+      const marker = listMarker(lines[index]);
+      if (!marker || marker.indent !== first.indent || marker.ordered !== first.ordered) break;
+      const item = document.createElement('li');
+      const task = marker.content.match(/^\[([ xX])\]\s+(.*)$/);
+      if (task) {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox'; checkbox.disabled = true;
+        checkbox.checked = task[1].toLowerCase() === 'x';
+        checkbox.setAttribute('aria-label', checkbox.checked ? 'Completed task' : 'Incomplete task');
+        item.append(checkbox);
+        appendInline(item, task[2]);
+      } else appendInline(item, marker.content);
+      index++;
+      while (index < lines.length) {
+        const nested = listMarker(lines[index]);
+        if (nested && nested.indent > first.indent) {
+          index = parseList(item, lines, index);
+          continue;
+        }
+        if (!lines[index].trim()) {
+          const following = listMarker(lines[index + 1] || '');
+          if (following && following.indent > first.indent) {index++; continue;}
+          break;
+        }
+        const indent = lines[index].match(/^\s*/)[0].replace(/\t/g, '    ').length;
+        if (indent <= first.indent) break;
+        item.append(document.createElement('br'));
+        appendInline(item, lines[index].trim());
+        index++;
+      }
+      list.append(item);
+    }
+    container.append(list);
+    return index;
+  }
+
+  function tableCells(line) {
+    let value = line.trim();
+    if (value.startsWith('|')) value = value.slice(1);
+    if (value.endsWith('|') && !value.endsWith('\\|')) value = value.slice(0, -1);
+    const cells = [];
+    let current = '', escaped = false;
+    for (const character of value) {
+      if (character === '|' && !escaped) {cells.push(current.trim()); current = '';}
+      else if (character === '\\' && !escaped) {current += character; escaped = true; continue;}
+      else {current += character; escaped = false;}
+      escaped = false;
+    }
+    cells.push(current.trim());
+    return cells;
+  }
+
+  function tableSeparator(line) {
+    const cells = tableCells(line);
+    return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+  }
+
+  function parseTable(container, lines, start) {
+    const headers = tableCells(lines[start]);
+    const separators = tableCells(lines[start + 1]);
+    if (headers.length !== separators.length || !tableSeparator(lines[start + 1])) return null;
+    const table = document.createElement('table');
+    table.className = 'tc-issue-editor__table';
+    const alignments = separators.map(cell => cell.startsWith(':') && cell.endsWith(':') ? 'center'
+      : cell.endsWith(':') ? 'right' : cell.startsWith(':') ? 'left' : '');
+    const head = document.createElement('thead'), headerRow = document.createElement('tr');
+    headers.forEach((text, index) => {
+      const cell = document.createElement('th');
+      cell.scope = 'col';
+      if (alignments[index]) cell.style.textAlign = alignments[index];
+      appendInline(cell, text); headerRow.append(cell);
+    });
+    head.append(headerRow); table.append(head);
+    const body = document.createElement('tbody');
+    let index = start + 2;
+    while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+      const values = tableCells(lines[index]);
+      const row = document.createElement('tr');
+      headers.forEach((_, column) => {
+        const cell = document.createElement('td');
+        if (alignments[column]) cell.style.textAlign = alignments[column];
+        appendInline(cell, values[column] || ''); row.append(cell);
+      });
+      body.append(row); index++;
+    }
+    table.append(body); container.append(table);
+    return index;
+  }
+
   function renderMarkdown(container, source) {
     container.replaceChildren();
     const lines = String(source).replace(/\r\n?/g, '\n').split('\n');
@@ -147,22 +269,31 @@
         const pre = document.createElement('pre'), codeNode = document.createElement('code');
         codeNode.textContent = code.join('\n'); pre.append(codeNode); container.append(pre); continue;
       }
-      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
       if (heading) {
         const node = document.createElement(`h${heading[1].length}`); appendInline(node, heading[2]); container.append(node); i++; continue;
       }
       if (/^>\s?/.test(line)) {
         const quote = document.createElement('blockquote'); appendInline(quote, line.replace(/^>\s?/, '')); container.append(quote); i++; continue;
       }
-      if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
-        const ordered = /^\s*\d+[.)]\s+/.test(line), list = document.createElement(ordered ? 'ol' : 'ul');
-        while (i < lines.length && (ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/).test(lines[i])) {
-          const item = document.createElement('li'); appendInline(item, lines[i].replace(ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/, '')); list.append(item); i++;
-        }
-        container.append(list); continue;
+      if (lines[i + 1] && line.includes('|') && tableSeparator(lines[i + 1])) {
+        const next = parseTable(container, lines, i);
+        if (next > i) {i = next; continue;}
+        const malformed = document.createElement('p');
+        appendInline(malformed, line);
+        malformed.append(document.createElement('br'));
+        appendInline(malformed, lines[i + 1]);
+        container.append(malformed);
+        i += 2;
+        continue;
+      }
+      if (listMarker(line)) {
+        i = parseList(container, lines, i);
+        continue;
       }
       const paragraph = document.createElement('p');
-      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|>\s?|```|\s*[-*+]\s+|\s*\d+[.)]\s+)/.test(lines[i])) {
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|>\s?|```)/.test(lines[i])
+        && !listMarker(lines[i]) && !(lines[i + 1] && lines[i].includes('|') && tableSeparator(lines[i + 1]))) {
         if (paragraph.childNodes.length) paragraph.append(document.createElement('br'));
         appendInline(paragraph, lines[i++]);
       }
@@ -181,9 +312,14 @@
     const serverNode = root.querySelector('[data-editor-server-value]'), statusNode = root.querySelector('[data-editor-status]');
     const saveButton = root.querySelector('[data-editor-save]'), editButton = root.querySelector('[data-editor-edit]');
     const previewButton = root.querySelector('[data-editor-preview-toggle]');
+    const attachmentRoot = root.querySelector('[data-editor-attachments]');
+    const uploadForm = attachmentRoot?.querySelector('[data-attachment-upload]');
+    const uploadInput = uploadForm?.querySelector('[data-attachment-files]');
+    const uploadStatus = uploadForm?.querySelector('[data-attachment-status]');
     if (!input || !preview) return null;
     const pendingRequests = new Set();
-    let showingPreview = true, destroyed = false;
+    let showingPreview = true, destroyed = false, uploadBusy = false, uploadPoll = null;
+    let lastSelection = {start: input.value.length, end: input.value.length}, attachmentMount = null;
     function sameRoute(candidate) {
       return candidate?.issue_id === route.issue_id && candidate?.generation === route.generation;
     }
@@ -226,7 +362,8 @@
       if (input.value !== state.text) input.value = state.text;
       input.disabled = !capabilities.edit;
       saveButton.hidden = showingPreview;
-      saveButton.disabled = !capabilities.edit || !state.dirty;
+      saveButton.disabled = !capabilities.edit || !state.dirty || uploadBusy;
+      if (attachmentRoot) attachmentRoot.hidden = !capabilities.edit;
       if (errorNode) {errorNode.hidden = !state.error; errorNode.textContent = state.error;}
       if (conflictNode) conflictNode.hidden = !state.conflict;
       if (conflictMessage) conflictMessage.textContent = state.conflict ? 'This description changed on the server. Review the current version before saving your draft again.' : '';
@@ -240,13 +377,128 @@
       previewButton.setAttribute('aria-pressed', String(showingPreview));
       editButton.hidden = !capabilities.edit || !showingPreview;
     }
+    function rememberSelection() {
+      lastSelection = {start: input.selectionStart ?? input.value.length, end: input.selectionEnd ?? input.value.length};
+    }
+    function applyInputTransform(text, selectionStart, selectionEnd) {
+      input.value = text;
+      input.focus(); input.setSelectionRange(selectionStart, selectionEnd);
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+    function toggleInline(marker) {
+      const text = input.value, start = input.selectionStart, end = input.selectionEnd, width = marker.length;
+      if (start === end) {
+        const next = text.slice(0, start) + marker + marker + text.slice(end);
+        applyInputTransform(next, start + width, start + width);
+        return;
+      }
+      const selected = text.slice(start, end);
+      const nestedStrong = marker === '*' && text[start - 2] === '*' && text[end + 1] === '*';
+      if (!nestedStrong && text.slice(start - width, start) === marker && text.slice(end, end + width) === marker) {
+        applyInputTransform(text.slice(0, start - width) + selected + text.slice(end + width), start - width, end - width);
+      } else if (selected.length >= width * 2 && selected.startsWith(marker) && selected.endsWith(marker)) {
+        const inner = selected.slice(width, selected.length - width);
+        applyInputTransform(text.slice(0, start) + inner + text.slice(end), start, start + inner.length);
+      } else {
+        applyInputTransform(text.slice(0, start) + marker + selected + marker + text.slice(end), start + width, end + width);
+      }
+    }
+    function insertLink() {
+      const text = input.value, start = input.selectionStart, end = input.selectionEnd;
+      const selected = text.slice(start, end);
+      if (start === end) {
+        const insertion = '[link text](URL)';
+        const next = text.slice(0, start) + insertion + text.slice(end);
+        applyInputTransform(next, start + 1, start + 10);
+      } else {
+        const insertion = `[${selected}](URL)`;
+        const next = text.slice(0, start) + insertion + text.slice(end);
+        const urlStart = start + selected.length + 3;
+        applyInputTransform(next, urlStart, urlStart + 3);
+      }
+    }
+    function insertUploadedMarkdown(markdown) {
+      const text = input.value;
+      const start = Math.max(0, Math.min(text.length, lastSelection.start));
+      const end = Math.max(start, Math.min(text.length, lastSelection.end));
+      const before = text.slice(0, start), after = text.slice(end);
+      const prefix = before && !before.endsWith('\n') ? '\n' : '';
+      const suffix = after && !after.startsWith('\n') ? '\n' : '';
+      const caret = before.length + prefix.length + markdown.length;
+      input.value = `${before}${prefix}${markdown}${suffix}${after}`;
+      lastSelection = {start: caret, end: caret};
+      input.focus(); input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+    function stopUploadPolling() {
+      if (uploadPoll !== null) clearInterval(uploadPoll);
+      uploadPoll = null;
+    }
+    function finishUploadIfIdle() {
+      if (!uploadBusy || uploadInput?.disabled) return false;
+      stopUploadPolling(); uploadBusy = false; queue.setBlocked(false); renderState();
+      return true;
+    }
+    function pollUpload() {
+      if (uploadPoll !== null) return;
+      uploadPoll = setInterval(finishUploadIfIdle, 40);
+      finishUploadIfIdle();
+    }
+    function beforeUpload(event) {
+      if (!capabilities.edit) {event.preventDefault(); event.stopImmediatePropagation(); return;}
+      const state = queue.state();
+      if (state.conflict) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (uploadStatus) uploadStatus.textContent = 'Resolve the description conflict before uploading.';
+        return;
+      }
+      if (!state.dirty && !state.error && !state.conflict) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (uploadStatus) uploadStatus.textContent = 'Saving the description before upload…';
+      void queue.flush().then(after => {
+        if (destroyed) return;
+        if (after.dirty || after.error || after.conflict) {
+          if (uploadStatus) uploadStatus.textContent = after.conflict
+            ? 'Resolve the description conflict before uploading.'
+            : after.error || 'Save the description before uploading.';
+          return;
+        }
+        if (uploadStatus) uploadStatus.textContent = '';
+        uploadForm?.requestSubmit();
+      });
+    }
+    function afterUploadSubmit() {
+      if (!uploadInput?.disabled || !uploadInput.files?.length) return;
+      uploadBusy = true; queue.setBlocked(true); renderState(); pollUpload();
+    }
+    if (uploadForm && uploadInput && attachmentRoot && globalThis.LificTopcoatAttachments?.createClient && globalThis.LificTopcoatAttachments?.attach) {
+      uploadForm.addEventListener('submit', beforeUpload, true);
+      attachmentRoot.addEventListener('pointerdown', rememberSelection, true);
+      input.addEventListener('select', rememberSelection);
+      input.addEventListener('keyup', rememberSelection);
+      input.addEventListener('mouseup', rememberSelection);
+      input.addEventListener('blur', rememberSelection);
+      try {
+        const helper = globalThis.LificTopcoatAttachments;
+        const client = helper.createClient({session: globalThis.lificSession});
+        attachmentMount = helper.attach(attachmentRoot, {
+          client, target: {entity_type: 'issue', entity_id: Number(route.issue_id)},
+          onUploaded(_attachment, markdown) {insertUploadedMarkdown(markdown);},
+        });
+        uploadForm.addEventListener('submit', afterUploadSubmit);
+      } catch (error) {
+        if (uploadStatus) uploadStatus.textContent = `Attachments unavailable: ${error.message}`;
+      }
+    }
     input.addEventListener('input', () => {
       if (destroyed || !capabilities.edit) return;
       const text = input.value;
+      queue.edit(text);
+      rememberSelection();
       window.dispatchEvent(new CustomEvent('lific:issue-detail-intent', {detail: {
         route, action: {type: 'edit_description', description: text},
       }}));
-      queue.edit(text); renderState();
+      renderState();
     });
     const flush = async () => {if (!capabilities.edit) return; await queue.flush(); renderState();};
     saveButton.addEventListener('click', flush);
@@ -257,18 +509,39 @@
     });
     editButton.addEventListener('click', () => {showingPreview = false; renderState(); input.focus();});
     input.addEventListener('keydown', event => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (event.shiftKey && key === 'k') {
+          event.preventDefault(); event.stopPropagation();
+          insertLink();
+          return;
+        }
+        if (!event.shiftKey && (key === 'b' || key === 'i')) {
+          event.preventDefault();
+          const marker = key === 'b' ? '**' : '*';
+          toggleInline(marker);
+          return;
+        }
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {event.preventDefault(); flush();}
     });
     function update(next = {}) {
       if (destroyed) return;
       if (next.route && (next.route.issue_id !== route.issue_id || next.route.generation !== route.generation)) return;
       if (next.capabilities) capabilities = {...next.capabilities};
-      queue.setCanonical({text: next.text, savedDescription: next.saved_description, expectedSeq: next.expected_seq});
+      if (next.conflict) queue.setConflict(next.conflict);
+      else queue.setCanonical({text: next.text, savedDescription: next.saved_description, expectedSeq: next.expected_seq});
       renderState();
     }
     function dispose() {
       if (destroyed) return;
       destroyed = true; queue.dispose();
+      stopUploadPolling(); attachmentMount?.dispose();
+      uploadForm?.removeEventListener('submit', beforeUpload, true);
+      uploadForm?.removeEventListener('submit', afterUploadSubmit);
+      attachmentRoot?.removeEventListener('pointerdown', rememberSelection, true);
+      input.removeEventListener('select', rememberSelection); input.removeEventListener('keyup', rememberSelection);
+      input.removeEventListener('mouseup', rememberSelection); input.removeEventListener('blur', rememberSelection);
       for (const cancel of [...pendingRequests]) cancel();
     }
     input.value = props.text ?? ''; renderState();

@@ -15,12 +15,19 @@ shows a retryable error. Route generations and edit revisions filter stale
 completions.
 
 The preview creates DOM nodes and text nodes directly. It supports common
-headings, paragraphs, lists, quotes, code, emphasis, safe links, and images.
-Attachment image URLs are resolved through the active session so public project
-scope is preserved. Raw HTML and mention-looking text remain text and are never
-inserted as markup.
+headings, paragraphs, GFM tables, nested and task lists, quotes, code, emphasis,
+safe links, and images. Attachment links and images are resolved through the
+active session, and public scope blocks remote images. Raw HTML and
+mention-looking text remain text and are never inserted as markup.
+
+Description attachments use the shared attachment client and uploader. Uploads
+start only after the current description is saved. Their generated markdown
+replaces the remembered textarea selection, and description saves stay paused
+until the upload queue finishes. Cmd/Ctrl+B and Cmd/Ctrl+I toggle emphasis;
+Cmd/Ctrl+Shift+K inserts a link and suppresses the command palette shortcut.
 
 The Node tests exercise debounce coalescing, serialization, flush ordering,
 conflict recovery, and edits made while a save is in flight. The headless
 Chromium tests cover the rendered editor, safe markdown images, autosave error
-rendering, and a newer draft queued behind an in-flight save.
+rendering, GFM structures, selection-aware attachment insertion, keyboard
+shortcuts, and a newer draft queued behind an in-flight save.

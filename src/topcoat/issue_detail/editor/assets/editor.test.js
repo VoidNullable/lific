@@ -1,6 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const editor = require('./editor.js');
+const fs = require('node:fs');
+const vm = require('node:vm');
 
 const deferred = () => {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no;}); return {promise, resolve, reject};};
 
@@ -74,4 +76,64 @@ test('editing back to the old baseline during a save queues it after acknowledge
   assert.deepEqual(calls, [['in flight', 3], ['saved', 4]]);
   assert.equal(queue.state().dirty, false);
   queue.dispose();
+});
+
+test('blocked saves retain the draft and resume debounce after attachment completion', async () => {
+  const calls = [];
+  const queue = editor.createSaveQueue({debounceMs: 10, save: async text => {calls.push(text); return {status: 'applied', description: text};}});
+  queue.edit('with attachment');
+  queue.setBlocked(true);
+  await queue.flush();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(calls, []);
+  queue.setBlocked(false);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(calls, ['with attachment']);
+  assert.equal(queue.state().dirty, false);
+  queue.dispose();
+});
+
+test('route conflict update preserves draft and blocks automatic saves', async () => {
+  const calls = [];
+  const queue = editor.createSaveQueue({text: 'draft', savedDescription: 'old', expectedSeq: 2, debounceMs: 10,
+    save: async (...args) => {calls.push(args); return {status: 'applied'};}});
+  queue.setConflict({current_description: 'server', expected_seq: 5});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(queue.state(), {text: 'draft', savedDescription: 'server', dirty: true, expectedSeq: 5, conflict: true, error: ''});
+  assert.deepEqual(calls, []);
+  queue.dispose();
+});
+
+test('matching the server description resolves a conflict without another save', async () => {
+  const calls = [];
+  const queue = editor.createSaveQueue({text: 'draft', savedDescription: 'old', expectedSeq: 2, debounceMs: -1,
+    save: async (...args) => {calls.push(args); return {status: 'applied'};}});
+  queue.setConflict({current_description: 'server', expected_seq: 5});
+  queue.edit('still different');
+  assert.equal(queue.state().conflict, true);
+  queue.edit('server');
+  assert.deepEqual(queue.state(), {text: 'server', savedDescription: 'server', dirty: false, expectedSeq: 5, conflict: false, error: ''});
+  await queue.flush();
+  assert.deepEqual(calls, []);
+  queue.dispose();
+});
+
+test('a canonical update matching the draft resolves a conflict', () => {
+  const queue = editor.createSaveQueue({text: 'draft', savedDescription: 'old', expectedSeq: 2, debounceMs: -1, save: async () => {}});
+  queue.setConflict({current_description: 'server', expected_seq: 5});
+  queue.setCanonical({savedDescription: 'draft', expectedSeq: 6});
+  assert.equal(queue.state().dirty, false);
+  assert.equal(queue.state().conflict, false);
+  queue.dispose();
+});
+
+test('empty Markdown headings render and advance to the following paragraph', () => {
+  const node = tag => ({tag, childNodes: [], append(...children) {this.childNodes.push(...children);}, replaceChildren() {this.childNodes = [];}});
+  const preview = node('article');
+  const context = vm.createContext({module: {exports: {}}, document: {createElement: node, createTextNode: text => ({text})}, preview});
+  vm.runInContext(fs.readFileSync(`${__dirname}/editor.js`, 'utf8'), context);
+  vm.runInContext('module.exports.renderMarkdown(preview, "# \\n## \\n###\\t\\n###### \\nafter")', context, {timeout: 1000});
+  assert.deepEqual(preview.childNodes.map(child => child.tag), ['h1', 'h2', 'h3', 'h6', 'p']);
+  assert.equal(preview.childNodes.slice(0, 4).every(child => child.childNodes.length === 0), true);
+  assert.equal(preview.childNodes[4].childNodes[0].text, 'after');
 });

@@ -98,6 +98,38 @@ test('headless editor debounces rapid edits and flushes the next write in sequen
     } finally {await browser.close();}
   });
 
+test('headless editor preserves the caret when the route observes an already-dirty draft',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<section data-topcoat-issue-editor>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <p data-editor-status></p><p data-editor-error hidden></p>
+        <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
+        <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => {
+        window.addEventListener('lific:issue-detail-intent', event => {
+          const {route, action} = event.detail;
+          if (action.type === 'edit_description') window.editor.update({route,text:action.description,saved_description:'base',expected_seq:4});
+        });
+        window.editor = lificIssueEditor.mount(document.querySelector('[data-topcoat-issue-editor]'), {
+          route: {issue_id: 31, generation: 1}, text: 'base', saved_description: 'base',
+          expected_seq: 4, capabilities: {edit: true}, debounce_ms: 10000,
+        });
+      });
+      await page.locator('[data-editor-edit]').click();
+      const input = page.locator('[data-editor-input]');
+      await input.press('End'); await input.press('X');
+      await input.evaluate(node => node.setSelectionRange(2, 2));
+      await input.press('Y');
+      assert.equal(await input.inputValue(), 'baYseX');
+      assert.equal(await input.evaluate(node => node.selectionStart), 3);
+    } finally {await browser.close();}
+  });
+
 test('headless editor shows an autosave failure without another user action',
   {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
     const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
@@ -131,7 +163,7 @@ test('headless editor shows an autosave failure without another user action',
     } finally {await browser.close();}
   });
 
-test('headless editor shows an autosave conflict without another user action',
+test('headless editor resolves an autosave conflict when the draft matches the server and permits uploads',
   {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
     const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
     const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
@@ -141,9 +173,20 @@ test('headless editor shows an autosave conflict without another user action',
         <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
+        <section data-editor-attachments><form data-attachment-upload>
+          <input type="file" data-attachment-files><button type="submit">Upload</button>
+          <p data-attachment-status></p></form></section>
         <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
       await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
       await page.evaluate(() => {
+        window.uploadSubmissions = 0;
+        window.LificTopcoatAttachments = {
+          createClient() {return {};},
+          attach(root) {
+            root.querySelector('form').addEventListener('submit', event => {event.preventDefault(); uploadSubmissions++;});
+            return {dispose() {}};
+          },
+        };
         window.addEventListener('lific:issue-detail-intent', event => {
           const {route, action} = event.detail;
           if (action.type !== 'save_description') return;
@@ -161,6 +204,13 @@ test('headless editor shows an autosave conflict without another user action',
       await page.locator('[data-editor-conflict]').waitFor({state: 'visible'});
       assert.equal(await page.locator('[data-editor-server-value]').textContent(), 'server draft');
       assert.equal(await page.locator('[data-editor-input]').inputValue(), 'draft');
+      await page.locator('[data-attachment-upload]').evaluate(form => form.requestSubmit());
+      assert.equal(await page.evaluate(() => uploadSubmissions), 0);
+      await page.locator('[data-editor-input]').fill('server draft');
+      assert.equal(await page.locator('[data-editor-conflict]').isVisible(), false);
+      assert.equal(await page.locator('[data-editor-status]').textContent(), 'Saved');
+      await page.locator('[data-attachment-upload]').evaluate(form => form.requestSubmit());
+      assert.equal(await page.evaluate(() => uploadSubmissions), 1);
     } finally {await browser.close();}
   });
 
@@ -173,9 +223,9 @@ test('headless editor renders safe image markdown and scopes attachment URLs',
       await page.setContent('<base href="https://lific.local/"><article id="preview"></article>');
       await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
       await page.evaluate(() => {
-        window.lificSession = {resolve: path => ({kind: 'public', url: `/public/api/projects/LIF${path}`})};
+        window.lificSession = {state: {publicProject: 'LIF'}, resolve: path => ({kind: 'public', url: `/public/api/projects/LIF${path}`})};
         lificIssueEditor.renderMarkdown(document.querySelector('#preview'),
-          '![Screenshot](/api/attachments/9) ![Unsafe](javascript:alert(1))');
+          '![Screenshot](/api/attachments/9) ![External](https://tracker.invalid/pixel.png) ![Unsafe](javascript:alert(1))\n[Download](/api/attachments/9)');
       });
       const image = page.locator('#preview img');
       assert.equal(await image.count(), 1);
@@ -184,5 +234,150 @@ test('headless editor renders safe image markdown and scopes attachment URLs',
       assert.equal(await image.getAttribute('referrerpolicy'), 'no-referrer');
       assert.match(await image.getAttribute('src'), /\/public\/api\/projects\/LIF\/attachments\/9$/);
       assert.equal(await page.locator('#preview').textContent().then(text => text.includes('javascript:alert(1)')), true);
+      assert.match(await page.locator('#preview a').getAttribute('href'), /\/public\/api\/projects\/LIF\/attachments\/9$/);
+      assert.equal(await page.locator('#preview a').textContent(), 'Download');
+    } finally {await browser.close();}
+  });
+
+test('headless editor preserves GFM tables, task checkboxes, and nested lists',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<article id="preview"></article>');
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => lificIssueEditor.renderMarkdown(document.querySelector('#preview'), [
+        '| Item | State |', '| :--- | ---: |', '| **Desk** | ready |', '',
+        '- [x] finished', '- [ ] pending', '  - child', '    1. grandchild', '  - sibling',
+      ].join('\n')));
+      assert.equal(await page.locator('table thead th').count(), 2);
+      assert.equal(await page.locator('table tbody tr').count(), 1);
+      assert.equal(await page.locator('table tbody strong').textContent(), 'Desk');
+      assert.equal(await page.locator('ul input[type=checkbox]').count(), 2);
+      assert.equal(await page.locator('ul input[type=checkbox]').nth(0).isChecked(), true);
+      assert.equal(await page.locator('ul input[type=checkbox]').nth(1).isChecked(), false);
+      assert.equal(await page.locator('ul ul li').count(), 3);
+      assert.equal(await page.locator('ul ul ol li').textContent(), 'grandchild');
+    } finally {await browser.close();}
+  });
+
+test('headless editor advances past malformed tables with mismatched column counts',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(2000);
+      await page.setContent('<article id="preview"></article>');
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => lificIssueEditor.renderMarkdown(document.querySelector('#preview'), 'a | b\n--- | --- | ---\ncell | row'));
+      assert.equal(await page.locator('#preview').textContent(), 'a | b--- | --- | ---cell | row');
+    } finally {await browser.close();}
+  });
+
+test('headless editor formatting shortcuts preserve selection and suppress the palette on Shift+K',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<section data-topcoat-issue-editor>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <p data-editor-status></p><p data-editor-error hidden></p>
+        <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
+        <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => {
+        window.paletteCalls = 0;
+        window.addEventListener('keydown', event => {if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'k') paletteCalls++;});
+        lificIssueEditor.mount(document.querySelector('[data-topcoat-issue-editor]'), {
+          route: {issue_id: 31, generation: 1}, text: 'word', saved_description: 'word', capabilities: {edit: true}, debounce_ms: 10000,
+        });
+      });
+      await page.locator('[data-editor-edit]').click();
+      const input = page.locator('[data-editor-input]');
+      await input.evaluate(node => node.setSelectionRange(0, 4));
+      await input.press('Control+B');
+      assert.equal(await input.inputValue(), '**word**');
+      assert.equal(await input.evaluate(node => node.selectionStart === 2 && node.selectionEnd === 6), true);
+      await input.press('Control+I');
+      assert.equal(await input.inputValue(), '***word***');
+      await input.press('Control+Shift+K');
+      assert.equal(await input.inputValue(), '***[word](URL)***');
+      assert.equal(await input.evaluate(node => node.value.slice(node.selectionStart, node.selectionEnd)), 'URL');
+      assert.equal(await page.evaluate(() => paletteCalls), 0);
+    } finally {await browser.close();}
+  });
+
+test('headless editor inserts uploaded attachment markdown at the selection and gates saves',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<section data-topcoat-issue-editor>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <section data-editor-attachments><form data-attachment-upload>
+          <input type="file" data-attachment-files multiple><button type="submit">Upload</button>
+          <button type="button" data-attachment-cancel hidden>Cancel</button><progress data-attachment-progress hidden></progress>
+          <p data-attachment-status role="status"></p></form></section>
+        <p data-editor-status></p><p data-editor-error hidden></p>
+        <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
+        <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => {
+        window.lificSession = {state: {publicProject: null}, resolve: path => ({kind: 'private', url: `/api${path}`})};
+        window.uploadContract = null; window.saves = [];
+        window.LificTopcoatAttachments = {
+          createClient({session}) {return {session};},
+          attach(root, options) {
+            const form = root.querySelector('form'), input = root.querySelector('[data-attachment-files]');
+            const progress = root.querySelector('[data-attachment-progress]');
+            window.uploadContract = options;
+            form.addEventListener('submit', async event => {
+              event.preventDefault(); input.disabled = true; progress.hidden = false;
+              await new Promise(resolve => {window.finishUpload = resolve;});
+              await options.onUploaded({id: 17}, '![sample.png](/api/attachments/17)');
+              input.disabled = false; progress.hidden = true;
+            });
+            return {dispose() {}};
+          },
+        };
+        window.addEventListener('lific:issue-detail-intent', event => {
+          const {route, action} = event.detail;
+          if (action.type !== 'save_description') return;
+          saves.push(action);
+          setTimeout(() => dispatchEvent(new CustomEvent('lific:issue-detail-applied', {detail: {
+            route, kind: 'editor', description: action.description, expected_seq: action.expected_seq + 1,
+            edit_revision: action.edit_revision,
+          }})), 0);
+        });
+        window.editor = lificIssueEditor.mount(document.querySelector('[data-topcoat-issue-editor]'), {
+          route: {issue_id: 31, generation: 1}, text: 'one two', saved_description: 'one two',
+          expected_seq: 4, capabilities: {edit: true}, debounce_ms: 10000,
+        });
+      });
+      assert.equal(await page.evaluate(() => uploadContract.target.entity_type), 'issue');
+      assert.equal(await page.evaluate(() => uploadContract.target.entity_id), 31);
+      await page.locator('[data-editor-edit]').click();
+      const input = page.locator('[data-editor-input]');
+      await input.evaluate(node => {node.focus(); node.setSelectionRange(4, 7); node.dispatchEvent(new Event('select'));});
+      await page.locator('[data-attachment-files]').setInputFiles({name: 'sample.png', mimeType: 'image/png', buffer: Buffer.from('image')});
+      await page.locator('[data-attachment-upload]').evaluate(form => form.requestSubmit());
+      await page.locator('[data-attachment-progress]').waitFor({state: 'visible'});
+      assert.equal(await page.locator('[data-editor-save]').isDisabled(), true);
+      await input.focus(); await input.press('Control+S');
+      assert.equal(await page.evaluate(() => saves.length), 0);
+      await page.evaluate(() => finishUpload());
+      await page.waitForFunction(() => document.querySelector('[data-editor-input]').value === 'one \n![sample.png](/api/attachments/17)');
+      await page.locator('[data-attachment-files]').evaluate(async input => {
+        while (document.querySelector('[data-editor-save]').disabled) await new Promise(resolve => setTimeout(resolve, 10));
+      });
+      assert.equal(await page.locator('[data-editor-save]').isDisabled(), false);
+      assert.equal(await input.evaluate(node => node.selectionStart === node.selectionEnd), true);
+      await page.locator('[data-editor-save]').click();
+      await page.waitForFunction(() => saves.length === 1);
+      assert.match(await page.evaluate(() => saves[0].description), /!\[sample\.png\]\(\/api\/attachments\/17\)/);
     } finally {await browser.close();}
   });

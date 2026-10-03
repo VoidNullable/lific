@@ -1,5 +1,11 @@
 .tc-issue-editor { min-width: 0; color: var(--text, #20232a); }
 .tc-issue-editor__toolbar { display: flex; align-items: center; gap: .5rem; margin-block: .5rem; }
+.tc-issue-editor__attachments { margin-block: .75rem; }
+.tc-issue-editor__attachments form { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.tc-issue-editor__attachments [data-attachment-status] { flex-basis: 100%; margin: 0; }
+.tc-issue-editor__table { border-collapse: collapse; margin-block: .75rem; max-width: 100%; overflow: auto; }
+.tc-issue-editor__table th, .tc-issue-editor__table td { border: 1px solid var(--border, #d1d5db); padding: .35rem .55rem; text-align: start; }
+.tc-issue-editor__preview input[type="checkbox"] { margin-inline-end: .4rem; vertical-align: middle; }
 .tc-issue-editor__status { margin: .25rem 0; color: var(--text-muted, #6b7280); font-size: .8rem; }
 .tc-issue-editor__error { color: var(--danger, #b42318); }
 .tc-issue-editor__conflict { margin-block: .75rem; padding: .75rem; border: 1px solid var(--warning, #b54708); border-radius: .375rem; }
