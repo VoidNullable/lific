@@ -405,6 +405,10 @@ mod tests {
 
     #[test]
     fn shell_context_constructors_enforce_route_audience_and_project_identity() {
+        let auth_route = ParsedRoute::parse("/login");
+        let auth_context = ShellContext::auth(&auth_route).unwrap();
+        assert!(matches!(auth_context.principal(), ShellPrincipal::Auth));
+
         let route = ParsedRoute::parse("/public/LIF/issues");
         let context = ShellContext::public(&route).unwrap();
 
