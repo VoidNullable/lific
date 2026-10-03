@@ -17,13 +17,12 @@ toolchain. Topcoat 0.9.0 itself requires Rust 1.98 or newer.
 
 ## Local commands
 
-Enter the repository's devenv shell, then install the CLI matching the pinned
-Topcoat library version and format the Topcoat macro bodies:
+Use the Topcoat profile to install the CLI matching the pinned Topcoat library
+version and format the Topcoat macro bodies:
 
 ```sh
-devenv shell
-devenv tasks run lific:topcoat:install-cli
-devenv tasks run lific:topcoat:fmt
+devenv --profile topcoat tasks run lific:topcoat:install-cli
+devenv --profile topcoat tasks run lific:topcoat:fmt
 ```
 
 The install task uses `cargo install --locked --version 0.9.0 topcoat-cli` and
@@ -31,16 +30,17 @@ stores the executable under the devenv Cargo install root. The formatter task
 uses that executable directly, so it does not depend on an unrelated global
 Topcoat CLI.
 
-Build and run the opt-in app with:
+Build and run the opt-in app through the Topcoat profile, which disables Cargo's
+default Vite feature:
 
 ```sh
-cargo run --locked --features topcoat-spike -- start
+devenv --profile topcoat shell -- cargo run --locked --no-default-features --features topcoat-spike -- start
 ```
 
 The scaffold stylesheet is currently a static Topcoat route backed by
 `include_str!`, so it is embedded in the executable and does not need an asset
 directory. Its route and CSS response are exercised by the feature-gated test
-suite in devenv.
+suite with `devenv --profile topcoat tasks run lific:topcoat:test`.
 
 ## API adapter
 

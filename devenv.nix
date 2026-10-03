@@ -64,6 +64,19 @@ let
       root = ./.;
       fileset = lib.fileset.unions paths;
     };
+  disabledTopcoatTask = message: {
+    before = lib.mkForce [ ];
+    after = lib.mkForce [ ];
+    exec = lib.mkForce ''
+      echo "${message}" >&2
+      exit 1
+    '';
+  };
+  disabledTopcoatViteTask = disabledTopcoatTask "Vite frontend tasks are disabled in the Topcoat profile.";
+  disabledTopcoatWebCheck = disabledTopcoatTask "The legacy web check is disabled in the Topcoat profile.";
+  disabledTopcoatPublish = disabledTopcoatTask "Use the lific-topcoat package output in the Topcoat profile.";
+  disabledTopcoatRelease = disabledTopcoatTask "Legacy Vite release tasks are disabled in the Topcoat profile.";
+  disabledTopcoatE2e = disabledTopcoatTask "Legacy Vite browser tests are disabled in the Topcoat profile.";
   webBundle = pkgs.stdenv.mkDerivation {
     pname = "lific-web";
     version = lificVersion;
@@ -256,13 +269,38 @@ in
         lific-topcoat = lificTopcoatPackage;
       };
       tasks."devenv:git-hooks:run".after = lib.mkForce [ ];
+      tasks."lific:web:build" = disabledTopcoatViteTask;
+      tasks."lific:web:check" = disabledTopcoatViteTask;
+      tasks."lific:web:lock-check" = disabledTopcoatViteTask;
+      tasks."lific:web:lock-update" = disabledTopcoatViteTask;
+      tasks."lific:install:web" = disabledTopcoatViteTask;
+      tasks."lific:community-proxy:check" = disabledTopcoatWebCheck;
+      tasks."lific:publish" = disabledTopcoatPublish;
       git-hooks.hooks.clippy.settings.extraArgs = lib.mkForce
         "--all-targets --locked --no-default-features --features topcoat-spike";
       tasks."lific:debug-build".exec = lib.mkForce
         "cargo build --locked --no-default-features --features topcoat-spike";
       tasks."lific:debug-build".after = lib.mkForce [ "lific:topcoat:build" ];
       tasks."lific:check".after = lib.mkForce [ "lific:topcoat:test" ];
+      tasks."lific:rust-test" = {
+        after = lib.mkForce [ ];
+        exec = lib.mkForce
+          "cargo test --all-targets --locked --no-default-features --features topcoat-spike";
+      };
+      tasks."lific:release:x86_64-unknown-linux-gnu" = disabledTopcoatRelease;
+      tasks."lific:release:aarch64-unknown-linux-gnu" = disabledTopcoatRelease;
+      tasks."lific:release:x86_64-apple-darwin" = disabledTopcoatRelease;
+      tasks."lific:release:aarch64-apple-darwin" = disabledTopcoatRelease;
+      tasks."lific:release:x86_64-pc-windows-msvc" = disabledTopcoatRelease;
+      tasks."lific:e2e:app" = disabledTopcoatE2e;
+      tasks."lific:e2e:components" = disabledTopcoatE2e;
+      tasks."lific:e2e" = disabledTopcoatE2e;
       processes.frontend.start.enable = lib.mkForce false;
+      processes.frontend.exec = lib.mkForce ''
+        echo "The Vite frontend process is disabled in the Topcoat profile." >&2
+        exit 1
+      '';
+      processes.frontend.after = lib.mkForce [ ];
       processes.backend.after = lib.mkForce [ "lific:topcoat:build" ];
       processes.backend.exec = lib.mkForce ''
         ${lib.optionalString config.devenv.isTesting ''
@@ -285,9 +323,38 @@ in
         lific-topcoat = lificTopcoatPackage;
       };
       tasks."devenv:git-hooks:run".after = lib.mkForce [ ];
+      tasks."lific:web:build" = disabledTopcoatViteTask;
+      tasks."lific:web:check" = disabledTopcoatViteTask;
+      tasks."lific:web:lock-check" = disabledTopcoatViteTask;
+      tasks."lific:web:lock-update" = disabledTopcoatViteTask;
+      tasks."lific:install:web" = disabledTopcoatViteTask;
+      tasks."lific:community-proxy:check" = disabledTopcoatWebCheck;
+      tasks."lific:publish" = disabledTopcoatPublish;
       git-hooks.hooks.clippy.settings.extraArgs = lib.mkForce
         "--all-targets --locked --no-default-features --features topcoat-spike";
+      tasks."lific:debug-build".exec = lib.mkForce
+        "cargo build --locked --no-default-features --features topcoat-spike";
+      tasks."lific:debug-build".after = lib.mkForce [ "lific:topcoat:build" ];
+      tasks."lific:rust-test" = {
+        after = lib.mkForce [ ];
+        exec = lib.mkForce
+          "cargo test --all-targets --locked --no-default-features --features topcoat-spike";
+      };
+      tasks."lific:check".after = lib.mkForce [ "lific:topcoat:test" ];
+      tasks."lific:release:x86_64-unknown-linux-gnu" = disabledTopcoatRelease;
+      tasks."lific:release:aarch64-unknown-linux-gnu" = disabledTopcoatRelease;
+      tasks."lific:release:x86_64-apple-darwin" = disabledTopcoatRelease;
+      tasks."lific:release:aarch64-apple-darwin" = disabledTopcoatRelease;
+      tasks."lific:release:x86_64-pc-windows-msvc" = disabledTopcoatRelease;
+      tasks."lific:e2e:app" = disabledTopcoatE2e;
+      tasks."lific:e2e:components" = disabledTopcoatE2e;
+      tasks."lific:e2e" = disabledTopcoatE2e;
       processes.frontend.start.enable = lib.mkForce false;
+      processes.frontend.exec = lib.mkForce ''
+        echo "The Vite frontend process is disabled in the Topcoat profile." >&2
+        exit 1
+      '';
+      processes.frontend.after = lib.mkForce [ ];
       processes.backend.after = lib.mkForce [ "lific:topcoat:build" ];
       processes.backend.exec = lib.mkForce ''
         ${lib.optionalString config.devenv.isTesting ''
