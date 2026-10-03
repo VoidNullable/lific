@@ -7,6 +7,9 @@ use topcoat::{
     view::{BoxView, ViewExt, view},
 };
 
+#[path = "topcoat_shell/context.rs"]
+pub(super) mod context;
+
 pub(crate) const STYLESHEET: &str = include_str!("assets/topcoat-shell.css");
 pub(crate) const STYLESHEET_PATH: &str = "/__topcoat-shell.css";
 pub(crate) const ROUTE_SCRIPT: &str = include_str!("assets/topcoat-shell.js");
