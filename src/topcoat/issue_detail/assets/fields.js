@@ -27,6 +27,8 @@
     if (!fields.title || !fields.status || !fields.priority || !fields.module_id || !fields.target_date ||
       !labelField || !labelOptions || !newLabelName || !newLabelColor || !createLabelButton) return null;
     let issue = {...(props.issue || {})}, capabilities = {...props.capabilities}, busy = false, alive = true;
+    const listeners = [];
+    const listen = (node, event, callback) => {node.addEventListener(event, callback); listeners.push(() => node.removeEventListener(event, callback));};
     const modules = Array.isArray(props.modules) ? props.modules : [];
     let labels = Array.isArray(props.labels) ? [...props.labels] : [];
     const statusNode = root.querySelector('[data-fields-status]');
@@ -81,6 +83,7 @@
       busy = true; if (statusNode) statusNode.textContent = 'Saving…'; render();
       try {
         const result = await props.onIntent?.({type: 'set_scalar', field: key, value});
+        if (!alive) return;
         if (result?.status === 'applied' && result.issue) issue = {...result.issue};
         else if (result?.status === 'conflict' && result.issue) issue = {...result.issue};
         else if (result?.status && result.status !== 'applied') throw new Error(result.error || 'Could not save this field.');
@@ -93,27 +96,29 @@
           }
         }
       } catch (error) {
+        if (!alive) return;
         issue[key] = old;
         if (statusNode) statusNode.textContent = error?.message || 'Could not save this field.';
       } finally {busy = false; render();}
     }
-    fields.title.addEventListener('keydown', event => {
+    listen(fields.title, 'keydown', event => {
       if (event.key === 'Escape') {fields.title.value = issue.title || ''; fields.title.blur();}
       else if (event.key === 'Enter' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) {
         event.preventDefault(); void change('title', fields.title.value.trim()); fields.title.blur();
       }
     });
-    fields.title.addEventListener('blur', () => void change('title', fields.title.value.trim()));
-    for (const key of ['status', 'priority']) fields[key].addEventListener('change', () => void change(key, fields[key].value));
-    fields.module_id.addEventListener('change', () => void change('module_id', fields.module_id.value === '' ? null : Number(fields.module_id.value)));
-    fields.target_date.addEventListener('change', () => void change('target_date', fields.target_date.value || null));
-    labelOptions.addEventListener('change', () => void change('labels', values().labels));
-    createLabelButton.addEventListener('click', async () => {
+    listen(fields.title, 'blur', () => void change('title', fields.title.value.trim()));
+    for (const key of ['status', 'priority']) listen(fields[key], 'change', () => void change(key, fields[key].value));
+    listen(fields.module_id, 'change', () => void change('module_id', fields.module_id.value === '' ? null : Number(fields.module_id.value)));
+    listen(fields.target_date, 'change', () => void change('target_date', fields.target_date.value || null));
+    listen(labelOptions, 'change', () => void change('labels', values().labels));
+    listen(createLabelButton, 'click', async () => {
       const name = newLabelName.value.trim();
-      if (!name || busy || !capabilities.edit || typeof props.onCreateLabel !== 'function') return;
+      if (!alive || !name || busy || !capabilities.edit || typeof props.onCreateLabel !== 'function') return;
       busy = true; if (statusNode) statusNode.textContent = 'Creating label…'; render();
       try {
         const created = await props.onCreateLabel(name, newLabelColor.value);
+        if (!alive) return;
         const label = created?.label || created;
         if (!label || typeof label.name !== 'string') throw new Error('Could not create this label.');
         if (!labels.some(item => String(item.name).toLocaleLowerCase() === label.name.toLocaleLowerCase())) labels.push(label);
@@ -122,6 +127,7 @@
         const nextLabels = labelNames([...(issue.labels || []), label.name]);
         busy = false; render(); await change('labels', nextLabels);
       } catch (error) {
+        if (!alive) return;
         if (statusNode) statusNode.textContent = error?.message || 'Could not create this label.';
         busy = false; render();
       }
@@ -131,7 +137,11 @@
       capabilities = {...next};
       render();
     }
-    return {values, setCapabilities, update(next, nextCapabilities) {issue = {...next}; if (nextCapabilities) capabilities = {...nextCapabilities}; render();}, dispose() {alive = false;}};
+    return {values, setCapabilities, update(next, nextCapabilities) {issue = {...next}; if (nextCapabilities) capabilities = {...nextCapabilities}; render();}, dispose() {
+      alive = false;
+      for (const remove of listeners) remove();
+      listeners.length = 0;
+    }};
   }
 
   const api = {STATUSES, PRIORITIES, labelNames, mount};

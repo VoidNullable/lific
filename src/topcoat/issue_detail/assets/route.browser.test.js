@@ -27,7 +27,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         </div></section>`);
       await page.evaluate(() => {
         window.issue = {id:7,project_id:3,seq:4,sequence:7,identifier:'ENG-7',title:'First title',description:'Saved body',status:'backlog',priority:'none',module_id:null,labels:[],created_at:'2026-10-01',updated_at:'2026-10-02'};
-        window.calls=[];window.roleDenied=false;window.holdResolve=false;window.holdDescription=false;window.lificSession={state:{user:{id:1},publicProject:null,loading:false},request:async(path,options={})=>{
+        window.calls=[];window.roleDenied=false;window.holdResolve=false;window.holdDescription=false;window.holdLabel=false;window.lificSession={state:{user:{id:1},publicProject:null,loading:false},request:async(path,options={})=>{
           calls.push({path,options});
           if(path==='/issues/resolve/ENG-7')return window.holdResolve
             ? await new Promise(resolve=>{window.releaseResolve=()=>resolve({ok:true,data:issue});}) : {ok:true,data:issue};
@@ -35,7 +35,9 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
             ? {ok:false,status:403,error:'Membership was revoked'} : {ok:true,data:{role:'maintainer',enforced:true,is_admin:false}};
           if(path==='/modules?project_id=3')return {ok:true,data:[{id:2,name:'Engine'}]};
           if(path==='/labels?project_id=3')return {ok:true,data:[{name:'bug'},{name:'API, clients'}]};
-          if(path==='/labels'&&options.method==='POST')return {ok:true,data:{name:JSON.parse(options.body).name,color:JSON.parse(options.body).color}};
+          if(path==='/labels'&&options.method==='POST')return window.holdLabel
+            ? await new Promise(resolve=>{window.releaseLabel=()=>resolve({ok:true,data:{name:JSON.parse(options.body).name,color:JSON.parse(options.body).color}});})
+            : {ok:true,data:{name:JSON.parse(options.body).name,color:JSON.parse(options.body).color}};
           if(path==='/issues/7'&&options.method==='PUT'){
             if(window.holdConflict)return await new Promise(resolve=>{window.releaseConflict=()=>resolve({ok:false,status:409,error:'Issue changed elsewhere',current:{...issue,seq:issue.seq+1,description:'External body'}});});
             if(window.holdDescription&&Object.hasOwn(JSON.parse(options.body),'description'))return await new Promise(resolve=>{window.releaseDescription=()=>{const patch=JSON.parse(options.body);issue={...issue,...patch,seq:issue.seq+1};resolve({ok:true,data:issue});};});
@@ -155,6 +157,23 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         assert.equal(evidence.issue,'External body');
         assert.equal(await page.locator('[data-editor-input]').inputValue(),'Local draft');
         assert.equal(await page.locator('[data-editor-conflict]').isVisible(),true);
+      });
+      await t.test('a label response from the previous account cannot mutate the replacement issue route', async () => {
+        const oldGeneration = await page.evaluate(() => {
+          window.holdLabel = true;
+          document.querySelector('[data-new-label-name]').value = 'old account label';
+          document.querySelector('[data-create-label]').click();
+          return window.lificIssueDetail.route.generation;
+        });
+        await page.waitForFunction(() => typeof window.releaseLabel === 'function');
+        await page.evaluate(() => {
+          window.lificSession.state.user = {id:2};
+          dispatchEvent(new CustomEvent('lific:account-change'));
+        });
+        await page.waitForFunction(generation => window.lificIssueDetail.route.generation > generation, oldGeneration);
+        await page.evaluate(() => {window.holdLabel=false;window.releaseLabel();});
+        await page.waitForTimeout(0);
+        assert.equal(await page.evaluate(() => window.lificIssueDetail.labels.some(label => label.name === 'old account label')),false);
       });
     } finally {await browser.close();}
   });

@@ -2842,7 +2842,7 @@ No issues found."
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
                     start_date: input.start_date.clone(),
-                    target_date: input.target_date.clone(),
+                    target_date: input.target_date.clone().map(Some),
                     labels: input
                         .labels
                         .as_deref()

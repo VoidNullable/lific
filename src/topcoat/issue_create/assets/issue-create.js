@@ -93,14 +93,14 @@
       const current = generation;
       let selection = initialSelection || env.selection?.() || {start: state.description.length, end: state.description.length};
       for (const file of files || []) {
-        if (disposed) break;
+        if (disposed || current !== generation) break;
         pendingUploads++;
         env.onPending?.(pendingUploads);
         const transfer = env.attachments.upload(file);
         transfers.add(transfer);
         const result = await transfer.result;
         transfers.delete(transfer);
-        if (disposed || current !== generation) continue;
+        if (disposed || current !== generation) break;
         pendingUploads--;
         env.onPending?.(pendingUploads);
         if (result.ok) {
@@ -153,6 +153,7 @@
       generation++;
       for (const transfer of transfers) transfer.abort();
       transfers.clear(); pendingUploads = 0; loadedAudience = null;
+      env.onPending?.(pendingUploads);
       publish({phase:'loading',project:null,role:null,modules:[],labelOptions:[],title:'',description:'',labels:[],moduleId:null,
         saving:false,creatingLabel:false,error:'',...model({search:env.search || ''})});
       void load();

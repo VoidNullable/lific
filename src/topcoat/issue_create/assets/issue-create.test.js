@@ -144,3 +144,32 @@ test('account changes clear a create draft and reload the project role for the n
   c.dispose();
   assert.equal(listeners.size,0);
 });
+
+test('account changes stop the remaining upload batch and allow a fresh issue draft', async () => {
+  const listeners = new Map(), uploads = [], pending = [];
+  const session = {state:{user:{id:1},publicProject:null,loading:false}};
+  let release;
+  const c = controller({session,window:{addEventListener:(name,listener)=>listeners.set(name,listener),removeEventListener:name=>listeners.delete(name)},
+    api:{request:async path=>{
+      if (path === '/projects') return {ok:true,data:[{id:9,identifier:'ENG'}]};
+      if (path.endsWith('/my-role')) return {ok:true,data:{role:'maintainer',enforced:true}};
+      return {ok:true,data:[]};
+    }},navigate(){},onPending:count=>pending.push(count),attachments:{
+      upload(file) {
+        uploads.push({file,user:session.state.user.id});
+        const result = uploads.length === 1 ? new Promise(resolve=>{release=resolve;}) : Promise.resolve({ok:true,data:{}});
+        return {result,abort:()=>release({canceled:true})};
+      },markdown:()=> 'Old account attachment',
+    }},'ENG');
+  await c.load();
+  const batch = c.upload(['private-a','private-b']);
+  session.state.user={id:2}; listeners.get('lific:account-change')();
+  await batch;
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.deepEqual(uploads,[{file:'private-a',user:1}]);
+  assert.equal(c.state.description,'');
+  assert.equal(pending.at(-1),0);
+  c.state.title='New account issue';
+  assert.equal(c.canCreate(),true);
+  c.dispose();
+});

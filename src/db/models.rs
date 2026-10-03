@@ -439,8 +439,13 @@ pub struct UpdateIssue {
     pub sort_order: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_date: Option<String>,
+    /// Absent leaves the due date unchanged; explicit null clears it.
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_date: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
     /// LIF-441: optimistic-concurrency precondition. `None` (the default, and
@@ -1752,6 +1757,18 @@ where
 mod tests {
     use super::*;
     use rusqlite::types::{FromSql, ToSql, ValueRef};
+
+    #[test]
+    fn issue_target_date_update_round_trips_absent_null_and_date() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"target_date": null}),
+            serde_json::json!({"target_date": "2026-10-15"}),
+        ] {
+            let update: UpdateIssue = serde_json::from_value(body.clone()).unwrap();
+            assert_eq!(serde_json::to_value(update).unwrap(), body);
+        }
+    }
 
     const STATUSES: [Status; 5] = [
         Status::Backlog,

@@ -179,8 +179,16 @@
         this.fields = globalThis.LificTopcoatIssueFields.mount(fieldsRoot,{issue,modules,labels,capabilities:this.capabilities,
           onIntent:action => this.accept({route:this.route,action:{...action,type:'set_scalar'}}),
           onCreateLabel:async (name,color) => {
-            if (!this.capabilities.edit) throw new Error('You no longer have permission to edit this issue.');
+            const route = this.route;
+            if (!this.current(route?.generation) || !routeMatches(route,this.route)) {
+              throw new Error('This issue is no longer active.');
+            }
+            if (!this.capabilities.edit) {
+              throw new Error('You no longer have permission to edit this issue.');
+            }
             const label = await this.request('/labels',{method:'POST',body:JSON.stringify({project_id:issue.project_id,name,color})});
+            if (!this.current(route.generation) || !routeMatches(route,this.route)) throw new Error('This issue is no longer active.');
+            if (!this.capabilities.edit) throw new Error('You no longer have permission to edit this issue.');
             if (!Array.isArray(this.labels)) this.labels = [];
             if (!this.labels.some(value => value.name.toLocaleLowerCase() === label.name.toLocaleLowerCase())) this.labels.push(label);
             return label;

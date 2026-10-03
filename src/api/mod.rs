@@ -1527,6 +1527,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_target_date_can_be_set_preserved_and_cleared_over_http() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let created = parse_json(
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": "Due date"}),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = created["id"].as_i64().unwrap();
+        let path = format!("/api/issues/{issue_id}");
+        let mut seq = created["seq"].as_i64().unwrap();
+
+        for (patch, expected) in [
+            (
+                serde_json::json!({"target_date": "2026-10-15"}),
+                serde_json::json!("2026-10-15"),
+            ),
+            (
+                serde_json::json!({"title": "Keep due date"}),
+                serde_json::json!("2026-10-15"),
+            ),
+            (
+                serde_json::json!({"target_date": null}),
+                serde_json::Value::Null,
+            ),
+            (
+                serde_json::json!({"target_date": "2026-10-20"}),
+                serde_json::json!("2026-10-20"),
+            ),
+        ] {
+            let mut patch = patch;
+            patch["expected_seq"] = serde_json::json!(seq);
+            let response = json_put(&app, &path, patch).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let updated = parse_json(response).await;
+            assert_eq!(updated["target_date"], expected);
+            let next_seq = updated["seq"].as_i64().unwrap();
+            assert!(next_seq > seq);
+            seq = next_seq;
+            assert_eq!(
+                parse_json(json_get(&app, &path).await).await["target_date"],
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn search_returns_results() {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;
