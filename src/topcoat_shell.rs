@@ -92,9 +92,16 @@ impl<'a> Page<'a> {
         )
     }
 
+    fn public_navigation(self) -> bool {
+        matches!(
+            self,
+            Self::Issues | Self::IssueDetail(_) | Self::Pages | Self::Record(_)
+        )
+    }
+
     fn navigation_page(self) -> Self {
         match self {
-            Self::IssueNew | Self::IssueDetail(_) => Self::Issues,
+            Self::Board | Self::IssueNew | Self::IssueDetail(_) => Self::Issues,
             Self::Record(_) => Self::Pages,
             Self::ModuleDetail(_) => Self::Modules,
             Self::PlanDetail(_) => Self::Plans,
@@ -270,7 +277,7 @@ fn navigation<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, label: &'static str) -> B
     let mut links = Vec::new();
     if let Some(project) = route.project {
         for &(page, slug) in PROJECT_DESTINATIONS {
-            if private || page.public() {
+            if private || page.public_navigation() {
                 links.push(NavigationLink {
                     href: route.project_href(slug),
                     label: page.title(),
@@ -579,6 +586,21 @@ mod tests {
         assert!(html.contains("aria-label=\"Account\""));
         assert!(!html.contains("Desktop navigation"));
         assert!(!html.contains("Mobile navigation"));
+    }
+
+    #[tokio::test]
+    async fn shell_public_board_uses_issue_navigation_entry() {
+        let cx = Cx::default();
+        let route = ParsedRoute::parse("/public/LIF/board");
+        assert_eq!(route.layout, Layout::Public);
+        assert_eq!(route.page, Page::Board);
+        let html = shell(&cx, &route, placeholder(&cx, &route))
+            .single()
+            .await
+            .unwrap()
+            .render(&cx);
+        assert!(html.contains("href=\"/public/LIF/issues\" aria-current=\"page\""));
+        assert!(!html.contains("href=\"/public/LIF/board\""));
     }
 
     #[tokio::test]
