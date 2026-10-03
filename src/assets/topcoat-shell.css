@@ -1,0 +1,84 @@
+/* Application chrome uses the shared Topcoat control tokens. */
+.tc-shell {
+  min-height: 100dvh;
+  background: var(--tc-bg);
+  color: var(--tc-text);
+  font-family: var(--tc-font);
+}
+
+.tc-shell a { color: inherit; }
+.tc-shell a:focus-visible,
+.tc-shell summary:focus-visible {
+  outline: 3px solid var(--tc-focus);
+  outline-offset: 3px;
+}
+
+.tc-shell__skip {
+  position: fixed;
+  z-index: 10;
+  top: 0.5rem;
+  left: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: var(--tc-surface);
+  transform: translateY(-200%);
+}
+.tc-shell__skip:focus { transform: translateY(0); }
+
+.tc-shell__header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  min-height: 4rem;
+  padding: 0.5rem 1.5rem;
+  background: var(--tc-surface);
+  border-bottom: 1px solid var(--tc-border);
+}
+.tc-shell__brand { font-size: 1.25rem; font-weight: 700; text-decoration: none; }
+.tc-shell__hint { color: var(--tc-muted); line-height: 1.5; }
+.tc-shell__body { display: grid; grid-template-columns: 15rem minmax(0, 1fr); }
+.tc-shell__desktop { padding: 1rem; border-right: 1px solid var(--tc-border); }
+.tc-shell__navigation { display: flex; flex-direction: column; gap: 0.25rem; }
+.tc-shell__navigation a,
+.tc-shell__auth-links a {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--tc-radius);
+  text-decoration: none;
+}
+.tc-shell__navigation a:hover { background: var(--tc-surface); }
+.tc-shell a[aria-current="page"] {
+  background: var(--tc-accent);
+  color: var(--tc-accent-text);
+  font-weight: 600;
+}
+.tc-shell__project { margin: 1.5rem 0 0.5rem; font-size: 1rem; overflow-wrap: anywhere; }
+.tc-shell__main { min-width: 0; padding: 2rem; }
+.tc-shell__placeholder { max-width: 70ch; }
+.tc-shell__placeholder h1 { font-size: 1.75rem; line-height: 1.25; }
+.tc-shell__placeholder p { line-height: 1.6; overflow-wrap: anywhere; }
+.tc-shell__auth-links { display: flex; gap: 0.5rem; margin-left: auto; }
+.tc-shell[data-layout="auth"] .tc-shell__body { display: block; }
+.tc-shell[data-layout="auth"] .tc-shell__main { max-width: 36rem; margin: 0 auto; }
+.tc-shell__mobile { display: none; }
+
+@media (max-width: 47.99rem) {
+  .tc-shell__header { padding: max(0.5rem, env(safe-area-inset-top)) 1rem 0.5rem; }
+  .tc-shell__body { display: block; }
+  .tc-shell__desktop { display: none; }
+  .tc-shell__main { padding: 1.5rem 1rem max(1.5rem, env(safe-area-inset-bottom)); }
+  .tc-shell__mobile { display: block; margin-left: auto; }
+  .tc-shell__mobile summary {
+    min-height: 2.75rem;
+    padding: 0.75rem;
+    cursor: pointer;
+  }
+  .tc-shell__mobile[open] { flex: 1 0 100%; }
+  .tc-shell__mobile[open] summary { width: fit-content; margin-left: auto; }
+  .tc-shell__mobile .tc-shell__navigation {
+    padding: 0.5rem 0 max(1rem, env(safe-area-inset-bottom));
+  }
+  .tc-shell__mobile .tc-shell__navigation a { min-height: 3rem; }
+}

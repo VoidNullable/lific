@@ -54,6 +54,16 @@ mod topcoat_controls;
 #[allow(dead_code)] // Session APIs are consumed as authenticated screens migrate.
 mod topcoat_session;
 
+#[cfg(feature = "topcoat-spike")]
+#[path = "topcoat_shell.rs"]
+#[allow(dead_code)] // Route families are consumed as screens migrate.
+mod topcoat_shell;
+
+#[cfg(feature = "topcoat-spike")]
+#[path = "topcoat_sync.rs"]
+#[allow(dead_code)] // Read models are consumed as screens migrate.
+mod topcoat_sync;
+
 #[cfg(all(feature = "topcoat-spike", feature = "vite-frontend"))]
 compile_error!("use --no-default-features with topcoat-spike to omit the Vite frontend");
 
@@ -130,11 +140,18 @@ mod topcoat_spike {
 
     #[layout("/")]
     async fn document_layout(cx: &topcoat::context::Cx, slot: Slot<'_>) -> Result<impl View> {
-        let session_attributes = super::topcoat_session::bootstrap_attributes(
-            cx,
-            &super::topcoat_session::Scope::Private,
-            false,
-        );
+        let uri = topcoat::router::request::uri(cx);
+        let route_target = uri
+            .path_and_query()
+            .map_or_else(|| uri.path(), |path| path.as_str());
+        let route = super::topcoat_shell::ParsedRoute::parse(route_target);
+        let scope = match (route.layout, route.project) {
+            (super::topcoat_shell::Layout::Public, Some(project)) => {
+                super::topcoat_session::Scope::public(project)
+            }
+            _ => super::topcoat_session::Scope::Private,
+        };
+        let session_attributes = super::topcoat_session::bootstrap_attributes(cx, &scope, false);
         Ok(view! {
             <!DOCTYPE html>
             <html lang="en">
@@ -143,8 +160,11 @@ mod topcoat_spike {
                     <meta name="viewport" content="width=device-width, initial-scale=1">
                     <title>"Lific Topcoat experiment"</title>
                     <link rel="stylesheet" href="/__topcoat-spike.css">
+                    <link rel="stylesheet" href=(super::topcoat_shell::STYLESHEET_PATH)>
                     <script type="module" src="/__topcoat-runtime.js"></script>
+                    <script defer="defer" src=(super::topcoat_shell::ROUTE_SCRIPT_PATH)></script>
                     <script defer="defer" src=(super::topcoat_session::SCRIPT_PATH)></script>
+                    <script defer="defer" src=(super::topcoat_sync::SCRIPT_PATH)></script>
                     <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
                 <body (session_attributes)>
@@ -173,6 +193,29 @@ mod topcoat_spike {
         })
     }
 
+    #[page("/")]
+    async fn shell_home(cx: &topcoat::context::Cx) -> Result<impl View> {
+        shell_page(cx)
+    }
+
+    #[page("/{*path}")]
+    async fn shell_route(cx: &topcoat::context::Cx) -> Result<impl View> {
+        shell_page(cx)
+    }
+
+    fn shell_page<'a>(cx: &'a topcoat::context::Cx) -> Result<topcoat::view::BoxView<'a>> {
+        let uri = topcoat::router::request::uri(cx);
+        let route_target = uri
+            .path_and_query()
+            .map_or_else(|| uri.path(), |path| path.as_str());
+        let route = super::topcoat_shell::ParsedRoute::parse(route_target);
+        if let Some(destination) = route.redirect.as_deref() {
+            return Err(topcoat::router::error::redirect_permanent(destination).into());
+        }
+        let content = super::topcoat_shell::placeholder(cx, &route);
+        Ok(super::topcoat_shell::shell(cx, &route, content))
+    }
+
     #[cfg(test)]
     #[page("/__topcoat-runtime-test")]
     async fn runtime_test_page(cx: &topcoat::context::Cx) -> Result<impl View> {
@@ -199,13 +242,34 @@ mod topcoat_spike {
     #[route(GET "/__topcoat-spike.css")]
     async fn stylesheet() -> Result<Response> {
         let css = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("assets/topcoat-spike.css"),
-            super::topcoat_controls::STYLESHEET
+            super::topcoat_controls::STYLESHEET,
+            super::topcoat_shell::STYLESHEET
         );
         Ok(Response::builder()
             .header("content-type", "text/css; charset=utf-8")
             .body(topcoat::router::Body::from(css))?)
+    }
+
+    #[route(GET "/__topcoat-shell.css")]
+    async fn shell_stylesheet() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/css; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_shell::STYLESHEET,
+            ))?)
+    }
+
+    #[route(GET "/__topcoat-shell.js")]
+    async fn shell_script() -> Result<Response> {
+        Ok(Response::builder()
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(topcoat::router::Body::from(
+                super::topcoat_shell::ROUTE_SCRIPT,
+            ))?)
     }
 
     #[route(GET "/__topcoat-preferences.js")]
@@ -280,6 +344,94 @@ mod topcoat_spike_tests {
         assert!(body.contains("/__topcoat-spike.css"));
         assert!(body.contains("/__topcoat-runtime.js"));
         assert!(body.contains("<main id=\"main-content\">"));
+    }
+
+    #[tokio::test]
+    async fn topcoat_shell_routes_keep_private_public_and_auth_chrome_scoped() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for (path, layout, expected) in [
+            ("/LIF/issues?assignee=me", "private", "/LIF/issues"),
+            ("/public/LIF/issues/LIF-42", "public", "/public/LIF/issues"),
+            ("/login", "auth", "/signup"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(
+                body.contains(&format!("data-layout=\"{layout}\"")),
+                "{path}"
+            );
+            assert!(body.contains(expected), "{path}");
+            if layout == "public" {
+                assert!(body.contains("data-lific-public-project=\"LIF\""));
+                assert!(!body.contains("/settings"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn topcoat_shell_redirects_legacy_public_issue_urls() {
+        let response = topcoat::router::tower::TowerService::new(topcoat_spike::router())
+            .oneshot(
+                Request::builder()
+                    .uri("/public/LIF/LIF-42?tab=comments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/public/LIF/issues/LIF-42?tab=comments"
+        );
+    }
+
+    #[tokio::test]
+    async fn topcoat_shell_and_sync_assets_are_discovered_without_vite() {
+        let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
+        for (path, content_type, expected) in [
+            (
+                "/__topcoat-shell.css",
+                "text/css; charset=utf-8",
+                ".tc-shell__navigation",
+            ),
+            (
+                "/__topcoat-shell.js",
+                "text/javascript; charset=utf-8",
+                "restoreRoute",
+            ),
+            (
+                "/__topcoat-sync.js",
+                "text/javascript; charset=utf-8",
+                "lificSync",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .unwrap(),
+                content_type
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains(expected), "{path}");
+        }
     }
 
     #[tokio::test]

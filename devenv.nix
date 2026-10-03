@@ -250,6 +250,7 @@ in
     topcoat.module = {
       languages.javascript.enable = lib.mkForce false;
       languages.javascript.directory = lib.mkForce "${repoRoot}/.topcoat";
+      packages = [ pkgs.nodejs ];
       outputs = lib.mkForce {
         lific = lificTopcoatPackage;
         lific-topcoat = lificTopcoatPackage;
@@ -564,10 +565,13 @@ in
       cwd = repoRoot;
       exec = "cargo build --locked --no-default-features --features topcoat-spike";
     };
-      "lific:topcoat:test" = {
-        cwd = repoRoot;
-        exec = "cargo test --all-targets --locked --no-default-features --features topcoat-spike";
-      };
+    "lific:topcoat:test" = {
+      cwd = repoRoot;
+      exec = ''
+        cargo test --all-targets --locked --no-default-features --features topcoat-spike
+        node --test src/assets/topcoat-sync.test.js
+      '';
+    };
     "lific:topcoat:install-cli" = {
       cwd = repoRoot;
       exec = "cargo install --locked --version 0.9.0 topcoat-cli";
