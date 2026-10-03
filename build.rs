@@ -48,8 +48,9 @@ fn embed_windows_manifest() {
 fn main() {
     embed_windows_manifest();
 
+    let vite_frontend = std::env::var_os("CARGO_FEATURE_VITE_FRONTEND").is_some();
     let topcoat = std::env::var_os("CARGO_FEATURE_TOPCOAT_SPIKE").is_some();
-    if should_check_vite_frontend(topcoat) {
+    if should_check_vite_frontend(vite_frontend, topcoat) {
         check_vite_frontend();
     }
 }
@@ -91,8 +92,8 @@ fn check_vite_frontend() {
     }
 }
 
-fn should_check_vite_frontend(topcoat: bool) -> bool {
-    !topcoat
+fn should_check_vite_frontend(vite_frontend: bool, topcoat: bool) -> bool {
+    vite_frontend && !topcoat
 }
 
 fn has_frontend_entry(dist: &Path) -> bool {
@@ -131,8 +132,10 @@ mod tests {
 
     #[test]
     fn topcoat_feature_skips_all_vite_frontend_build_checks() {
-        assert!(should_check_vite_frontend(false));
-        assert!(!should_check_vite_frontend(true));
+        assert!(should_check_vite_frontend(true, false));
+        assert!(!should_check_vite_frontend(false, true));
+        assert!(!should_check_vite_frontend(true, true));
+        assert!(!should_check_vite_frontend(false, false));
     }
 
     #[test]
