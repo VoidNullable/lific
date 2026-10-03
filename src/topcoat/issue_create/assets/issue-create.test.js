@@ -21,10 +21,14 @@ test('status query accepts only supported issue statuses', () => {
 
 test('create waits for a title and all attachment uploads', async () => {
   let posted;
-  const env = {api: {request: async (path, options) => {posted = {path, options}; return {ok: true, data: {identifier: 'ENG-12'}};}}, navigate() {}, pendingUploads: () => 1};
+  const env = {api: {request: async (path, options) => {
+    if (path === '/projects') return {ok:true,data:[{id:9,identifier:'ENG'}]};
+    if (path.endsWith('/my-role')) return {ok:true,data:{role:'maintainer',enforced:true}};
+    if (path.startsWith('/modules') || path.startsWith('/labels')) return {ok:true,data:[]};
+    posted = {path, options}; return {ok: true, data: {identifier: 'ENG-12'}};
+  }}, navigate() {}, pendingUploads: () => 1};
   const c = controller(env, 'ENG');
-  c.state.phase = 'ready';
-  c.state.project = {id: 9, identifier: 'ENG'};
+  await c.load();
   c.state.title = '  example  ';
   assert.equal(await c.create(), false);
   assert.equal(posted, undefined);
@@ -35,9 +39,13 @@ test('create waits for a title and all attachment uploads', async () => {
 });
 
 test('failed create preserves draft and reports the API error', async () => {
-  const c = controller({api: {request: async () => ({ok: false, error: 'No access'})}, navigate() {throw new Error('must not navigate');}}, 'ENG');
-  c.state.phase = 'ready';
-  c.state.project = {id: 9, identifier: 'ENG'};
+  const c = controller({api: {request: async path => {
+    if (path === '/projects') return {ok:true,data:[{id:9,identifier:'ENG'}]};
+    if (path.endsWith('/my-role')) return {ok:true,data:{role:'maintainer',enforced:true}};
+    if (path.startsWith('/modules') || path.startsWith('/labels')) return {ok:true,data:[]};
+    return {ok:false,error:'No access'};
+  }}, navigate() {throw new Error('must not navigate');}}, 'ENG');
+  await c.load();
   c.state.title = ' Draft ';
   c.state.description = 'keep me';
   assert.equal(await c.create(), false);
@@ -97,15 +105,42 @@ test('uploaded markdown replaces the textarea selection and leaves the caret aft
 test('inline label creation posts its color, adds and selects the label, and sorts choices', async () => {
   let request;
   const c = controller({
-    api: {request: async (path, options) => {request = {path, options}; return {ok: true, data: {id: 3, name: 'launch', color: '#123456'}};}},
+    api: {request: async (path, options) => {
+      if (path === '/projects') return {ok:true,data:[{id:9,identifier:'ENG'}]};
+      if (path.endsWith('/my-role')) return {ok:true,data:{role:'maintainer',enforced:true}};
+      if (path.startsWith('/modules') || path.startsWith('/labels?')) return {ok:true,data:[{id:2,name:'bug',color:'#ff0000'}]};
+      request = {path, options}; return {ok: true, data: {id: 3, name: 'launch', color: '#123456'}};
+    }},
     navigate() {},
   }, 'ENG');
-  c.state.phase = 'ready';
-  c.state.project = {id: 9, identifier: 'ENG'};
-  c.state.labelOptions = [{id: 2, name: 'bug', color: '#ff0000'}];
+  await c.load();
   assert.equal(await c.createLabel(' launch ', '#123456'), true);
   assert.equal(request.path, '/labels');
   assert.deepEqual(JSON.parse(request.options.body), {project_id: 9, name: 'launch', color: '#123456'});
   assert.equal(JSON.stringify(c.state.labels), '["launch"]');
   assert.equal(JSON.stringify(c.state.labelOptions.map(label => label.name)), '["bug","launch"]');
+});
+
+test('account changes clear a create draft and reload the project role for the new audience', async () => {
+  const listeners = new Map(); const calls = [];
+  const session = {state:{user:{id:1},publicProject:null,loading:false}};
+  const win = {addEventListener:(name,listener)=>listeners.set(name,listener),removeEventListener:name=>listeners.delete(name)};
+  const c = controller({session,window:win,api:{state:session.state,request:async path=>{
+    calls.push(path);
+    if (path === '/projects') return {ok:true,data:[{id:9,identifier:'ENG'}]};
+    if (path.endsWith('/my-role')) return {ok:true,data:{role:'maintainer',enforced:true}};
+    if (path.startsWith('/modules') || path.startsWith('/labels')) return {ok:true,data:[]};
+    throw new Error(`Unexpected ${path}`);
+  }},navigate(){}},'ENG');
+  await c.load();
+  c.state.title='Old account draft'; c.state.description='Private notes';
+  session.state.user={id:2};
+  listeners.get('lific:account-change')();
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(c.state.phase,'ready');
+  assert.equal(c.state.title,''); assert.equal(c.state.description,'');
+  assert.equal(c.canCreate(),false);
+  assert.equal(calls.filter(path=>path==='/projects').length,2);
+  c.dispose();
+  assert.equal(listeners.size,0);
 });

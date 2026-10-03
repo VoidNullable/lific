@@ -1,0 +1,38 @@
+.tc-identity {
+  box-sizing: border-box;
+  width: min(100% - 2rem, 52rem);
+  margin: 2rem auto;
+  color: var(--text);
+}
+
+.tc-identity h1 { margin: 0 0 1.25rem; font-size: var(--text-display, 2rem); }
+.tc-identity h2 { margin: 0 0 1rem; font-size: var(--text-title, 1.25rem); }
+.tc-identity h3 { margin: 0 0 .5rem; }
+.tc-identity section { margin-block: 1.5rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: .75rem; background: var(--surface); }
+.tc-identity form { display: grid; gap: .9rem; max-width: 34rem; }
+.tc-identity label { display: grid; gap: .4rem; color: var(--text-muted); font-size: .875rem; }
+.tc-identity input, .tc-identity textarea, .tc-identity select {
+  box-sizing: border-box; width: 100%; min-height: 2.5rem; padding: .55rem .7rem;
+  border: 1px solid var(--border); border-radius: .45rem; background: var(--bg); color: var(--text);
+  font: inherit;
+}
+.tc-identity textarea { min-height: 6rem; resize: vertical; }
+.tc-identity input[type=checkbox] { width: 1.1rem; min-height: 1.1rem; }
+.tc-identity__check { display: flex !important; align-items: center; gap: .65rem !important; }
+.tc-identity__password { display: flex; gap: .5rem; }
+.tc-identity__password input { flex: 1; }
+.tc-identity__show { flex: none; }
+.tc-identity__error { color: var(--error); }
+.tc-identity__message, .tc-identity__hint { color: var(--text-muted); }
+.tc-identity__instance { color: var(--text-faint); font-size: .8rem; }
+.tc-identity__users article { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; padding-block: .75rem; border-top: 1px solid var(--border); }
+.tc-identity__users article span { color: var(--text-muted); font-size: .85rem; }
+.tc-identity__secret { margin-block: 1rem; padding: 1rem; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: .5rem; background: var(--bg); }
+.tc-identity__secret code { display: block; margin-block: .75rem; user-select: all; }
+.tc-identity__reauth { border-color: var(--warning, var(--border)) !important; }
+.tc-identity a { color: var(--accent); }
+
+@media (max-width: 38rem) {
+  .tc-identity { width: min(100% - 1.25rem, 52rem); margin-block: 1rem; }
+  .tc-identity section { padding: 1rem; }
+}

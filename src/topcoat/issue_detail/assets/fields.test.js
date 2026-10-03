@@ -7,8 +7,8 @@ test('field choices preserve the issue API vocabulary and order', () => {
   assert.deepEqual(PRIORITIES, ['urgent','high','medium','low','none']);
 });
 
-test('labels trim whitespace, drop blanks and preserve first occurrence', () => {
-  assert.deepEqual(labelNames('bug, needs review, bug, ,urgent'), ['bug','needs review','urgent']);
-  assert.deepEqual(labelNames([' bug ','', 'docs', 'bug']), ['bug','docs']);
+test('labels preserve exact names instead of interpreting commas as delimiters', () => {
+  assert.deepEqual(labelNames(['API, clients','urgent','API, clients']), ['API, clients','urgent']);
+  assert.deepEqual(labelNames([' bug ','', 'docs', 'bug']), [' bug ','docs','bug']);
   assert.deepEqual(labelNames(null), []);
 });

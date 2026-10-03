@@ -386,11 +386,17 @@ in
         node --test src/topcoat/dashboard/assets/dashboard.browser.test.js
         node --test src/topcoat/dashboard/assets/dashboard.session.browser.test.js
         node --test src/topcoat/issue_list/assets/issue-list.browser.test.js
+        node --test src/topcoat/issue_detail/assets/fields.test.js src/topcoat/issue_detail/assets/route.test.js
+        node --test src/topcoat/issue_detail/editor/assets/editor.test.js
         node --test src/topcoat/issue_detail/editor/assets/editor.browser.test.js
         node --test src/topcoat/issue_detail/assets/route.browser.test.js
+        node --test src/topcoat/issue_detail/collaboration/assets/collaboration.test.js
         node --test src/topcoat/issue_detail/collaboration/assets/collaboration.browser.test.js
+        node --test src/topcoat/issue_create/assets/issue-create.test.js
         node --test src/topcoat/issue_create/assets/issue-create.browser.test.js
         node --test src/topcoat/project_settings/assets/project-settings.browser.test.js
+        node --test src/topcoat/identity/assets/identity.test.js
+        node --test src/topcoat/identity/assets/identity.browser.test.js
           '';
           after = [ "lific:install:e2e" ];
         };

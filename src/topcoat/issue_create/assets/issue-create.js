@@ -25,13 +25,23 @@
     const state = {phase: 'loading', project: null, role: null, modules: [], labelOptions: [], ...model({search: env.search || ''}), error: ''};
     const transfers = new Set();
     let disposed = false;
+    let generation = 0;
+    let loadedAudience = null;
     let pendingUploads = 0;
     const publish = patch => {Object.assign(state, patch); env.onChange?.(state);};
     const editable = role => !!role && (role.is_admin || !role.enforced || ['maintainer', 'lead'].includes(role.role));
+    const audience = () => {
+      const current = env.session?.state || env.api?.state || {};
+      let token = '';
+      try {token = globalThis.localStorage?.getItem('lific_token') || '';} catch (_) {}
+      return `${current.publicProject ?? ''}:${current.user?.id ?? ''}:${token}`;
+    };
 
     async function load() {
+      const current = ++generation;
+      const currentAudience = audience();
       const projects = await env.api.request('/projects');
-      if (disposed) return false;
+      if (disposed || current !== generation || currentAudience !== audience()) return false;
       if (!projects.ok) {publish({phase: 'error', error: projects.error}); return false;}
       const project = projects.data.find(item => item.identifier === identifier);
       if (!project) {publish({phase: 'error', error: `Project ${identifier} not found`}); return false;}
@@ -40,25 +50,28 @@
         env.api.request(`/modules?project_id=${project.id}`),
         env.api.request(`/labels?project_id=${project.id}`),
       ]);
-      if (disposed) return false;
+      if (disposed || current !== generation || currentAudience !== audience()) return false;
       if (!role.ok) {publish({phase: 'error', error: role.error}); return false;}
       if (!editable(role.data)) {publish({phase: 'denied', project, role: role.data}); return false;}
       if (!modules.ok || !labels.ok) {
         publish({phase: 'error', project, role: role.data, error: !modules.ok ? modules.error : labels.error});
         return false;
       }
+      loadedAudience = currentAudience;
       publish({...model({modules: modules.data, search: env.search || ''}), phase: 'ready', project, role: role.data, modules: modules.data, labelOptions: labels.data, error: ''});
       return true;
     }
 
-    function canCreate() {return state.phase === 'ready' && state.title.trim().length > 0 && (env.pendingUploads?.() ?? pendingUploads) === 0 && !state.saving;}
+    function canCreate() {return state.phase === 'ready' && loadedAudience === audience() && state.title.trim().length > 0 && (env.pendingUploads?.() ?? pendingUploads) === 0 && !state.saving;}
     async function create() {
       if (!canCreate()) return false;
+      const current = generation;
+      const currentAudience = loadedAudience;
       publish({saving: true, error: ''});
       const body = {project_id: state.project.id, title: state.title.trim(), description: state.description, status: state.status, priority: state.priority, labels: [...state.labels]};
       if (state.moduleId !== null) body.module_id = state.moduleId;
       const result = await env.api.request('/issues', {method: 'POST', body: JSON.stringify(body)});
-      if (disposed) return false;
+      if (disposed || current !== generation || currentAudience !== audience()) return false;
       if (result.ok) {
         env.navigate(`/${encodeURIComponent(identifier)}/issues/${encodeURIComponent(result.data.identifier)}`);
         return true;
@@ -69,12 +82,15 @@
 
     function discard() {
       disposed = true;
+      generation++;
+      stopListening();
       for (const transfer of transfers) transfer.abort();
       transfers.clear();
       env.navigate(`/${encodeURIComponent(identifier)}/issues`);
     }
 
     async function upload(files, initialSelection = null) {
+      const current = generation;
       let selection = initialSelection || env.selection?.() || {start: state.description.length, end: state.description.length};
       for (const file of files || []) {
         if (disposed) break;
@@ -84,9 +100,9 @@
         transfers.add(transfer);
         const result = await transfer.result;
         transfers.delete(transfer);
+        if (disposed || current !== generation) continue;
         pendingUploads--;
         env.onPending?.(pendingUploads);
-        if (disposed) continue;
         if (result.ok) {
           const snippet = env.attachments.markdown(result.data);
           const text = state.description;
@@ -116,8 +132,10 @@
         return true;
       }
       publish({creatingLabel: true, error: ''});
+      const current = generation;
+      const currentAudience = loadedAudience;
       const result = await env.api.request('/labels', {method: 'POST', body: JSON.stringify({project_id: state.project.id, name: trimmed, color})});
-      if (disposed) return false;
+      if (disposed || current !== generation || currentAudience !== audience()) return false;
       if (!result.ok) {
         publish({creatingLabel: false, error: result.error});
         return false;
@@ -128,7 +146,30 @@
       return true;
     }
 
-    return {env, state, transfers, load, create, discard, upload, toggleLabel, createLabel, canCreate, dispose() {disposed = true; for (const transfer of transfers) transfer.abort(); transfers.clear();}};
+    function clearForAudienceChange() {
+      if (disposed || env.session?.state?.loading) return;
+      const nextAudience = audience();
+      if (nextAudience === loadedAudience) return;
+      generation++;
+      for (const transfer of transfers) transfer.abort();
+      transfers.clear(); pendingUploads = 0; loadedAudience = null;
+      publish({phase:'loading',project:null,role:null,modules:[],labelOptions:[],title:'',description:'',labels:[],moduleId:null,
+        saving:false,creatingLabel:false,error:'',...model({search:env.search || ''})});
+      void load();
+    }
+    const win = env.window || globalThis;
+    const onAudienceChange = () => clearForAudienceChange();
+    for (const name of ['lific:account-change','lific:scope-change','lific:session-change']) win.addEventListener?.(name,onAudienceChange);
+    win.addEventListener?.('storage',onAudienceChange);
+    function stopListening() {
+      for (const name of ['lific:account-change','lific:scope-change','lific:session-change']) win.removeEventListener?.(name,onAudienceChange);
+      win.removeEventListener?.('storage',onAudienceChange);
+    }
+    return {env, state, transfers, load, create, discard, upload, toggleLabel, createLabel, canCreate, dispose() {
+      disposed = true; generation++;
+      stopListening();
+      for (const transfer of transfers) transfer.abort(); transfers.clear();
+    }};
   }
 
   function mount(root, env = {}) {

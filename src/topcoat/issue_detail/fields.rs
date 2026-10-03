@@ -17,7 +17,7 @@ pub(crate) fn scaffold(cx: &Cx) -> BoxView<'_> {
     view! { cx =>
         <section class="tc-issue-fields" data-issue-fields="" aria-label="Issue fields">
             <label class="tc-issue-fields__title">"Title"
-                <input data-field="title" name="title" maxlength="200" autocomplete="off" required="" />
+                <input data-field="title" name="title" maxlength="500" autocomplete="off" required="" />
             </label>
             <label>"Status"
                 <select data-field="status" name="status">
@@ -40,10 +40,18 @@ pub(crate) fn scaffold(cx: &Cx) -> BoxView<'_> {
             <label>"Module"
                 <select data-field="module_id" name="module_id"><option value="">"No module"</option></select>
             </label>
-            <label>"Labels"
-                <input data-field="labels" name="labels" autocomplete="off" aria-describedby="issue-label-help" />
+            <label>"Due date"
+                <input data-field="target_date" name="target_date" type="date" />
             </label>
-            <p id="issue-label-help" class="tc-issue-fields__hint">"Separate labels with commas."</p>
+            <fieldset data-label-field="">
+                <legend>"Labels"</legend>
+                <div class="tc-issue-fields__label-options" data-label-options=""></div>
+                <div class="tc-issue-fields__new-label">
+                    <label>"New label" <input data-new-label-name="" name="new_label" autocomplete="off" /></label>
+                    <label>"Color" <input data-new-label-color="" name="new_label_color" type="color" value="#6b7280" /></label>
+                    <button type="button" data-create-label="">"Create label"</button>
+                </div>
+            </fieldset>
             <div class="tc-issue-fields__metadata" data-field-metadata="" hidden="hidden">
                 <span data-field-created=""></span>
                 <span data-field-updated=""></span>
@@ -68,7 +76,10 @@ mod tests {
         assert!(html.contains("data-field=\"priority\""));
         assert!(html.contains("value=\"none\""));
         assert!(html.contains("data-field=\"module_id\""));
-        assert!(html.contains("data-field=\"labels\""));
+        assert!(html.contains("data-label-field=\"\""));
+        assert!(html.contains("data-label-options=\"\""));
+        assert!(html.contains("data-field=\"target_date\""));
+        assert!(html.contains("maxlength=\"500\""));
         assert!(html.contains("aria-live=\"polite\""));
     }
 }
