@@ -39,6 +39,11 @@ use crate::{
     actor, api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, resolve_caller, storage,
 };
 
+#[cfg(feature = "topcoat-spike")]
+#[path = "topcoat_api.rs"]
+#[allow(dead_code)] // This API boundary is introduced ahead of its screen handlers.
+mod topcoat_api;
+
 /// Embedded frontend assets compiled from web/dist/.
 /// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
 #[derive(Embed)]

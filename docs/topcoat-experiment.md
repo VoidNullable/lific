@@ -42,6 +42,37 @@ The scaffold stylesheet is currently a static Topcoat route backed by
 directory. Its route and CSS response are exercised by the feature-gated test
 suite in devenv.
 
+## API adapter
+
+`server::topcoat_api` provides the feature-gated Topcoat frontend with a typed
+HTTP client for the existing `/api` routes. Its project and issue DTOs mirror
+the JSON contract and are separate from the database models. Required nullable
+fields stay required on the wire, and unknown fields fail decoding. Issue DTOs
+also retain the server's `seq`, import `source`, and optional `waits` fields.
+
+The client builds authenticated requests, encodes query parameters, serializes
+JSON bodies, and decodes JSON responses. Multipart requests use reqwest's form
+builder to create the content-type boundary. Downloads return the response
+bytes and content headers. `send_json_with_headers` returns decoded data with
+the HTTP status and headers; `send_json` remains the data-only convenience
+method. This preserves pagination metadata such as `x-comment-has-more`. API
+errors retain the HTTP status and server message. If the response body fails
+after headers arrive, the typed body-read error keeps that status. Stale-write
+conflicts also retain the `current` entity and `update_conflict` code so a
+caller can reconcile and retry with `expected_seq`.
+
+The focused tests cover project and issue JSON compatibility, missing required
+fields, conflict response recovery data, response-body failures across JSON
+and download paths, pagination header retention, bearer headers, query
+encoding, JSON mutation bodies with `expected_seq`, multipart boundary
+generation, and authenticated download request construction.
+
+The existing Svelte transport still has several behaviors that migrated
+screens must account for: shared JSON requests use `requestWithHeaders`, normal
+downloads use `download`, archive downloads use a separate abortable `fetch`,
+and archive imports plus attachment uploads use `XMLHttpRequest` to report
+upload progress. The adapter does not replace those Svelte call sites yet.
+
 Topcoat's `asset!` API uses a separate generated bundle. When a migrated screen
 starts using it, `topcoat asset bundle --bin lific` writes to
 `target/debug/assets` by default, beside the executable that the CLI built. A
