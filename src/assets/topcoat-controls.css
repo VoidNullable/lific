@@ -282,8 +282,11 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tc-spinner { animation: none; }
+  :root:not([data-motion="full"]) .tc-spinner { animation: none; }
 }
+
+[data-motion="reduced"] .tc-spinner { animation: none; }
+[data-motion="full"] .tc-spinner { animation: tc-spin 0.8s linear infinite; }
 
 .tc-dialog {
   background: var(--tc-surface);

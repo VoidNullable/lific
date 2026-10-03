@@ -5,29 +5,5 @@
 }
 
 body {
-  margin: 0 auto;
-  max-width: 72rem;
-  padding: 1.5rem;
-}
-
-.topcoat-scaffold__header {
-  align-items: center;
-  display: flex;
-  gap: 2rem;
-  justify-content: space-between;
-}
-
-.topcoat-scaffold__header nav {
-  display: flex;
-  gap: 1rem;
-}
-
-.skip-link {
-  left: -100vw;
-  position: absolute;
-}
-
-.skip-link:focus {
-  left: 1rem;
-  top: 1rem;
+  margin: 0;
 }

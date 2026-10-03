@@ -37,6 +37,7 @@ pub(crate) enum Preference {
     Accent,
     Density,
     FontScale,
+    Motion,
 }
 
 impl Preference {
@@ -46,6 +47,7 @@ impl Preference {
             Self::Accent => "accent",
             Self::Density => "density",
             Self::FontScale => "fontScale",
+            Self::Motion => "motion",
         }
     }
 
@@ -62,6 +64,11 @@ impl Preference {
             ],
             Self::Density => &[("comfortable", "Comfortable"), ("compact", "Compact")],
             Self::FontScale => &[("small", "Small"), ("normal", "Normal"), ("large", "Large")],
+            Self::Motion => &[
+                ("system", "System"),
+                ("reduced", "Reduced"),
+                ("full", "Full"),
+            ],
         }
     }
 }
@@ -127,14 +134,16 @@ impl<'a> Button<'a> {
 }
 
 pub(crate) fn button<'a>(cx: &'a Cx, props: Button<'a>) -> BoxView<'a> {
-    let attrs = attributes! { cx =>
+    let attrs = attributes! {
+        cx =>
         (props.attrs)
         class=(props.variant.class())
         type=(props.kind.as_str())
         disabled=(props.disabled || props.loading)
         aria-busy=(props.loading.then_some("true"))
     };
-    view! { cx =>
+    view! {
+        cx =>
         <button (attrs)>
             if props.loading {
                 <span class="tc-spinner" aria-hidden="true"></span>
@@ -217,7 +226,8 @@ pub(crate) fn text_input<'a>(cx: &'a Cx, mut props: TextInput<'a>) -> BoxView<'a
     if props.error.is_some() {
         append_error_description(cx, &mut props.attrs, &error_id);
     }
-    let attrs = attributes! { cx =>
+    let attrs = attributes! {
+        cx =>
         (props.attrs)
         class="tc-input"
         id=(props.id)
@@ -229,11 +239,14 @@ pub(crate) fn text_input<'a>(cx: &'a Cx, mut props: TextInput<'a>) -> BoxView<'a
         disabled=(props.disabled)
         aria-invalid=(props.error.map(|_| "true"))
     };
-    view! { cx =>
+    view! {
+        cx =>
         <div class="tc-field">
             <label class="tc-field__label" for=(props.id)>
                 (props.label)
-                if props.required { <span>" (required)"</span> }
+                if props.required {
+                    <span>" (required)"</span>
+                }
             </label>
             <input (attrs)>
             if let Some(message) = props.error {
@@ -288,7 +301,8 @@ pub(crate) fn select<'a>(cx: &'a Cx, mut props: Select<'a>) -> BoxView<'a> {
     if props.error.is_some() {
         append_error_description(cx, &mut props.attrs, &error_id);
     }
-    let attrs = attributes! { cx =>
+    let attrs = attributes! {
+        cx =>
         (props.attrs)
         class="tc-input tc-select"
         id=(props.id)
@@ -297,15 +311,20 @@ pub(crate) fn select<'a>(cx: &'a Cx, mut props: Select<'a>) -> BoxView<'a> {
         disabled=(props.disabled)
         aria-invalid=(props.error.map(|_| "true"))
     };
-    view! { cx =>
+    view! {
+        cx =>
         <div class="tc-field">
             <label class="tc-field__label" for=(props.id)>
                 (props.label)
-                if props.required { <span>" (required)"</span> }
+                if props.required {
+                    <span>" (required)"</span>
+                }
             </label>
             <select (attrs)>
                 for (value, label) in props.options {
-                    <option value=(*value) selected=(*value == props.selected)>(*label)</option>
+                    <option value=(*value) selected=(*value == props.selected)>
+                        (*label)
+                    </option>
                 }
             </select>
             if let Some(message) = props.error {
@@ -340,7 +359,8 @@ pub(crate) fn preference_select<'a>(
 
 /// Announces loading without making decorative animation part of the label.
 pub(crate) fn loading<'a>(cx: &'a Cx, message: &'a str) -> BoxView<'a> {
-    view! { cx =>
+    view! {
+        cx =>
         <p class="tc-loading" role="status" aria-live="polite" aria-atomic="true">
             <span class="tc-spinner" aria-hidden="true"></span>
             (message)
@@ -350,16 +370,14 @@ pub(crate) fn loading<'a>(cx: &'a Cx, message: &'a str) -> BoxView<'a> {
 }
 
 pub(crate) fn error_message<'a>(cx: &'a Cx, message: &'a str) -> BoxView<'a> {
-    view! { cx =>
-        <p class="tc-error" role="alert" aria-atomic="true">(message)</p>
-    }
-    .boxed()
+    view! { cx => <p class="tc-error" role="alert" aria-atomic="true">(message)</p> }.boxed()
 }
 
 /// Opens the matching native dialog modally, preserving browser focus and
 /// Escape handling. The ID is an escaped data attribute, never JavaScript.
 pub(crate) fn dialog_trigger<'a>(cx: &'a Cx, id: &'a str, label: &'a str) -> BoxView<'a> {
-    view! { cx =>
+    view! {
+        cx =>
         <button
             class="tc-button"
             type="button"
@@ -367,7 +385,9 @@ pub(crate) fn dialog_trigger<'a>(cx: &'a Cx, id: &'a str, label: &'a str) -> Box
             aria-controls=(id)
             aria-haspopup="dialog"
             onclick="document.getElementById(this.dataset.dialog).showModal()"
-        >(label)</button>
+        >
+            (label)
+        </button>
     }
     .boxed()
 }
@@ -383,7 +403,8 @@ pub(crate) fn dialog<'a>(
 ) -> BoxView<'a> {
     let title_id = format!("{id}-title");
     let body = body.boxed();
-    view! { cx =>
+    view! {
+        cx =>
         <dialog class="tc-dialog" id=(id) aria-labelledby=(title_id.clone())>
             <header class="tc-dialog__header">
                 <h2 id=(title_id)>(title)</h2>
@@ -400,9 +421,17 @@ pub(crate) fn dialog<'a>(
 }
 
 pub(crate) fn popover_trigger<'a>(cx: &'a Cx, id: &'a str, label: &'a str) -> BoxView<'a> {
-    view! { cx =>
-        <button class="tc-button" type="button" popovertarget=(id) aria-controls=(id)
-            aria-haspopup="dialog">(label)</button>
+    view! {
+        cx =>
+        <button
+            class="tc-button"
+            type="button"
+            popovertarget=(id)
+            aria-controls=(id)
+            aria-haspopup="dialog"
+        >
+            (label)
+        </button>
     }
     .boxed()
 }
@@ -418,13 +447,26 @@ pub(crate) fn popover<'a>(
 ) -> BoxView<'a> {
     let title_id = format!("{id}-title");
     let body = body.boxed();
-    view! { cx =>
-        <div class="tc-popover" id=(id) popover="auto" role="dialog"
-            aria-labelledby=(title_id.clone())>
+    view! {
+        cx =>
+        <div
+            class="tc-popover"
+            id=(id)
+            popover="auto"
+            role="dialog"
+            aria-labelledby=(title_id.clone())
+        >
             <header class="tc-dialog__header">
                 <h2 id=(title_id)>(title)</h2>
-                <button class="tc-button" type="button" popovertarget=(id)
-                    popovertargetaction="hide" aria-label="Close popover">"Close"</button>
+                <button
+                    class="tc-button"
+                    type="button"
+                    popovertarget=(id)
+                    popovertargetaction="hide"
+                    aria-label="Close popover"
+                >
+                    "Close"
+                </button>
             </header>
             <div class="tc-dialog__body">(body)</div>
         </div>
@@ -446,7 +488,8 @@ pub(crate) fn confirmation<'a>(
         cx,
         id,
         title,
-        view! { cx =>
+        view! {
+            cx =>
             <p>(message)</p>
             <div class="tc-actions">(actions)</div>
         },
@@ -467,18 +510,26 @@ pub(crate) fn toast<'a>(cx: &'a Cx, message: &'a str, kind: ToastKind) -> BoxVie
         ToastKind::Success => ("tc-toast tc-toast--success", "status"),
         ToastKind::Error => ("tc-toast tc-toast--error", "alert"),
     };
-    view! { cx =>
+    view! {
+        cx =>
         <div class=(class) data-tc-toast="" role=(role) aria-atomic="true">
             <p>(message)</p>
-            <button class="tc-button" type="button" aria-label="Dismiss notification"
-                onclick="this.closest('[data-tc-toast]').remove()">"Dismiss"</button>
+            <button
+                class="tc-button"
+                type="button"
+                aria-label="Dismiss notification"
+                onclick="this.closest('[data-tc-toast]').remove()"
+            >
+                "Dismiss"
+            </button>
         </div>
     }
     .boxed()
 }
 
 pub(crate) fn skeleton<'a>(cx: &'a Cx, message: &'a str) -> BoxView<'a> {
-    view! { cx =>
+    view! {
+        cx =>
         <div class="tc-skeleton" role="status" aria-live="polite" aria-atomic="true">
             <span class="tc-visually-hidden">(message)</span>
             <span class="tc-skeleton__line" aria-hidden="true"></span>
@@ -496,7 +547,8 @@ pub(crate) fn empty_state<'a>(
     actions: impl View + 'a,
 ) -> BoxView<'a> {
     let actions = actions.boxed();
-    view! { cx =>
+    view! {
+        cx =>
         <section class="tc-empty">
             <h2>(title)</h2>
             <p>(message)</p>
@@ -513,9 +565,13 @@ pub(crate) fn error_state<'a>(
     actions: impl View + 'a,
 ) -> BoxView<'a> {
     let actions = actions.boxed();
-    view! { cx =>
+    view! {
+        cx =>
         <section class="tc-error tc-error-state">
-            <div role="alert" aria-atomic="true"><h2>(title)</h2><p>(message)</p></div>
+            <div role="alert" aria-atomic="true">
+                <h2>(title)</h2>
+                <p>(message)</p>
+            </div>
             <div class="tc-actions">(actions)</div>
         </section>
     }
@@ -530,9 +586,12 @@ pub(crate) fn tooltip<'a>(
     label: &'a str,
     message: &'a str,
 ) -> BoxView<'a> {
-    view! { cx =>
+    view! {
+        cx =>
         <span class="tc-tooltip">
-            <button class="tc-button" type="button" aria-describedby=(id)>(label)</button>
+            <button class="tc-button" type="button" aria-describedby=(id)>
+                (label)
+            </button>
             <span class="tc-tooltip__content" id=(id) role="tooltip">(message)</span>
         </span>
     }
@@ -546,6 +605,273 @@ pub(crate) fn kbd<'a>(cx: &'a Cx, shortcut: &'a str) -> BoxView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_preferences_script(script: &str) {
+        let fixture = tempfile::tempdir().unwrap();
+        let module = fixture.path().join("preferences.mjs");
+        std::fs::write(&module, PREFERENCES_SCRIPT).unwrap();
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", script])
+            .env("LIFIC_PREFERENCES_MODULE", module)
+            .output()
+            .expect("the Topcoat devenv profile provides Node.js");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn controls_preferences_preserve_existing_svelte_appearance_on_migration() {
+        run_preferences_script(
+            r#"
+            import assert from 'node:assert/strict';
+            const {loadPreferences, savePreferences, STORAGE_KEY} = await import(process.env.LIFIC_PREFERENCES_MODULE);
+            const values = new Map([
+                ['lific_theme', 'dark'], ['lific_accent', 'teal'],
+                ['lific_density', 'compact'], ['lific_font_scale', 'lg'],
+            ]);
+            const storage = {
+                getItem: key => values.get(key) ?? null,
+                setItem: (key, value) => values.set(key, value),
+                removeItem: key => values.delete(key),
+            };
+            const migrated = loadPreferences(storage);
+            assert.equal(migrated.theme, 'dark');
+            assert.equal(migrated.accent, 'teal');
+            assert.equal(migrated.density, 'compact');
+            assert.equal(migrated.fontScale, 'large');
+            savePreferences({...migrated, theme:'system', accent:'rose', fontScale:'small'}, storage);
+            assert.equal(storage.getItem('lific_theme'), null);
+            assert.equal(storage.getItem('lific_accent'), 'rose');
+            assert.equal(storage.getItem('lific_font_scale'), 'sm');
+            assert.equal(loadPreferences(storage).fontScale, 'small');
+            values.clear();
+            values.set(STORAGE_KEY, JSON.stringify({theme:'light',density:'compact',fontScale:'large'}));
+            const previousTopcoat = loadPreferences(storage);
+            assert.equal(previousTopcoat.theme, 'light');
+            assert.equal(previousTopcoat.density, 'compact');
+            savePreferences(previousTopcoat, storage);
+            assert.equal(storage.getItem(STORAGE_KEY), null);
+            assert.equal(storage.getItem('lific_theme'), 'light');
+            values.delete('lific_theme');
+            assert.equal(loadPreferences(storage).theme, 'system');
+            assert.equal(loadPreferences({getItem(){throw Error('blocked');}}).theme, 'system');
+            assert.equal(savePreferences({accent:'green'}, {removeItem(){},setItem(){throw Error('full');}}).accent, 'green');
+
+            const failedValues = new Map([[STORAGE_KEY, JSON.stringify({theme:'dark',accent:'rose'})]]);
+            const failedMigration = {
+                getItem: key => failedValues.get(key) ?? null,
+                setItem(){throw Error('full');},
+                removeItem: key => failedValues.delete(key),
+            };
+            savePreferences(loadPreferences(failedMigration), failedMigration);
+            assert.notEqual(failedMigration.getItem(STORAGE_KEY), null);
+        "#,
+        );
+    }
+
+    #[test]
+    fn controls_preferences_do_not_overwrite_another_tabs_preference() {
+        run_preferences_script(
+            r#"
+            import assert from 'node:assert/strict';
+            const {initializePreferences} = await import(process.env.LIFIC_PREFERENCES_MODULE);
+            const values = new Map();
+            const storage = {
+                getItem: key => values.get(key) ?? null,
+                setItem: (key, value) => values.set(key, value),
+                removeItem: key => values.delete(key),
+            };
+            function tab(name) {
+                const listeners = new Map();
+                const control = {dataset:{tcPreference:name},value:''};
+                const doc = {
+                    documentElement:{dataset:{}},
+                    querySelectorAll:selector=>selector==='[data-tc-preference]' ? [control] : [],
+                    addEventListener:(event,fn)=>listeners.set(event,fn),
+                    removeEventListener:event=>listeners.delete(event),
+                };
+                doc.documentElement.ownerDocument=doc;
+                const win = {
+                    addEventListener:(event,fn)=>listeners.set(`window:${event}`,fn),
+                    removeEventListener:event=>listeners.delete(`window:${event}`),
+                    matchMedia:()=>null,
+                };
+                initializePreferences(doc,storage,win);
+                return value => {
+                    control.value=value;
+                    listeners.get('change')({target:{closest:()=>control}});
+                };
+            }
+            const changeTheme = tab('theme');
+            const changeAccent = tab('accent');
+            changeTheme('dark');
+            assert.equal(values.get('lific_theme'),'dark');
+            changeAccent('teal');
+            assert.equal(values.get('lific_theme'),'dark');
+            assert.equal(values.get('lific_accent'),'teal');
+        "#,
+        );
+    }
+
+    #[test]
+    fn controls_preferences_keep_motion_and_synchronize_other_tabs() {
+        run_preferences_script(
+            r#"
+            import assert from 'node:assert/strict';
+            const {loadPreferences, savePreferences, normalizePreferences, initializePreferences, STORAGE_KEY} = await import(process.env.LIFIC_PREFERENCES_MODULE);
+            const values = new Map([['lific_motion','reduced']]);
+            const storage = {
+                getItem: key => values.get(key) ?? null,
+                setItem: (key, value) => values.set(key, value),
+                removeItem: key => values.delete(key),
+            };
+            assert.equal(loadPreferences(storage).motion, 'reduced');
+            assert.equal(normalizePreferences({motion:'invalid'}).motion, 'system');
+            const listeners = new Map();
+            const media = {matches:false, addEventListener:(_, fn)=>listeners.set('media',fn),removeEventListener:()=>listeners.delete('media')};
+            const win = {
+                addEventListener:(name, fn)=>listeners.set(`window:${name}`,fn),
+                removeEventListener:(name)=>listeners.delete(`window:${name}`),
+                matchMedia:()=>media,
+            };
+            const motion = {dataset:{tcPreference:'motion'},value:''};
+            const root = {dataset:{}};
+            const doc = {
+                documentElement:root, defaultView:win,
+                querySelectorAll:selector=>selector==='[data-tc-preference]' ? [motion] : [],
+                addEventListener:(name, fn)=>listeners.set(`document:${name}`,fn),
+                removeEventListener:(name)=>listeners.delete(`document:${name}`),
+            };
+            root.ownerDocument=doc;
+            const stop = initializePreferences(doc,storage,win);
+            assert.equal(root.dataset.motion, 'reduced');
+            assert.equal(motion.value, 'reduced');
+            values.set('lific_motion','full');
+            listeners.get('window:storage')({storageArea:storage,key:'lific_motion',newValue:'full'});
+            assert.equal(root.dataset.motion, 'full');
+            assert.equal(motion.value, 'full');
+            values.delete('lific_motion');
+            listeners.get('window:storage')({storageArea:storage,key:'lific_motion',newValue:null});
+            assert.equal(motion.value, 'system');
+            media.matches=true;
+            listeners.get('media')();
+            assert.equal(root.dataset.motion, 'reduced');
+            motion.value='full';
+            listeners.get('document:change')({target:{closest:()=>motion}});
+            assert.equal(storage.getItem('lific_motion'), 'full');
+            assert.equal(root.dataset.motion, 'full');
+            values.clear();
+            listeners.get('window:storage')({storageArea:storage,key:null,newValue:null});
+            assert.equal(motion.value, 'system');
+            assert.equal(root.dataset.motion, 'reduced');
+            values.set(STORAGE_KEY, JSON.stringify({motion:'full',fontScale:'large'}));
+            listeners.get('window:storage')({storageArea:storage,key:STORAGE_KEY,newValue:storage.getItem(STORAGE_KEY)});
+            assert.equal(root.dataset.motion, 'full');
+            assert.equal(root.dataset.fontScale, 'large');
+            assert.equal(storage.getItem(STORAGE_KEY), null);
+            assert.equal(initializePreferences(doc,storage,win), stop);
+            stop();
+            assert.equal(listeners.size, 0);
+        "#,
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires devenv --profile topcoat-e2e with repository Playwright/Chromium"]
+    async fn controls_preferences_survive_reload_and_update_dynamic_controls_in_other_tabs() {
+        let cx = &Cx::default();
+        let content = render(
+            cx,
+            view! {
+                cx =>
+                (preference_select(cx, "theme", "Theme", Preference::Theme, "system"))
+                (preference_select(cx, "motion", "Motion", Preference::Motion, "system"))
+                <span class="tc-spinner" aria-hidden="true"></span>
+            },
+        )
+        .await;
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("fixture.html"),
+            format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><style>{STYLESHEET}</style><script type=\"module\" src=\"/preferences.js\"></script></head><body>{content}</body></html>"),
+        ).unwrap();
+        std::fs::write(fixture.path().join("preferences.js"), PREFERENCES_SCRIPT).unwrap();
+        let playwright = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("e2e/node_modules/playwright/index.mjs");
+        let script = r#"
+            import assert from 'node:assert/strict';
+            import {readFileSync} from 'node:fs';
+            import {join} from 'node:path';
+            const {chromium} = await import(process.env.LIFIC_PLAYWRIGHT_MODULE);
+            const browser = await chromium.launch({executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+            try {
+                const context = await browser.newContext({reducedMotion:'reduce'});
+                await context.route('http://lific.test/**', route => {
+                    const script = route.request().url().endsWith('/preferences.js');
+                    return route.fulfill({contentType:script ? 'text/javascript' : 'text/html',body:readFileSync(join(process.env.LIFIC_PREFERENCES_FIXTURE, script ? 'preferences.js' : 'fixture.html'),'utf8')});
+                });
+                const page = await context.newPage();
+                page.setDefaultTimeout(5000);
+                const errors=[];
+                page.on('pageerror',error=>errors.push(error.message));
+                await page.goto('http://lific.test/');
+                const state = async page => page.evaluate(()=>({...document.documentElement.dataset}));
+                await page.waitForFunction(()=>document.documentElement.dataset.motion==='reduced');
+                assert.equal(await page.locator('.tc-spinner').evaluate(e=>getComputedStyle(e).animationName),'none');
+                await page.selectOption('#theme','dark');
+                await page.selectOption('#motion','full');
+                assert.equal((await state(page)).theme,'dark');
+                assert.equal((await state(page)).motion,'full');
+                assert.equal(await page.locator('.tc-spinner').evaluate(e=>getComputedStyle(e).animationName),'tc-spin');
+                await page.reload();
+                await page.waitForFunction(()=>document.documentElement.dataset.motion==='full');
+                assert.equal(await page.locator('#theme').inputValue(),'dark');
+                assert.equal(await page.locator('#motion').inputValue(),'full');
+                await page.evaluate(()=>{
+                    const select=document.createElement('select');
+                    select.id='late-theme'; select.dataset.tcPreference='theme';
+                    for(const value of ['system','light','dark']) select.add(new Option(value,value));
+                    document.body.append(select);
+                });
+                await page.waitForFunction(()=>document.querySelector('#late-theme').value==='dark');
+                const follower=await context.newPage();
+                follower.setDefaultTimeout(5000);
+                follower.on('pageerror',error=>errors.push(error.message));
+                await follower.goto('http://lific.test/');
+                await follower.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+                await page.selectOption('#theme','light');
+                await page.selectOption('#motion','system');
+                await follower.waitForFunction(()=>document.documentElement.dataset.theme==='light' && document.documentElement.dataset.motion==='reduced');
+                assert.equal(await follower.locator('#theme').inputValue(),'light');
+                assert.equal(await follower.locator('#motion').inputValue(),'system');
+                await follower.emulateMedia({reducedMotion:'no-preference'});
+                await follower.waitForFunction(()=>document.documentElement.dataset.motion==='full');
+                await page.evaluate(()=>localStorage.clear());
+                await follower.waitForFunction(()=>document.documentElement.dataset.theme==='system');
+                assert.equal(await follower.locator('#theme').inputValue(),'system');
+                await page.reload();
+                await page.waitForFunction(()=>document.documentElement.dataset.theme==='system');
+                assert.deepEqual(errors,[]);
+                console.log('appearance reload, dynamic controls, cross-tab storage and OS motion passed');
+            } finally {await browser.close();}
+        "#;
+        let output = std::process::Command::new("bun")
+            .args(["--eval", script])
+            .env("LIFIC_PLAYWRIGHT_MODULE", playwright)
+            .env("LIFIC_PREFERENCES_FIXTURE", fixture.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     async fn render(cx: &Cx, control: impl View) -> String {
         control.single().await.unwrap().render(cx)
@@ -591,7 +917,8 @@ mod tests {
         props.kind = ButtonKind::Submit;
         props.variant = ButtonVariant::Primary;
         props.loading = true;
-        props.attrs = attributes! { cx =>
+        props.attrs = attributes! {
+            cx =>
             @click="() => console.log('clicked')"
             form="issue-form"
             name="action"
@@ -678,7 +1005,8 @@ mod tests {
         let mut props = TextInput::new("title", "title", "Title", "Keep this value");
         props.required = true;
         props.error = Some("A title is required");
-        props.attrs = attributes! { cx =>
+        props.attrs = attributes! {
+            cx =>
             @input="(event) => console.log(event.target.value)"
             maxlength="200"
             data-field="issue-title"
@@ -779,7 +1107,8 @@ mod tests {
     #[tokio::test]
     async fn controls_compose_inside_views_and_accept_nested_dialog_content() {
         let cx = &Cx::default();
-        let controls = view! { cx =>
+        let controls = view! {
+            cx =>
             <section>
                 (button(cx, Button::new("Save")))
                 (text_input(cx, TextInput::new("title", "title", "Title", "Draft")))
@@ -817,7 +1146,8 @@ mod tests {
         props.required = true;
         props.disabled = true;
         props.error = Some("Choose an allowed status");
-        props.attrs = attributes! { cx =>
+        props.attrs = attributes! {
+            cx =>
             @change="(event) => console.log(event.target.value)"
             class="wrong"
             name="wrong"
@@ -863,6 +1193,7 @@ mod tests {
             Preference::Accent,
             Preference::Density,
             Preference::FontScale,
+            Preference::Motion,
         ] {
             let selected = preference.options()[0].0;
             let html = render(
@@ -879,8 +1210,9 @@ mod tests {
                     Preference::Accent => "accent",
                     Preference::Density => "density",
                     Preference::FontScale => "font-scale",
+                    Preference::Motion => "motion",
                 };
-                if preference != Preference::Theme || *value != "system" {
+                if *value != "system" {
                     assert!(STYLESHEET.contains(&format!("[data-{attribute}=\"{value}\"]")));
                 }
             }
@@ -892,9 +1224,15 @@ mod tests {
         let cx = &Cx::default();
         let html = render(
             cx,
-            view! { cx =>
+            view! {
+                cx =>
                 (popover_trigger(cx, "filters", "Filter issues"))
-                (popover(cx, "filters", "Issue filters", button(cx, Button::new("Apply"))))
+                (popover(
+                    cx,
+                    "filters",
+                    "Issue filters",
+                    button(cx, Button::new("Apply")),
+                ))
             },
         )
         .await;
@@ -997,7 +1335,8 @@ mod tests {
         let cx = &Cx::default();
         let html = render(
             cx,
-            view! { cx =>
+            view! {
+                cx =>
                 (tooltip(cx, "shortcut-help", "Help", "Press <Enter> to confirm."))
                 (kbd(cx, "Ctrl + <Enter>"))
             },

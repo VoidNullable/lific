@@ -366,6 +366,10 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
                         <a href="/signup" aria-current=(signup_link.then_some("page"))>"Sign up"</a>
                     </nav>
                 } else {
+                    <button type="button" class="tc-shell__sidebar-toggle" data-sidebar-toggle=""
+                        aria-label="Collapse sidebar" aria-expanded="true" aria-controls="tc-sidebar">
+                        "Collapse sidebar"
+                    </button>
                     <details class="tc-shell__mobile">
                         <summary>"Navigation"</summary>
                         (mobile_navigation)
@@ -374,8 +378,14 @@ pub(crate) fn shell<'a>(cx: &'a Cx, route: &ParsedRoute<'_>, content: BoxView<'a
             </header>
             <div class="tc-shell__body">
                 if !is_auth {
-                    <aside class="tc-shell__desktop">
+                    <span class="tc-shell__sidebar-probe" data-sidebar-probe="" aria-hidden="true"></span>
+                    <aside class="tc-shell__desktop" id="tc-sidebar">
                         (desktop_navigation)
+                        <div class="tc-shell__sidebar-resize" data-sidebar-resize="" role="separator"
+                            tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical"
+                            aria-controls="tc-sidebar"
+                            aria-valuemin="180" aria-valuemax="400" aria-valuenow="230"
+                            title="Use Left and Right arrows to resize. Double click to reset."></div>
                     </aside>
                 }
                 <main class="tc-shell__main" id="main-content" tabindex="-1">(content)</main>
@@ -569,5 +579,33 @@ mod tests {
         assert!(html.contains("aria-label=\"Account\""));
         assert!(!html.contains("Desktop navigation"));
         assert!(!html.contains("Mobile navigation"));
+    }
+
+    #[tokio::test]
+    async fn shell_sidebar_resize_and_collapse_are_keyboard_accessible() {
+        let cx = Cx::default();
+        for path in ["/LIF/issues", "/public/LIF/issues"] {
+            let route = ParsedRoute::parse(path);
+            let html = shell(&cx, &route, placeholder(&cx, &route))
+                .single()
+                .await
+                .unwrap()
+                .render(&cx);
+            assert!(html.contains("aria-label=\"Collapse sidebar\""), "{path}");
+            assert!(html.contains("aria-controls=\"tc-sidebar\""), "{path}");
+            assert!(html.contains("id=\"tc-sidebar\""), "{path}");
+            assert!(html.contains("role=\"separator\""), "{path}");
+            assert!(html.contains("aria-orientation=\"vertical\""), "{path}");
+            assert!(html.contains("aria-label=\"Resize sidebar\""), "{path}");
+            assert!(html.contains("tabindex=\"0\""), "{path}");
+        }
+        let route = ParsedRoute::parse("/login");
+        let html = shell(&cx, &route, placeholder(&cx, &route))
+            .single()
+            .await
+            .unwrap()
+            .render(&cx);
+        assert!(!html.contains("data-sidebar-toggle"));
+        assert!(!html.contains("data-sidebar-resize"));
     }
 }

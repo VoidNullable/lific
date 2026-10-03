@@ -145,6 +145,7 @@ mod topcoat_spike {
             .path_and_query()
             .map_or_else(|| uri.path(), |path| path.as_str());
         let route = super::topcoat_shell::ParsedRoute::parse(route_target);
+        let title = route.page.title();
         let scope = match (route.layout, route.project) {
             (super::topcoat_shell::Layout::Public, Some(project)) => {
                 super::topcoat_session::Scope::public(project)
@@ -158,7 +159,7 @@ mod topcoat_spike {
                 <head>
                     <meta charset="utf-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1">
-                    <title>"Lific Topcoat experiment"</title>
+                    <title>(title)</title>
                     <link rel="stylesheet" href="/__topcoat-spike.css">
                     <link rel="stylesheet" href=(super::topcoat_shell::STYLESHEET_PATH)>
                     <script type="module" src="/__topcoat-runtime.js"></script>
@@ -168,14 +169,7 @@ mod topcoat_spike {
                     <script type="module" src="/__topcoat-preferences.js"></script>
                 </head>
                 <body (session_attributes)>
-                    <a class="skip-link" href="#main-content">"Skip to content"</a>
-                    <header class="topcoat-scaffold__header">
-                        <a href="/__topcoat-spike">"Lific"</a>
-                        <nav aria-label="Primary">
-                            <a href="/__topcoat-spike">"Experiment home"</a>
-                        </nav>
-                    </header>
-                    <main id="main-content">(slot)</main>
+                    (slot)
                 </body>
             </html>
         })
@@ -184,12 +178,14 @@ mod topcoat_spike {
     #[page("/__topcoat-spike")]
     async fn home() -> Result<impl View> {
         Ok(view! {
-            <section class="topcoat-scaffold">
-                <h1>"Topcoat migration spike"</h1>
-                <p>
-                    "The feature-gated application scaffold is mounted behind the existing Axum routes."
-                </p>
-            </section>
+            <main id="main-content">
+                <section class="topcoat-scaffold">
+                    <h1>"Topcoat migration spike"</h1>
+                    <p>
+                        "The feature-gated application scaffold is mounted behind the existing Axum routes."
+                    </p>
+                </section>
+            </main>
         })
     }
 
@@ -340,19 +336,30 @@ mod topcoat_spike_tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&body);
-        assert!(body.contains("<nav aria-label=\"Primary\">"));
         assert!(body.contains("/__topcoat-spike.css"));
         assert!(body.contains("/__topcoat-runtime.js"));
         assert!(body.contains("<main id=\"main-content\">"));
+        assert!(!body.contains("topcoat-scaffold__header"));
+        assert!(!body.contains("class=\"skip-link\""));
     }
 
     #[tokio::test]
     async fn topcoat_shell_routes_keep_private_public_and_auth_chrome_scoped() {
         let router = topcoat::router::tower::TowerService::new(topcoat_spike::router());
-        for (path, layout, expected) in [
-            ("/LIF/issues?assignee=me", "private", "/LIF/issues"),
-            ("/public/LIF/issues/LIF-42", "public", "/public/LIF/issues"),
-            ("/login", "auth", "/signup"),
+        for (path, layout, expected, title) in [
+            (
+                "/LIF/issues?assignee=me",
+                "private",
+                "/LIF/issues",
+                "Issues",
+            ),
+            (
+                "/public/LIF/issues/LIF-42",
+                "public",
+                "/public/LIF/issues",
+                "Issue detail",
+            ),
+            ("/login", "auth", "/signup", "Log in"),
         ] {
             let response = router
                 .clone()
@@ -365,6 +372,13 @@ mod topcoat_spike_tests {
                 body.contains(&format!("data-layout=\"{layout}\"")),
                 "{path}"
             );
+            assert_eq!(body.matches("id=\"main-content\"").count(), 1, "{path}");
+            assert_eq!(
+                body.matches("class=\"tc-shell__header\"").count(),
+                1,
+                "{path}"
+            );
+            assert!(body.contains(&format!("<title>{title}</title>")), "{path}");
             assert!(body.contains(expected), "{path}");
             if layout == "public" {
                 assert!(body.contains("data-lific-public-project=\"LIF\""));
@@ -455,8 +469,9 @@ mod topcoat_spike_tests {
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&body);
-        assert!(body.contains(".topcoat-scaffold"));
-        assert!(body.contains("max-width: 72rem"));
+        assert!(body.contains("body {\n  margin: 0;\n}"));
+        assert!(body.contains(".tc-shell"));
+        assert!(!body.contains("max-width: 72rem"));
         assert!(body.contains(".tc-button"));
         assert!(body.contains("--tc-accent"));
     }

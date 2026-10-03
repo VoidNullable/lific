@@ -8,7 +8,8 @@
 
 .tc-shell a { color: inherit; }
 .tc-shell a:focus-visible,
-.tc-shell summary:focus-visible {
+.tc-shell summary:focus-visible,
+.tc-shell button:focus-visible {
   outline: 3px solid var(--tc-focus);
   outline-offset: 3px;
 }
@@ -36,8 +37,43 @@
 }
 .tc-shell__brand { font-size: 1.25rem; font-weight: 700; text-decoration: none; }
 .tc-shell__hint { color: var(--tc-muted); line-height: 1.5; }
-.tc-shell__body { display: grid; grid-template-columns: 15rem minmax(0, 1fr); }
-.tc-shell__desktop { padding: 1rem; border-right: 1px solid var(--tc-border); }
+.tc-shell__body { display: grid; grid-template-columns: var(--tc-sidebar-width, 14.375rem) minmax(0, 1fr); }
+.tc-shell__desktop { position: relative; min-width: 0; padding: 1rem; border-right: 1px solid var(--tc-border); }
+.tc-shell[data-sidebar-collapsed="true"] .tc-shell__body { grid-template-columns: minmax(0, 1fr); }
+.tc-shell[data-sidebar-collapsed="true"] .tc-shell__desktop { display: none; }
+.tc-shell__sidebar-toggle {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-left: auto;
+  border: 1px solid var(--tc-border);
+  border-radius: var(--tc-radius);
+  background: var(--tc-surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tc-shell__sidebar-probe {
+  position: absolute;
+  width: 1rem;
+  height: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.tc-shell__sidebar-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -0.25rem;
+  width: 0.5rem;
+  cursor: col-resize;
+  touch-action: none;
+}
+.tc-shell__sidebar-resize:hover,
+.tc-shell__sidebar-resize:focus-visible {
+  background: var(--tc-accent);
+  outline: 2px solid var(--tc-focus);
+  outline-offset: 1px;
+}
 .tc-shell__navigation { display: flex; flex-direction: column; gap: 0.25rem; }
 .tc-shell__navigation a,
 .tc-shell__auth-links a {
@@ -68,6 +104,7 @@
   .tc-shell__header { padding: max(0.5rem, env(safe-area-inset-top)) 1rem 0.5rem; }
   .tc-shell__body { display: block; }
   .tc-shell__desktop { display: none; }
+  .tc-shell__sidebar-toggle { display: none; }
   .tc-shell__main { padding: 1.5rem 1rem max(1.5rem, env(safe-area-inset-bottom)); }
   .tc-shell__mobile { display: block; margin-left: auto; }
   .tc-shell__mobile summary {
