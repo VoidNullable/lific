@@ -62,7 +62,7 @@ test('headless upload queue survives same-account notifications and retries only
     await page.waitForFunction(() => window.calls.length === 2 && window.uploaded.length === 1);
     await page.evaluate(() => dispatchEvent(new CustomEvent('lific:account-change')));
     assert.equal(await page.evaluate(() => window.aborted), 0);
-    await page.getByRole('button', {name: 'Cancel'}).click();
+    await page.getByRole('button', {name: 'Cancel', exact: true}).click();
     await page.getByRole('button', {name: 'Upload', exact: true}).click();
     await page.waitForFunction(() => window.calls.length === 3);
     assert.deepEqual(await page.evaluate(() => window.calls), ['one.txt', 'two.txt', 'two.txt']);
@@ -168,4 +168,87 @@ test('headless native originals use session cookie while thumbnail and structure
     assert.match(requests.find(request => request.pathname === '/api/attachments/10').headers.range, /^bytes=/);
     await page.evaluate(() => component.dispose());
   } finally {await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));}
+});
+test('headless per-file controls retry one rejection, cancel one transfer, and preserve sibling uploads', {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+  const {chromium} = await import(path.resolve(__dirname, '../../../..', 'e2e/node_modules/playwright/index.mjs'));
+  const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+  try {
+    const page = await browser.newPage(); page.setDefaultTimeout(5000);
+    await page.setContent('<section><form data-attachment-upload><input type=file multiple data-attachment-files><button type=submit>Upload</button><button type=button data-attachment-cancel hidden>Cancel</button><progress data-attachment-progress hidden></progress><p data-attachment-status></p></form></section>');
+    await page.addScriptTag({content: fs.readFileSync(`${__dirname}/attachments.js`, 'utf8')});
+    await page.evaluate(() => {
+      window.calls=[];window.aborted=[];window.uploaded=[];window.release={};
+      const client={audience:()=> 'same',upload(file){calls.push(file.name);let finish;const result=file.name==='bad.txt'&&calls.filter(name=>name===file.name).length===1?Promise.resolve({ok:false,error:'Rejected'}):new Promise(resolve=>{finish=resolve;release[file.name]=()=>resolve({ok:true,data:{id:calls.length,filename:file.name,mime:file.type}});});return {result,abort(){aborted.push(file.name);finish?.({ok:false,canceled:true,error:'Canceled'});}};}};
+      window.component=LificTopcoatAttachments.attach(document.querySelector('section'),{client,onUploaded:row=>uploaded.push(row.filename)});
+    });
+    await page.locator('input').setInputFiles(['bad.txt','cancel.txt','keep.txt'].map(name=>({name,mimeType:'text/plain',buffer:Buffer.from(name)})));
+    await page.getByRole('button',{name:'Upload',exact:true}).click();
+    await page.getByRole('button',{name:'Retry bad.txt',exact:true}).click();
+    await page.getByRole('button',{name:'Cancel upload of cancel.txt',exact:true}).click();
+    await page.evaluate(()=>{release['bad.txt']();release['keep.txt']();});
+    await page.waitForFunction(()=>uploaded.length===2);
+    assert.deepEqual(await page.evaluate(()=>calls),['bad.txt','cancel.txt','keep.txt','bad.txt']);
+    assert.deepEqual(await page.evaluate(()=>aborted),['cancel.txt']);
+    assert.deepEqual((await page.evaluate(()=>uploaded)).sort(),['bad.txt','keep.txt']);
+    await page.evaluate(()=>component.dispose());
+  } finally {await browser.close();}
+});
+test('headless image composer offers annotation, resize and alt text without uploading original redactions', {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+  const {chromium} = await import(path.resolve(__dirname, '../../../..', 'e2e/node_modules/playwright/index.mjs'));
+  const browser = await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+  try {
+    const page=await browser.newPage();page.setDefaultTimeout(5000);
+    await page.setContent('<section id=composer></section>');
+    await page.addScriptTag({content:fs.readFileSync(`${__dirname}/attachments.js`,'utf8')});
+    await page.evaluate(async()=>{
+      const canvas=document.createElement('canvas');canvas.width=5000;canvas.height=3000;const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,5000,3000);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+      window.original=new File([blob],'shot.png',{type:'image/png'});window.files=[];window.draft='';
+      const client={audience:()=> 'same',upload(file){files.push(file);return {result:Promise.resolve({ok:true,data:{id:8,filename:file.name,mime:file.type}}),abort(){}};}};
+      window.composer=LificTopcoatAttachments.createComposer({root:document.querySelector('section'),client,text:{read:()=>draft,write:value=>draft=value},onUploaded:(row,snippet)=>{draft+=snippet;}});
+      window.pending=composer.enqueue([original],{source:'paste'});
+    });
+    await page.getByRole('button',{name:'Annotate',exact:true}).click();
+    await page.getByRole('button',{name:'Redact',exact:true}).click();
+    const canvas=page.locator('[data-attachment-annotation-canvas]');const box=await canvas.boundingBox();
+    await page.mouse.move(box.x+10,box.y+10);await page.mouse.down();await page.mouse.move(box.x+70,box.y+70);await page.mouse.up();
+    await page.getByRole('button',{name:'Upload annotated image',exact:true}).click();
+    await page.getByRole('button',{name:/Resize to 2560px/}).click();
+    await page.getByRole('textbox',{name:/Describe shot-annotated.png/}).fill('A redacted [diagram]');
+    await page.getByRole('button',{name:'Apply image description',exact:true}).click();
+    await page.evaluate(()=>pending);
+    assert.equal(await page.evaluate(()=>draft),'![A redacted diagram](/api/attachments/8)');
+    const image=await page.evaluate(async()=>{const bitmap=await createImageBitmap(files[0]);const canvas=document.createElement('canvas');canvas.width=bitmap.width;canvas.height=bitmap.height;const ctx=canvas.getContext('2d');ctx.drawImage(bitmap,0,0);return {width:bitmap.width,name:files[0].name,pixel:[...ctx.getImageData(100,100,1,1).data]};});
+    assert.equal(image.width,2560);assert.equal(image.name,'shot-annotated.png');assert.deepEqual(image.pixel,[0,0,0,255]);
+    await page.evaluate(()=>composer.dispose());
+  }finally{await browser.close();}
+});
+test('headless large-paste choices keep text and teardown cancels pending annotation and uploads', {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+  const {chromium}=await import(path.resolve(__dirname,'../../../..','e2e/node_modules/playwright/index.mjs'));
+  const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+  try{
+    const page=await browser.newPage();page.setDefaultTimeout(5000);
+    await page.setContent('<section><textarea aria-label=Draft></textarea></section>');await page.addScriptTag({content:fs.readFileSync(`${__dirname}/attachments.js`,'utf8')});
+    await page.evaluate(()=>{window.files=[];window.busy=[];window.audience='one';const root=document.querySelector('section'),textarea=root.querySelector('textarea');root.addEventListener('lific:attachment-busy',event=>busy.push(event.detail.busy));window.composer=LificTopcoatAttachments.createComposer({root,textarea,text:{read:()=>textarea.value,write:next=>textarea.value=next},client:{audience:()=>audience,upload(file){files.push(file);return {result:Promise.resolve({ok:true,data:{id:1,filename:file.name,mime:file.type}}),abort(){}};}},onUploaded:(row,snippet)=>textarea.value+=snippet});});
+    const value=Array(61).fill('log line').join('\n');
+    const paste=()=>page.locator('textarea').evaluate((textarea,value)=>{const clipboardData=new DataTransfer();clipboardData.setData('text/plain',value);textarea.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData}));},value);
+    await paste();await page.getByRole('button',{name:'Paste inline',exact:true}).click();assert.equal(await page.locator('textarea').inputValue(),value);assert.equal(await page.evaluate(()=>files.length),0);
+    await page.locator('textarea').fill('');await paste();await page.getByRole('button',{name:'Attach pasted text',exact:true}).click();await page.waitForFunction(()=>files.length===1);assert.equal(await page.evaluate(()=>files[0].text()),value);assert.match(await page.locator('textarea').inputValue(),/^\[paste-.*\.txt\]\(\/api\/attachments\/1\)$/);
+    await page.evaluate(async()=>{const canvas=document.createElement('canvas');canvas.width=20;canvas.height=20;const blob=await new Promise(resolve=>canvas.toBlob(resolve));window.imageTask=composer.enqueue([new File([blob],'cancel.png',{type:'image/png'})],{source:'drop'});});
+    await page.getByRole('button',{name:'Annotate',exact:true}).waitFor();await page.evaluate(()=>{audience='two';dispatchEvent(new CustomEvent('lific:account-change'));});await page.evaluate(()=>imageTask);
+    assert.equal(await page.getByRole('button',{name:'Annotate',exact:true}).count(),0);assert.equal(await page.evaluate(()=>files.length),1);assert.equal(await page.evaluate(()=>busy.at(-1)),false);
+    await page.evaluate(()=>composer.dispose());
+  }finally{await browser.close();}
+});
+test('headless annotation crop handles change flattened dimensions and undo restores the prior crop', {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+  const {chromium}=await import(path.resolve(__dirname,'../../../..','e2e/node_modules/playwright/index.mjs'));
+  const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+  try{
+    const page=await browser.newPage();page.setDefaultTimeout(5000);await page.setContent('<section></section>');await page.addScriptTag({content:fs.readFileSync(`${__dirname}/attachments.js`,'utf8')});
+    await page.evaluate(async()=>{const canvas=document.createElement('canvas');canvas.width=400;canvas.height=200;canvas.getContext('2d').fillRect(0,0,400,200);const blob=await new Promise(resolve=>canvas.toBlob(resolve));window.files=[];window.composer=LificTopcoatAttachments.createComposer({root:document.querySelector('section'),client:{audience:()=> 'one',upload(file){files.push(file);return {result:Promise.resolve({ok:true,data:{id:1,filename:file.name,mime:file.type}}),abort(){}};}}});window.task=composer.enqueue([new File([blob],'crop.png',{type:'image/png'})],{source:'drop'});});
+    await page.getByRole('button',{name:'Annotate',exact:true}).click();await page.getByRole('button',{name:'Crop',exact:true}).click();const box=await page.locator('canvas').boundingBox();
+    const drag=async(from,to)=>{await page.mouse.move(box.x+from[0],box.y+from[1]);await page.mouse.down();await page.mouse.move(box.x+to[0],box.y+to[1]);await page.mouse.up();};
+    await drag([30,30],[130,130]);await drag([130,130],[180,160]);await page.getByRole('button',{name:'Undo',exact:true}).click();await page.getByRole('button',{name:'Upload annotated image',exact:true}).click();await page.evaluate(()=>task);
+    assert.deepEqual(await page.evaluate(async()=>{const image=await createImageBitmap(files[0]);return [image.width,image.height];}),[100,100]);
+    await page.evaluate(()=>composer.dispose());
+  }finally{await browser.close();}
 });

@@ -809,16 +809,16 @@ pub(super) async fn delete_attachment(
 
 // ── Where-used + dedup (LIF-418) ─────────────────────────────
 
-/// One place an attachment is referenced from. `identifier` is the
-/// human-facing key (`LIF-12`, `LIF-DOC-3`) where the entity has one, and null
-/// for a comment, which is addressed through its parent rather than in its own
-/// right.
+/// One place an attachment is referenced from. For comments, `identifier` and
+/// `page_id` describe the parent route, while `entity_id` remains the comment
+/// ID. `title` is the comment excerpt used in the where-used list.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LinkedEntity {
     pub entity_type: String,
     pub entity_id: i64,
     pub identifier: Option<String>,
     pub title: String,
+    pub page_id: Option<i64>,
 }
 
 /// Another attachment row over the same bytes, with its own usages.
@@ -934,6 +934,7 @@ fn describe_entity(
                             entity_id,
                             identifier: Some(issue.identifier),
                             title: issue.title,
+                            page_id: None,
                         })
                 }
                 AttachmentEntity::Page => {
@@ -944,17 +945,31 @@ fn describe_entity(
                             entity_id,
                             identifier: Some(page.identifier),
                             title: page.title,
+                            page_id: Some(page.id),
                         })
                 }
                 AttachmentEntity::Comment => queries::comments::get_comment(conn, entity_id)
                     .ok()
-                    .map(|comment| LinkedEntity {
-                        entity_type: "comment".into(),
-                        entity_id,
-                        // A comment is not addressable by identifier; the client
-                        // navigates to it through its parent issue or page.
-                        identifier: None,
-                        title: comment_title(&comment.content),
+                    .map(|comment| {
+                        let parent = if let Some(issue_id) = comment.issue_id {
+                            queries::get_issue(conn, issue_id)
+                                .ok()
+                                .map(|issue| (Some(issue.identifier), None))
+                        } else if let Some(page_id) = comment.page_id {
+                            queries::get_page(conn, page_id)
+                                .ok()
+                                .map(|page| (Some(page.identifier), Some(page.id)))
+                        } else {
+                            None
+                        };
+                        let (identifier, page_id) = parent.unwrap_or((None, None));
+                        LinkedEntity {
+                            entity_type: "comment".into(),
+                            entity_id,
+                            identifier,
+                            title: comment_title(&comment.content),
+                            page_id,
+                        }
                     }),
             };
         Ok(described)
@@ -3303,16 +3318,14 @@ mod media_tests {
             .unwrap();
         assert_eq!(page["title"], "Runbook");
         assert!(page["identifier"].as_str().unwrap().contains("-DOC-"));
+        assert_eq!(page["page_id"], page_id);
 
         let comment = entities
             .iter()
             .find(|e| e["entity_type"] == "comment")
             .unwrap();
-        assert_eq!(
-            comment["identifier"],
-            serde_json::Value::Null,
-            "a comment is reached through its parent, not by identifier"
-        );
+        assert_eq!(comment["identifier"], issue["identifier"]);
+        assert_eq!(comment["page_id"], serde_json::Value::Null);
         assert_eq!(comment["title"], "see this");
 
         assert!(links["duplicates"].as_array().unwrap().is_empty());
@@ -3321,10 +3334,10 @@ mod media_tests {
     /// Two uploads of identical bytes are two rows over one blob. The point
     /// of the duplicates list is telling the caller the file is already here.
     #[tokio::test]
-    async fn duplicates_surface_other_rows_over_the_same_bytes() {
+    async fn primary_and_duplicate_comment_usages_include_parent_routes() {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;
-        let issue_id = parse_json(
+        let issue = parse_json(
             json_post(
                 &app,
                 "/api/issues",
@@ -3332,38 +3345,73 @@ mod media_tests {
             )
             .await,
         )
-        .await["id"]
-            .as_i64()
-            .unwrap();
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
 
         let bytes = png_image(24, 24);
-        let first = parse_json(
-            upload(
+        let page = parse_json(
+            json_post(
                 &app,
-                "a.png",
-                "image/png",
-                &bytes,
-                Some(("issue", issue_id)),
+                "/api/pages",
+                serde_json::json!({ "project_id": project_id, "title": "Duplicate home" }),
             )
             .await,
         )
-        .await["id"]
+        .await;
+        let page_id = page["id"].as_i64().unwrap();
+
+        let first = parse_json(upload(&app, "a.png", "image/png", &bytes, None).await).await["id"]
             .as_i64()
             .unwrap();
+        json_post(
+            &app,
+            &format!("/api/issues/{issue_id}/comments"),
+            serde_json::json!({ "content": format!("Issue comment links /api/attachments/{first}") }),
+        )
+        .await;
         let second =
             parse_json(upload(&app, "again.png", "image/png", &bytes, None).await).await["id"]
                 .as_i64()
                 .unwrap();
+        json_post(
+            &app,
+            &format!("/api/pages/{page_id}/comments"),
+            serde_json::json!({ "content": format!("Page comment links /api/attachments/{second}") }),
+        )
+        .await;
         assert_ne!(first, second);
 
         let links =
             parse_json(json_get(&app, &format!("/api/attachments/{second}/links")).await).await;
-        assert!(links["entities"].as_array().unwrap().is_empty());
+        let primary_comment = links["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["entity_type"] == "comment")
+            .unwrap();
+        assert_eq!(primary_comment["identifier"], page["identifier"]);
+        assert_eq!(primary_comment["page_id"], page_id);
+        assert_eq!(
+            primary_comment["title"],
+            format!("Page comment links /api/attachments/{second}")
+        );
+
         let dupes = links["duplicates"].as_array().unwrap();
         assert_eq!(dupes.len(), 1);
         assert_eq!(dupes[0]["attachment_id"], first);
         assert_eq!(dupes[0]["filename"], "a.png");
-        assert_eq!(dupes[0]["entities"][0]["title"], "Original home");
+        let duplicate_comment = dupes[0]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["entity_type"] == "comment")
+            .unwrap();
+        assert_eq!(duplicate_comment["identifier"], issue["identifier"]);
+        assert_eq!(duplicate_comment["page_id"], serde_json::Value::Null);
+        assert_eq!(
+            duplicate_comment["title"],
+            format!("Issue comment links /api/attachments/{first}")
+        );
     }
 
     /// The duplicate list must never become a read oracle: a caller who

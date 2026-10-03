@@ -111,7 +111,7 @@
       this.folders = []; this.pages = []; this.activity = []; this.mentionCandidates = []; this.activeMentionIndex = 0;
       this.activeTab = 'browse';
       this.audience = identity(session); this.canEdit = false; this.canComment = false;
-      this.objectUrls = new Set(); this.uploads = new Set(); this.attachments = []; this.commentAttachments = new Map();
+      this.objectUrls = new Set(); this.uploads = new Set(); this.composers = new Map(); this.attachments = []; this.commentAttachments = new Map();
       this.attachmentClient = win.LificTopcoatAttachments?.createClient({session, win});
       this.public = root.dataset.pageScope === 'public';
       this.projectName = root.dataset.projectIdentifier;
@@ -130,6 +130,7 @@
     transition() {
       const next = identity(this.session);
       if (next === this.audience) return;
+      this.composers.forEach(composer=>composer.dispose()); this.composers.clear();
       this.audience = next; this.generation++; this.win.clearTimeout(this.timer); this.page = null; this.pages = [];
       this.root.querySelectorAll('[data-page-mention-menu]').forEach(menu => menu.remove());
       this.root.setAttribute('aria-busy', 'true');
@@ -394,6 +395,7 @@
         await this.loadCommentAttachments(generation);
         if (!this.current(generation)) return;
         this.wireMentionInput(byId(this.root, '[data-page-comment-form] textarea[name="content"]'));
+        if(!this.public&&this.attachmentClient){if(this.canEdit)this.composer('page');if(this.canComment)this.composer('comment');}
         this.renderLabels(page.labels || [], labels);
         await this.followDeepLink(generation);
         if (!this.current(generation)) return;
@@ -514,7 +516,7 @@
         }
       });
       listen(byId(this.root, '[data-page-body]'), 'input', event => {
-        byId(this.root, '[data-page-save]').disabled = event.currentTarget.value === (this.page?.content || '');
+        byId(this.root, '[data-page-save]').disabled = Boolean(this.composers.get('page')?.pending) || event.currentTarget.value === (this.page?.content || '');
         byId(this.root, '[data-page-save-status]').textContent = 'Unsaved changes';
         if (!byId(this.root, '[data-page-preview-content]').hidden) this.renderMarkdown(byId(this.root, '[data-page-preview-content]'), event.currentTarget.value);
       });
@@ -528,10 +530,15 @@
       });
       listen(byId(this.root,'[data-page-files]'),'change',event=>void this.uploadFiles(event.currentTarget.files));
       listen(byId(this.root,'[data-page-attachment-upload]'),'dragover',event=>event.preventDefault());
-      listen(byId(this.root,'[data-page-attachment-upload]'),'drop',event=>{event.preventDefault();void this.uploadFiles(event.dataTransfer?.files);});
+      listen(byId(this.root,'[data-page-attachment-upload]'),'drop',event=>{event.preventDefault();void this.uploadFiles(event.dataTransfer?.files, undefined, 'drop');});
       listen(byId(this.root, '[data-page-comment-form]'), 'submit', event => { event.preventDefault(); void this.createComment(new FormData(event.currentTarget)); });
       listen(byId(this.root,'[data-page-comment-form] textarea[name="content"]'),'input',()=>{this.commentDraftVersion++;});
-      listen(byId(this.root,'[data-page-comment-files]'),'change',()=>{this.commentDraftVersion++;});
+      listen(byId(this.root,'[data-page-comment-files]'),'change',event=>{this.commentDraftVersion++;void this.uploadFiles(event.currentTarget.files,null);});
+      const commentForm=byId(this.root,'[data-page-comment-form]');
+      listen(this.root,'lific:attachment-busy',event=>{
+        if(commentForm.contains(event.target))commentForm.querySelector('[type=submit]').disabled=event.detail.busy;
+        else byId(this.root,'[data-page-save]').disabled=event.detail.busy||!this.editing||byId(this.root,'[data-page-body]').value===(this.page?.content||'');
+      });
       this.wireMentionInput(byId(this.root, '[data-page-comment-form] textarea[name="content"]'));
       listen(byId(this.root, '[data-page-comments-older]'), 'click', () => void this.loadOlderComments());
       listen(byId(this.root, '[data-page-delete]'), 'click', () => void this.deletePage());
@@ -549,13 +556,14 @@
     setEditing(editing) {
       this.editing = editing;
       if (!editing) {
+        this.composers.get('page')?.cancelAll();
         byId(this.root, '[data-page-body]').value = this.page?.content || '';
         this.renderMarkdown(byId(this.root, '[data-page-preview-content]'), this.page?.content || '');
         byId(this.root, '[data-page-save-status]').textContent = 'Saved';
       }
       byId(this.root, '[data-page-body]').disabled = !editing;
       byId(this.root, '[data-page-edit]').hidden = editing;
-      byId(this.root, '[data-page-save]').disabled = !editing || byId(this.root, '[data-page-body]').value === (this.page?.content || '');
+      byId(this.root, '[data-page-save]').disabled = Boolean(this.composers.get('page')?.pending) || !editing || byId(this.root, '[data-page-body]').value === (this.page?.content || '');
       byId(this.root, '[data-page-cancel]').hidden = !editing;
       if (editing) byId(this.root, '[data-page-body]').focus();
       byId(this.root,'[data-page-body]').hidden=!editing;
@@ -565,6 +573,7 @@
       byId(this.root,'[data-page-preview]').setAttribute('aria-pressed',String(!editing));
     }
     async saveBody() {
+      if(this.composers.get('page')?.pending)return;
       const body = byId(this.root, '[data-page-body]').value;
       const ok = await this.saveField({content:body});
       if (ok && byId(this.root,'[data-page-body]').value === (this.page?.content || '')) this.setEditing(false);
@@ -590,17 +599,17 @@
       } catch (error) { this.showError(error); byId(this.root, '[data-page-save-status]').textContent = 'Could not save. Your changes are still here.'; return false; }
     }
     async createComment(form) {
+      if(this.composers.get('comment')?.pending)return;
       const content = String(form.get('content') || '').trim(); if (!content || !this.canComment || this.public) return;
       const submittedContent=byId(this.root,'[data-page-comment-form] textarea[name="content"]')?.value||'';
       const fileInput=byId(this.root,'[data-page-comment-files]');
-      const submittedFiles=[...(fileInput?.files||[])];
       const draftVersion=this.commentDraftVersion;
       try {
         const comment = await requestData(this.session, `/pages/${this.page.id}/comments`, {method:'POST', body:JSON.stringify({content})});
         this.comments.push(comment); this.renderComments();
         const composer=byId(this.root,'[data-page-comment-form] textarea[name="content"]');
-        if(this.commentDraftVersion===draftVersion&&composer?.value===submittedContent){composer.value='';if(fileInput)fileInput.value='';}
-        if(submittedFiles.length)await this.uploadFiles(submittedFiles,{entity_type:'comment',entity_id:comment.id});
+        if(this.commentDraftVersion===draftVersion&&composer?.value===submittedContent){composer.value='';if(fileInput)fileInput.value='';this.composers.get('comment')?.cancelAll();}
+        await this.loadCommentAttachments(this.generation);
       } catch (error) { this.showError(error); }
     }
     async createLabel(form) {
@@ -789,12 +798,28 @@
       for(const comment of this.comments){try{const result=await this.attachmentClient.list({entity_type:'comment',entity_id:comment.id});if(!this.current(generation)||!result.ok)continue;this.commentAttachments.set(comment.id,result.data||[]);}catch{}}
       if(this.current(generation))this.renderComments();
     }
-    async uploadFiles(files,target={entity_type:'page',entity_id:this.page?.id}) {
-      if(!(target.entity_type==='comment'?this.canComment:this.canEdit)||this.public||!files?.length||!this.attachmentClient)return;
-      const status=byId(this.root,'[data-page-attachment-status]');
-      for(const file of files){status.textContent=`Uploading ${file.name}…`;const task=this.attachmentClient.upload(file,{target,onProgress:progress=>{status.textContent=`Uploading ${file.name}: ${progress.total?Math.round(progress.loaded/progress.total*100):0}%`;}});this.uploads.add(task);
-        const result=await task.result;this.uploads.delete(task);if(!result.ok){status.textContent=result.error;continue;}
-        if(target.entity_type==='page')await this.loadAttachments(this.generation);else await this.loadCommentAttachments(this.generation);status.textContent=`Uploaded ${file.name}`;}
+    composer(kind) {
+      if(this.composers.has(kind))return this.composers.get(kind);
+      const textarea=kind==='page'?byId(this.root,'[data-page-body]'):byId(this.root,'[data-page-comment-form] textarea[name="content"]');
+      const parent=kind==='page'?byId(this.root,'[data-page-attachments]'):byId(this.root,'[data-page-comment-form]');
+      const host=el(this.doc,'div');parent.append(host);
+      const write=value=>{textarea.value=value;textarea.dispatchEvent(new this.win.Event('input',{bubbles:true}));};
+      const composer=this.win.LificTopcoatAttachments.createComposer({root:host,client:this.attachmentClient,win:this.win,
+        textarea,text:{read:()=>textarea.value,write},target:kind==='page'?()=>({entity_type:'page',entity_id:this.page.id}):null,
+        onStatus:message=>{byId(this.root,'[data-page-attachment-status]').textContent=message.replace(/^Uploaded (.*)\.$/,'Uploaded $1');},
+        onUploaded:async(row,snippet)=>{
+          if(kind==='page'&&!this.editing)this.setEditing(true);
+          const start=textarea.selectionStart??textarea.value.length,end=textarea.selectionEnd??start;
+          const before=textarea.value.slice(0,start),after=textarea.value.slice(end),insert=`${before&&!before.endsWith('\n')?'\n':''}${snippet}${after&&!after.startsWith('\n')?'\n':''}`;
+          write(before+insert+after);textarea.setSelectionRange(start+insert.length,start+insert.length);
+          if(kind==='page')await this.loadAttachments(this.generation);
+        }});
+      this.composers.set(kind,composer);return composer;
+    }
+    async uploadFiles(files,target={entity_type:'page',entity_id:this.page?.id},source='picker') {
+      const kind=target?.entity_type==='page'?'page':'comment';
+      if(!(kind==='page'?this.canEdit:this.canComment)||this.public||!files?.length||!this.attachmentClient)return;
+      await this.composer(kind).enqueue(files,{source});
     }
     async followDeepLink(generation) {
       const location=this.win.location;const params=new URLSearchParams(location.search||'');
@@ -805,7 +830,7 @@
       const attachmentId=String(attachmentRef||'').match(/(?:att)?(\d+)/)?.[1];
       if(attachmentId){const row=this.doc.getElementById(`attachment-${attachmentId}`)||this.doc.getElementById(`comment-attachment-${attachmentId}`);row?.scrollIntoView({block:'center'});row?.classList.add('tc-page-attachment--target');}
     }
-    dispose() { if (this.disposed) return; this.disposed = true; this.generation++; this.win.clearTimeout(this.timer); this.listeners.forEach(remove => remove());this.uploads.forEach(task=>task.abort());this.objectUrls.forEach(url=>this.win.URL.revokeObjectURL(url)); }
+    dispose() { if (this.disposed) return; this.disposed = true; this.generation++; this.win.clearTimeout(this.timer); this.listeners.forEach(remove => remove());this.uploads.forEach(task=>task.abort());this.composers.forEach(composer=>composer.dispose());this.composers.clear();this.objectUrls.forEach(url=>this.win.URL.revokeObjectURL(url)); }
   }
   function attach(root, options) { return new PagesController(root, options); }
   function mount(doc = globalThis.document, options) {

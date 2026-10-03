@@ -17,6 +17,7 @@ test('headless issue collaboration preserves drafts and emits coordinator intent
       <div data-issue-attachments></div><ol data-issue-history></ol><button data-issue-delete>Delete issue</button><button data-issue-restore hidden>Restore issue</button><p data-collab-status></p><textarea data-description-editor aria-label="Issue description"></textarea></main></section></body></html>`;
     let comments = [{id:3,issue_id:12,user_id:4,author:'Sam',author_display_name:'Sam User',content:'Existing comment @sam TEAM_ALPHA-22 /api/attachments/8',created_at:'2026-10-01T10:00:00Z',updated_at:'2026-10-01T10:00:00Z'}];
     await page.setContent(html);
+    await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../../../attachments/assets/attachments.js'),'utf8')});
     await page.evaluate(() => {
       window.intents=[];window.fixtureCommentRequests=0; window.confirm=()=>true;
       window.fixtureAffordances={manage:true,edit:true,comment:true};window.lificSession={state:{user:{id:4},publicProject:null,role:{role:'maintainer',enforced:true,is_admin:false}},affordances:()=>lificSession.state.publicProject?{manage:false,edit:false,comment:false}:fixtureAffordances,scopedRoute:path=>lificSession.state.publicProject?`/public${path}`:path,resolve:path=>({url:`/api${path}`}),request:async path=>{
@@ -27,7 +28,7 @@ test('headless issue collaboration preserves drafts and emits coordinator intent
         return {ok:true,data:[]};
       }};
       window.fixtureUploadTargets=[];window.fixtureUploadNames=[];window.fixtureAttachmentDisposals=0;window.fixtureAttachmentMounts=0;
-      window.LificTopcoatAttachments={viewerKind:item=>({png:'image',mp4:'video',mp3:'audio',diff:'diff',csv:'csv',zip:'zip',txt:'text'})[item.filename.split('.').pop()]||'file',markdown:item=>`[${item.filename}](/api/attachments/${item.id})`,createClient:({session})=>({session,url:id=>`/api/attachments/${id}`,upload:(file,options)=>{fixtureUploadTargets.push(options.target);fixtureUploadNames.push(file.name);return {result:new Promise(resolve=>setTimeout(()=>resolve({ok:true,data:{id:20,filename:file.name,mime:file.type||'text/plain',size:file.size}}),75)),abort(){}};},thumbnail:async()=>({ok:false,status:404,error:'missing'})}),attach:(target,options)=>{window.fixtureAttachmentOptions=options;fixtureAttachmentMounts++;return {dispose(){fixtureAttachmentDisposals++;const form=target.querySelector('[data-attachment-upload]');if(form){form.querySelector('[data-attachment-files]').disabled=true;form.querySelector('[type=submit]').disabled=true;form.querySelector('[data-attachment-cancel]').hidden=false;}for(const media of target.querySelectorAll('video,audio'))media.removeAttribute('src');}};}};
+      window.LificTopcoatAttachments={createComposer:window.LificTopcoatAttachments.createComposer,viewerKind:item=>({png:'image',mp4:'video',mp3:'audio',diff:'diff',csv:'csv',zip:'zip',txt:'text'})[item.filename.split('.').pop()]||'file',markdown:item=>`[${item.filename}](/api/attachments/${item.id})`,createClient:({session})=>({session,audience:()=>session.state.publicProject?'public:'+session.state.publicProject:'private:'+session.state.user.id,url:id=>`/api/attachments/${id}`,upload:(file,options)=>{fixtureUploadTargets.push(options.target);fixtureUploadNames.push(file.name);return {result:new Promise(resolve=>setTimeout(()=>resolve({ok:true,data:{id:20,filename:file.name,mime:file.type||'text/plain',size:file.size}}),75)),abort(){}};},thumbnail:async()=>({ok:false,status:404,error:'missing'})}),attach:(target,options)=>{window.fixtureAttachmentOptions=options;fixtureAttachmentMounts++;return {dispose(){fixtureAttachmentDisposals++;const form=target.querySelector('[data-attachment-upload]');if(form){form.querySelector('[data-attachment-files]').disabled=true;form.querySelector('[type=submit]').disabled=true;form.querySelector('[data-attachment-cancel]').hidden=false;}for(const media of target.querySelectorAll('video,audio'))media.removeAttribute('src');}};}};
       window.fixtureComments=[];window.addEventListener('lific:issue-detail-intent',event=>intents.push(event.detail));
     });
     await page.addScriptTag({content:script});
@@ -87,10 +88,10 @@ test('headless issue collaboration preserves drafts and emits coordinator intent
         {name:'cancel-active.txt',mimeType:'text/plain',buffer:Buffer.from('active')},
         {name:'cancel-queued.txt',mimeType:'text/plain',buffer:Buffer.from('queued')},
       ]);await page.waitForFunction(count=>fixtureUploadNames.length===count+1,before);
-      await page.getByRole('button',{name:'Cancel'}).click();await page.getByRole('button',{name:'Edit',exact:true}).first().click();const reopened=page.getByRole('textbox',{name:'Edit comment'});await page.waitForTimeout(110);
+      await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.getByRole('button',{name:'Edit',exact:true}).first().click();const reopened=page.getByRole('textbox',{name:'Edit comment'});await page.waitForTimeout(110);
       assert.equal(await reopened.inputValue(),'Existing comment @sam TEAM_ALPHA-22 /api/attachments/8','cancelled upload cannot overwrite the reopened editor');
       assert.equal(await page.evaluate(()=>fixtureUploadNames.length),before+1,'cancel drops the queued second file');assert.equal(await page.evaluate(()=>document.querySelector('[data-topcoat-collaboration]')._commentEdits.get(3).content),'Existing comment @sam TEAM_ALPHA-22 /api/attachments/8');
-      await page.getByRole('button',{name:'Cancel'}).click();
+      await page.getByRole('button',{name:'Cancel',exact:true}).click();
     });
 
     await t.test('comment attachment picker inserts at the caret and gates submit until upload completes',async()=>{
@@ -137,6 +138,17 @@ test('headless issue collaboration preserves drafts and emits coordinator intent
       assert.equal(await edit.inputValue(),'Existing comment @sam TEAM_ALPHA-22 /api/attachments/8');
     });
 
+    await t.test('comment composers offer image annotation and alt text and hold large pastes for an inline or attachment choice',async()=>{
+      const draft=page.getByRole('textbox',{name:'Write a comment'});await draft.fill('Image comment');
+      await draft.evaluate(async field=>{const canvas=document.createElement('canvas');canvas.width=200;canvas.height=100;const blob=await new Promise(resolve=>canvas.toBlob(resolve));const files=new DataTransfer();files.items.add(new File([blob],'shot.png',{type:'image/png'}));field.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:files}));});
+      await page.getByRole('button',{name:'Annotate',exact:true}).waitFor();assert.equal(await page.locator('[data-comment-compose] [type=submit]').isDisabled(),true);
+      await page.getByRole('button',{name:'Skip annotation',exact:true}).click();await page.getByRole('textbox',{name:'Describe shot.png'}).fill('A [chart]');await page.getByRole('button',{name:'Apply image description',exact:true}).click();
+      assert.match(await draft.inputValue(),/!\[A chart\]\(\/api\/attachments\/20\)/);
+      await draft.fill('Log comment');await draft.evaluate(field=>{const data=new DataTransfer();data.setData('text/plain',Array(61).fill('log').join('\n'));field.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+      await page.getByRole('button',{name:'Attach pasted text',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[data-comment-draft]').value.includes('[paste-'));
+      await page.locator('[data-comment-compose] [type=submit]').click();assert.match((await page.evaluate(()=>intents.at(-1).action.content)),/\[paste-.*\.txt\]\(\/api\/attachments\/20\)/);
+    });
+
     await t.test('relation link, unlink and reverse plus user/date wait transitions',async()=>{
       await page.locator('[data-relation-create] [name=target]').fill('ENG-9');await page.locator('[data-relation-create] [name=kind]').selectOption('blocks');await page.getByRole('button',{name:'Link issue'}).click();assert.equal(await page.evaluate(()=>intents.at(-1).action.operation),'link_relation');
       const linkAction=await page.evaluate(()=>intents.at(-1).action);assert.equal(await page.locator('[data-relation-create] [name=target]').inputValue(),'ENG-9');
@@ -166,7 +178,7 @@ test('headless issue collaboration preserves drafts and emits coordinator intent
       assert.equal(await draft.inputValue(),'Keep this comment draft');assert.equal(await page.locator('[data-comment-compose]').isHidden(),true);
       assert.equal(await edit.inputValue(),'Keep the restricted editor draft');assert.equal(await edit.evaluate(el=>el.readOnly),true);assert.equal(await page.getByRole('button',{name:'Save comment'}).isDisabled(),true);assert.equal(await page.locator('[data-comment-files="3"]').isDisabled(),true);
       await page.evaluate(()=>document.querySelector('[data-topcoat-collaboration]')._issueCollaboration.setCapabilities({edit:true,comment:true}));assert.equal(await edit.evaluate(el=>el.readOnly),false);assert.equal(await edit.inputValue(),'Keep the restricted editor draft');
-      await page.getByRole('button',{name:'Cancel'}).click();
+      await page.getByRole('button',{name:'Cancel',exact:true}).click();
       await page.evaluate(()=>document.querySelector('[data-topcoat-collaboration]')._issueCollaboration.setCapabilities({edit:true,comment:true}));
       assert.equal(await draft.inputValue(),'Keep this comment draft');assert.equal(await page.locator('[data-comment-compose]').isHidden(),false);
     });

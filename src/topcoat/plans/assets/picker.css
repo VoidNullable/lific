@@ -1,0 +1,11 @@
+.tc-issue-picker,.tc-plan-dialog{background:var(--surface,#fff);color:var(--text,#18212f);border:1px solid var(--border,#d3dae4);border-radius:.6rem;padding:1.25rem;width:min(38rem,calc(100vw - 2rem));max-height:85dvh;overflow:auto}
+.tc-issue-picker::backdrop,.tc-plan-dialog::backdrop{background:#1118}
+.tc-issue-picker label,.tc-plan-dialog label{display:grid;gap:.35rem;margin:.75rem 0}
+.tc-issue-picker input,.tc-plan-dialog input,.tc-plan-dialog textarea,.tc-plan-dialog select{min-width:0;width:100%;box-sizing:border-box;padding:.55rem;font:inherit;color:inherit;background:var(--bg,#fff);border:1px solid var(--border,#d3dae4);border-radius:.3rem}
+.tc-plan-dialog textarea{min-height:12rem}
+.tc-issue-picker [role=listbox]{display:grid;gap:.35rem;max-height:45dvh;overflow:auto}
+.tc-issue-picker [role=option]{text-align:left;padding:.6rem;min-height:2.75rem;border:1px solid var(--border,#d3dae4);background:var(--bg,#fff);color:inherit;border-radius:.3rem}
+.tc-issue-picker [aria-selected=true]{outline:2px solid var(--accent,#4467c8)}
+.tc-picker-actions,.tc-plan-dialog form>div{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+.tc-issue-picker button,.tc-plan-dialog button{font:inherit;cursor:pointer;min-height:2.5rem}
+.tc-issue-picker [role=alert],.tc-plan-dialog [role=alert]{color:var(--error,#b3261e)}

@@ -2,7 +2,7 @@
 (() => {
   'use strict';
 
-  function createSaveQueue({text = '', savedDescription = '', expectedSeq = 0, debounceMs = 650, save, onChange = () => {}}) {
+  function createSaveQueue({text = '', savedDescription = '', expectedSeq = 0, debounceMs = -1, save, onChange = () => {}}) {
     let current = String(text), saved = String(savedDescription), seq = Number(expectedSeq);
     let dirty = current !== saved, conflict = false, error = '', timer = null, running = null;
     let requested = false, revision = 0, disposed = false, blocked = false;
@@ -97,8 +97,14 @@
       changed();
       return state();
     }
+    function discard() {
+      clearTimeout(timer); timer = null; requested = false; revision++;
+      current = saved; dirty = false; conflict = false; error = '';
+      changed();
+      return state();
+    }
     function dispose() {disposed = true; requested = false; clearTimeout(timer); timer = null;}
-    return {edit, flush, state, setCanonical, setBlocked, setConflict, dispose};
+    return {edit, flush, state, setCanonical, setBlocked, setConflict, discard, dispose};
   }
 
   function appendInline(parent, source) {
@@ -312,6 +318,7 @@
     const serverNode = root.querySelector('[data-editor-server-value]'), statusNode = root.querySelector('[data-editor-status]');
     const saveButton = root.querySelector('[data-editor-save]'), editButton = root.querySelector('[data-editor-edit]');
     const previewButton = root.querySelector('[data-editor-preview-toggle]');
+    const cancelButton = root.querySelector('[data-editor-cancel]');
     const attachmentRoot = root.querySelector('[data-editor-attachments]');
     const uploadForm = attachmentRoot?.querySelector('[data-attachment-upload]');
     const uploadInput = uploadForm?.querySelector('[data-attachment-files]');
@@ -320,6 +327,7 @@
     const pendingRequests = new Set();
     let showingPreview = true, destroyed = false, uploadBusy = false, uploadPoll = null;
     let lastSelection = {start: input.value.length, end: input.value.length}, attachmentMount = null;
+    let saving = 0, attachmentGeneration = 0;
     function sameRoute(candidate) {
       return candidate?.issue_id === route.issue_id && candidate?.generation === route.generation;
     }
@@ -354,7 +362,7 @@
       });
     }
     const queue = createSaveQueue({text: props.text ?? '', savedDescription: props.saved_description ?? '', expectedSeq: props.expected_seq ?? 0,
-      debounceMs: props.debounce_ms ?? 650, save: saveThroughRoute, onChange: renderState});
+      debounceMs: -1, save: saveThroughRoute, onChange: renderState});
     function renderState() {
       if (destroyed) return;
       root.hidden = false;
@@ -363,7 +371,8 @@
       input.disabled = !capabilities.edit;
       saveButton.hidden = showingPreview;
       saveButton.disabled = !capabilities.edit || !state.dirty || uploadBusy;
-      if (attachmentRoot) attachmentRoot.hidden = !capabilities.edit;
+      if (cancelButton) {cancelButton.hidden = showingPreview; cancelButton.disabled = saving > 0;}
+      if (attachmentRoot) attachmentRoot.hidden = !capabilities.edit || showingPreview;
       if (errorNode) {errorNode.hidden = !state.error; errorNode.textContent = state.error;}
       if (conflictNode) conflictNode.hidden = !state.conflict;
       if (conflictMessage) conflictMessage.textContent = state.conflict ? 'This description changed on the server. Review the current version before saving your draft again.' : '';
@@ -452,43 +461,39 @@
         if (uploadStatus) uploadStatus.textContent = 'Resolve the description conflict before uploading.';
         return;
       }
-      if (!state.dirty && !state.error && !state.conflict) return;
-      event.preventDefault(); event.stopImmediatePropagation();
-      if (uploadStatus) uploadStatus.textContent = 'Saving the description before upload…';
-      void queue.flush().then(after => {
-        if (destroyed) return;
-        if (after.dirty || after.error || after.conflict) {
-          if (uploadStatus) uploadStatus.textContent = after.conflict
-            ? 'Resolve the description conflict before uploading.'
-            : after.error || 'Save the description before uploading.';
-          return;
-        }
-        if (uploadStatus) uploadStatus.textContent = '';
-        uploadForm?.requestSubmit();
-      });
     }
     function afterUploadSubmit() {
       if (!uploadInput?.disabled || !uploadInput.files?.length) return;
       uploadBusy = true; queue.setBlocked(true); renderState(); pollUpload();
     }
-    if (uploadForm && uploadInput && attachmentRoot && globalThis.LificTopcoatAttachments?.createClient && globalThis.LificTopcoatAttachments?.attach) {
+    function mountAttachments() {
+      const helper = globalThis.LificTopcoatAttachments;
+      if (!uploadForm || !uploadInput || !attachmentRoot || !helper?.createClient || !helper?.attach) return;
+      const generation = ++attachmentGeneration;
+      try {
+        const client = helper.createClient({session: globalThis.lificSession});
+        attachmentMount = helper.attach(attachmentRoot, {
+          client, target: {entity_type: 'issue', entity_id: Number(route.issue_id)},
+          text: {read: () => queue.state().text, write: text => {
+            input.value = text; input.dispatchEvent(new Event('input', {bubbles: true}));
+          }},
+          onUploaded(_attachment, markdown) {
+            if (!destroyed && generation === attachmentGeneration) insertUploadedMarkdown(markdown);
+          },
+        });
+      } catch (error) {
+        if (uploadStatus) uploadStatus.textContent = `Attachments unavailable: ${error.message}`;
+      }
+    }
+    mountAttachments();
+    if (attachmentMount) {
       uploadForm.addEventListener('submit', beforeUpload, true);
       attachmentRoot.addEventListener('pointerdown', rememberSelection, true);
       input.addEventListener('select', rememberSelection);
       input.addEventListener('keyup', rememberSelection);
       input.addEventListener('mouseup', rememberSelection);
       input.addEventListener('blur', rememberSelection);
-      try {
-        const helper = globalThis.LificTopcoatAttachments;
-        const client = helper.createClient({session: globalThis.lificSession});
-        attachmentMount = helper.attach(attachmentRoot, {
-          client, target: {entity_type: 'issue', entity_id: Number(route.issue_id)},
-          onUploaded(_attachment, markdown) {insertUploadedMarkdown(markdown);},
-        });
-        uploadForm.addEventListener('submit', afterUploadSubmit);
-      } catch (error) {
-        if (uploadStatus) uploadStatus.textContent = `Attachments unavailable: ${error.message}`;
-      }
+      uploadForm.addEventListener('submit', afterUploadSubmit);
     }
     input.addEventListener('input', () => {
       if (destroyed || !capabilities.edit) return;
@@ -500,13 +505,31 @@
       }}));
       renderState();
     });
-    const flush = async () => {if (!capabilities.edit) return; await queue.flush(); renderState();};
-    saveButton.addEventListener('click', flush);
-    previewButton.addEventListener('click', async () => {
-      await flush();
-      if (!queue.state().error && !queue.state().conflict) showingPreview = true;
-      renderState();
-    });
+    const flush = async () => {if (!capabilities.edit || uploadBusy) return; await queue.flush(); renderState();};
+    async function commit() {
+      if (!capabilities.edit || uploadBusy) return;
+      saving++; renderState();
+      try {
+        await flush();
+        const state = queue.state();
+        if (!destroyed && !state.dirty && !state.error && !state.conflict) showingPreview = true;
+      } finally {saving--; renderState();}
+    }
+    function cancel() {
+      if (!capabilities.edit || saving > 0) return;
+      if (attachmentMount?.cancel) attachmentMount.cancel();
+      else {attachmentGeneration++; attachmentMount?.dispose(); attachmentMount = null; mountAttachments();}
+      stopUploadPolling(); uploadBusy = false; queue.setBlocked(false);
+      queue.discard(); showingPreview = true; renderState();
+    }
+    function attachmentBusy(event) {
+      stopUploadPolling();
+      uploadBusy = !!event.detail?.busy; queue.setBlocked(uploadBusy); renderState();
+    }
+    attachmentRoot?.addEventListener('lific:attachment-busy', attachmentBusy);
+    saveButton.addEventListener('click', commit);
+    cancelButton?.addEventListener('click', cancel);
+    previewButton.addEventListener('click', commit);
     editButton.addEventListener('click', () => {showingPreview = false; renderState(); input.focus();});
     input.addEventListener('keydown', event => {
       if ((event.metaKey || event.ctrlKey) && !event.altKey) {
@@ -523,7 +546,8 @@
           return;
         }
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {event.preventDefault(); flush();}
+      if (event.key === 'Escape') {event.preventDefault(); event.stopPropagation(); cancel();}
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {event.preventDefault(); commit();}
     });
     function update(next = {}) {
       if (destroyed) return;
@@ -535,8 +559,9 @@
     }
     function dispose() {
       if (destroyed) return;
-      destroyed = true; queue.dispose();
+      destroyed = true; attachmentGeneration++; queue.dispose();
       stopUploadPolling(); attachmentMount?.dispose();
+      attachmentRoot?.removeEventListener('lific:attachment-busy', attachmentBusy);
       uploadForm?.removeEventListener('submit', beforeUpload, true);
       uploadForm?.removeEventListener('submit', afterUploadSubmit);
       attachmentRoot?.removeEventListener('pointerdown', rememberSelection, true);
@@ -545,7 +570,7 @@
       for (const cancel of [...pendingRequests]) cancel();
     }
     input.value = props.text ?? ''; renderState();
-    return {flush, update, dispose, queue, preview() {showingPreview = true; renderState();}, edit() {showingPreview = false; renderState(); input.focus();}};
+    return {flush, update, dispose, queue, cancel, preview() {showingPreview = true; renderState();}, edit() {showingPreview = false; renderState(); input.focus();}};
   }
 
   const api = {createSaveQueue, renderMarkdown, mount};

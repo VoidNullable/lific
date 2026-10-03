@@ -21,7 +21,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
               <label>New label<input data-new-label-name></label><input data-new-label-color type="color" value="#6b7280"><button type="button" data-create-label>Create label</button></fieldset>
             <span data-field-metadata hidden><span data-field-created></span><span data-field-updated></span></span>
             <p data-fields-status role="status"></p></section>
-          <section data-topcoat-issue-editor hidden><button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+          <section data-topcoat-issue-editor hidden><button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
             <p data-editor-status role="status"></p><p data-editor-error hidden></p><section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
             <textarea data-editor-input aria-label="Issue description"></textarea><article data-editor-preview hidden></article></section>
         </div></section>`);
@@ -94,27 +94,50 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         assert.deepEqual(await page.evaluate(()=>issue.labels),['API, clients','triage, urgent']);
         assert.equal(await page.evaluate(()=>calls.filter(call=>call.path==='/labels'&&call.options.method==='POST').length),1);
       });
-      await t.test('an older local description acknowledgement keeps a newer draft autosaving', async () => {
-        await page.evaluate(()=>{window.holdDescription=true;window.editorConflicts=[];addEventListener('lific:issue-detail-conflict',event=>editorConflicts.push(event.detail));
-          window.lificIssueDetail.editor.queue.edit('First draft');});
+      await t.test('an older description acknowledgement preserves a newer draft until its explicit save', async () => {
+        await page.evaluate(()=>{window.holdDescription=true;window.releaseDescription=null;window.editorConflicts=[];addEventListener('lific:issue-detail-conflict',event=>editorConflicts.push(event.detail));});
+        await page.locator('[data-editor-edit]').click();
+        const input=page.locator('[data-editor-input]');
+        await input.fill('First draft');
+        await page.locator('[data-editor-save]').click();
         await page.waitForFunction(()=>typeof window.releaseDescription==='function');
-        await page.evaluate(()=>window.lificIssueDetail.editor.queue.edit('Newer draft'));
+        await input.fill('Newer draft');
         await page.evaluate(()=>{window.holdDescription=false;window.releaseDescription();});
-        await page.waitForFunction(()=>issue.description==='Newer draft');
+        await page.waitForFunction(()=>lificIssueDetail.editor.queue.state().savedDescription==='First draft');
+        assert.equal(await input.inputValue(),'Newer draft');
+        assert.equal(await page.evaluate(()=>lificIssueDetail.editor.queue.state().dirty),true);
+        assert.equal(await page.evaluate(()=>issue.description),'First draft');
         assert.equal(await page.evaluate(()=>window.editorConflicts.length),0);
-        assert.equal(await page.evaluate(()=>window.lificIssueDetail.editor.queue.state().dirty),false);
+        await page.locator('[data-editor-save]').click();
+        await page.waitForFunction(()=>issue.description==='Newer draft'&&!lificIssueDetail.editor.queue.state().dirty);
         await page.evaluate(()=>{window.holdDescription=true;window.releaseDescription=null;window.descriptionWritesBefore=calls.filter(call=>
-          call.options.method==='PUT'&&Object.hasOwn(JSON.parse(call.options.body),'description')).length;
-          window.lificIssueDetail.editor.queue.edit('In flight draft');});
+          call.options.method==='PUT'&&Object.hasOwn(JSON.parse(call.options.body),'description')).length;});
+        await page.locator('[data-editor-edit]').click();
+        await input.fill('In flight draft');
+        await page.locator('[data-editor-save]').click();
         await page.waitForFunction(()=>typeof window.releaseDescription==='function');
-        await page.evaluate(()=>window.lificIssueDetail.editor.queue.edit('Newer draft'));
-        assert.equal(await page.evaluate(()=>window.lificIssueDetail.editor.queue.state().dirty),false);
+        await input.fill('Newer draft');
+        assert.equal(await page.evaluate(()=>lificIssueDetail.editor.queue.state().dirty),false);
         await page.evaluate(()=>{window.holdDescription=false;window.releaseDescription();});
-        await page.waitForFunction(()=>calls.filter(call=>call.options.method==='PUT'&&
-          Object.hasOwn(JSON.parse(call.options.body),'description')).length===window.descriptionWritesBefore+2);
-        await page.waitForFunction(()=>issue.description==='Newer draft'&&
-          !window.lificIssueDetail.editor.queue.state().dirty);
+        await page.waitForFunction(()=>lificIssueDetail.editor.queue.state().savedDescription==='In flight draft');
+        assert.equal(await page.evaluate(()=>lificIssueDetail.editor.queue.state().dirty),true);
+        assert.equal(await page.evaluate(()=>calls.filter(call=>call.options.method==='PUT'&&
+          Object.hasOwn(JSON.parse(call.options.body),'description')).length),await page.evaluate(()=>descriptionWritesBefore+1));
+        await page.locator('[data-editor-save]').click();
+        await page.waitForFunction(()=>issue.description==='Newer draft'&&!lificIssueDetail.editor.queue.state().dirty);
         assert.equal(await page.evaluate(()=>window.editorConflicts.length),0);
+      });
+      await t.test('Cancel and Escape discard issue description drafts without issuing a write', async () => {
+        const writes=await page.evaluate(()=>calls.filter(call=>call.options.method==='PUT').length);
+        const input=page.locator('[data-editor-input]');
+        await page.locator('[data-editor-edit]').click();await input.fill('Discard this draft');
+        await page.locator('[data-editor-cancel]').click();
+        assert.equal(await input.inputValue(),'Newer draft');
+        assert.equal(await input.isVisible(),false);
+        await page.locator('[data-editor-edit]').click();await input.fill('Discard with Escape');await input.press('Escape');
+        assert.equal(await input.inputValue(),'Newer draft');
+        assert.equal(await input.isVisible(),false);
+        assert.equal(await page.evaluate(()=>calls.filter(call=>call.options.method==='PUT').length),writes);
       });
       await t.test('realtime refresh applies a clean server description without remounting the editor', async () => {
         await page.evaluate(()=>{issue={...issue,seq:issue.seq+1,description:'Remote update'};dispatchEvent(new CustomEvent('lific:realtime',{detail:{type:'issue.updated',project_id:3,issue_id:7,seq:issue.seq}}));});
@@ -122,7 +145,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         assert.equal(await page.locator('[data-detail-title]').textContent(),'Second title');
       });
       await t.test('description and panel acknowledgements preserve a title draft entered while each request is in flight',async()=>{
-        await page.evaluate(()=>{window.holdDescription=true;window.releaseDescription=null;lificIssueDetail.editor.queue.edit('Description with pending title');});
+        await page.evaluate(()=>{window.holdDescription=true;window.releaseDescription=null;lificIssueDetail.editor.queue.edit('Description with pending title');void lificIssueDetail.editor.flush();});
         await page.waitForFunction(()=>typeof releaseDescription==='function');
         const title=page.locator('[data-field="title"]');await title.fill('Focused title draft');
         await page.evaluate(()=>{holdDescription=false;releaseDescription();});
@@ -140,7 +163,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
         await page.evaluate(()=>releasePanel());await page.waitForFunction(()=>panelDone);
         assert.equal(await title.inputValue(),'Another focused title draft');
         assert.equal(await title.evaluate(node=>node===document.activeElement),true);
-        await title.press('Escape');
+        await title.press('Escape');await title.blur();
       });
       await t.test('refresh preserves a scalar draft started while the issue read is in flight', async () => {
         await page.evaluate(()=>{window.holdResolve=true;dispatchEvent(new CustomEvent('lific:realtime',{detail:{type:'issue.updated',project_id:3,issue_id:7}}));});
@@ -204,7 +227,7 @@ test('headless issue detail resolves, edits scalar fields and saves markdown thr
           window.lificSession.state.user = {id:2};
           dispatchEvent(new CustomEvent('lific:account-change'));
         });
-        await page.waitForFunction(generation => window.lificIssueDetail.route.generation > generation, oldGeneration);
+        await page.waitForFunction(generation => window.lificIssueDetail.route?.generation > generation, oldGeneration);
         await page.evaluate(() => {window.holdLabel=false;window.releaseLabel();});
         await page.waitForTimeout(0);
         assert.equal(await page.evaluate(() => window.lificIssueDetail.labels.some(label => label.name === 'old account label')),false);

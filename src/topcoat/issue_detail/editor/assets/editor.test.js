@@ -137,3 +137,27 @@ test('empty Markdown headings render and advance to the following paragraph', ()
   assert.equal(preview.childNodes.slice(0, 4).every(child => child.childNodes.length === 0), true);
   assert.equal(preview.childNodes[4].childNodes[0].text, 'after');
 });
+
+
+test('description drafts wait for an explicit save', async () => {
+  const calls = [];
+  const queue = editor.createSaveQueue({text: 'saved', savedDescription: 'saved', save: async text => {calls.push(text); return {status: 'applied', description: text};}});
+  queue.edit('draft');
+  await new Promise(resolve => setTimeout(resolve, 700));
+  assert.deepEqual(calls, []);
+  await queue.flush();
+  assert.deepEqual(calls, ['draft']);
+  queue.dispose();
+});
+
+test('discard returns to the latest server version without a write', async () => {
+  const calls = [];
+  const queue = editor.createSaveQueue({text: 'saved', savedDescription: 'saved', expectedSeq: 3, save: async text => {calls.push(text); return {status: 'applied'};}});
+  queue.edit('draft');
+  queue.setConflict({current_description: 'new server version', expected_seq: 4});
+  queue.discard();
+  assert.deepEqual(queue.state(), {text: 'new server version', savedDescription: 'new server version', dirty: false, expectedSeq: 4, conflict: false, error: ''});
+  await queue.flush();
+  assert.deepEqual(calls, []);
+  queue.dispose();
+});

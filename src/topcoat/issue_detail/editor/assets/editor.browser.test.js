@@ -13,7 +13,7 @@ test('headless editor renders markdown as safe text and preserves a draft after 
       await page.setContent(`<main><section class="tc-issue-editor" data-topcoat-issue-editor>
         <div class="tc-issue-editor__toolbar"><button type="button" data-editor-edit>Edit</button>
           <button type="button" data-editor-preview-toggle>Preview</button>
-          <button type="button" data-editor-save>Save</button></div>
+          <button type="button" data-editor-save>Save</button><button type="button" data-editor-cancel>Cancel</button></div>
         <p data-editor-status role="status"></p><p data-editor-error role="alert" hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <textarea data-editor-input aria-label="Issue description"></textarea>
@@ -55,7 +55,7 @@ test('headless editor renders markdown as safe text and preserves a draft after 
     } finally {await browser.close();}
   });
 
-test('headless editor debounces rapid edits and flushes the next write in sequence',
+test('headless editor serializes explicit saves and preserves edits during the active write',
   {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
     const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
     const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
@@ -63,7 +63,7 @@ test('headless editor debounces rapid edits and flushes the next write in sequen
       const page = await browser.newPage();
       page.setDefaultTimeout(4000);
       await page.setContent(`<section data-topcoat-issue-editor>
-        <div><button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button></div>
+        <div><button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button></div>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
@@ -85,6 +85,7 @@ test('headless editor debounces rapid edits and flushes the next write in sequen
       await page.locator('[data-editor-edit]').click();
       const input = page.locator('[data-editor-input]');
       await input.fill('r'); await input.fill('rapid draft');
+      await page.locator('[data-editor-save]').click();
       await page.waitForFunction(() => window.saves.length === 1);
       assert.equal(await page.evaluate(() => saves[0].description), 'rapid draft');
       await input.fill('next draft');
@@ -105,7 +106,7 @@ test('headless editor preserves the caret when the route observes an already-dir
     try {
       const page = await browser.newPage();
       await page.setContent(`<section data-topcoat-issue-editor>
-        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
@@ -130,14 +131,14 @@ test('headless editor preserves the caret when the route observes an already-dir
     } finally {await browser.close();}
   });
 
-test('headless editor shows an autosave failure without another user action',
+test('headless editor preserves its draft after an explicit save fails',
   {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
     const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
     const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
     try {
       const page = await browser.newPage();
       await page.setContent(`<section data-topcoat-issue-editor>
-        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
@@ -147,7 +148,7 @@ test('headless editor shows an autosave failure without another user action',
           const {route, action} = event.detail;
           if (action.type !== 'save_description') return;
           setTimeout(() => dispatchEvent(new CustomEvent('lific:issue-detail-error', {detail: {
-            route, edit_revision: action.edit_revision, error: 'Offline during autosave',
+            route, edit_revision: action.edit_revision, error: 'Offline during save',
           }})), 0);
         });
         lificIssueEditor.mount(document.querySelector('[data-topcoat-issue-editor]'), {
@@ -157,20 +158,21 @@ test('headless editor shows an autosave failure without another user action',
       });
       await page.locator('[data-editor-edit]').click();
       await page.locator('[data-editor-input]').fill('draft');
+      await page.locator('[data-editor-save]').click();
       await page.locator('[data-editor-error]').waitFor({state: 'visible'});
-      assert.equal(await page.locator('[data-editor-error]').textContent(), 'Offline during autosave');
+      assert.equal(await page.locator('[data-editor-error]').textContent(), 'Offline during save');
       assert.equal(await page.locator('[data-editor-input]').inputValue(), 'draft');
     } finally {await browser.close();}
   });
 
-test('headless editor resolves an autosave conflict when the draft matches the server and permits uploads',
+test('headless editor resolves an explicit save conflict when the draft matches the server and permits uploads',
   {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
     const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
     const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
     try {
       const page = await browser.newPage();
       await page.setContent(`<section data-topcoat-issue-editor>
-        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <section data-editor-attachments><form data-attachment-upload>
@@ -201,6 +203,7 @@ test('headless editor resolves an autosave conflict when the draft matches the s
       });
       await page.locator('[data-editor-edit]').click();
       await page.locator('[data-editor-input]').fill('draft');
+      await page.locator('[data-editor-save]').click();
       await page.locator('[data-editor-conflict]').waitFor({state: 'visible'});
       assert.equal(await page.locator('[data-editor-server-value]').textContent(), 'server draft');
       assert.equal(await page.locator('[data-editor-input]').inputValue(), 'draft');
@@ -283,7 +286,7 @@ test('headless editor formatting shortcuts preserve selection and suppress the p
     try {
       const page = await browser.newPage();
       await page.setContent(`<section data-topcoat-issue-editor>
-        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
         <p data-editor-status></p><p data-editor-error hidden></p>
         <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
         <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
@@ -317,7 +320,7 @@ test('headless editor inserts uploaded attachment markdown at the selection and 
     try {
       const page = await browser.newPage();
       await page.setContent(`<section data-topcoat-issue-editor>
-        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button><button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
         <section data-editor-attachments><form data-attachment-upload>
           <input type="file" data-attachment-files multiple><button type="submit">Upload</button>
           <button type="button" data-attachment-cancel hidden>Cancel</button><progress data-attachment-progress hidden></progress>
@@ -379,5 +382,74 @@ test('headless editor inserts uploaded attachment markdown at the selection and 
       await page.locator('[data-editor-save]').click();
       await page.waitForFunction(() => saves.length === 1);
       assert.match(await page.evaluate(() => saves[0].description), /!\[sample\.png\]\(\/api\/attachments\/17\)/);
+    } finally {await browser.close();}
+  });
+
+
+test('headless editor saves explicitly and Cancel or Escape discard the draft',
+  {skip: !process.env.PLAYWRIGHT_EXECUTABLE_PATH}, async () => {
+    const {chromium} = await import(path.resolve(__dirname, '../../../../../e2e/node_modules/playwright/index.mjs'));
+    const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH});
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<section data-topcoat-issue-editor>
+        <button data-editor-edit>Edit</button><button data-editor-preview-toggle>Preview</button>
+        <button data-editor-save>Save</button><button data-editor-cancel>Cancel</button>
+        <section data-editor-attachments><form data-attachment-upload><input type="file" data-attachment-files><p data-attachment-status></p></form></section>
+        <p data-editor-status></p><p data-editor-error hidden></p>
+        <section data-editor-conflict hidden><p data-editor-conflict-message></p><pre data-editor-server-value></pre></section>
+        <textarea data-editor-input></textarea><article data-editor-preview hidden></article></section>`);
+      await page.addScriptTag({content: fs.readFileSync(`${__dirname}/editor.js`, 'utf8')});
+      await page.evaluate(() => {
+        window.saves = []; window.attachmentCancels = 0;
+        window.LificTopcoatAttachments = {
+          createClient() {return {};},
+          attach(root) {return {
+            cancel() {attachmentCancels++; root.dispatchEvent(new CustomEvent('lific:attachment-busy', {bubbles:true, detail:{busy:false}}));},
+            dispose() {},
+          };},
+        };
+        window.addEventListener('lific:issue-detail-intent', event => {
+          const {route, action} = event.detail;
+          if (action.type !== 'save_description') return;
+          saves.push(action.description);
+          dispatchEvent(new CustomEvent('lific:issue-detail-applied', {detail: {
+            route, kind: 'editor', description: action.description, expected_seq: 5, edit_revision: action.edit_revision,
+          }}));
+        });
+        window.editor = lificIssueEditor.mount(document.querySelector('[data-topcoat-issue-editor]'), {
+          route: {issue_id: 31, generation: 1}, text: 'saved', saved_description: 'saved', expected_seq: 4,
+          capabilities: {edit: true},
+        });
+      });
+      const input = page.locator('[data-editor-input]');
+      await page.locator('[data-editor-edit]').click();
+      await input.fill('draft');
+      await page.waitForTimeout(700);
+      assert.deepEqual(await page.evaluate(() => saves), []);
+      await page.locator('[data-editor-attachments]').evaluate(root => root.dispatchEvent(new CustomEvent('lific:attachment-busy', {bubbles:true, detail:{busy:true}})));
+      assert.equal(await page.locator('[data-editor-save]').isDisabled(), true);
+      await input.press('Control+S');
+      assert.deepEqual(await page.evaluate(() => saves), []);
+      await page.locator('[data-editor-cancel]').click();
+      assert.equal(await page.evaluate(() => attachmentCancels), 1);
+      assert.equal(await input.inputValue(), 'saved');
+      assert.equal(await input.isVisible(), false);
+      await page.locator('[data-editor-edit]').click();
+      await input.fill('discard with Escape');
+      await input.press('Escape');
+      assert.equal(await input.inputValue(), 'saved');
+      assert.equal(await input.isVisible(), false);
+      assert.deepEqual(await page.evaluate(() => saves), []);
+      await page.locator('[data-editor-edit]').click();
+      await input.fill('commit');
+      await page.locator('[data-editor-save]').click();
+      await page.waitForFunction(() => document.querySelector('[data-editor-input]').hidden);
+      assert.deepEqual(await page.evaluate(() => saves), ['commit']);
+      await page.locator('[data-editor-edit]').click();
+      await input.fill('shortcut');
+      await input.press('Control+S');
+      await page.waitForFunction(() => document.querySelector('[data-editor-input]').hidden);
+      assert.deepEqual(await page.evaluate(() => saves), ['commit', 'shortcut']);
     } finally {await browser.close();}
   });

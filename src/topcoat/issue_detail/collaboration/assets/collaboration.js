@@ -52,8 +52,11 @@
     let focusedId=null;
     for(const state of root._commentEdits?.values?.()||[])state.focused=false;
     if(activeField){focusedId=Number(activeField.dataset.commentEditDraft);const state=root._commentEdits.get(focusedId)||{};Object.assign(state,{content:activeField.value,selectionStart:activeField.selectionStart,selectionEnd:activeField.selectionEnd,focused:true});root._commentEdits.set(focusedId,state);}
+    const editors=new Map([...root.querySelectorAll('[data-comment-id] [data-comment-editor]')].map(editor=>[Number(editor.closest('[data-comment-id]').dataset.commentId),editor]));
     root.querySelector('[data-comment-count]').textContent=String(comments.length);
     root.querySelector('[data-comment-thread]').innerHTML=comments.length?`<ol>${comments.map(item=>commentMarkup(item,canEdit,root._commentEdits?.get(Number(item.id)))).join('')}</ol>`:'<p class="tc-collab__muted">No comments yet</p>';
+    for(const [id,editor] of editors){const replacement=root.querySelector(`[data-comment-id="${id}"] [data-comment-editor]`);if(replacement){editor.querySelector('textarea').readOnly=!canEdit;editor.querySelector('[data-comment-files]').disabled=!canEdit;editor.querySelector('[data-comment-save]').disabled=!canEdit||Boolean(root._commentEdits.get(id)?.uploading);replacement.replaceWith(editor);}}
+    root._syncCommentComposers?.();
     renderCommentBodies(root);
     if(focusedId!==null){const state=root._commentEdits.get(focusedId),field=root.querySelector(`[data-comment-edit-draft="${focusedId}"]`);if(field){field.focus();field.setSelectionRange(state.selectionStart??field.value.length,state.selectionEnd??state.selectionStart??field.value.length);}}
   }
@@ -274,28 +277,32 @@
       const status=root.querySelector(`[data-comment-upload-status="${id}"]`);if(status)status.textContent=uploading?'Uploading attachments…':'';
     }
     function cancelCommentUploads(id) {
-      const queue=root._commentUploads.get(id);if(!queue)return;
-      queue.cancelled=true;queue.files.length=0;queue.active?.abort?.();
-      if(root._commentUploads.get(id)===queue)root._commentUploads.delete(id);
+      const queue=root._commentUploads.get(String(id));if(!queue)return;
+      root._commentUploads.delete(String(id));queue.dispose();
       const state=id==='new'?null:root._commentEdits.get(Number(id));if(state)state.uploading=false;
       updateUploadGate(id,false);
     }
-    async function uploadCommentFiles(id, files) {
-      const selected=Array.from(files||[]);if(!selected.length||!root._composerClient)return;
-      if(root.dataset.commentEnabled!=='true'){say('Comment permissions are unavailable.');return;}
-      const field=commentTextarea(id);if(!field)return;
-      const state=id==='new'?null:(root._commentEdits.get(Number(id))||{content:field.value});
-      const caretStart=field.selectionStart??field.value.length,caretEnd=field.selectionEnd??caretStart;
-      if(state)root._commentEdits.set(Number(id),state);
-      const queue=root._commentUploads.get(id)||{files:[],running:false,generation:audienceGeneration,cancelled:false};queue.files.push(...selected);root._commentUploads.set(id,queue);queue.caret={start:caretStart,end:caretEnd};queue.textSnapshot=field.value;queue.editState=state;
-      if(state){state.content=field.value;state.uploading=true;state.selectionStart=caretStart;state.selectionEnd=caretEnd;root._commentEdits.set(Number(id),state);}
-      updateUploadGate(id,true);let failed=[];
-      if(queue.running)return;queue.running=true;
-      try {while(queue.files.length){if(disposed||!root.isConnected||queue.cancelled||queue.generation!==audienceGeneration||state&&root._commentEdits.get(Number(id))!==state){queue.files.length=0;break;}const file=queue.files.shift();const transfer=root._composerClient.upload(file,{target:null});queue.active=transfer;let result;try{result=await transfer.result;}catch(error){if(queue.cancelled||disposed||queue.generation!==audienceGeneration)break;failed.push(`${file.name}: ${error.message}`);continue;}if(disposed||!root.isConnected||queue.cancelled||queue.generation!==audienceGeneration||state&&root._commentEdits.get(Number(id))!==state){queue.files.length=0;break;}if(!result.ok){failed.push(`${file.name}: ${result.error}`);continue;}
-          const current=commentTextarea(id);if(!current)continue;const changedDuringTransfer=current.value!==queue.textSnapshot;const selection=changedDuringTransfer?{start:current.selectionStart??current.value.length,end:current.selectionEnd??current.selectionStart??current.value.length}:queue.caret;const text=current.value,start=Math.min(selection?.start??text.length,text.length),end=Math.min(selection?.end??start,text.length),before=text.slice(0,start),after=text.slice(end),markdown=globalThis.LificTopcoatAttachments.markdown(result.data),prefix=before&&!/\s$/.test(before)?' ':'',suffix=after&&!/^\s/.test(after)?' ':'';const snippet=`${before}${prefix}${markdown}${suffix}${after}`;current.value=snippet;const caret=start+prefix.length+markdown.length;current.focus();current.setSelectionRange(caret,caret);queue.caret={start:caret,end:caret};queue.textSnapshot=snippet;
-          if(state){state.content=snippet;state.selectionStart=caret;state.selectionEnd=caret;}
-        }} finally {const stillCurrent=!disposed&&root.isConnected&&!queue.cancelled&&queue.generation===audienceGeneration&&(!state||root._commentEdits.get(Number(id))===state);if(!stillCurrent)queue.files.length=0;queue.running=false;queue.active=null;if(state&&stillCurrent){state.uploading=false;root._commentEdits.set(Number(id),state);}if(!queue.files.length&&root._commentUploads.get(id)===queue)root._commentUploads.delete(id);if(stillCurrent)updateUploadGate(id,false);if(failed.length&&stillCurrent){const status=root.querySelector(`[data-comment-upload-status="${id}"]`);if(status)status.textContent=failed.join(' ');}}
+    function commentComposer(id='new') {
+      id=String(id);if(root._commentUploads.has(id))return root._commentUploads.get(id);
+      const field=commentTextarea(id),parent=id==='new'?composer:field?.closest('[data-comment-editor]');
+      if(!field||!parent||!root._composerClient||root.dataset.commentEnabled!=='true')return null;
+      const host=document.createElement('div');host.dataset.commentUploadQueue=id;parent.append(host);
+      host.addEventListener('lific:attachment-busy',event=>{const state=id==='new'?null:root._commentEdits.get(Number(id));if(state)state.uploading=event.detail.busy;updateUploadGate(id,event.detail.busy);});
+      const write=value=>{const current=commentTextarea(id);if(current){current.value=value;current.dispatchEvent(new Event('input',{bubbles:true}));}};
+      const controller=globalThis.LificTopcoatAttachments.createComposer({root:host,client:root._composerClient,target:null,concurrency:1,textarea:field,text:{read:()=>commentTextarea(id)?.value||'',write},
+        onStatus:message=>{const status=root.querySelector(`[data-comment-upload-status="${id}"]`);if(status)status.textContent=message;},
+        onUploaded:(_attachment,markdown)=>{
+          const current=commentTextarea(id);if(!current)return;const text=current.value,start=current.selectionStart??text.length,end=current.selectionEnd??start,before=text.slice(0,start),after=text.slice(end),prefix=before&&!/\s$/.test(before)?' ':'',suffix=after&&!/^\s/.test(after)?' ':'';
+          current.value=`${before}${prefix}${markdown}${suffix}${after}`;const caret=start+prefix.length+markdown.length;current.setSelectionRange(caret,caret);current.dispatchEvent(new Event('input',{bubbles:true}));
+        }});
+      const queue={get pending(){return controller.pending;},enqueue:(files,options)=>controller.enqueue(files,options),dispose(){controller.dispose();host.remove();}};
+      root._commentUploads.set(id,queue);return queue;
     }
+    root._syncCommentComposers=()=>{
+      for(const id of [...root._commentUploads.keys()])if(id!=='new'&&(!root._commentEdits.has(Number(id))||!commentTextarea(id)))cancelCommentUploads(id);
+      if(root.dataset.commentEnabled==='true'){commentComposer('new');for(const id of root._commentEdits.keys())commentComposer(String(id));}
+    };
+    async function uploadCommentFiles(id, files) {await commentComposer(id)?.enqueue(Array.from(files||[]));}
     let candidates = [];
     let mentionMatches = [], mentionIndex = 0;
     const candidateGeneration=generation;
@@ -306,7 +313,7 @@
       if (form.matches('[data-comment-compose]')) {
         event.preventDefault();
         const input = form.querySelector('[data-comment-draft]'), content = input.value.trim();
-        if(root._commentUploads.get('new')?.running||root._commentUploads.get('new')?.files.length){say('Wait for comment attachments to finish uploading.');return;}
+        if(root._commentUploads.get('new')?.pending){say('Wait for comment attachments to finish uploading.');return;}
         if (!content) return;
         const action={type:'mutate_panel',panel:'comments',operation:'create_comment',content};trackAction(action,form,input.value);
         send(root,action);keepFocus(input,input.value.length);
@@ -342,7 +349,7 @@
       const save = event.target.closest('[data-comment-save]');
       if (save) {
         const row = save.closest('[data-comment-id]'), field = row.querySelector('textarea'), content = field.value.trim();
-        if (content&&!root._commentUploads.get(String(save.dataset.commentSave))?.running&&!root._commentUploads.get(String(save.dataset.commentSave))?.files.length) {const action={type:'mutate_panel',panel:'comments',operation:'edit_comment',comment_id:Number(save.dataset.commentSave),content};trackAction(action,null,field.value);send(root,action);}
+        if (content&&!root._commentUploads.get(String(save.dataset.commentSave))?.pending) {const action={type:'mutate_panel',panel:'comments',operation:'edit_comment',comment_id:Number(save.dataset.commentSave),content};trackAction(action,null,field.value);send(root,action);}
       }
       const cancelEdit=event.target.closest('[data-comment-cancel]');if(cancelEdit){const id=String(cancelEdit.dataset.commentCancel);cancelCommentUploads(id);root._commentEdits.delete(Number(id));void refreshComments(root);}
       if (remove) {
@@ -358,7 +365,6 @@
       if (event.target.closest('[data-issue-restore]')) send(root,{type:'restore'});
     }
     function onInput(event) {
-      const activeField=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(activeField){const id=activeField.matches('[data-comment-draft]')?'new':activeField.dataset.commentEditDraft,queue=root._commentUploads.get(id);if(queue?.running){queue.caret={start:activeField.selectionStart??activeField.value.length,end:activeField.selectionEnd??activeField.selectionStart??activeField.value.length};queue.textSnapshot=activeField.value;}}
       const editField=event.target.closest('[data-comment-edit-draft]');if(editField){const id=Number(editField.dataset.commentEditDraft),state=root._commentEdits.get(id)||{};Object.assign(state,{content:editField.value,selectionStart:editField.selectionStart,selectionEnd:editField.selectionEnd,focused:document.activeElement===editField});root._commentEdits.set(id,state);return;}
       if (!event.target.matches('[data-comment-draft]')) return;
       const node = event.target, caret = node.selectionStart, match = node.value.slice(0,caret).match(/(?:^|\s)@([\w-]*)$/), list = root.querySelector('[data-mention-list]');
@@ -382,8 +388,6 @@
       const choice = event.target.closest('[data-mention-user]'); if (!choice) return;
       chooseMention(Number(choice.dataset.mentionIndex));
     }
-    function onPaste(event){const field=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(!field)return;const files=Array.from(event.clipboardData?.items||[]).map(item=>item.kind==='file'?item.getAsFile():null).filter(Boolean);if(files.length){event.preventDefault();void uploadCommentFiles(field.dataset.commentEditDraft||'new',files);}}
-    function onDrop(event){const field=event.target.closest('[data-comment-draft],[data-comment-edit-draft]');if(!field)return;const files=Array.from(event.dataTransfer?.files||[]);if(files.length){event.preventDefault();void uploadCommentFiles(field.dataset.commentEditDraft||'new',files);}}
     function onApplied(event) {
       if (event.detail?.route?.issue_id !== Number(root.dataset.issueId) || event.detail?.route?.generation !== JSON.parse(initialRoute).generation) return;
       if(event.detail.panel)commitDraft(event.detail);
@@ -428,19 +432,19 @@
     }
     function onFileChange(event){const input=event.target.closest('[data-comment-files]');if(input&&input.files?.length){void uploadCommentFiles(input.dataset.commentFiles,input.files);input.value='';}}
     function onHashChange(){const hash=globalThis.location?.hash||'';if(root._commentLastHash!==undefined&&root._commentLastHash!==hash)root._commentTargetDone=null;root._commentLastHash=hash;void resolveCommentHash(root,root._collabGeneration);}
-    root.addEventListener('submit',onSubmit); root.addEventListener('click',onClick); root.addEventListener('input',onInput); root.addEventListener('click',onMention);root.addEventListener('paste',onPaste);root.addEventListener('drop',onDrop);
+    root.addEventListener('submit',onSubmit); root.addEventListener('click',onClick); root.addEventListener('input',onInput); root.addEventListener('click',onMention);
     root.addEventListener('change',onWaitKind);root.addEventListener('change',onFileChange);root.addEventListener('keydown',onKeydown); window.addEventListener('lific:issue-detail-applied',onApplied); window.addEventListener('lific:issue-detail-conflict',onConflict); window.addEventListener('lific:account-change',onScope); window.addEventListener('lific:scope-change',onScope);
     window.addEventListener('lific:issue-detail-error',onError);window.addEventListener('hashchange',onHashChange);
     function setCapabilities(capabilities={}) {
       const comment=capabilities.comment===true,edit=capabilities.edit===true;
       if(!comment&&root.dataset.commentEnabled==='true'){
-        for(const [id,queue] of root._commentUploads){queue.cancelled=true;queue.files.length=0;queue.active?.abort?.();const state=id==='new'?null:root._commentEdits.get(Number(id));if(state)state.uploading=false;updateUploadGate(id,false);}
+        for(const id of [...root._commentUploads.keys()])cancelCommentUploads(id);
         root._commentUploads.clear();
       }
       root.dataset.commentEnabled=String(comment);root.dataset.editEnabled=String(edit);
       if(composer)composer.hidden=!comment;if(relationForm)relationForm.hidden=!edit;if(waitForm)waitForm.hidden=!edit;if(deleteButton)deleteButton.hidden=!edit;
       renderRelations(root);renderWaits(root,JSON.parse(root.dataset.waits||'[]'));
-      renderCommentList(root,root._comments||[],comment);
+      renderCommentList(root,root._comments||[],comment);root._syncCommentComposers();
     }
     root._issueCollaboration={
       refresh:()=>refresh(root),
@@ -453,8 +457,9 @@
         publishIssuePanels(issue);
       },
       setCapabilities,
-      dispose(){disposed=true;generation++;audienceGeneration++;root._collabGeneration++;for(const id of [...root._commentUploads.keys()])cancelCommentUploads(id);root._commentUploads.clear();for(const src of root._attachmentObjectUrls||[])URL.revokeObjectURL(src);root._attachmentObjectUrls?.clear?.();root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);root.removeEventListener('input',onInput);root.removeEventListener('paste',onPaste);root.removeEventListener('drop',onDrop);root.removeEventListener('change',onWaitKind);root.removeEventListener('change',onFileChange);root.removeEventListener('keydown',onKeydown);window.removeEventListener('lific:issue-detail-applied',onApplied);window.removeEventListener('lific:issue-detail-conflict',onConflict);window.removeEventListener('lific:issue-detail-error',onError);window.removeEventListener('hashchange',onHashChange);window.removeEventListener('lific:account-change',onScope);window.removeEventListener('lific:scope-change',onScope);root._attachmentMount?.dispose?.();root._attachmentMount=null;root.querySelector('[data-issue-attachments]')?.replaceChildren();}
+      dispose(){disposed=true;generation++;audienceGeneration++;root._collabGeneration++;for(const id of [...root._commentUploads.keys()])cancelCommentUploads(id);root._commentUploads.clear();for(const src of root._attachmentObjectUrls||[])URL.revokeObjectURL(src);root._attachmentObjectUrls?.clear?.();root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);root.removeEventListener('input',onInput);root.removeEventListener('change',onWaitKind);root.removeEventListener('change',onFileChange);root.removeEventListener('keydown',onKeydown);window.removeEventListener('lific:issue-detail-applied',onApplied);window.removeEventListener('lific:issue-detail-conflict',onConflict);window.removeEventListener('lific:issue-detail-error',onError);window.removeEventListener('hashchange',onHashChange);window.removeEventListener('lific:account-change',onScope);window.removeEventListener('lific:scope-change',onScope);root._attachmentMount?.dispose?.();root._attachmentMount=null;root.querySelector('[data-issue-attachments]')?.replaceChildren();}
     };
+    root._syncCommentComposers();
     void refresh(root);
     return root._issueCollaboration;
   }

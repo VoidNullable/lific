@@ -397,6 +397,11 @@ in
         node --test src/topcoat/project_settings/assets/project-settings.browser.test.js
         node --test src/topcoat/identity/assets/identity.test.js
         node --test src/topcoat/identity/assets/identity.browser.test.js
+        node --test src/topcoat/files/assets/files.browser.test.js
+        node --test src/topcoat/plans/assets/plans.browser.test.js
+        node --test src/topcoat/modules/assets/modules.browser.test.js
+        node --test src/topcoat/activity_insights/assets/routes.browser.test.js
+        node --test src/topcoat/public/assets/public.browser.test.js
           '';
           after = [ "lific:install:e2e" ];
         };
@@ -672,6 +677,11 @@ in
         node --test src/topcoat/issue_detail/assets/fields.test.js
         node --test src/topcoat/issue_detail/assets/route.test.js
         node --test src/topcoat/project_settings/assets/project-settings.test.js
+        node --test src/topcoat/files/assets/files.test.js
+        node --test src/topcoat/plans/assets/plans.test.js
+        node --test src/topcoat/modules/assets/modules.test.js
+        node --test src/topcoat/activity_insights/assets/model.test.js
+        node --test src/topcoat/public/assets/public.test.js
       '';
     };
     "lific:topcoat:install-cli" = {

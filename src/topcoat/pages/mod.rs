@@ -11,7 +11,10 @@ pub(crate) const SCRIPT: &str = concat!(
     include_str!("assets/pages.js")
 );
 pub(crate) const STYLESHEET_PATH: &str = "/__topcoat-pages.css";
-pub(crate) const STYLESHEET: &str = include_str!("assets/pages.css");
+pub(crate) const STYLESHEET: &str = concat!(
+    include_str!("../attachments/assets/attachments.css"),
+    include_str!("assets/pages.css")
+);
 
 pub(crate) fn list<'a>(cx: &'a Cx, project: &'a str, public: bool) -> BoxView<'a> {
     let scope = if public { "public" } else { "private" };
@@ -157,5 +160,6 @@ mod tests {
         assert_eq!(STYLESHEET_PATH, "/__topcoat-pages.css");
         assert!(SCRIPT.contains("LificTopcoatPages"));
         assert!(STYLESHEET.contains(".tc-pages"));
+        assert!(STYLESHEET.contains(".tc-attachments"));
     }
 }

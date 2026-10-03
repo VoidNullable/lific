@@ -182,3 +182,23 @@ test('throwing destination abort cannot replace the original transfer failure', 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'write failed');
 });
+test('image offers preserve resize thresholds, formats, learned caps and safe alt references', () => {
+  const {api} = fixture();
+  assert.equal(api.decideDownscale({width: 2560, height: 2000, bytes: 20e6, mime: 'image/png'}), null);
+  assert.equal(api.decideDownscale({width: 6000, height: 3000, bytes: 5e6, mime: 'image/gif'}), null);
+  const offer = api.decideDownscale({width: 6000, height: 3000, bytes: 5e6, mime: 'image/jpeg'});
+  assert.equal(offer.width, 2560); assert.equal(offer.height, 1280); assert.equal(offer.reason, 'dimensions');
+  assert.equal(api.decideDownscale({width: 3000, height: 2000, bytes: 900, mime: 'image/png'}, 1000).reason, 'size');
+  assert.equal(api.parseUploadCap('file too large: 12345 bytes (max 10485760)'), 10485760);
+  assert.equal(api.replaceImageAlt('before ![shot.png](/api/attachments/8) after ![other](/api/attachments/9)', 8, ' A [chart]\nwith\ttwo lines '), 'before ![A chart with two lines](/api/attachments/8) after ![other](/api/attachments/9)');
+  assert.equal(api.replaceImageAlt('![removed](/api/attachments/9)', 8, 'wrong'), '![removed](/api/attachments/9)');
+});
+test('crop handles preserve bounds and minimum crop size and large-paste thresholds are strict', () => {
+  const {api}=fixture();
+  const crop={x:10,y:20,w:100,h:80};
+  assert.equal(api.resizeCrop(crop,'nw',{x:200,y:-5},{w:500,h:500}).w,16);
+  assert.equal(api.resizeCrop(crop,'nw',{x:200,y:-5},{w:500,h:500}).y,0);
+  assert.equal(api.resizeCrop(crop,'se',{x:600,y:600},{w:500,h:500}).w,490);
+  assert.equal(api.isBigPaste('x'.repeat(6000)),false);assert.equal(api.isBigPaste('x'.repeat(6001)),true);
+  assert.equal(api.isBigPaste(Array(60).fill('x').join('\n')),false);assert.equal(api.isBigPaste(Array(61).fill('x').join('\n')),true);
+});
