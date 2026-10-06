@@ -113,6 +113,10 @@
   // the local fold after a mutation. Last started wins; see
   // `commentOpIsCurrent`.
   let commentOp = 0;
+  // Orders the reads that replace `issue` within one route: the initial load,
+  // automatic refreshes, and the reloads after a relation change. Those can
+  // overlap (two quick removals), so only the latest-started read may land.
+  let issueRead = 0;
 
   // Bumped by every successful local create, edit or delete. A replacement
   // refresh captures it when it starts and refuses to land if it changed,
@@ -150,8 +154,10 @@
   let moduleOpen = $state(false);
   let labelsOpen = $state(false);
   let relationMenuOpen = $state(false);
-  // The relation kind being added; the picker modal is open while it's set.
-  let addingRelation = $state<RelationKind | null>(null);
+  // What the open picker will link, captured when it opens: the picker resolves
+  // the chosen issue asynchronously, and by then the reader may be on another
+  // issue. `gen` lets that late selection be recognised and dropped.
+  let addingRelation = $state<{ kind: RelationKind; source: string; gen: number } | null>(null);
   let relationPickerOpen = $state(false);
 
   // Save indicator
@@ -187,6 +193,7 @@
     labelsOpen = false;
     relationMenuOpen = false;
     relationPickerOpen = false;
+    addingRelation = null;
     lastSaved = null;
     // Claim the route synchronously, before any await can start. Everything
     // in flight for the previous issue is now stale, and every field it could
@@ -253,8 +260,9 @@
     // refresh uses this count, and it wants the rows on screen right now, not a
     // subscription to them.
     const loadedRows = untrack(() => comments.length);
+    const read = ++issueRead;
     const res = await resolveIssue(identifier);
-    if (gen !== loadGen) return;
+    if (gen !== loadGen || read !== issueRead) return;
     if (!res.ok) {
       error = res.error;
       loading = false;
@@ -277,7 +285,7 @@
       ),
       listIssueActivity(issueId),
     ]);
-    if (gen !== loadGen) return;
+    if (gen !== loadGen || read !== issueRead) return;
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
     // The comment window is guarded separately, so the rest of the issue still
@@ -533,16 +541,20 @@
   // ── Relations ────────────────────────────────────────
 
   function startAddRelation(kind: RelationKind) {
+    if (!issue) return;
     relationMenuOpen = false;
-    addingRelation = kind;
+    addingRelation = { kind, source: issue.identifier, gen: loadGen };
     relationPickerOpen = true;
   }
 
   // Reloads ride the current route generation, so a navigation made while
   // the link request is in flight wins over this refresh.
   async function addRelation(other: Issue) {
-    if (!issue || !addingRelation) return;
-    const req = linkRequest(addingRelation, issue.identifier, other.identifier);
+    const pending = addingRelation;
+    // A selection that resolves after the reader left the issue it was made
+    // on is dropped rather than linked to whatever issue is showing now.
+    if (!pending || pending.gen !== loadGen) return;
+    const req = linkRequest(pending.kind, pending.source, other.identifier);
     const res = await linkIssues(req.source, req.target, req.relation_type);
     if (!res.ok) {
       toast(`Couldn't link ${other.identifier}: ${res.error}`, { kind: "error" });
@@ -1156,7 +1168,7 @@
     bind:open={relationPickerOpen}
     projectId={issue.project_id}
     {projectIdentifier}
-    title={addingRelation ? `Add “${addingRelation.label}” relation` : "Link an issue"}
+    title={addingRelation ? `Add “${addingRelation.kind.label}” relation` : "Link an issue"}
     onSelect={addRelation}
   />
 {/if}

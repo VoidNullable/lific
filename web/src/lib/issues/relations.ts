@@ -31,5 +31,5 @@ export function relationsOf(issue: Issue, kind: RelationKind): string[] {
 }
 
 export function hasRelations(issue: Issue): boolean {
-  return RELATION_KINDS.some((kind) => relationsOf(issue, kind).length > 0);
+  return RELATION_KINDS.some(({ field }) => (issue[field]?.length ?? 0) > 0);
 }
