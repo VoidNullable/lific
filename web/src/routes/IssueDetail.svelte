@@ -11,6 +11,8 @@
     updateComment,
     deleteComment,
     listIssueActivity,
+    linkIssues,
+    unlinkIssues,
     me,
     type Issue,
     type Module,
@@ -21,6 +23,14 @@
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
+  import IssuePickerModal from "../lib/IssuePickerModal.svelte";
+  import {
+    RELATION_KINDS,
+    hasRelations,
+    linkRequest,
+    relationsOf,
+    type RelationKind,
+  } from "../lib/issues/relations";
   import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
@@ -45,7 +55,7 @@
     removeComment,
     upsertComment,
   } from "../lib/commentState";
-  import { ArrowUpRight, ChevronDown } from "lucide-svelte";
+  import { ArrowUpRight, ChevronDown, Plus, X } from "lucide-svelte";
   import { untrack } from "svelte";
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
 
@@ -103,6 +113,10 @@
   // the local fold after a mutation. Last started wins; see
   // `commentOpIsCurrent`.
   let commentOp = 0;
+  // Orders the reads that replace `issue` within one route: the initial load,
+  // automatic refreshes, and the reloads after a relation change. Those can
+  // overlap (two quick removals), so only the latest-started read may land.
+  let issueRead = 0;
 
   // Bumped by every successful local create, edit or delete. A replacement
   // refresh captures it when it starts and refuses to land if it changed,
@@ -139,6 +153,12 @@
   let priorityOpen = $state(false);
   let moduleOpen = $state(false);
   let labelsOpen = $state(false);
+  let relationMenuOpen = $state(false);
+  // What the open picker will link, captured when it opens: the picker resolves
+  // the chosen issue asynchronously, and by then the reader may be on another
+  // issue. `gen` lets that late selection be recognised and dropped.
+  let addingRelation = $state<{ kind: RelationKind; source: string; gen: number } | null>(null);
+  let relationPickerOpen = $state(false);
 
   // Save indicator
   let saving = $state(false);
@@ -171,6 +191,9 @@
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
+    relationMenuOpen = false;
+    relationPickerOpen = false;
+    addingRelation = null;
     lastSaved = null;
     // Claim the route synchronously, before any await can start. Everything
     // in flight for the previous issue is now stale, and every field it could
@@ -200,7 +223,9 @@
         statusOpen ||
         priorityOpen ||
         moduleOpen ||
-        labelsOpen,
+        labelsOpen ||
+        relationMenuOpen ||
+        relationPickerOpen,
       intervalMs: 0,
       shouldRefresh: (event) =>
         event.type === "resync.required" ||
@@ -235,8 +260,9 @@
     // refresh uses this count, and it wants the rows on screen right now, not a
     // subscription to them.
     const loadedRows = untrack(() => comments.length);
+    const read = ++issueRead;
     const res = await resolveIssue(identifier);
-    if (gen !== loadGen) return;
+    if (gen !== loadGen || read !== issueRead) return;
     if (!res.ok) {
       error = res.error;
       loading = false;
@@ -259,7 +285,7 @@
       ),
       listIssueActivity(issueId),
     ]);
-    if (gen !== loadGen) return;
+    if (gen !== loadGen || read !== issueRead) return;
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
     // The comment window is guarded separately, so the rest of the issue still
@@ -368,6 +394,7 @@
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
+    relationMenuOpen = false;
   }
 
   function closeOtherDropdowns() {
@@ -375,6 +402,7 @@
     headerStatusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
+    relationMenuOpen = false;
   }
 
   // ── Save helpers ─────────────────────────────────────
@@ -508,6 +536,43 @@
       return;
     }
     navigate(`/${projectIdentifier}/issues/${rel}`);
+  }
+
+  // ── Relations ────────────────────────────────────────
+
+  function startAddRelation(kind: RelationKind) {
+    if (!issue) return;
+    relationMenuOpen = false;
+    addingRelation = { kind, source: issue.identifier, gen: loadGen };
+    relationPickerOpen = true;
+  }
+
+  // Reloads ride the current route generation, so a navigation made while
+  // the link request is in flight wins over this refresh.
+  async function addRelation(other: Issue) {
+    const pending = addingRelation;
+    // A selection that resolves after the reader left the issue it was made
+    // on is dropped rather than linked to whatever issue is showing now.
+    if (!pending || pending.gen !== loadGen) return;
+    const req = linkRequest(pending.kind, pending.source, other.identifier);
+    const res = await linkIssues(req.source, req.target, req.relation_type);
+    if (!res.ok) {
+      toast(`Couldn't link ${other.identifier}: ${res.error}`, { kind: "error" });
+      return;
+    }
+    await loadIssue(issueIdentifier, true, loadGen);
+  }
+
+  // The API has no per-type unlink: this drops every relation between the
+  // two issues, so a pair linked twice (e.g. blocks + related) loses both.
+  async function removeRelation(other: string) {
+    if (!issue) return;
+    const res = await unlinkIssues(issue.identifier, other);
+    if (!res.ok) {
+      toast(`Couldn't unlink ${other}: ${res.error}`, { kind: "error" });
+      return;
+    }
+    await loadIssue(issueIdentifier, true, loadGen);
   }
 
   // ── Comments / export / delete ───────────────────────
@@ -762,6 +827,7 @@
             priorityOpen = false;
             moduleOpen = false;
             labelsOpen = false;
+            relationMenuOpen = false;
           }}
         >
           <StatusIcon status={issue.status} size={13} />
@@ -814,6 +880,7 @@
                 priorityOpen = false;
                 moduleOpen = false;
                 labelsOpen = false;
+                relationMenuOpen = false;
               }}
             >
               <StatusIcon status={issue.status} size={14} />
@@ -848,6 +915,7 @@
                 statusOpen = false;
                 moduleOpen = false;
                 labelsOpen = false;
+                relationMenuOpen = false;
               }}
             >
               <PriorityIcon priority={issue.priority} />
@@ -899,6 +967,7 @@
                   statusOpen = false;
                   priorityOpen = false;
                   labelsOpen = false;
+                  relationMenuOpen = false;
                 }}
               >
                 {#if moduleEmoji(issue.module_id)}
@@ -994,68 +1063,82 @@
           <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
         {/if}
 
-        {#if issue.blocks?.length || issue.blocked_by?.length || issue.relates_to?.length || issue.duplicates?.length || issue.duplicated_by?.length}
+        {#if editable || hasRelations(issue)}
           <div class="issue-meta-relations">
-            {#if issue.blocked_by && issue.blocked_by.length > 0}
-              <div class="issue-meta-field">
-                {@render sidebarField("Blocked by")}
-                <div class="flex flex-wrap gap-1.5">
-                  {#each issue.blocked_by as rel}
-                    <button
-                      class="text-caption font-mono text-[var(--error)]
-                             bg-[var(--error-bg)] px-1.5 py-0.5 rounded
-                             hover:underline transition-colors"
-                      title="{rel}  ·  Shift-click to preview"
-                      onclick={(e) => openRelation(e, rel)}
-                    >
-                      {rel}
-                    </button>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-            {#if issue.blocks && issue.blocks.length > 0}
-              <div class="issue-meta-field">
-                {@render sidebarField("Blocks")}
-                <div class="flex flex-wrap gap-1.5">
-                  {#each issue.blocks as rel}
-                    <button
-                      class="text-caption font-mono text-[var(--accent)]
-                             bg-[var(--accent-subtle)] px-1.5 py-0.5 rounded
-                             hover:underline transition-colors"
-                      title="{rel}  ·  Shift-click to preview"
-                      onclick={(e) => openRelation(e, rel)}
-                    >
-                      {rel}
-                    </button>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-            {#each [
-              { label: "Related", relations: issue.relates_to },
-              { label: "Duplicate of", relations: issue.duplicates },
-              { label: "Duplicated by", relations: issue.duplicated_by },
-            ] as group (group.label)}
-              {#if group.relations?.length}
+            {#each RELATION_KINDS as kind (kind.field)}
+              {@const rels = relationsOf(issue, kind)}
+              {#if rels.length > 0}
                 <div class="issue-meta-field">
-                  {@render sidebarField(group.label)}
+                  {@render sidebarField(kind.label)}
                   <div class="flex flex-wrap gap-1.5">
-                    {#each group.relations as rel}
-                      <button
-                        class="text-caption font-mono text-[var(--text-muted)]
-                               bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
-                               hover:underline transition-colors"
-                        title="{rel}  ·  Shift-click to preview"
-                        onclick={(e) => openRelation(e, rel)}
+                    {#each rels as rel (rel)}
+                      <span
+                        class="inline-flex items-center rounded text-caption font-mono
+                               {relationChipClass(kind.field)}"
                       >
-                        {rel}
-                      </button>
+                        <button
+                          class="px-1.5 py-0.5 hover:underline"
+                          title="{rel}  ·  Shift-click to preview"
+                          onclick={(e) => openRelation(e, rel)}
+                        >
+                          {rel}
+                        </button>
+                        {#if editable}
+                          <button
+                            class="pr-1 py-0.5 opacity-60 hover:opacity-100 transition-opacity"
+                            title="Remove every relation with {rel}"
+                            aria-label="Remove relation with {rel}"
+                            onclick={() => removeRelation(rel)}
+                          >
+                            <X size={11} />
+                          </button>
+                        {/if}
+                      </span>
                     {/each}
                   </div>
                 </div>
               {/if}
             {/each}
+
+            {#if editable}
+              <div class="relative">
+                <button
+                  class="flex items-center gap-1.5 text-body-sm rounded-md px-2 py-1 -mx-2
+                         text-[var(--text-faint)] hover:text-[var(--text)]
+                         hover:bg-[var(--bg-subtle)] transition-colors"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    const next = !relationMenuOpen;
+                    closeOtherDropdowns();
+                    labelsOpen = false;
+                    relationMenuOpen = next;
+                  }}
+                >
+                  <Plus size={13} />
+                  Add relation
+                </button>
+                {#if relationMenuOpen}
+                  <div
+                    class="absolute left-0 top-full mt-1 z-20 w-[180px]
+                           bg-[var(--surface)] border border-[var(--border)]
+                           rounded-md shadow-lg py-1"
+                    role="presentation"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => e.stopPropagation()}
+                  >
+                    {#each RELATION_KINDS as kind (kind.field)}
+                      <button
+                        class="w-full px-3 py-1.5 text-left text-body-sm
+                               text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                        onclick={() => startAddRelation(kind)}
+                      >
+                        {kind.label}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </div>
 
           <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
@@ -1080,6 +1163,16 @@
   {/snippet}
 </DocumentDetail>
 
+{#if issue}
+  <IssuePickerModal
+    bind:open={relationPickerOpen}
+    projectId={issue.project_id}
+    {projectIdentifier}
+    title={addingRelation ? `Add “${addingRelation.kind.label}” relation` : "Link an issue"}
+    onSelect={addRelation}
+  />
+{/if}
+
 {#snippet sidebarField(label: string)}
   <p class="issue-meta-field-label">{label}</p>
 {/snippet}
@@ -1103,6 +1196,14 @@
 {/snippet}
 
 <script lang="ts" module>
+  function relationChipClass(field: string): string {
+    switch (field) {
+      case "blocked_by": return "text-[var(--error)] bg-[var(--error-bg)]";
+      case "blocks": return "text-[var(--accent)] bg-[var(--accent-subtle)]";
+      default: return "text-[var(--text-muted)] bg-[var(--bg-subtle)]";
+    }
+  }
+
   function priorityTextClass(priority: string): string {
     switch (priority) {
       case "urgent": return "text-[var(--error)]";

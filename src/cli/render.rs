@@ -146,6 +146,28 @@ pub fn issue_detail(issue: &Issue, module_name: ModuleName<'_>) -> String {
     if let Some(name) = issue.module_id.and_then(module_name) {
         w!(out, "  Module:   {name}");
     }
+    relation_lines(&mut out, issue);
+    if !issue.description.is_empty() {
+        w!(out);
+        w!(out, "{}", issue.description);
+    }
+    out
+}
+
+/// What `issue link` and `issue unlink` print: the source issue's relations
+/// after the change.
+pub fn issue_relations(issue: &Issue) -> String {
+    let mut out = String::new();
+    w!(out, "Relations of {}: {}", issue.identifier, issue.title);
+    let before = out.len();
+    relation_lines(&mut out, issue);
+    if out.len() == before {
+        w!(out, "  None");
+    }
+    out
+}
+
+fn relation_lines(out: &mut String, issue: &Issue) {
     if !issue.blocks.is_empty() {
         w!(out, "  Blocks:   {}", issue.blocks.join(", "));
     }
@@ -161,11 +183,6 @@ pub fn issue_detail(issue: &Issue, module_name: ModuleName<'_>) -> String {
     if !issue.duplicated_by.is_empty() {
         w!(out, "  DupedBy:  {}", issue.duplicated_by.join(", "));
     }
-    if !issue.description.is_empty() {
-        w!(out);
-        w!(out, "{}", issue.description);
-    }
-    out
 }
 
 pub fn issue_created(issue: &Issue) -> String {
@@ -680,6 +697,21 @@ mod tests {
             issue_detail(&one, &|_| None),
             "TST-1 - Fix the bug\n  Status:   active\n  Priority: urgent\n  \
              Blocks:   TST-2\n  DupedBy:  TST-3\n\nDetails\n"
+        );
+    }
+
+    #[test]
+    fn lists_relations_or_says_there_are_none() {
+        let mut one = issue("TST-1", Status::Active, Priority::Urgent);
+        assert_eq!(
+            issue_relations(&one),
+            "Relations of TST-1: Fix the bug\n  None\n"
+        );
+
+        one.relates_to = vec!["TST-4".into()];
+        assert_eq!(
+            issue_relations(&one),
+            "Relations of TST-1: Fix the bug\n  Relates:  TST-4\n"
         );
     }
 }

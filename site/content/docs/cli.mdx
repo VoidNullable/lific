@@ -318,9 +318,11 @@ lific issue list --project <PROJECT> [--status <STATUS>] [--priority <PRIORITY>]
 lific issue get <IDENTIFIER>
 lific issue create --project <PROJECT> --title <TITLE> [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
 lific issue update <IDENTIFIER> [--title <TITLE>] [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
+lific issue link <SOURCE> <TARGET> --type <TYPE>
+lific issue unlink <SOURCE> <TARGET>
 ```
 
-`get` prints the issue with its description and relations. `update` changes only the fields you pass. [Issues](/docs/concepts/issues) explains what each field does.
+`get` prints the issue with its description and relations. `update` changes only the fields you pass. `link` relates two issues; `blocks` and `duplicate` read from source to target, so `lific issue link APP-1 APP-2 --type blocks` means APP-1 blocks APP-2. `unlink` removes every relation between the two issues, whichever direction it runs. Both print the source issue's relations afterwards. [Issues](/docs/concepts/issues) explains what each field does.
 
 | Flag | What it does |
 | --- | --- |
@@ -334,6 +336,7 @@ lific issue update <IDENTIFIER> [--title <TITLE>] [--description <MARKDOWN>] [--
 | `-l, --labels <LABELS>` | For `create` and `update`: comma-separated label names. On `update` the list replaces all of the issue's labels. |
 | `-w, --workable` | For `list`: shows only open issues whose blockers are all `done`. |
 | `--limit <LIMIT>` | For `list`: the most issues to show. 50 by default, at most 500. |
+| `-r, --type <TYPE>` | For `link`: `blocks`, `relates_to` or `duplicate`. |
 
 Filters combine, so `--status todo --label bug` shows issues that match both.
 

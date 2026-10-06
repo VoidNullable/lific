@@ -50,6 +50,8 @@ Deleting an issue removes it from the list straight away and shows a toast with 
 
 The issue view puts the description on the left and the fields on the right: Status, Priority, Module and Labels, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. Relation chips show the other issue's current status and change when it does. `Shift`-click a chip to preview that issue instead of opening it.
 
+To add a relation, click **Add relation** under the relations, choose its kind, then pick the other issue. The picker searches the current project; type a full identifier such as `OPS-12` to link an issue in another project. Click the × on a chip to remove it. That removes every relation between the two issues, so a pair that both blocks and relates loses both. Viewers see the chips without these controls.
+
 The **Waiting on** field holds blockers that are not issues: a person, or a window of days with an optional note. Choose **Add blocker**, then **Person** or **Dates**. Each one shows whether it is still waiting, due to check or overdue, and its clear button removes it. List rows and board cards show a small marker naming who or when the issue waits on, in red once overdue. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
 
 The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
@@ -67,7 +69,7 @@ Issue descriptions and pages use the same editor. Choose **Edit**, or press `E`,
 
 ### Link issues in the graph
 
-The issue view shows relations but cannot create or remove them. Use **Graph** for that, or the CLI, API or MCP.
+Besides the issue view, relations can be drawn in **Graph**, or created from the CLI, API or MCP.
 
 Graph has two views. **Linked** draws the issues that have at least one relation, arranged by their `blocks` chains. **Unlinked** lays out the rest in a grid so you can connect them. Closed issues are hidden until you turn on **Closed issues**.
 

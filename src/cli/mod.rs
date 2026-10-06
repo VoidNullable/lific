@@ -838,6 +838,50 @@ pub enum IssueAction {
         #[arg(short, long)]
         labels: Option<String>,
     },
+
+    /// Link two issues with a relation (e.g. LIF-1 blocks LIF-2)
+    Link {
+        /// Source issue identifier (e.g. LIF-1)
+        source: String,
+
+        /// Target issue identifier (e.g. LIF-2)
+        target: String,
+
+        /// Relation from source to target
+        #[arg(short = 'r', long = "type", value_name = "TYPE", value_enum)]
+        relation: RelationType,
+    },
+
+    /// Remove every relation between two issues, in either direction
+    Unlink {
+        /// First issue identifier (e.g. LIF-1)
+        source: String,
+
+        /// Second issue identifier (e.g. LIF-2)
+        target: String,
+    },
+}
+
+/// Relation kinds accepted by `issue link`, named as the API stores them.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum RelationType {
+    /// Source blocks target
+    Blocks,
+    /// Source and target are related
+    #[value(name = "relates_to")]
+    RelatesTo,
+    /// Source duplicates target
+    Duplicate,
+}
+
+impl RelationType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::RelatesTo => "relates_to",
+            Self::Duplicate => "duplicate",
+        }
+    }
 }
 
 // ── Project ──────────────────────────────────────────────────

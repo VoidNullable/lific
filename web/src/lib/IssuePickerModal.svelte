@@ -62,6 +62,19 @@
   let errorMsg = $state("");
   let searchGen = 0;
 
+  // Bumped whenever the picker opens, closes or is unmounted. A pick still
+  // resolving across any of those is stale: the caller may have moved on
+  // (another issue, another kind of link), and closing through the bound
+  // `open` would shut a picker opened since, even from an unmounted instance.
+  let session = 0;
+  $effect(() => {
+    void open;
+    session += 1;
+    return () => {
+      session += 1;
+    };
+  });
+
   // Open transition: focus the input and seed the list with recent /
   // identifier-shaped results.
   $effect(() => {
@@ -152,10 +165,12 @@
   }
 
   async function pick(hit: Hit) {
+    const started = session;
     resolving = true;
     errorMsg = "";
     const res = await resolveIssue(hit.identifier);
     resolving = false;
+    if (started !== session) return;
     if (!res.ok) {
       errorMsg = res.error;
       return;

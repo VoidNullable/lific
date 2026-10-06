@@ -375,6 +375,40 @@ fn issue(
                 print!("{}", render::issue_updated(&issue));
             }
         }
+
+        IssueAction::Link {
+            source,
+            target,
+            relation,
+        } => {
+            let conn = pool.write()?;
+            let source_id = queries::resolve_identifier(&conn, source)?;
+            let target_id = queries::resolve_identifier(&conn, target)?;
+            queries::link_issues(&conn, source_id, target_id, relation.as_str())?;
+            let issue = queries::get_issue(&conn, source_id)?;
+            drop(conn);
+
+            if json {
+                out.json_resources(&issue, ResourceKind::Issue);
+            } else {
+                print!("{}", render::issue_relations(&issue));
+            }
+        }
+
+        IssueAction::Unlink { source, target } => {
+            let conn = pool.write()?;
+            let source_id = queries::resolve_identifier(&conn, source)?;
+            let target_id = queries::resolve_identifier(&conn, target)?;
+            queries::unlink_issues(&conn, source_id, target_id)?;
+            let issue = queries::get_issue(&conn, source_id)?;
+            drop(conn);
+
+            if json {
+                out.json_resources(&issue, ResourceKind::Issue);
+            } else {
+                print!("{}", render::issue_relations(&issue));
+            }
+        }
     }
     Ok(())
 }
@@ -1677,6 +1711,63 @@ mod tests {
             },
         };
         run(&pool, &cmd, false, None).unwrap();
+    }
+
+    fn get_issue_by_identifier(pool: &DbPool, identifier: &str) -> Issue {
+        let conn = pool.read().unwrap();
+        let id = queries::resolve_identifier(&conn, identifier).unwrap();
+        queries::get_issue(&conn, id).unwrap()
+    }
+
+    #[test]
+    fn issue_link_relates_both_sides_and_unlink_in_either_order_removes_it() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Blocker");
+        seed_issue(&pool, "TST", "Blocked");
+
+        let link = Command::Issue {
+            action: IssueAction::Link {
+                source: "TST-1".into(),
+                target: "TST-2".into(),
+                relation: RelationType::Blocks,
+            },
+        };
+        run(&pool, &link, false, None).unwrap();
+        assert_eq!(
+            get_issue_by_identifier(&pool, "TST-1").blocks,
+            vec!["TST-2"]
+        );
+        assert_eq!(
+            get_issue_by_identifier(&pool, "TST-2").blocked_by,
+            vec!["TST-1"]
+        );
+
+        let unlink = Command::Issue {
+            action: IssueAction::Unlink {
+                source: "TST-2".into(),
+                target: "TST-1".into(),
+            },
+        };
+        run(&pool, &unlink, false, None).unwrap();
+        assert!(get_issue_by_identifier(&pool, "TST-1").blocks.is_empty());
+    }
+
+    #[test]
+    fn issue_link_refuses_to_link_an_issue_to_itself() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Lonely");
+
+        let cmd = Command::Issue {
+            action: IssueAction::Link {
+                source: "TST-1".into(),
+                target: "TST-1".into(),
+                relation: RelationType::RelatesTo,
+            },
+        };
+        let error = run(&pool, &cmd, false, None).unwrap_err();
+        assert!(error.to_string().contains("cannot be linked to itself"));
     }
 
     #[test]
