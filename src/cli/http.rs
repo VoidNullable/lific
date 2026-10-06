@@ -250,6 +250,10 @@ impl HttpBackend {
                     let issue: models::Issue = decode(value)?;
                     render::issue_updated(&issue)
                 }
+                IssueAction::Link { .. } | IssueAction::Unlink { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    render::issue_relations(&issue)
+                }
             },
             Command::Project { action } => match action {
                 ProjectAction::List => {
@@ -510,6 +514,30 @@ impl HttpBackend {
                     ..Default::default()
                 };
                 self.send_json(Method::PUT, &format!("/api/issues/{id}"), &body)
+                    .await
+            }
+            // The link endpoints only acknowledge; re-read the source issue so
+            // the output matches the SQL backend and shows the new relations.
+            IssueAction::Link {
+                source,
+                target,
+                relation,
+            } => {
+                let body = json!({
+                    "source": source,
+                    "target": target,
+                    "relation_type": relation.as_str(),
+                });
+                self.send_json(Method::POST, "/api/issues/link", &body)
+                    .await?;
+                self.get_json(&format!("/api/issues/resolve/{}", segment(source)), &[])
+                    .await
+            }
+            IssueAction::Unlink { source, target } => {
+                let body = json!({ "source": source, "target": target });
+                self.send_json(Method::POST, "/api/issues/unlink", &body)
+                    .await?;
+                self.get_json(&format!("/api/issues/resolve/{}", segment(source)), &[])
                     .await
             }
         }
@@ -1546,7 +1574,7 @@ mod tests {
         },
         cli::{
             Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction,
-            ModuleAction, PageAction, ProjectAction, split_csv,
+            ModuleAction, PageAction, ProjectAction, RelationType, split_csv,
         },
         config::AuthConfig,
         db::models::AuthUser,
@@ -2895,6 +2923,62 @@ mod tests {
 
         assert_eq!(issue["title"], "Test issue");
         assert_eq!(issue["identifier"], "TST-1");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn links_and_unlinks_issues_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let duplicate = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Create {
+                        project: "TST".into(),
+                        title: "Duplicate".into(),
+                        description: String::new(),
+                        status: "backlog".into(),
+                        priority: "none".into(),
+                        module: None,
+                        labels: None,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        let duplicate = duplicate["identifier"].as_str().unwrap().to_owned();
+
+        let linked = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Link {
+                        source: duplicate.clone(),
+                        target: fixture.issue_identifier.clone(),
+                        relation: RelationType::Duplicate,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(linked["identifier"], duplicate.as_str());
+        assert_eq!(linked["duplicates"], json!([fixture.issue_identifier]));
+
+        let unlinked = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Unlink {
+                        source: duplicate.clone(),
+                        target: fixture.issue_identifier.clone(),
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        // Empty relation lists are omitted from the serialized issue.
+        assert!(unlinked.get("duplicates").is_none());
         fixture.server.abort();
     }
 
