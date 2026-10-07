@@ -94,7 +94,7 @@ keyring = { version = "3", features = [
 ] }
 
 # Static assets (embedded frontend)
-rust-embed = { version = "8", features = ["mime-guess"] }
+rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
 mime_guess = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Backup/restore archive format (LIF-266): `lific dump` / `lific restore`
