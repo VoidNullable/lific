@@ -25,7 +25,7 @@ export const PLAN_SYNC_W = 1832;
 export const PLAN_SYNC_H = 620;
 export const PLAN_SYNC_FRAMES = 238;
 
-const TUI = {
+export const TUI = {
   bg: "#0a0e14",
   text: "#e8eaf0",
   dim: "#707886",
@@ -62,10 +62,11 @@ const STEPS: Step[] = [
 ];
 const TOTAL_STEPS = STEPS.length; // 7 discrete boxes to tick
 
-const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({
-  at,
-  children,
-}) => {
+export const ToolLine: React.FC<{
+  at: number;
+  children: React.ReactNode;
+  size?: number;
+}> = ({ at, children, size = 23 }) => {
   const frame = useCurrentFrame();
   if (frame < at) return null;
   const t = interpolate(frame, [at, at + 6], [0, 1], {
@@ -80,7 +81,7 @@ const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({
     <div
       style={{
         fontFamily: MONO,
-        fontSize: 23,
+        fontSize: size,
         color: TUI.dim,
         opacity: t,
         whiteSpace: "pre",
@@ -96,7 +97,7 @@ const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({
   );
 };
 
-const Typed: React.FC<{ at: number; text: string }> = ({ at, text }) => {
+export const Typed: React.FC<{ at: number; text: string }> = ({ at, text }) => {
   const frame = useCurrentFrame();
   const chars = frame >= at ? Math.min(text.length, Math.floor((frame - at) * 1.5)) : 0;
   if (chars === 0) return null;
@@ -119,7 +120,7 @@ const Typed: React.FC<{ at: number; text: string }> = ({ at, text }) => {
   );
 };
 
-const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = ({
+export const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = ({
   at,
   children,
 }) => {

@@ -417,49 +417,24 @@ export default function Home() {
           <Reveal>
             <SectionTitle>everyone</SectionTitle>
             <Body className="mt-8">
-              Setup takes about a minute. <Cmd>lific init</Cmd> writes the
-              config, creates the database, and asks how you want to sign in:
-              login-free, or with a password. It creates the first admin
-              account from that answer, then installs a background service
-              where the system offers one (a systemd user session on Linux,
-              launchd on macOS), so{" "}
-              <Em>the server is still running tomorrow</Em>.{" "}
-              <Cmd>lific connect</Cmd> finds the AI tools on your machine and
-              writes their MCP config for them. Restart your client and the
-              tools show up.
-            </Body>
-            <Body>
-              Running solo, that&apos;s the whole ceremony: no signup form, and
-              each AI tool gets <Em>its own key under your account</Em>, so the
-              activity log shows which tool changed what.
+              Feel less like a prompter and more like a director.
             </Body>
           </Reveal>
           <Reveal delay={100} className="mt-9 min-w-0">
-            <Window title="~" className="w-full min-w-0 max-w-full md:max-w-4xl">
-              <pre className="max-w-full overflow-x-auto whitespace-pre bg-bg p-4 font-mono text-body-sm leading-loose text-text sm:p-6">
-                <code>
-                  <span className="text-success">$</span> cargo install lific
-                  {"\n"}
-                  <span className="text-success">$</span> lific init
-                  {"      "}
-                  <span className="text-text-faint">
-                    # config + db + admin; service on :3456
-                  </span>
-                  {"\n"}
-                  <span className="text-success">$</span> lific connect
-                  {"   "}
-                  <span className="text-text-faint">
-                    # writes MCP config into your AI clients
-                  </span>
-                  {"\n"}
-                  <span className="text-success">$</span> lific doctor
-                  {"    "}
-                  <span className="text-text-faint">
-                    # health checks; exits nonzero if broken
-                  </span>
-                </code>
-              </pre>
+            <Window
+              title="APP · opencode-blake and blake"
+              className="min-w-0 w-full max-w-full"
+            >
+              <AutoplayVideo
+                src="/everyone-split.mp4"
+                poster="/everyone-poster.webp"
+                aspect="aspect-[1832/740]"
+                label="An agent session moves APP-43 to active over MCP while a person drags APP-51 to done in the web UI; both changes appear on the same board and in the activity feed"
+              />
             </Window>
+            <p className="mt-3 text-caption text-text-faint">
+              Two people&apos;s worth of work. One of them is an agent.
+            </p>
           </Reveal>
         </section>
 

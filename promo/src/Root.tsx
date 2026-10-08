@@ -15,6 +15,12 @@ import {
   PLAN_SYNC_H,
   PLAN_SYNC_FRAMES,
 } from "./PlanSync";
+import {
+  EveryoneSplit,
+  EVERYONE_SPLIT_W,
+  EVERYONE_SPLIT_H,
+  EVERYONE_SPLIT_FRAMES,
+} from "./EveryoneSplit";
 import { TOTAL_FRAMES } from "./timing";
 import { FPS, WIDTH, HEIGHT } from "./theme";
 import "./index.css";
@@ -56,6 +62,15 @@ export const RemotionRoot: React.FC = () => {
         fps={FPS}
         width={PLAN_SYNC_W}
         height={PLAN_SYNC_H}
+      />
+      {/* Landing-page everyone loop: bunx remotion render EveryoneSplit ../site/public/everyone-split.mp4 --muted */}
+      <Composition
+        id="EveryoneSplit"
+        component={EveryoneSplit}
+        durationInFrames={EVERYONE_SPLIT_FRAMES}
+        fps={FPS}
+        width={EVERYONE_SPLIT_W}
+        height={EVERYONE_SPLIT_H}
       />
       {/* README hero image: npx remotion still Hero ../LificHero.png */}
       <Still id="Hero" component={Hero} width={1920} height={1080} />
