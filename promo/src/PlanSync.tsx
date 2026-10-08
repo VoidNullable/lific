@@ -9,6 +9,7 @@ import {
 import { C } from "./theme";
 import { BODY, DISPLAY, MONO } from "./fonts";
 import { Circle, CircleCheckBig, CircleDot } from "./components/icons";
+import { ArrowUpRight } from "./components/lucide-extra";
 
 /*
  * PlanSync — landing-page loop for the "sprint is the plan" section.
@@ -43,7 +44,7 @@ const R2 = 166; // typed resume reply
 const NEXT = 190; // step #4 becomes the active one
 const FADE = 222; // loop-seam fade
 
-type Step = {
+export type PlanStep = {
   id: number;
   depth: 0 | 1;
   title: string;
@@ -51,7 +52,7 @@ type Step = {
   done0?: boolean; // done before the video starts
 };
 
-const STEPS: Step[] = [
+export const PLAN_STEPS: PlanStep[] = [
   { id: 1, depth: 0, title: "Schema migration for pending ops", issue: "APP-39", done0: true },
   { id: 2, depth: 0, title: "Write-ahead op queue", issue: "APP-40", done0: true },
   { id: 3, depth: 0, title: "Conflict resolution", issue: "APP-42" },
@@ -60,7 +61,7 @@ const STEPS: Step[] = [
   { id: 4, depth: 0, title: "Retry with exponential backoff", issue: "APP-43" },
   { id: 5, depth: 0, title: "Feature flag and rollout notes" },
 ];
-const TOTAL_STEPS = STEPS.length; // 7 discrete boxes to tick
+export const TOTAL_STEPS = PLAN_STEPS.length; // 7 discrete boxes to tick
 
 export const ToolLine: React.FC<{
   at: number;
@@ -149,6 +150,176 @@ export const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = 
   );
 };
 
+export type PlanStepState = "done" | "active" | "open";
+
+/**
+ * The plan card on the right of PlanSync: header with the discrete tally,
+ * then the step tree. Exported so stills (TeamsStill) can freeze it at a
+ * chosen state. `pop` returns the completion spring of a step that is
+ * popping (undefined otherwise); `glow` fades the row highlight.
+ * `rowGap` spaces the steps (14 in the video).
+ */
+export const PlanPanel: React.FC<{
+  doneCount: number;
+  stepState: (s: PlanStep) => PlanStepState;
+  pop?: (s: PlanStep) => number | undefined;
+  glow?: (s: PlanStep) => number;
+  rowGap?: number;
+  style?: React.CSSProperties;
+}> = ({
+  doneCount,
+  stepState,
+  pop = () => undefined,
+  glow = () => 0,
+  rowGap = 14,
+  style,
+}) => (
+  <div
+    style={{
+      width: 700,
+      borderRadius: 16,
+      border: `1px solid ${C.border}`,
+      backgroundColor: C.bgSubtle,
+      boxShadow: "0 30px 80px rgba(0,0,0,0.55)",
+      padding: "28px 32px",
+      boxSizing: "border-box",
+      ...style,
+    }}
+  >
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        paddingBottom: 16,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: MONO,
+          fontSize: 15,
+          color: C.accent,
+          backgroundColor: C.accentSubtle,
+          borderRadius: 6,
+          padding: "3px 10px",
+        }}
+      >
+        APP-PLAN-2
+      </span>
+      <span
+        style={{
+          fontFamily: DISPLAY,
+          fontSize: 27,
+          fontWeight: 600,
+          color: C.text,
+        }}
+      >
+        Ship offline sync
+      </span>
+      <span
+        style={{
+          marginLeft: "auto",
+          fontFamily: MONO,
+          fontSize: 15,
+          color: C.textFaint,
+        }}
+      >
+        {doneCount}/{TOTAL_STEPS} steps done
+      </span>
+    </div>
+
+    <div style={{ display: "flex", flexDirection: "column", gap: rowGap }}>
+      {PLAN_STEPS.map((s) => {
+        const state = stepState(s);
+        const sub = s.depth === 1;
+        const p = pop(s);
+        const popping = p !== undefined;
+        const g = glow(s);
+        const iconSize = sub ? 18 : 22;
+        return (
+          <div
+            key={s.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: sub ? 12 : 14,
+              marginLeft: sub ? 36 : 0,
+              borderRadius: 8,
+              padding: "3px 10px",
+              margin: `-3px -10px -3px ${sub ? 26 : -10}px`,
+              backgroundColor:
+                g > 0 ? `rgba(74,222,128,${g * 0.1})` : undefined,
+            }}
+          >
+            {sub ? (
+              <span
+                style={{
+                  fontFamily: MONO,
+                  fontSize: 16,
+                  color: C.textFaint,
+                }}
+              >
+                &#9492;
+              </span>
+            ) : null}
+            <span
+              style={{
+                display: "inline-flex",
+                transform: popping
+                  ? `scale(${1 + (1 - (p ?? 1)) * 0.5})`
+                  : undefined,
+              }}
+            >
+              {state === "done" ? (
+                <CircleCheckBig size={iconSize} color={C.success} />
+              ) : state === "active" ? (
+                <CircleDot size={iconSize} color={C.accent} />
+              ) : (
+                <Circle size={iconSize} color={C.textMuted} />
+              )}
+            </span>
+            <span
+              style={{
+                fontFamily: BODY,
+                fontSize: sub ? 19 : 22,
+                color: state === "done" ? C.textMuted : C.text,
+                textDecoration: state === "done" ? "line-through" : "none",
+              }}
+            >
+              {s.title}
+            </span>
+            {s.issue ? (
+              // PlanDetail.svelte's provenance chip: a done step whose
+              // issue is done reads "via APP-42" (muted); anything else
+              // reads "APP-43: <issue status>" (accent).
+              <span
+                style={{
+                  marginLeft: "auto",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontFamily: MONO,
+                  fontSize: 14,
+                  whiteSpace: "nowrap",
+                  color: state === "done" ? C.textFaint : C.accent,
+                  backgroundColor: state === "done" ? C.surface : C.accentSubtle,
+                  borderRadius: 6,
+                  padding: "3px 9px",
+                }}
+              >
+                {state === "done"
+                  ? `via ${s.issue}`
+                  : `${s.issue}: ${state === "active" ? "active" : "todo"}`}
+                <ArrowUpRight size={13} color={state === "done" ? C.textFaint : C.accent} />
+              </span>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  </div>
+);
+
 export const PlanSync: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -180,7 +351,7 @@ export const PlanSync: React.FC = () => {
     extrapolateRight: "clamp",
   });
 
-  const stepState = (s: Step): "done" | "active" | "open" => {
+  const stepState = (s: PlanStep): PlanStepState => {
     if (s.done0) return "done";
     if (s.id === 7) return done7 ? "done" : "active";
     if (s.id === 3) return done3 ? "done" : "active";
@@ -260,152 +431,18 @@ export const PlanSync: React.FC = () => {
       </div>
 
       {/* The plan, live in Lific */}
-      <div
+      <PlanPanel
+        doneCount={doneCount}
+        stepState={stepState}
+        pop={(s) =>
+          s.id === 7 && done7 ? pop7 : s.id === 3 && done3 ? pop3 : undefined
+        }
+        glow={(s) => (s.id === 7 ? glow7 : s.id === 3 ? glow3 : 0)}
         style={{
-          width: 700,
-          borderRadius: 16,
-          border: `1px solid ${C.border}`,
-          backgroundColor: C.bgSubtle,
-          boxShadow: "0 30px 80px rgba(0,0,0,0.55)",
-          padding: "28px 32px",
-          boxSizing: "border-box",
           opacity: panelIn,
           transform: `translateY(${(1 - panelIn) * 20}px)`,
         }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            paddingBottom: 16,
-          }}
-        >
-          <span
-            style={{
-              fontFamily: MONO,
-              fontSize: 15,
-              color: C.accent,
-              backgroundColor: C.accentSubtle,
-              borderRadius: 6,
-              padding: "3px 10px",
-            }}
-          >
-            APP-PLAN-2
-          </span>
-          <span
-            style={{
-              fontFamily: DISPLAY,
-              fontSize: 27,
-              fontWeight: 600,
-              color: C.text,
-            }}
-          >
-            Ship offline sync
-          </span>
-          <span
-            style={{
-              marginLeft: "auto",
-              fontFamily: MONO,
-              fontSize: 15,
-              color: C.textFaint,
-            }}
-          >
-            {doneCount}/{TOTAL_STEPS} steps done
-          </span>
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {STEPS.map((s) => {
-            const state = stepState(s);
-            const sub = s.depth === 1;
-            const popping = (s.id === 7 && done7) || (s.id === 3 && done3);
-            const pop = s.id === 7 ? pop7 : pop3;
-            const glow = s.id === 7 ? glow7 : s.id === 3 ? glow3 : 0;
-            const iconSize = sub ? 18 : 22;
-            return (
-              <div
-                key={s.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: sub ? 12 : 14,
-                  marginLeft: sub ? 36 : 0,
-                  borderRadius: 8,
-                  padding: "3px 10px",
-                  margin: `-3px -10px -3px ${sub ? 26 : -10}px`,
-                  backgroundColor:
-                    glow > 0 ? `rgba(74,222,128,${glow * 0.1})` : undefined,
-                }}
-              >
-                {sub ? (
-                  <span
-                    style={{
-                      fontFamily: MONO,
-                      fontSize: 16,
-                      color: C.textFaint,
-                    }}
-                  >
-                    &#9492;
-                  </span>
-                ) : null}
-                <span
-                  style={{
-                    display: "inline-flex",
-                    transform: popping
-                      ? `scale(${1 + (1 - pop) * 0.5})`
-                      : undefined,
-                  }}
-                >
-                  {state === "done" ? (
-                    <CircleCheckBig size={iconSize} color={C.success} />
-                  ) : state === "active" ? (
-                    <CircleDot size={iconSize} color={C.accent} />
-                  ) : (
-                    <Circle size={iconSize} color={C.textMuted} />
-                  )}
-                </span>
-                <span
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: sub ? 19 : 22,
-                    color: state === "done" ? C.textMuted : C.text,
-                    textDecoration: state === "done" ? "line-through" : "none",
-                  }}
-                >
-                  {s.title}
-                </span>
-                {s.issue ? (
-                  <span
-                    style={{
-                      marginLeft: "auto",
-                      fontFamily: MONO,
-                      fontSize: 14,
-                      whiteSpace: "nowrap",
-                      color:
-                        state === "done"
-                          ? C.success
-                          : state === "active"
-                            ? C.accent
-                            : C.textFaint,
-                      backgroundColor:
-                        state === "done"
-                          ? "#142a1b"
-                          : state === "active"
-                            ? C.accentSubtle
-                            : C.surface,
-                      borderRadius: 6,
-                      padding: "3px 9px",
-                    }}
-                  >
-                    {s.issue} &middot; {state}
-                  </span>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      />
 
       {/* Loop-seam fade */}
       <AbsoluteFill

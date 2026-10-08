@@ -27,12 +27,7 @@ import {
   AGENTS_STILL_H,
   AGENTS_STILL_FRAMES,
 } from "./AgentsStill";
-import {
-  AgentsStill,
-  AGENTS_STILL_W,
-  AGENTS_STILL_H,
-  AGENTS_STILL_FRAMES,
-} from "./AgentsStill";
+import { TeamsStill, TEAMS_STILL_W, TEAMS_STILL_H } from "./TeamsStill";
 import { HumansStill, HUMANS_STILL_W, HUMANS_STILL_H } from "./HumansStill";
 import { TOTAL_FRAMES } from "./timing";
 import { FPS, WIDTH, HEIGHT } from "./theme";
@@ -94,14 +89,12 @@ export const RemotionRoot: React.FC = () => {
         width={AGENTS_STILL_W}
         height={AGENTS_STILL_H}
       />
-      {/* Landing-page "For agents" still: render and crop commands in AgentsStill.tsx */}
-      <Composition
-        id="AgentsStill"
-        component={AgentsStill}
-        durationInFrames={AGENTS_STILL_FRAMES}
-        fps={FPS}
-        width={AGENTS_STILL_W}
-        height={AGENTS_STILL_H}
+      {/* Landing-page "For teams" still: render and crop commands in TeamsStill.tsx */}
+      <Still
+        id="TeamsStill"
+        component={TeamsStill}
+        width={TEAMS_STILL_W}
+        height={TEAMS_STILL_H}
       />
       {/* Landing-page "For humans" still: render and crop commands in HumansStill.tsx */}
       <Still
