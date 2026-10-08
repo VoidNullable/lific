@@ -9,132 +9,110 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchInput {
-    #[schemars(
-        description = "Text to search for across issues, pages, comments, and attachment filenames/contents"
-    )]
+    #[schemars(description = "Text to find in issues, pages, comments, and attachments")]
     pub query: String,
-    #[schemars(description = "Filter to a specific project (e.g. LIF)")]
+    #[schemars(description = "Only this project")]
     pub project: Option<String>,
-    #[schemars(description = "Restrict results to one type: issue, page, comment, or attachment")]
+    #[schemars(description = "Only issue, page, comment, or attachment")]
     pub result_type: Option<String>,
-    #[schemars(
-        description = "Sort mode: relevance (default, best match first) or recent (most recently updated first)"
-    )]
+    #[schemars(description = "relevance (default) or recent")]
     pub sort: Option<String>,
     #[schemars(
-        description = "Match mode: 'fts' (default, tokenized with prefix matching) or 'literal' (case-insensitive substring, for punctuation-heavy needles that FTS tokenizes away)."
+        description = "fts (default, word prefixes) or literal (substring, for punctuation)"
     )]
     pub mode: Option<String>,
     #[schemars(description = "Max results (default 20)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for paging")]
+    #[schemars(description = "Offset for paging")]
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListIssuesInput {
-    #[schemars(
-        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
-    )]
+    #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
-    #[schemars(description = "Filter by status: backlog, todo, active, done, cancelled")]
+    #[schemars(description = "backlog, todo, active, done, or cancelled")]
     pub status: Option<String>,
-    #[schemars(description = "Filter by priority: urgent, high, medium, low, none")]
+    #[schemars(description = "urgent, high, medium, low, or none")]
     pub priority: Option<String>,
-    #[schemars(description = "Filter by module name")]
+    #[schemars(description = "Module name")]
     pub module: Option<String>,
-    #[schemars(description = "Filter by label name")]
+    #[schemars(description = "Label name")]
     pub label: Option<String>,
-    #[schemars(description = "Only return issues with no unresolved blockers")]
+    #[schemars(description = "Only open issues with no open blocker or holding wait")]
     pub workable: Option<bool>,
-    #[schemars(description = "Return issues with at least one blocker.")]
+    #[schemars(description = "Only issues with an open blocker or holding wait")]
     pub blocked: Option<bool>,
-    #[schemars(description = "Created at/after ISO date or datetime (e.g. 2026-06-01)")]
+    #[schemars(description = "Created at or after this ISO date or datetime")]
     pub created_since: Option<String>,
-    #[schemars(description = "Created before ISO date or datetime (exclusive)")]
+    #[schemars(description = "Created before this (exclusive)")]
     pub created_until: Option<String>,
-    #[schemars(description = "Updated at/after ISO date or datetime.")]
+    #[schemars(description = "Updated at or after this")]
     pub updated_since: Option<String>,
-    #[schemars(description = "Updated before ISO date or datetime (exclusive)")]
+    #[schemars(description = "Updated before this (exclusive)")]
     pub updated_until: Option<String>,
-    #[schemars(
-        description = "Sort Order: sort_order (default), sequence, created, updated, priority"
-    )]
+    #[schemars(description = "sort_order (default), sequence, created, updated, or priority")]
     pub order_by: Option<String>,
-    #[schemars(description = "Sort direction: asc (default) or desc")]
+    #[schemars(description = "asc (default) or desc")]
     pub order: Option<String>,
     #[schemars(description = "Max results (default 50)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for paging")]
+    #[schemars(description = "Offset for paging")]
     pub offset: Option<i64>,
     #[schemars(
-        description = "Issues in the projects where any of these users has a role, across projects; project becomes optional. \"me\" is you; others by username (\"alice\" or \"@alice\"). Lists active and todo unless status/statuses asks, sorted like the web home page: status, priority, then most recently updated"
+        description = "Issues across the projects where these users have a role (\"me\" is you); project becomes optional. Active and todo unless status/statuses says, sorted by status, priority, recency"
     )]
     pub members: Option<Vec<String>>,
     #[schemars(
-        description = "Roles that count for members: lead, maintainer, viewer, or all (default all). Without members, means your own roles"
+        description = "Roles that count for members: lead, maintainer, viewer, or all (default). Alone: your roles"
     )]
     pub roles: Option<Vec<String>>,
-    #[schemars(
-        description = "Several statuses at once: backlog, todo, active, done, cancelled, or all. Not together with status"
-    )]
+    #[schemars(description = "Several statuses, or all. Not with status")]
     pub statuses: Option<Vec<String>>,
-    #[schemars(
-        description = "Assignment: none (free for agents), human (needs a person), me, or a username"
-    )]
+    #[schemars(description = "none (free for agents), human (needs a person), me, or a username")]
     pub assignee: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetIssueInput {
-    #[schemars(description = "Issue ID like PRO-42 or ADA-7")]
+    #[schemars(description = "Issue ID, e.g. PRO-42")]
     pub identifier: String,
-    #[schemars(
-        description = "Comment trail: 'recent' (default, last 3), 'all' (most recent 500; page the rest with list_comments), or 'none' (count only)."
-    )]
+    #[schemars(description = "recent (default, last 3), all (newest 500), or none (count only)")]
     pub include_comments: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetActivityInput {
-    #[schemars(description = "Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO)")]
+    #[schemars(description = "Issue (PRO-42), page (PRO-DOC-3), or project (PRO)")]
     pub identifier: String,
     #[schemars(
-        description = "Only entries strictly after this ISO date or datetime (UTC unless offset given), oldest-first"
+        description = "Only entries after this ISO date or datetime (UTC unless offset given), oldest first"
     )]
     pub since: Option<String>,
     #[schemars(description = "Max entries (default 30, cap 200)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for paging")]
+    #[schemars(description = "Offset for paging")]
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetBriefingInput {
-    #[schemars(
-        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
-    )]
+    #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
-    #[schemars(
-        description = "Also summarize changes after this ISO date or datetime (UTC unless offset given)"
-    )]
+    #[schemars(description = "Also summarize changes after this ISO date or datetime")]
     pub since: Option<String>,
-    #[schemars(
-        description = "Page IDs to report on (e.g. LIF-DOC-1); default: recently updated pages"
-    )]
+    #[schemars(description = "Page IDs to report on; default recently updated")]
     pub pages: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIssueInput {
-    #[schemars(
-        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
-    )]
+    #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
     // LIF-478: optional so a batch can omit it; the tool requires it
     // whenever `issues` is absent.
@@ -143,26 +121,29 @@ pub struct CreateIssueInput {
     pub title: String,
     #[schemars(description = "Markdown description")]
     pub description: Option<String>,
-    #[schemars(description = "Status: backlog, todo, active, done, cancelled (default: backlog)")]
+    #[schemars(description = "backlog (default), todo, active, done, or cancelled")]
     pub status: Option<String>,
-    #[schemars(description = "Priority: urgent, high, medium, low, none (default: none)")]
+    #[schemars(description = "urgent, high, medium, low, or none (default)")]
     pub priority: Option<String>,
-    #[schemars(description = "Module name to assign to")]
+    #[schemars(description = "Module name")]
     pub module: Option<String>,
-    #[schemars(description = "Label names to attach")]
+    #[schemars(description = "Label names")]
     pub labels: Option<Vec<String>>,
-    #[schemars(description = "Start date (ISO 8601 date, e.g. 2026-06-01)")]
+    #[schemars(description = "Start date, YYYY-MM-DD")]
     pub start_date: Option<String>,
-    #[schemars(description = "Target/due date (ISO 8601 date, e.g. 2026-06-15)")]
+    #[schemars(description = "Due date, YYYY-MM-DD")]
     pub target_date: Option<String>,
     #[schemars(
-        description = "Who must do it: [\"human\"] for any person, or usernames (\"me\" is you). Omit to leave it to agents."
+        description = "Who must do it: [\"human\"] for any person, or usernames (\"me\" is you). Omit to leave it to agents"
     )]
     pub assignees: Option<Vec<String>>,
     #[schemars(
-        description = "Create up to 50 issues atomically instead: each item takes the fields above except project. Only project may accompany it.",
+        description = "Up to 50 issues to create in one transaction, each with the fields above. Only project may accompany it",
         schema_with = "create_issue_items_schema"
     )]
+    // Without a serde default, the custom schema made schemars list
+    // `issues` as required, so strict clients sent a batch on every call.
+    #[serde(default)]
     pub issues: Option<Vec<CreateIssueItem>>,
 }
 
@@ -203,22 +184,20 @@ pub struct UpdateIssueInput {
     pub title: Option<String>,
     #[schemars(description = "New description (markdown)")]
     pub description: Option<String>,
-    #[schemars(description = "New status: backlog, todo, active, done, cancelled")]
+    #[schemars(description = "backlog, todo, active, done, or cancelled")]
     pub status: Option<String>,
-    #[schemars(description = "New priority: urgent, high, medium, low, none")]
+    #[schemars(description = "urgent, high, medium, low, or none")]
     pub priority: Option<String>,
-    #[schemars(
-        description = "New module name. Omit to leave unchanged; pass an empty string \"\" to unassign."
-    )]
+    #[schemars(description = "Module name; \"\" clears it")]
     pub module: Option<String>,
     #[schemars(description = "Replace labels")]
     pub labels: Option<Vec<String>>,
-    #[schemars(description = "New start date (ISO 8601 date, e.g. 2026-06-01)")]
+    #[schemars(description = "Start date, YYYY-MM-DD")]
     pub start_date: Option<String>,
-    #[schemars(description = "New target/due date (ISO 8601 date, e.g. 2026-06-15)")]
+    #[schemars(description = "Due date, YYYY-MM-DD")]
     pub target_date: Option<String>,
     #[schemars(
-        description = "Optional concurrency check: the 'seq' you last read for this issue. The update is refused if the issue has changed since. Omit for last-writer-wins."
+        description = "The seq you last read; the update is refused if the issue changed since"
     )]
     pub expected_seq: Option<i64>,
     #[schemars(
@@ -226,7 +205,7 @@ pub struct UpdateIssueInput {
     )]
     pub assignees: Option<Vec<String>>,
     #[schemars(
-        description = "Completion evidence (markdown), only with status=done. Saved as a verification comment."
+        description = "How you verified the work (markdown), only with status=done. Saved as a verification comment"
     )]
     pub evidence: Option<String>,
 }
@@ -237,43 +216,35 @@ pub struct BulkUpdateInput {
     #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
     // ── Filter (which issues to change; mirrors list_issues) ──
-    #[schemars(
-        description = "Only affect issues with this status: backlog, todo, active, done, cancelled"
-    )]
+    #[schemars(description = "Only issues with this status")]
     pub filter_status: Option<String>,
-    #[schemars(
-        description = "Only affect issues with this priority: urgent, high, medium, low, none"
-    )]
+    #[schemars(description = "Only issues with this priority")]
     pub filter_priority: Option<String>,
-    #[schemars(description = "Only affect issues in this module (by name)")]
+    #[schemars(description = "Only issues in this module")]
     pub filter_module: Option<String>,
-    #[schemars(description = "Only affect issues carrying this label (by name)")]
+    #[schemars(description = "Only issues with this label")]
     pub filter_label: Option<String>,
     // ── Target (fields to set on every matching issue) ──
-    #[schemars(description = "New status to set: backlog, todo, active, done, cancelled")]
+    #[schemars(description = "Status to set")]
     pub set_status: Option<String>,
-    #[schemars(description = "New priority to set: urgent, high, medium, low, none")]
+    #[schemars(description = "Priority to set")]
     pub set_priority: Option<String>,
-    #[schemars(description = "New module (by name) to set")]
+    #[schemars(description = "Module to set")]
     pub set_module: Option<String>,
-    #[schemars(description = "Replace assignment, as in update_issue assignees")]
+    #[schemars(description = "Assignment to set, as in update_issue")]
     pub set_assignees: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetBoardInput {
-    #[schemars(
-        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
-    )]
+    #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
-    #[schemars(description = "Group by: status, priority, or module (default: status)")]
+    #[schemars(description = "status (default), priority, or module")]
     pub group_by: Option<String>,
-    #[schemars(
-        description = "Include done and cancelled issues (default false). By default closed columns appear as count-only stubs."
-    )]
+    #[schemars(description = "Show done and cancelled issues (default false)")]
     pub include_closed: Option<bool>,
-    #[schemars(description = "Cap issues rendered per column; output notes the remainder")]
+    #[schemars(description = "Max issues per column")]
     pub max_per_column: Option<i64>,
 }
 
@@ -316,36 +287,30 @@ pub struct UnlinkIssuesInput {
 pub struct GetPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
-    #[schemars(
-        description = "Read one section: heading text (case-insensitive) or its anchor (e.g. current-state), with its subsections"
-    )]
+    #[schemars(description = "Read one section by heading text or anchor, with its subsections")]
     pub section: Option<String>,
-    #[schemars(description = "Return only the headings, each section's size, and the page seq")]
+    #[schemars(description = "Return only headings, section sizes, and seq")]
     pub outline: Option<bool>,
-    #[schemars(
-        description = "A seq from an earlier read: return only the content diff since then, plus the current seq"
-    )]
+    #[schemars(description = "Return only the diff since this earlier seq")]
     pub since_seq: Option<i64>,
-    #[schemars(
-        description = "Continue a cut read from this character offset (into the section if given)"
-    )]
+    #[schemars(description = "Continue a cut read from this character offset")]
     pub offset: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePageInput {
-    #[schemars(description = "Project ID (e.g. LIF). Omit for workspace-level page.")]
+    #[schemars(description = "Project ID; omit for a workspace page")]
     pub project: Option<String>,
     #[schemars(description = "Page title")]
     pub title: String,
     #[schemars(description = "Markdown content")]
     pub content: Option<String>,
-    #[schemars(description = "Folder name to place page in")]
+    #[schemars(description = "Folder name")]
     pub folder: Option<String>,
     #[schemars(description = "Status: draft, active, complete, archived")]
     pub status: Option<String>,
-    #[schemars(description = "Label names to attach (project-scoped; ignored on workspace pages)")]
+    #[schemars(description = "Label names (project pages only)")]
     pub labels: Option<Vec<String>>,
 }
 
@@ -358,18 +323,16 @@ pub struct UpdatePageInput {
     pub title: Option<String>,
     #[schemars(description = "New markdown content")]
     pub content: Option<String>,
-    #[schemars(
-        description = "Move to folder name. Omit to leave unchanged; pass an empty string \"\" for project root."
-    )]
+    #[schemars(description = "Folder name; \"\" moves to the project root")]
     pub folder: Option<String>,
     #[schemars(description = "Status: draft, active, complete, archived")]
     pub status: Option<String>,
-    #[schemars(description = "Pin (true) or unpin (false) the page to the top of the page list.")]
+    #[schemars(description = "Pin to the top of the page list")]
     pub pinned: Option<bool>,
-    #[schemars(description = "Replace labels; [] clears all (project-scoped)")]
+    #[schemars(description = "Replace labels; [] clears")]
     pub labels: Option<Vec<String>>,
     #[schemars(
-        description = "Optional concurrency check: the 'seq' you last read for this page. The update is refused if the page has changed since. Omit for last-writer-wins."
+        description = "The seq you last read; the update is refused if the page changed since"
     )]
     pub expected_seq: Option<i64>,
 }
@@ -382,15 +345,15 @@ pub struct UpdatePageInput {
 pub struct EditIssueInput {
     #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
-    #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[schemars(description = "Exact text to find; must match once unless replace_all")]
     #[serde(alias = "oldString")]
     pub old_string: String,
-    #[schemars(description = "Replacement string (must differ from old_string)")]
+    #[schemars(description = "Replacement; must differ")]
     #[serde(alias = "newString")]
     pub new_string: String,
     #[schemars(description = "Field to edit: 'description' (default) or 'title'")]
     pub field: Option<String>,
-    #[schemars(description = "Replace all occurrences (default false)")]
+    #[schemars(description = "Replace every match (default false)")]
     #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
@@ -400,15 +363,15 @@ pub struct EditIssueInput {
 pub struct EditPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
-    #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[schemars(description = "Exact text to find; must match once unless replace_all")]
     #[serde(alias = "oldString")]
     pub old_string: String,
-    #[schemars(description = "Replacement string (must differ from old_string)")]
+    #[schemars(description = "Replacement; must differ")]
     #[serde(alias = "newString")]
     pub new_string: String,
     #[schemars(description = "Field to edit: 'content' (default) or 'title'")]
     pub field: Option<String>,
-    #[schemars(description = "Replace all occurrences (default false)")]
+    #[schemars(description = "Replace every match (default false)")]
     #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
@@ -416,63 +379,45 @@ pub struct EditPageInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteInput {
-    #[schemars(
-        description = "Type of thing to delete: issue, page, plan, project, module, label, or folder"
-    )]
+    #[schemars(description = "issue, page, plan, project, module, label, or folder")]
     pub resource_type: String,
-    #[schemars(
-        description = "ID or name (e.g. LIF-1, LIF-DOC-1, LIF for projects, or name for modules/labels/folders)"
-    )]
+    #[schemars(description = "ID (LIF-1, LIF-DOC-1, LIF) or module, label, or folder name")]
     pub identifier: String,
-    #[schemars(description = "Project ID (required for deleting module/label/folder by name)")]
+    #[schemars(description = "Project ID, for a module, label, or folder")]
     pub project: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListResourcesInput {
-    #[schemars(
-        description = "Resource type: project, module, label, folder, page, issue, or plan"
-    )]
+    #[schemars(description = "project, module, label, folder, page, issue, or plan")]
     pub resource_type: String,
-    #[schemars(
-        description = "Project ID (required for issues, plans, modules, labels, and folders unless the session is bound to a repository; optional for pages; for projects, lists only that project)"
-    )]
+    #[schemars(description = "Project ID; needed for most types unless the session is repo-bound")]
     pub project: Option<String>,
-    #[schemars(description = "Folder name (for pages)")]
+    #[schemars(description = "Folder name (pages)")]
     pub folder: Option<String>,
-    #[schemars(description = "Label name (for issues or pages)")]
+    #[schemars(description = "Label name (issues, pages)")]
     pub label: Option<String>,
-    #[schemars(
-        description = "Status filter for pages (draft, active, complete, archived) or plans"
-    )]
+    #[schemars(description = "Page or plan status")]
     pub status: Option<String>,
-    #[schemars(
-        description = "Sort column (for page lists): sort_order (default), title, status, created, or updated"
-    )]
+    #[schemars(description = "Pages: sort_order (default), title, status, created, or updated")]
     pub order_by: Option<String>,
-    #[schemars(description = "Sort direction (for page lists): asc (default) or desc")]
+    #[schemars(description = "Pages: asc (default) or desc")]
     pub order: Option<String>,
-    #[schemars(
-        description = "Max results (plans default to 50 and cap at 500; issues and pages default to 100; other lists ignore this field)"
-    )]
+    #[schemars(description = "Max results (issues and pages 100, plans 50, cap 500)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for issue, page, or plan paging")]
+    #[schemars(description = "Offset for issues, pages, or plans")]
     pub offset: Option<i64>,
     #[schemars(
-        description = "Projects only: keep projects where any of these users has a role. \"me\" is you; others by username (\"alice\" or \"@alice\")"
+        description = "Projects only: keep projects where these users have a role (\"me\" is you)"
     )]
     pub members: Option<Vec<String>>,
-    #[schemars(
-        description = "Projects only: roles that count for members: lead, maintainer, viewer, or all (default all). Without members, means your own roles"
-    )]
+    #[schemars(description = "Projects only: roles that count for members (default all)")]
     pub roles: Option<Vec<String>>,
-    #[schemars(
-        description = "Projects only: statuses to count per project: backlog, todo, active, done, cancelled, or all (default all); [] prints no counts"
-    )]
+    #[schemars(description = "Projects only: statuses to count (default all); [] prints none")]
     pub statuses: Option<Vec<String>>,
     #[schemars(
-        description = "Projects only: roles to list every member of by name: lead, maintainer, viewer, or all. Default names up to 5 leads and maintainers and counts viewers, and a single-person instance shows no roster; [] prints counts only"
+        description = "Projects only: roles to name every member of (lead, maintainer, viewer, all); [] prints counts only"
     )]
     pub show_members: Option<Vec<String>>,
 }
@@ -480,33 +425,25 @@ pub struct ListResourcesInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManageResourceInput {
-    #[schemars(description = "Resource type: project, module, label, or folder")]
+    #[schemars(description = "project, module, label, or folder")]
     pub resource_type: String,
-    #[schemars(description = "Action: create or update")]
+    #[schemars(description = "create or update")]
     pub action: String,
-    #[schemars(
-        description = "Required for module, label, or folder updates; projects use `project` instead"
-    )]
+    #[schemars(description = "Current name, to update a module, label, or folder")]
     pub current_name: Option<String>,
-    #[schemars(
-        description = "Project ID (e.g. LIF), required for module/label/folder operations and for project updates"
-    )]
+    #[schemars(description = "Project ID, for modules, labels, folders, and project updates")]
     pub project: Option<String>,
-    #[schemars(description = "Name (required when creating a project, module, label, or folder)")]
+    #[schemars(description = "Name; required to create")]
     pub name: Option<String>,
-    #[schemars(description = "Identifier (required for project create, e.g. PRO)")]
+    #[schemars(description = "Project identifier, e.g. PRO")]
     pub identifier: Option<String>,
     #[schemars(description = "Description")]
     pub description: Option<String>,
-    #[schemars(
-        description = "Status (for module: backlog, planned, active, paused, done, cancelled)"
-    )]
+    #[schemars(description = "Module status: backlog, planned, active, paused, done, cancelled")]
     pub status: Option<String>,
-    #[schemars(description = "Color hex (for label, e.g. #EF4444)")]
+    #[schemars(description = "Label color, e.g. #EF4444")]
     pub color: Option<String>,
-    #[schemars(
-        description = "Icon for project or module: 'lucide:<Name>' or a literal emoji. Omit to leave unchanged; pass an empty string \"\" to clear."
-    )]
+    #[schemars(description = "Project or module icon: 'lucide:<Name>' or an emoji; \"\" clears")]
     pub emoji: Option<String>,
 }
 
@@ -534,9 +471,7 @@ impl ManageResourceInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddCommentInput {
-    #[schemars(
-        description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
-    )]
+    #[schemars(description = "Issue (LIF-1), page (LIF-DOC-1), or workspace page (DOC-1) ID")]
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
@@ -545,21 +480,15 @@ pub struct AddCommentInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListCommentsInput {
-    #[schemars(
-        description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
-    )]
+    #[schemars(description = "Issue (LIF-1), page (LIF-DOC-1), or workspace page (DOC-1) ID")]
     pub identifier: String,
-    #[schemars(description = "Filter to comments by this author username")]
+    #[schemars(description = "Only this author's comments")]
     pub author: Option<String>,
-    #[schemars(
-        description = "Sort direction by creation time: desc (default, newest first) or asc (oldest first)"
-    )]
+    #[schemars(description = "desc (default, newest first) or asc")]
     pub order: Option<String>,
-    #[schemars(
-        description = "Maximum comments to return (default 50, cap 500). A long thread is paged, never dumped whole."
-    )]
+    #[schemars(description = "Max comments (default 50, cap 500)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for paging")]
+    #[schemars(description = "Offset for paging")]
     pub offset: Option<i64>,
 }
 
@@ -571,21 +500,17 @@ pub struct ListCommentsInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditCommentInput {
-    #[schemars(description = "Comment id (from add_comment or list_comments)")]
+    #[schemars(description = "Comment id")]
     pub comment_id: i64,
-    #[schemars(
-        description = "Replace the ENTIRE comment body with this markdown. Omit when using old_string/new_string."
-    )]
+    #[schemars(description = "New body, replacing all of it. Not with old_string")]
     pub content: Option<String>,
-    #[schemars(
-        description = "Exact string to find in the comment. Must be unique unless replace_all is true. Use with new_string instead of content."
-    )]
+    #[schemars(description = "Exact text to find; must match once unless replace_all")]
     #[serde(alias = "oldString")]
     pub old_string: Option<String>,
-    #[schemars(description = "Replacement for old_string (must differ from it)")]
+    #[schemars(description = "Replacement; must differ")]
     #[serde(alias = "newString")]
     pub new_string: Option<String>,
-    #[schemars(description = "With old_string: replace all occurrences (default false)")]
+    #[schemars(description = "Replace every match (default false)")]
     #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
@@ -593,7 +518,7 @@ pub struct EditCommentInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteCommentInput {
-    #[schemars(description = "Comment id (from add_comment or list_comments)")]
+    #[schemars(description = "Comment id")]
     pub comment_id: i64,
 }
 
@@ -617,15 +542,11 @@ pub struct PlanStepInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePlanInput {
-    #[schemars(
-        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
-    )]
+    #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
     #[schemars(description = "Plan title")]
     pub title: String,
-    #[schemars(
-        description = "Optional anchor issue (e.g. LIF-42). Closing it auto-archives the plan."
-    )]
+    #[schemars(description = "Anchor issue; closing it archives the plan")]
     pub anchor_issue: Option<String>,
     #[schemars(
         description = "Full nested step tree. Each step: {title, description?, issue?, done?, steps?[]}"
@@ -646,10 +567,10 @@ pub struct EditPlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
     #[schemars(
-        description = "Database step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes)."
+        description = "Step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes)"
     )]
     pub step_id: i64,
-    #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[schemars(description = "Exact text to find; must match once unless replace_all")]
     #[serde(alias = "oldString")]
     pub old_string: String,
     #[schemars(description = "Replacement string")]
@@ -657,7 +578,7 @@ pub struct EditPlanStepInput {
     pub new_string: String,
     #[schemars(description = "Field to edit: 'description' (default) or 'title'")]
     pub field: Option<String>,
-    #[schemars(description = "Replace all occurrences (default false)")]
+    #[schemars(description = "Replace every match (default false)")]
     #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
@@ -668,44 +589,42 @@ pub struct UpdatePlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
     #[schemars(
-        description = "Database step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes). OMIT operates on the plan itself."
+        description = "Step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes). Omit to change the plan"
     )]
     pub step_id: Option<i64>,
     #[schemars(description = "New title for the target")]
     pub title: Option<String>,
     // ── Plan-level (step_id omitted) ──
-    #[schemars(description = "Plan status: active done or archived")]
+    #[schemars(description = "Plan status: active, done, or archived")]
     pub status: Option<String>,
     #[schemars(description = "Set the plan's anchor issue")]
     pub anchor_issue: Option<String>,
     #[schemars(description = "Clear the plan's anchor issue")]
     pub clear_anchor: Option<bool>,
     // ── Step-level (step_id set) ──
-    #[schemars(description = "Mark the step done/undone (a linked issue syncs)")]
+    #[schemars(description = "Mark the step done or not; a linked issue follows")]
     pub done: Option<bool>,
     #[schemars(description = "Attach an issue (e.g. LIF-42) to the step")]
     pub attach_issue: Option<String>,
-    #[schemars(description = "Detach the step's issue reference")]
+    #[schemars(description = "Detach the step's issue")]
     pub detach_issue: Option<bool>,
     #[schemars(
         description = "Add a step with this title: under step_id, or top-level when step_id is omitted"
     )]
     pub add_child_title: Option<String>,
-    #[schemars(description = "Description for the added child step")]
+    #[schemars(description = "Description for the new step")]
     pub add_child_description: Option<String>,
-    #[schemars(description = "Issue ID for the added child step")]
+    #[schemars(description = "Issue the new step mirrors")]
     pub add_child_issue: Option<String>,
-    #[schemars(description = "Reparent the step under this step id")]
+    #[schemars(description = "Move the step under this step")]
     pub move_parent_step_id: Option<i64>,
-    #[schemars(description = "Reparent the step to the plan root")]
+    #[schemars(description = "Move the step to the top level")]
     pub move_to_root: Option<bool>,
-    #[schemars(description = "New position among siblings (0-based)")]
+    #[schemars(description = "New position among siblings, from 0")]
     pub move_position: Option<i64>,
-    #[schemars(description = "Delete the step and its subtree")]
+    #[schemars(description = "Delete the step and its children")]
     pub delete: Option<bool>,
-    #[schemars(
-        description = "Return the full re-rendered tree instead of the delta (default false)"
-    )]
+    #[schemars(description = "Return the whole tree, not a receipt")]
     pub echo_tree: Option<bool>,
 }
 
@@ -714,13 +633,11 @@ pub struct UpdatePlanStepInput {
 pub struct UploadAttachmentInput {
     #[schemars(description = "File name, e.g. crash-log.txt or screenshot.png")]
     pub filename: String,
-    #[schemars(description = "File bytes, base64 encoded (max 10 MiB decoded)")]
+    #[schemars(description = "File bytes, base64 (max 10 MiB decoded)")]
     pub content_base64: String,
-    #[schemars(
-        description = "Link the upload to this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages)"
-    )]
+    #[schemars(description = "Link to this issue or page")]
     pub entity: Option<String>,
-    #[schemars(description = "Link the upload to this comment id instead of an issue or page")]
+    #[schemars(description = "Link to this comment instead")]
     pub comment_id: Option<i64>,
 }
 
@@ -738,20 +655,16 @@ pub struct GetAttachmentInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListAttachmentsInput {
-    #[schemars(
-        description = "List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages)"
-    )]
+    #[schemars(description = "Issue or page ID")]
     pub entity: Option<String>,
-    #[schemars(description = "List every attachment in this project (e.g. LIF) instead")]
+    #[schemars(description = "Every attachment in this project instead")]
     pub project: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExportInput {
-    #[schemars(
-        description = "What to export: an issue ID (PRO-42), a page ID (PRO-DOC-3), or a bare project ID (PRO) for the whole project"
-    )]
+    #[schemars(description = "Issue (PRO-42), page (PRO-DOC-3), or project (PRO)")]
     pub identifier: String,
     #[schemars(description = "Project only: zero-indexed document offset")]
     pub offset: Option<i64>,

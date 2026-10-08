@@ -32,8 +32,68 @@ impl LificMcp {
         // Stateless HTTP creates a handler per request. Share immutable routes so
         // rmcp's thread-local schema cache doesn't retain a copy on each worker.
         // Calls still receive the current handler's database and session state.
-        static ROUTER: LazyLock<ToolRouter<LificMcp>> = LazyLock::new(LificMcp::tool_router);
+        static ROUTER: LazyLock<ToolRouter<LificMcp>> = LazyLock::new(|| {
+            let mut router = LificMcp::tool_router();
+            for route in router.map.values_mut() {
+                let mut schema = serde_json::Value::Object((*route.attr.input_schema).clone());
+                compact_schema(&mut schema, true);
+                if let serde_json::Value::Object(schema) = schema {
+                    route.attr.input_schema = Arc::new(schema);
+                }
+            }
+            router
+        });
         &ROUTER
+    }
+}
+
+/// LIF-505: strip what a derived input schema says twice or not at all.
+/// Every connected agent pays for `tools/list` on every session, and about
+/// half of it was boilerplate: the draft URL and Rust type name on each
+/// schema, `format: int64` on every integer, and `["string", "null"]` on
+/// every optional field, whose optionality `required` already states. Plain
+/// types are also what Gemini-family clients accept; they reject type
+/// arrays. Validation is unaffected: arguments are checked by serde, and an
+/// omitted field is still `None`.
+pub(crate) fn compact_schema(schema: &mut serde_json::Value, top: bool) {
+    let serde_json::Value::Object(map) = schema else {
+        return;
+    };
+    if top {
+        map.remove("$schema");
+    }
+    map.remove("title");
+    map.remove("format");
+    if map.get("default").is_some_and(serde_json::Value::is_null) {
+        map.remove("default");
+    }
+    if let Some(serde_json::Value::Array(types)) = map.get("type") {
+        let concrete: Vec<serde_json::Value> =
+            types.iter().filter(|t| *t != "null").cloned().collect();
+        if concrete.len() == 1 {
+            map.insert("type".into(), concrete[0].clone());
+        }
+    }
+    // Keys of these maps are field and definition names, not keywords, so
+    // only their values are schemas.
+    for named in ["properties", "$defs", "definitions"] {
+        if let Some(serde_json::Value::Object(children)) = map.get_mut(named) {
+            children
+                .values_mut()
+                .for_each(|child| compact_schema(child, false));
+        }
+    }
+    for single in ["items", "additionalProperties", "not"] {
+        if let Some(child) = map.get_mut(single) {
+            compact_schema(child, false);
+        }
+    }
+    for list in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(serde_json::Value::Array(children)) = map.get_mut(list) {
+            children
+                .iter_mut()
+                .for_each(|child| compact_schema(child, false));
+        }
     }
 }
 
@@ -1882,7 +1942,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values; pass since to read forward from a timestamp."
+        description = "Read who changed what and when, and through which interface, for an issue, page, or project. Newest first; since reads forward."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
         self.get_activity_inner(input)
@@ -2039,7 +2099,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Call first when resuming a project: active plans with next steps, blocked, workable and active issues, key pages (metadata only) and, with since, what changed. Bounded to about 6,000 characters."
+        description = "Call first when resuming a project: plans and next steps, blocked, workable and active issues, key pages, and with since, what changed. About 6,000 characters."
     )]
     fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
         self.get_briefing_inner(input)
@@ -2047,7 +2107,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List issues for a project, or with members=[\"me\"] across the projects where you hold a role (active and todo, like the web home page); roles=[\"lead\",\"maintainer\"] keeps the projects you answer for. workable=true gives issues with no blockers, blocked=true for issues with at least one blocker."
+        description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
         self.list_issues_inner(input).unwrap_or_else(error_response)
@@ -2290,9 +2350,7 @@ No issues found."
         }))
     }
 
-    #[tool(
-        description = "Get an issue by ID (e.g. LIF-1): full details plus the last 3 comments by default."
-    )]
+    #[tool(description = "Get an issue with its details and last 3 comments.")]
     fn get_issue(&self, Parameters(input): Parameters<GetIssueInput>) -> String {
         self.get_issue_inner(input).unwrap_or_else(error_response)
     }
@@ -2526,7 +2584,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). A project returns its issue and page documents a page at a time; continue with offset."
+        description = "Export Markdown for an issue, a page, or a whole project. A project comes back in pages; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
         self.export_inner(input)
@@ -2609,7 +2667,7 @@ No issues found."
         }
     }
 
-    #[tool(description = "Create a new issue in a project, or several at once with issues")]
+    #[tool(description = "Create an issue, or up to 50 with issues.")]
     fn create_issue(&self, Parameters(input): Parameters<CreateIssueInput>) -> String {
         self.create_issue_inner(input)
             .unwrap_or_else(error_response)
@@ -2829,9 +2887,7 @@ No issues found."
         }))
     }
 
-    #[tool(
-        description = "Update an existing issue by identifier. Only provided fields are changed."
-    )]
+    #[tool(description = "Update an issue. Only the fields you pass change.")]
     fn update_issue(&self, Parameters(input): Parameters<UpdateIssueInput>) -> String {
         self.update_issue_inner(input)
             .unwrap_or_else(error_response)
@@ -3019,7 +3075,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Apply field changes to matching issues in one call. At most 500 matching issues are selected; narrow filters when more matches exist. Returns the number of issues updated."
+        description = "Change every matching issue in one call, at most 500; narrow the filters for more. Returns the count."
     )]
     fn bulk_update(&self, Parameters(input): Parameters<BulkUpdateInput>) -> String {
         self.bulk_update_inner(input).unwrap_or_else(error_response)
@@ -3104,7 +3160,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Edit an issue by replacing an exact string. Targets the description by default; pass field='title' for the title. Fails if old_string is missing or ambiguous (unless replace_all=true). Cheaper than update_issue for small changes."
+        description = "Replace one exact string in an issue's description, or title with field='title'. Cheaper than update_issue for small edits."
     )]
     fn edit_issue(&self, Parameters(input): Parameters<EditIssueInput>) -> String {
         self.edit_issue_inner(input).unwrap_or_else(error_response)
@@ -3193,7 +3249,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Board view of issues grouped by status (default), priority, or module. Done/cancelled are count-only stubs unless include_closed=true."
+        description = "Issues grouped by status (default), priority, or module. Closed columns show only counts unless include_closed=true."
     )]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
         self.get_board_inner(input).unwrap_or_else(error_response)
@@ -3355,7 +3411,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Link two issues with a relation: blocks, relates_to, or duplicate. A blocks link with user or from/until instead of source makes target wait on a person or dates."
+        description = "Link two issues: blocks, relates_to, or duplicate. For blocks, pass user or from/until instead of source to make target wait on a person or dates."
     )]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
         self.link_issues_inner(input).unwrap_or_else(error_response)
@@ -3447,7 +3503,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Get a page by identifier (e.g. LIF-DOC-1). Pages over 30,000 chars return their outline and opening; read the rest by section."
+        description = "Get a page. Over 30,000 characters you get its outline and opening; read the rest by section."
     )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
         self.get_page_inner(input).unwrap_or_else(error_response)
@@ -3582,7 +3638,7 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Update a page by identifier. Only provided fields are changed.")]
+    #[tool(description = "Update a page. Only the fields you pass change.")]
     fn update_page(&self, Parameters(input): Parameters<UpdatePageInput>) -> String {
         self.update_page_inner(input).unwrap_or_else(error_response)
     }
@@ -3656,7 +3712,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Edit a page by exact string replacement; same contract as edit_issue. Targets the content by default; pass field='title' for the title."
+        description = "Replace one exact string in a page's content, or title with field='title'."
     )]
     fn edit_page(&self, Parameters(input): Parameters<EditPageInput>) -> String {
         self.edit_page_inner(input).unwrap_or_else(error_response)
@@ -3734,9 +3790,7 @@ No issues found."
         }))
     }
 
-    #[tool(
-        description = "Delete any resource by type and identifier. Types: issue, page, plan, project, module, label, folder."
-    )]
+    #[tool(description = "Delete an issue, page, plan, project, module, label, or folder.")]
     fn delete(&self, Parameters(input): Parameters<DeleteInput>) -> String {
         self.delete_inner(input).unwrap_or_else(error_response)
     }
@@ -3840,7 +3894,7 @@ No issues found."
     }
 
     #[tool(
-        description = "List resources by type: project, module, label, folder, page, issue, or plan. Most types need a project identifier. Project rows show members by role, your role and issue counts per status; members=[\"me\"] keeps only your projects."
+        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show members, your role, and counts per status."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
         self.list_resources_inner(input)
@@ -4201,7 +4255,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Create or update a project, module, label, or folder. Create project requires name and identifier; project update requires project=<IDENT>; module/label/folder create requires project and name; module/label/folder update requires project and current_name. Use delete for deletion."
+        description = "Create or update a project, module, label, or folder. Project: name and identifier to create, project to update. Others: project, plus name to create or current_name to update."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
         self.manage_resource_inner(input.normalize_quotes())
@@ -4452,9 +4506,7 @@ No issues found."
         }
     }
 
-    #[tool(
-        description = "Add a comment to an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). The author is the authenticated user."
-    )]
+    #[tool(description = "Add a comment to an issue or page. The author is the caller.")]
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
         self.add_comment_inner(input).unwrap_or_else(error_response)
     }
@@ -4517,7 +4569,7 @@ No issues found."
     }
 
     #[tool(
-        description = "List comments on an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). Returns the 50 newest by default; page back with offset, or pass order=asc to read oldest first."
+        description = "List comments on an issue or page: the 50 newest by default. Page with offset, or order=asc for oldest first."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
         self.list_comments_inner(input)
@@ -4667,7 +4719,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Edit a comment by id. Either pass old_string/new_string for exact string replacement (same contract as edit_issue), or pass content to replace the entire body. Author or admin only; @mentions re-resolve."
+        description = "Edit a comment: old_string/new_string replaces one exact string, content replaces the body. Author or admin only."
     )]
     fn edit_comment(&self, Parameters(input): Parameters<EditCommentInput>) -> String {
         self.edit_comment_inner(input)
@@ -4796,7 +4848,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Create a nestable step-by-step plan that survives outside the context window. Steps can mirror issues via 'issue': closing the issue completes the step and vice versa."
+        description = "Create a nested step plan that outlives the session. A step with issue mirrors it: closing either closes both."
     )]
     fn create_plan(&self, Parameters(input): Parameters<CreatePlanInput>) -> String {
         self.create_plan_inner(input).unwrap_or_else(error_response)
@@ -4861,7 +4913,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Rehydrate a plan's full step tree (e.g. LIF-PLAN-3) when resuming work. Step lines show the #id used by edit_plan_step and update_plan_step, done state, and linked issues."
+        description = "Get a plan's full step tree. Each step shows its #id (the step_id), done state, and linked issue."
     )]
     fn get_plan(&self, Parameters(input): Parameters<GetPlanInput>) -> String {
         self.get_plan_inner(input).unwrap_or_else(error_response)
@@ -4877,7 +4929,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Edit a plan step's text by exact string replacement; same contract as edit_issue. Targets description by default; pass field='title'."
+        description = "Replace one exact string in a plan step's description, or title with field='title'."
     )]
     fn edit_plan_step(&self, Parameters(input): Parameters<EditPlanStepInput>) -> String {
         self.edit_plan_step_inner(input)
@@ -4936,7 +4988,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Mutate a plan or one step. With step_id: step CRUD, done toggling, attach/detach issue (linked issues sync state). Without step_id: update the plan itself or add a top-level step; plan status never closes the anchor issue. Returns a delta."
+        description = "Change one step (step_id): done, rename, attach or detach an issue, add a child, move, delete. Without step_id: change the plan or add a top-level step. Plan status never closes the anchor issue."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
         self.update_plan_step_inner(input)
@@ -5219,7 +5271,7 @@ No issues found."
     // ── Attachments (LIF-418) ────────────────────────────────
 
     #[tool(
-        description = "Upload a file (base64) and get a markdown snippet to embed. Optionally links it to an issue (LIF-42), page (LIF-DOC-3), or comment. Max 10 MiB; images, PDF, zip, SVG and plain text only."
+        description = "Upload a base64 file (max 10 MiB; images, PDF, zip, SVG, plain text) and get Markdown to embed. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
         self.upload_attachment_inner(input)
@@ -5430,9 +5482,7 @@ No issues found."
         ))])
     }
 
-    #[tool(
-        description = "List attachments on an issue (LIF-42) or page (LIF-DOC-3), or across a whole project."
-    )]
+    #[tool(description = "List attachments on an issue or page, or in a project.")]
     fn list_attachments(&self, Parameters(input): Parameters<ListAttachmentsInput>) -> String {
         self.list_attachments_inner(input)
             .unwrap_or_else(error_response)
@@ -12214,6 +12264,57 @@ mod tests {
         }
         assert_eq!(get("PLN-PLAN-1"), foreign_before);
         assert_eq!(get("PLN-PLAN-2"), after);
+    }
+
+    #[test]
+    fn published_schemas_carry_no_boilerplate() {
+        fn walk(value: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for key in ["$schema", "format"] {
+                        if map.contains_key(key) {
+                            found.push(format!("{path}: {key}"));
+                        }
+                    }
+                    if map.get("type").is_some_and(serde_json::Value::is_array) {
+                        found.push(format!("{path}: type array"));
+                    }
+                    if map.get("title").is_some_and(serde_json::Value::is_string) {
+                        found.push(format!("{path}: title"));
+                    }
+                    for (key, child) in map {
+                        walk(child, &format!("{path}.{key}"), found);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, path, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (m, _guard) = mcp();
+        let schemas = m.list_tool_schemas();
+        let mut found = Vec::new();
+        for (name, schema) in &schemas {
+            walk(schema, name, &mut found);
+        }
+        assert!(found.is_empty(), "{found:#?}");
+        // A field named like a keyword is a field, and survives.
+        let (_, create) = schemas
+            .iter()
+            .find(|(name, _)| name == "create_issue")
+            .unwrap();
+        assert_eq!(create["properties"]["title"]["type"], "string");
+        // Neither a single title nor a batch is mandatory on its own.
+        assert!(
+            create
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "{create}"
+        );
     }
 
     #[test]
