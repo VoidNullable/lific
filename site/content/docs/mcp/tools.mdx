@@ -453,7 +453,7 @@ The double-escape repair applies to descriptions, not titles.
 
 ### `update_plan_step`
 
-Changes a plan, or one step in it. Without `step_id` the call targets the plan; with it, the step.
+Changes a plan, or one step in it. Without `step_id` the call targets the plan; with it, the step. A field that belongs to the other target is refused with an error rather than ignored.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -466,9 +466,9 @@ Changes a plan, or one step in it. Without `step_id` the call targets the plan; 
 | `done` | `boolean` | No | Step only: mark done or not done. Marking done also closes a linked issue, and the response says so. |
 | `attach_issue` | `string` | No | Step only: link an issue, e.g. `APP-42`. |
 | `detach_issue` | `boolean` | No | Step only: remove the step's issue link. |
-| `add_child_title` | `string` | No | Step only: add a child step with this title. |
-| `add_child_description` | `string` | No | Step only: description for the new child. |
-| `add_child_issue` | `string` | No | Step only: issue the new child mirrors. |
+| `add_child_title` | `string` | No | Add a step with this title: a child of `step_id`, or a top-level step when `step_id` is omitted. |
+| `add_child_description` | `string` | No | Description for the new step. Needs `add_child_title`. |
+| `add_child_issue` | `string` | No | Issue the new step mirrors. Needs `add_child_title`. |
 | `move_parent_step_id` | `integer` | No | Step only: move the step under this step. |
 | `move_to_root` | `boolean` | No | Step only: move the step to the top level. |
 | `move_position` | `integer` | No | Step only: new zero-based position among its siblings. |

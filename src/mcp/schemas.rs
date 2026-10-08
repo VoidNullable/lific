@@ -672,7 +672,9 @@ pub struct UpdatePlanStepInput {
     pub attach_issue: Option<String>,
     #[schemars(description = "Detach the step's issue reference")]
     pub detach_issue: Option<bool>,
-    #[schemars(description = "Add a child step with this title under the target step")]
+    #[schemars(
+        description = "Add a step with this title: under step_id, or top-level when step_id is omitted"
+    )]
     pub add_child_title: Option<String>,
     #[schemars(description = "Description for the added child step")]
     pub add_child_description: Option<String>,

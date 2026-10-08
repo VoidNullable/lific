@@ -4870,7 +4870,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Mutate a plan or one step. With step_id: step CRUD, done toggling, attach/detach issue (linked issues sync state). Without step_id: update the plan itself; plan status never closes the anchor issue. Returns a delta."
+        description = "Mutate a plan or one step. With step_id: step CRUD, done toggling, attach/detach issue (linked issues sync state). Without step_id: update the plan itself or add a top-level step; plan status never closes the anchor issue. Returns a delta."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
         self.update_plan_step_inner(input)
@@ -4878,6 +4878,37 @@ No issues found."
     }
 
     fn update_plan_step_inner(&self, input: UpdatePlanStepInput) -> Result<String, String> {
+        // LIF-503: these act on an existing step. Without step_id they used
+        // to be dropped while the receipt still said "Updated plan", which
+        // agents read as success.
+        if input.add_child_title.is_none()
+            && (input.add_child_issue.is_some() || input.add_child_description.is_some())
+        {
+            return Err("add_child_issue and add_child_description need add_child_title.".into());
+        }
+        if input.step_id.is_none() {
+            let step_only = [
+                ("done", input.done.is_some()),
+                ("attach_issue", input.attach_issue.is_some()),
+                ("detach_issue", input.detach_issue.is_some()),
+                ("move_parent_step_id", input.move_parent_step_id.is_some()),
+                ("move_to_root", input.move_to_root.is_some()),
+                ("move_position", input.move_position.is_some()),
+                ("delete", input.delete.is_some()),
+            ];
+            if let Some((name, _)) = step_only.iter().find(|(_, set)| *set) {
+                return Err(format!(
+                    "{name} needs step_id. Without step_id only plan fields and add_child_title (a top-level step) apply."
+                ));
+            }
+        } else if input.status.is_some()
+            || input.anchor_issue.is_some()
+            || input.clear_anchor.is_some()
+        {
+            return Err(
+                "status, anchor_issue and clear_anchor change the plan; omit step_id.".into(),
+            );
+        }
         // LIF-198: Maintainer on the plan's own project gates every mutation
         // below (plan-level and step-level alike).
         let plan_project_id = self.read(|conn| {
@@ -4924,16 +4955,36 @@ No issues found."
                         (None, Some(true)) => Some(None),
                         _ => None,
                     };
-                    queries::plans::update_plan(
-                        conn,
-                        plan_id,
-                        &models::UpdatePlan {
-                            title: input.title.clone(),
-                            status: input.status.clone(),
-                            issue_id: anchor,
-                        },
-                    )?;
-                    notes.push("Updated plan".into());
+                    if input.title.is_some() || input.status.is_some() || anchor.is_some() {
+                        queries::plans::update_plan(
+                            conn,
+                            plan_id,
+                            &models::UpdatePlan {
+                                title: input.title.clone(),
+                                status: input.status.clone(),
+                                issue_id: anchor,
+                            },
+                        )?;
+                        notes.push("Updated plan".into());
+                    }
+                    if let Some(ref step_title) = input.add_child_title {
+                        let step_issue = match &input.add_child_issue {
+                            Some(ident) => Some(queries::resolve_identifier(conn, ident)?),
+                            None => None,
+                        };
+                        let new_id = queries::plans::add_step(
+                            conn,
+                            plan_id,
+                            None,
+                            step_title,
+                            input.add_child_description.as_deref().unwrap_or(""),
+                            step_issue,
+                        )?;
+                        notes.push(format!("Added top-level step #{new_id}"));
+                    }
+                    if notes.is_empty() {
+                        notes.push("No changes specified".into());
+                    }
                 }
                 // ── Step-level update ──
                 Some(step_id) => {
@@ -12322,6 +12373,83 @@ mod tests {
             !out.contains("only step"),
             "receipt must omit the tree: {out}"
         );
+    }
+
+    // LIF-503: without step_id, add_child_title appends a top-level step
+    // after the existing roots instead of being silently dropped.
+    #[test]
+    fn update_plan_step_without_step_id_adds_a_top_level_step() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PTL");
+        seed_issue(&m, "PTL", "Linked work");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PTL".into()),
+            title: "Roots".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "existing root".into(),
+                steps: Some(vec![PlanStepInput {
+                    title: "nested".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]),
+        }));
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PTL-PLAN-1".into(),
+            add_child_title: Some("new root".into()),
+            add_child_issue: Some("PTL-1".into()),
+            ..Default::default()
+        }));
+        assert!(out.contains("Added top-level step #"), "got: {out}");
+        assert!(
+            !out.contains("Updated plan"),
+            "no plan field changed: {out}"
+        );
+
+        let conn = m.db.read().unwrap();
+        let plan_id = queries::plans::resolve_plan_identifier(&conn, "PTL-PLAN-1").unwrap();
+        let plan = queries::plans::get_plan(&conn, plan_id).unwrap();
+        let roots: Vec<&str> = plan.steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(roots, ["existing root", "new root"]);
+        assert!(plan.steps[1].children.is_empty());
+        assert_eq!(plan.steps[1].issue_identifier.as_deref(), Some("PTL-1"));
+    }
+
+    #[test]
+    fn update_plan_step_refuses_step_fields_without_step_id() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PSF");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PSF".into()),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "only".into(),
+                ..Default::default()
+            }]),
+        }));
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            done: Some(true),
+            ..Default::default()
+        }));
+        assert!(out.contains("done needs step_id"), "got: {out}");
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            add_child_issue: Some("PSF-1".into()),
+            ..Default::default()
+        }));
+        assert!(out.contains("need add_child_title"), "got: {out}");
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            ..Default::default()
+        }));
+        assert!(out.contains("No changes specified"), "got: {out}");
     }
 
     #[test]
