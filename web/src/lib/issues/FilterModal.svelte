@@ -9,7 +9,7 @@
   // Reads + mutates the shared IssueListState (`view`) directly, same as the
   // old inline popover did; data-derived inputs (labels, modules) come in as
   // props.
-  import { X, Check, Layers, CircleDotDashed } from "lucide-svelte";
+  import { X, Check, Layers, CircleDotDashed, Bot, User, UserCheck } from "lucide-svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import {
@@ -21,20 +21,50 @@
     PRIORITY_DESCRIPTIONS,
   } from "./grouping";
   import type { IssueListState } from "./state.svelte";
-  import type { Label, Module } from "../api";
+  import type { IssueAssignee, Label, Module } from "../api";
   import { safeLabelColor } from "../labelColors";
+  import { currentUser } from "../userState";
+  import PersonAvatar from "./PersonAvatar.svelte";
+  import {
+    ASSIGNEE_FILTER_HUMAN,
+    ASSIGNEE_FILTER_ME,
+    ASSIGNEE_FILTER_NONE,
+    filterUsername,
+    personFilter,
+    personName,
+  } from "./assignees";
 
   let {
     view,
     labels,
     modules,
+    assignees = [],
     priorityCssColor,
   }: {
     view: IssueListState;
     labels: Label[];
     modules: Module[];
+    /** LIF-147: people named on this project's issues. */
+    assignees?: IssueAssignee[];
     priorityCssColor: (p: string) => string;
   } = $props();
+
+  // LIF-147: "Me" has its own row, so the people list leaves you out. A
+  // stored filter naming someone no longer assigned anywhere still gets a
+  // row, so it can be seen and cleared.
+  const ASSIGNEE_CHOICES = [
+    { value: ASSIGNEE_FILTER_ME, label: "Me", hint: "Issues that name you." },
+    { value: ASSIGNEE_FILTER_HUMAN, label: "Needs a person", hint: "For any person or for named people." },
+    { value: ASSIGNEE_FILTER_NONE, label: "Any agent", hint: "Unassigned. Agents can pick these up." },
+  ];
+  let filterPeople = $derived.by(() => {
+    const others = assignees.filter((a) => a.user_id !== $currentUser?.id);
+    const stored = filterUsername(view.filterAssignee);
+    if (stored && !others.some((a) => a.username.toLowerCase() === stored.toLowerCase())) {
+      others.push({ user_id: -1, username: stored });
+    }
+    return others;
+  });
 
   let filterCount = $derived(view.activeFilterCount());
 
@@ -220,6 +250,67 @@
                 {#if active}
                   <Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />
                 {/if}
+              </button>
+            {/each}
+          </div>
+        </section>
+
+        <!-- ASSIGNEE (LIF-147) -->
+        <section data-testid="filter-assignee">
+          <div class="px-1 pb-1.5 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+            Assignee
+          </div>
+          <div class="flex flex-col gap-0.5">
+            <button
+              class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
+                     {!view.filterAssignee ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+              onclick={() => (view.filterAssignee = "")}
+            >
+              <span class="size-4 mt-0.5 shrink-0"></span>
+              <span class="flex-1 min-w-0">
+                <span class="block text-body-sm font-medium text-[var(--text)]">Any</span>
+                <span class="block text-caption text-[var(--text-faint)]">No assignee filter.</span>
+              </span>
+              {#if !view.filterAssignee}<Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />{/if}
+            </button>
+            {#each ASSIGNEE_CHOICES as choice (choice.value)}
+              {@const active = view.filterAssignee === choice.value}
+              <button
+                class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
+                       {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+                data-assignee-filter={choice.value}
+                onclick={() => view.toggleAssigneeFilter(choice.value)}
+              >
+                <span class="mt-0.5 shrink-0 text-[var(--text-muted)]">
+                  {#if choice.value === ASSIGNEE_FILTER_ME}
+                    <UserCheck size={16} />
+                  {:else if choice.value === ASSIGNEE_FILTER_HUMAN}
+                    <User size={16} />
+                  {:else}
+                    <Bot size={16} />
+                  {/if}
+                </span>
+                <span class="flex-1 min-w-0">
+                  <span class="block text-body-sm font-medium text-[var(--text)]">{choice.label}</span>
+                  <span class="block text-caption text-[var(--text-faint)]">{choice.hint}</span>
+                </span>
+                {#if active}<Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />{/if}
+              </button>
+            {/each}
+            {#each filterPeople as person (person.username)}
+              {@const value = personFilter(person.username)}
+              {@const active = view.filterAssignee.toLowerCase() === value.toLowerCase()}
+              <button
+                class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
+                       {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+                data-assignee-filter={value}
+                onclick={() => view.toggleAssigneeFilter(value)}
+              >
+                <PersonAvatar {person} size="xs" />
+                <span class="flex-1 min-w-0 truncate text-body-sm font-medium text-[var(--text)]">
+                  {personName(person)}
+                </span>
+                {#if active}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
               </button>
             {/each}
           </div>

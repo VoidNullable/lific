@@ -23,6 +23,7 @@
   import { copyToClipboard } from "../clipboard";
   import { projectCodeOf } from "../references"; // LIF-248
   import WaitChip from "./WaitChip.svelte"; // LIF-485
+  import AssigneeMarker from "./AssigneeMarker.svelte"; // LIF-147
 
   let {
     issue,
@@ -334,6 +335,10 @@
   <!-- LIF-485: who or when this issue waits on. Shown at every width:
        unlike labels, an overdue wait is something to act on. -->
   <WaitChip waits={issue.waits} />
+
+  <!-- LIF-147: who must do it, when a person must. Small and fixed-width,
+       so it stays at every width like the wait chip. -->
+  <AssigneeMarker {issue} />
 
   <!-- Labels. Hidden below sm — secondary metadata that would otherwise
        crush the title on a phone (LIF-229). -->

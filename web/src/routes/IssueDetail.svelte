@@ -33,6 +33,8 @@
     type RelationKind,
   } from "../lib/issues/relations";
   import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
+  import AssigneeField from "../lib/issues/AssigneeField.svelte"; // LIF-147
+  import { assignmentNames, sameNames, type Person } from "../lib/issues/assignees";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon, { statusCssColor } from "../lib/StatusIcon.svelte";
@@ -480,6 +482,7 @@
   async function saveFieldWithUndo(
     patch: Record<string, unknown>,
     prevPatch: Record<string, unknown>,
+    people?: Person[],
   ) {
     if (!issue) return;
     const id = issue.id;
@@ -491,9 +494,20 @@
       patch,
       prevPatch,
       modules,
-      onApplied: (applied) => {
+      people,
+      onApplied: (applied, updated) => {
         if (issue && issue.id === id) {
-          issue = { ...issue, ...(applied as Partial<Issue>) };
+          // LIF-147: an assignment is sent as names but read back as
+          // people, so take those fields from the server's copy.
+          issue =
+            "assignees" in applied
+              ? {
+                  ...issue,
+                  needs_human: updated.needs_human,
+                  assignees: updated.assignees,
+                  seq: updated.seq,
+                }
+              : { ...issue, ...(applied as Partial<Issue>) };
         }
         lastSaved = new Date().toLocaleTimeString([], {
           hour: "2-digit",
@@ -526,6 +540,14 @@
     if (id !== issue.module_id) {
       await saveFieldWithUndo({ module_id: id }, { module_id: issue.module_id });
     }
+  }
+
+  /** LIF-147: replace who the issue is for. Undoable like status. */
+  async function setAssignees(names: string[], people: Person[]) {
+    if (!issue) return;
+    const prev = assignmentNames(issue);
+    if (sameNames(names, prev)) return;
+    await saveFieldWithUndo({ assignees: names }, { assignees: prev }, people);
   }
 
   async function toggleLabel(name: string) {
@@ -1071,6 +1093,17 @@
             onOpen={closeOtherDropdowns}
           />
         </div>
+
+        <!-- LIF-147: who must do it. Viewers see it read-only. -->
+        <AssigneeField
+          {issue}
+          {editable}
+          onApply={setAssignees}
+          onOpen={() => {
+            closeOtherDropdowns();
+            labelsOpen = false;
+          }}
+        />
 
         <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
 

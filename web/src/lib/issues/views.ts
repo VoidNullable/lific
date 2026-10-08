@@ -23,6 +23,7 @@ import type { IssueListState } from "./state.svelte";
 import type { SortField, SortDir } from "./sort";
 import type { GroupBy, Density, LaneBy } from "./grouping";
 import { saveListState, saveLayout, saveHiddenStatuses } from "./persistence";
+import { normalizeAssigneeFilter } from "./assignees";
 import {
   listSavedViews,
   createSavedView,
@@ -43,6 +44,8 @@ export interface ViewConfig {
   filterPriority: string;
   filterLabel: string;
   filterModule: string;
+  /** LIF-147. Views saved before it existed parse to "" (no filter). */
+  filterAssignee: string;
   searchQuery: string;
   sortField: SortField;
   sortDir: SortDir;
@@ -63,6 +66,7 @@ const FIELDS_COMPARED: (keyof ViewConfig)[] = [
   "filterPriority",
   "filterLabel",
   "filterModule",
+  "filterAssignee",
   "searchQuery",
   "sortField",
   "sortDir",
@@ -81,6 +85,7 @@ export function buildConfig(view: IssueListState, layout: Layout): ViewConfig {
     filterPriority: view.filterPriority,
     filterLabel: view.filterLabel,
     filterModule: view.filterModule,
+    filterAssignee: view.filterAssignee,
     searchQuery: view.searchQuery,
     sortField: view.sortField,
     sortDir: view.sortDir,
@@ -114,6 +119,7 @@ export function parseConfig(raw: string): ViewConfig | null {
     filterPriority: str(p.filterPriority, ""),
     filterLabel: str(p.filterLabel, ""),
     filterModule: str(p.filterModule, ""),
+    filterAssignee: normalizeAssigneeFilter(p.filterAssignee),
     searchQuery: str(p.searchQuery, ""),
     sortField: (["priority", "age", "number", "updated"] as const).includes(p.sortField as SortField)
       ? (p.sortField as SortField)
@@ -144,6 +150,7 @@ export function applyConfig(
   view.filterPriority = config.filterPriority;
   view.filterLabel = config.filterLabel;
   view.filterModule = config.filterModule;
+  view.filterAssignee = config.filterAssignee;
   view.searchQuery = config.searchQuery;
   view.sortField = config.sortField;
   view.sortDir = config.sortDir;

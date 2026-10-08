@@ -23,6 +23,8 @@ export type PersistedListState = {
   filterPriority?: string;
   filterLabel?: string;
   filterModule?: string;
+  /** LIF-147. Absent in state saved before assignment existed. */
+  filterAssignee?: string;
   searchQuery?: string;
   sortField?: SortField;
   sortDir?: SortDir;

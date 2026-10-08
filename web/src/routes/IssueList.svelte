@@ -67,6 +67,14 @@
     prevPatchFor,
   } from "../lib/issues/state.svelte"; // LIF-243: undo layer
   import { scheduleDelete } from "../lib/issues/deferredDelete.svelte"; // LIF-283
+  import {
+    assigneesIn,
+    assignmentNames,
+    matchesAssigneeFilter,
+    sameNames,
+    type Person,
+  } from "../lib/issues/assignees"; // LIF-147
+  import { currentUser } from "../lib/userState";
   import { shortcutsSuppressed } from "../lib/shortcuts"; // LIF-245
   import { selectedIssueExport } from "../lib/issues/export";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
@@ -484,8 +492,16 @@
       const mid = mod ? mod.id : null;
       out = out.filter((i) => i.module_id === mid);
     }
+    if (view.filterAssignee) {
+      const me = $currentUser;
+      out = out.filter((i) => matchesAssigneeFilter(i, view.filterAssignee, me));
+    }
     return out;
   });
+
+  // LIF-147: everyone named on this project's issues, for the filter's
+  // people list.
+  let projectAssignees = $derived(assigneesIn(issues));
 
   // LIF-119: fuzzy full-text search. The scoring/ranking lives in
   // lib/issues/search.ts; we wrap it in one $derived so downstream code can
@@ -763,6 +779,18 @@
   // selection mutators live here because they read the `flatIssues` derived.
   // Which action-bar menu is open (popovers open upward from the bar).
   let bulkMenu = $state<BulkMenu>(null);
+  /** LIF-147: the selection's shared assignment, or null when it differs
+   *  between selected issues. Seeds the bulk assign picker. */
+  let selectedAssignment = $derived.by((): string[] | null => {
+    let shared: string[] | null = null;
+    for (const i of issues) {
+      if (!view.selectedIds.has(i.id)) continue;
+      const names = assignmentNames(i);
+      if (shared === null) shared = names;
+      else if (!sameNames(shared, names)) return null;
+    }
+    return shared;
+  });
   let bulkBusy = $state(false);
   let bulkError = $state("");
 
@@ -867,6 +895,46 @@
     if (failedIds.size > 0) {
       reconcile();
     }
+  }
+
+  /** LIF-147: give every selected issue the same assignment, with one Undo
+   *  that restores each issue's own previous assignment. Issues that
+   *  already have it are skipped. The server's copy of each issue is
+   *  stamped back, since names go out and people come back. */
+  async function bulkAssign(names: string[], people: Person[]) {
+    if (bulkBusy || view.selectedIds.size === 0) return;
+    bulkBusy = true;
+    bulkMenu = null;
+    skipFocusReset = true;
+    const targets = issues
+      .filter((i) => view.selectedIds.has(i.id) && !sameNames(assignmentNames(i), names))
+      .map((i) => ({
+        id: i.id,
+        identifier: i.identifier,
+        prevPatch: { assignees: assignmentNames(i) } as Record<string, unknown>,
+      }));
+    if (targets.length === 0) {
+      bulkBusy = false;
+      return;
+    }
+    const { failedIds } = await trackMutation(
+      bulkUpdateIssuesWithUndo({
+        targets,
+        patch: { assignees: names },
+        modules,
+        people,
+        onApplied: (_patches, updated) => {
+          issues = issues.map((i) => {
+            const fresh = updated.get(i.id);
+            return fresh
+              ? { ...i, needs_human: fresh.needs_human, assignees: fresh.assignees }
+              : i;
+          });
+        },
+      }),
+    );
+    bulkBusy = false;
+    if (failedIds.size > 0) reconcile();
   }
 
   /** Add one label to every selected issue (union — issues that already
@@ -1631,6 +1699,7 @@
     onCycleChanged={focusNextChanged}
     {labels}
     {modules}
+    assignees={projectAssignees}
     {priorityCssColor}
     bind:searchInputEl
     onOpenSearch={openSearch}
@@ -2285,6 +2354,9 @@
       bind:bulkMenu
       {modules}
       {labels}
+      projectId={project?.id ?? null}
+      selectedAssignment={selectedAssignment}
+      onAssign={bulkAssign}
       onUpdate={bulkUpdate}
       onAddLabel={bulkAddLabel}
       onDelete={bulkDelete}

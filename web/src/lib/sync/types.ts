@@ -11,7 +11,7 @@
 // the highest seq it has applied; `/changes?since=cursor` returns everything
 // above it, tombstones included.
 
-import type { IssueWait } from "../api";
+import type { IssueAssignee, IssueWait } from "../api";
 
 export type SyncKind = "issue" | "page" | "comment";
 
@@ -44,6 +44,11 @@ export interface IssueRow {
   /** LIF-484: user and date blockers. Omitted when the issue has none; a
    *  wait added or cleared re-delivers the row at a new seq. */
   waits?: IssueWait[];
+  /** LIF-147: see `Issue.needs_human`. Always present on the wire; optional
+   *  here so rows cached before assignment existed still type-check. */
+  needs_human?: boolean;
+  /** LIF-147: named people. Omitted when there are none. */
+  assignees?: IssueAssignee[];
 }
 
 /** A live page row. Note the field the wire shape does NOT carry: no

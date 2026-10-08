@@ -857,8 +857,43 @@ export interface Issue {
   duplicated_by?: string[];
   /** LIF-484: user and date blockers. Absent when the issue has none. */
   waits?: IssueWait[];
+  /** LIF-147: true when a person must do this issue: anyone (no
+   *  `assignees`) or the named people in `assignees`. False means
+   *  unassigned, so any agent may work it. */
+  needs_human?: boolean;
+  /** LIF-147: the named people. Absent for unassigned issues and for
+   *  issues marked for any person. Always human accounts. */
+  assignees?: IssueAssignee[];
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+}
+
+// ── Assignment (LIF-147) ───────────────────────────────────
+//
+// Three states: unassigned (`needs_human` false), any person (`needs_human`
+// true, no `assignees`), or named people. A write sends `assignees` as a
+// whole replacement: `[]`, `["human"]`, or usernames.
+
+export interface IssueAssignee {
+  user_id: number;
+  username: string;
+  display_name?: string;
+}
+
+/** `GET /api/issues/attention` (LIF-506): open issues waiting on the caller
+ *  across every project they can see, newest activity first, at most 50 per
+ *  group. An issue can be in `waiting` and in one of the other two. */
+export interface Attention {
+  /** Issues that name the caller. */
+  assigned: Issue[];
+  /** Issues marked for any person, naming no one. */
+  human: Issue[];
+  /** Issues with a user wait on the caller. */
+  waiting: Issue[];
+}
+
+export async function getAttention() {
+  return request<Attention>("/issues/attention");
 }
 
 // ── Waits: user and date blockers (LIF-484) ────────────────
@@ -922,6 +957,9 @@ export interface IssueFilters {
   module_id?: number;
   label?: string;
   workable?: boolean;
+  /** LIF-147: `none`, `human` (any issue a person must do), `me`, or a
+   *  username. */
+  assignee?: string;
   order_by?: string;
   order?: "asc" | "desc";
   limit?: number;
@@ -963,6 +1001,8 @@ export interface CreateIssueInput {
   priority?: string;
   module_id?: number;
   labels?: string[];
+  /** LIF-147: `["human"]` for any person, or usernames. Omit for agents. */
+  assignees?: string[];
 }
 
 export async function createIssue(input: CreateIssueInput) {
@@ -984,6 +1024,9 @@ export interface UpdateIssueInput {
   module_id?: number;
   sort_order?: number;
   labels?: string[];
+  /** LIF-147: replaces the assignment. `[]` = any agent, `["human"]` = any
+   *  person, usernames = those people. */
+  assignees?: string[];
   /** LIF-441: refuse the write (409) unless the issue still has this seq. */
   expected_seq?: number;
 }
@@ -1208,7 +1251,9 @@ export interface Activity {
   project_id: number | null;
   issue_id: number | null;
   page_id: number | null;
-  /** create | update | delete | attach | detach | link | unlink | wait | unwait */
+  /** create | update | delete | attach | detach | link | unlink | wait |
+   *  unwait | assign | unassign. Assignment entries have `field`
+   *  "assignee" and a value of "@username" or "human". */
   action: string;
   field: string | null;
   old_value: string | null;
