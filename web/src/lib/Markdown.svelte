@@ -24,6 +24,9 @@
   import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
   import { attachmentThumbnailUrl, attachmentUrl } from "./api"; // LIF-418
   import { inPublicScope } from "./publicScope"; // LIF-471
+  import { normalizeEscapedNewlines, setTaskChecked, taskStates } from "./taskList"; // LIF-502
+  import { toast } from "./toast/toast.svelte";
+  import { tick } from "svelte";
 
   // LIF-471: in public scope an <img> may only point at this instance's own
   // attachments. Registered once (hooks are global to DOMPurify) and inert
@@ -53,11 +56,18 @@
     // `activeBudget` below). Callers that render several bodies which must
     // share one aggregate cap (Comments) pass one in and own its lifetime.
     mermaidBudget = undefined,
+    // LIF-502: opt-in. When set, task-list checkboxes render enabled and a
+    // click calls this with the body rewritten so only that item's marker
+    // changed. Resolve false (or throw) when the save did not land; the
+    // checkboxes then snap back to `content`. Left unset (comments, previews,
+    // public views, read-only users), checkboxes stay disabled as before.
+    onTaskToggle = undefined,
   }: {
     content: string;
     class?: string;
     mentions?: MentionUser[];
     mermaidBudget?: MermaidBudget | undefined;
+    onTaskToggle?: ((next: string) => Promise<boolean | void> | boolean | void) | undefined;
   } = $props();
 
   // Lowercased username → display name, for chip rendering.
@@ -196,12 +206,37 @@
   const X_SVG =
     '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 
-  // Normalize literal \n sequences left over from the escaped-newline bug (LIF-10).
-  let normalized = $derived(content.replace(/\\n/g, "\n"));
+  // LIF-502: interactive task checkboxes. marked emits one `checkbox` call
+  // per task item in render order, which is the same order taskList.ts
+  // counts in, so the counter below is the item's index in the source.
+  // `data-task` carries a per-instance nonce with the index: a body can
+  // contain its own raw `<input type="checkbox">`, and without the nonce it
+  // could pose as a task item and redirect a click to a different line.
+  const taskNonce = Array.from(crypto.getRandomValues(new Uint32Array(2)), (n) =>
+    n.toString(36),
+  ).join("");
+  let taskCounter = 0;
+  let tasksInteractive = false;
+  const origCheckbox = renderer.checkbox.bind(renderer);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  renderer.checkbox = function (token: any): string {
+    const index = taskCounter++;
+    if (!tasksInteractive) return origCheckbox(token);
+    return `<input ${token.checked ? 'checked="" ' : ""}type="checkbox" class="task-toggle" data-task="${taskNonce}:${index}"> `;
+  };
 
-  let rendered = $derived(
-    marked.parse(normalized, { breaks: true, gfm: true, renderer }) as string
-  );
+  // Only the signed-in renderer of an editable body opts in; public scope
+  // never does, whatever a caller passes.
+  let taskToggleEnabled = $derived(!!onTaskToggle && !inPublicScope());
+
+  // Normalize literal \n sequences left over from the escaped-newline bug (LIF-10).
+  let normalized = $derived(normalizeEscapedNewlines(content));
+
+  let rendered = $derived.by(() => {
+    taskCounter = 0;
+    tasksInteractive = taskToggleEnabled;
+    return marked.parse(normalized, { breaks: true, gfm: true, renderer }) as string;
+  });
 
   // LIF-262: attachment references. Images embedded as
   // `![alt](/api/attachments/{id})` render inline (marked already emits an
@@ -262,8 +297,10 @@
       // Keep the data-mermaid / data-lang / data-issue-ident / data-mention
       // hooks the post-render effects (and mention chips) read, plus
       // data-attachment (chip decoration) and the download attr on
-      // attachment chips (LIF-262).
+      // attachment chips (LIF-262), and data-task on interactive task
+      // checkboxes (LIF-502).
       ADD_ATTR: [
+        "data-task",
         "data-mermaid",
         "data-lang",
         "data-issue-ident",
@@ -659,9 +696,90 @@
       for (const component of mounted) void unmount(component);
     };
   });
+
+  // ── LIF-502: toggling task items ─────────────────────────
+  //
+  // Clicks are queued and saved one at a time, each against the `content`
+  // current when its turn comes (the caller has replaced it with the saved
+  // body by then), so a quick second click is never computed from a body the
+  // first save already superseded. Each entry records the state the user
+  // asked for rather than "flip", which makes a replay idempotent. A failed
+  // save drops whatever is still queued: the caller has reloaded or reported
+  // an error, and indexes recorded against the old body may no longer mean
+  // the same items.
+  let taskQueue: { index: number; checked: boolean }[] = [];
+  let taskDraining = false;
+
+  /** Put every task checkbox back to what `content` says. */
+  function syncTaskInputs() {
+    const root = containerEl;
+    if (!root) return;
+    const states = taskStates(content);
+    for (const input of root.querySelectorAll<HTMLInputElement>("input.task-toggle[data-task]")) {
+      const index = Number(input.dataset.task?.split(":")[1]);
+      if (index in states) input.checked = states[index];
+    }
+  }
+
+  async function drainTaskQueue() {
+    if (taskDraining) return;
+    taskDraining = true;
+    try {
+      while (taskQueue.length > 0) {
+        const op = taskQueue.shift()!;
+        const save = onTaskToggle;
+        if (!save || !taskToggleEnabled) {
+          taskQueue = [];
+          break;
+        }
+        const next = setTaskChecked(content, op.index, op.checked);
+        if (next === null) {
+          taskQueue = [];
+          toast("Couldn't find that checklist item in the text. Edit the body to change it.", {
+            kind: "error",
+          });
+          break;
+        }
+        if (next === content) continue;
+        let ok: boolean;
+        try {
+          ok = (await save(next)) !== false;
+        } catch {
+          ok = false;
+        }
+        if (!ok) {
+          taskQueue = [];
+          break;
+        }
+      }
+    } finally {
+      taskDraining = false;
+      // Let a new `content` reach the DOM, then make sure no checkbox is left
+      // showing a state that never saved.
+      await tick();
+      syncTaskInputs();
+      if (taskQueue.length > 0) void drainTaskQueue();
+    }
+  }
+
+  function handleTaskChange(e: Event) {
+    const input = e.target;
+    if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") return;
+    const [nonce, raw] = (input.dataset.task ?? "").split(":");
+    if (nonce !== taskNonce) return;
+    if (!taskToggleEnabled) {
+      input.checked = !input.checked;
+      return;
+    }
+    taskQueue.push({ index: Number(raw), checked: input.checked });
+    void drainTaskQueue();
+  }
 </script>
 
-<div class="prose {className}" bind:this={containerEl}>
+<!-- `change` bubbles up from the task checkboxes in the raw {@html} markup;
+     the checkboxes themselves are native inputs, focusable and toggled with
+     Space, so the container needs no keyboard handling of its own. -->
+<div class="prose {className}" bind:this={containerEl} onchange={handleTaskChange}>
   {@html html}
 </div>
 
@@ -763,6 +881,11 @@
      link happened to sit in. */
   :global(.prose .attachment-view-host) {
     display: block;
+  }
+
+  /* LIF-502: a task checkbox the reader can tick. */
+  :global(.prose input.task-toggle) {
+    cursor: pointer;
   }
 
   /* Lightbox overlay for inline images. */

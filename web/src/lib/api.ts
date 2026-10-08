@@ -857,6 +857,8 @@ export interface Issue {
   duplicated_by?: string[];
   /** LIF-484: user and date blockers. Absent when the issue has none. */
   waits?: IssueWait[];
+  /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
+  seq?: number;
 }
 
 // ── Waits: user and date blockers (LIF-484) ────────────────
@@ -982,6 +984,8 @@ export interface UpdateIssueInput {
   module_id?: number;
   sort_order?: number;
   labels?: string[];
+  /** LIF-441: refuse the write (409) unless the issue still has this seq. */
+  expected_seq?: number;
 }
 
 export async function updateIssue(id: number, input: UpdateIssueInput) {
@@ -1812,6 +1816,8 @@ export interface Page {
   /** LIF-105: project-scoped labels attached to this page. Always [] for
    *  workspace pages (project_id === null). */
   labels: string[];
+  /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
+  seq?: number;
 }
 
 export interface Folder {
@@ -1879,6 +1885,8 @@ export interface UpdatePageInput {
   pinned?: boolean;
   /** LIF-105: replace the full label set. Pass [] to clear. Omitted = no change. */
   labels?: string[];
+  /** LIF-441: refuse the write (409) unless the page still has this seq. */
+  expected_seq?: number;
 }
 
 export async function updatePage(id: number, input: UpdatePageInput) {

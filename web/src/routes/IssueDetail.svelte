@@ -439,6 +439,31 @@
     }
   }
 
+  /** LIF-502: a task checkbox ticked in the rendered description. Guarded by
+   *  `expected_seq` so a body someone else changed since this view loaded is
+   *  reloaded, not overwritten. Resolves false when nothing was saved. */
+  async function saveDescriptionTask(next: string): Promise<boolean> {
+    const current = issue;
+    if (!current) return false;
+    saving = true;
+    const res = await updateIssue(current.id, { description: next, expected_seq: current.seq });
+    saving = false;
+    if (issue?.id !== current.id) return false;
+    if (res.ok) {
+      issue = res.data;
+      lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      refreshActivity();
+      return true;
+    }
+    if (res.status === 409) {
+      toast(`${current.identifier} changed since you opened it. Showing the latest version.`, { kind: "error" });
+      void loadIssue(issueIdentifier, true, loadGen);
+    } else {
+      toast(`Couldn't save ${current.identifier}: ${res.error}`, { kind: "error" });
+    }
+    return false;
+  }
+
   // ── Metadata updates ─────────────────────────────────
   // LIF-243: status/priority/module are one-click reversible, so they skip
   // the plain `saveField` path in favor of `saveFieldWithUndo`, which shows
@@ -784,6 +809,7 @@
   bodyEmptyReadText="No description"
   bodyProseMinHeight="60px"
   onSaveBody={saveDescription}
+  onToggleBodyTask={editable ? saveDescriptionTask : undefined}
   bind:bodyMode
   autofocusWhenEmpty
   {saving}

@@ -392,6 +392,33 @@
     }
   }
 
+  /** LIF-502: a task checkbox ticked in the rendered body. Guarded by
+   *  `expected_seq` so a page someone else changed since this view loaded is
+   *  reloaded, not overwritten. Resolves false when nothing was saved. */
+  async function saveBodyTask(next: string): Promise<boolean> {
+    const current = page;
+    if (!current) return false;
+    saving = true;
+    const res = await updatePage(current.id, { content: next, expected_seq: current.seq });
+    saving = false;
+    if (page?.id !== current.id) return false;
+    if (res.ok) {
+      page = res.data;
+      lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      listPageActivity(current.id).then((r) => {
+        if (r.ok && page?.id === current.id) activity = r.data.items;
+      });
+      return true;
+    }
+    if (res.status === 409) {
+      toast(`${current.identifier} changed since you opened it. Showing the latest version.`, { kind: "error" });
+      void refreshPage();
+    } else {
+      toast(`Couldn't save ${current.identifier}: ${res.error}`, { kind: "error" });
+    }
+    return false;
+  }
+
   // LIF-112: persist a lifecycle status change. The Select binds to a
   // local mirror so the dropdown reflects the new value immediately. The
   // effect below syncs the mirror down from the loaded page, and persists
@@ -615,6 +642,7 @@
   bodyEmptyReadText="Empty page"
   bodyProseMinHeight="120px"
   onSaveBody={saveBody}
+  onToggleBodyTask={editable ? saveBodyTask : undefined}
   {saving}
   {lastSaved}
   onExport={inPublicScope() ? undefined : exportMarkdown}
