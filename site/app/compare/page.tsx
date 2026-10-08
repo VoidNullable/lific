@@ -15,12 +15,12 @@ const STAMP_ISO = "2026-07-14";
 export const metadata: Metadata = {
   title: "Issue trackers with MCP support, compared · Lific",
   description:
-    "A date-stamped comparison of issue trackers with MCP servers: Lific, beads, Vikunja, Gitea, Plane, and Linear. First-party support, transports, measured tool counts and token costs, deployment, licenses, and honest losses.",
+    "Lific, beads, Vikunja, Gitea, Plane and Linear side by side: MCP tools, token cost, hosting and license.",
   alternates: { canonical: "/compare" },
   openGraph: {
     title: "Issue trackers with MCP support, compared",
     description:
-      "Lific vs beads, Vikunja, Gitea, Plane, and Linear: real tables, measured token costs, real losses, and a literal 'when to use something else' section.",
+      "Lific, beads, Vikunja, Gitea, Plane and Linear side by side: MCP tools, token cost, hosting and license.",
     url: "https://lific.dev/compare",
     siteName: "Lific",
     type: "article",
@@ -39,7 +39,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Issue trackers with MCP support, compared",
     description:
-      "Lific vs beads, Vikunja, Gitea, Plane, and Linear: real tables, measured token costs, real losses.",
+      "Lific, beads, Vikunja, Gitea, Plane and Linear side by side: MCP tools, token cost, hosting and license.",
     images: ["/og.png"],
   },
 };
@@ -420,10 +420,10 @@ export default function Compare() {
             <span aria-hidden className="hidden text-text-faint sm:inline">
               ·
             </span>
-            <span>Accurate at time of writing, {STAMP}</span>
+            <span>Updated {STAMP}</span>
           </p>
           <Body>
-            If you want your coding agent to work against a real issue tracker
+            If you want your coding agent to work against an issue tracker
             over the Model Context Protocol, these are the options worth
             knowing about: <Ext href={GITHUB}>Lific</Ext>,{" "}
             <Ext href="https://github.com/steveyegge/beads">beads</Ext>,{" "}
@@ -958,9 +958,9 @@ export default function Compare() {
                 head: "Young.",
                 body: (
                   <>
-                    First release April 2026. Short track record, small
-                    community. Weight that honestly against tools that have
-                    shipped for years.
+                    First release April 2026: a short track record and a
+                    small community, next to tools that have shipped for
+                    years.
                   </>
                 ),
               },
@@ -983,12 +983,12 @@ export default function Compare() {
           />
         </section>
 
-        {/* The literal 'use something else' section. */}
+        {/* The 'use something else' section. */}
         <section className="band min-w-0 mt-[clamp(4.5rem,10vh,7rem)] py-[clamp(3rem,7vh,4.5rem)]">
           <H2 id="something-else">When to use something else</H2>
           <Body className="mb-8">
-            These are honest defaults, not straw men. If one of these fits,
-            use it. An issue tracker you resent is one you stop updating.
+            If one of these fits better, use it. An issue tracker you resent
+            is one you stop updating.
           </Body>
 
           <AltSection
@@ -1070,7 +1070,7 @@ export default function Compare() {
             }
           >
             Linear is the best-run commercial tracker in the business, and its
-            hosted MCP server is genuinely zero-setup: add a URL, OAuth in
+            hosted MCP server is zero-setup: add a URL, OAuth in
             your browser, done. If you don&apos;t need self-hosting or your
             data on your own disk, it&apos;s the lowest-friction option on
             this page.

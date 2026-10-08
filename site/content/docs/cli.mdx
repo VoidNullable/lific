@@ -510,7 +510,7 @@ lific restore <ARCHIVE> [--force] [--allow-large]
 | `--force` | Allows replacing an existing database. The current one is moved aside to `lific.db.pre-restore-<timestamp>`, not deleted. Without this flag, `restore` refuses when a database exists. |
 | `--allow-large` | Accepts an archive over the default restore limits: a 512 MiB database, 64 MiB for any one attachment, 1 GiB in total, or 10,000 entries. |
 
-The limits exist so an archive from someone else cannot fill your disk before validation rejects it. `lific dump` has no size ceiling, so a large enough instance produces honest backups that exceed them. Pass `--allow-large` only for an archive you made yourself; every other check still runs.
+The limits exist so an archive from someone else cannot fill your disk before validation rejects it. `lific dump` has no size ceiling, so a large enough instance produces valid backups that exceed them. Pass `--allow-large` only for an archive you made yourself; every other check still runs.
 
 ### export issue
 
