@@ -12,7 +12,8 @@
     "issue-topbar": "bun issue-topbar.ts",
     "sidebar": "bun sidebar.ts",
     "task-checkboxes": "bun task-checkboxes.ts",
-    "cross-project-relations": "bun cross-project-relations.ts"
+    "cross-project-relations": "bun cross-project-relations.ts",
+    "issue-assignees": "bun issue-assignees.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"

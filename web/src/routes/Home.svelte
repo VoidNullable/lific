@@ -14,6 +14,8 @@
     listIssues,
     listAllPages,
     listProjectActivity,
+    getAttention,
+    type Attention,
     type AuthUser,
     type Project,
     type Issue,
@@ -46,7 +48,12 @@
     Sun,
     Sunset,
     Moon,
+    UserCheck,
+    User,
+    Hourglass,
+    Inbox,
   } from "lucide-svelte";
+  import { projectCodeOf } from "../lib/references";
   import { getContext } from "svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
 
@@ -74,6 +81,9 @@
   let user = $state<AuthUser | null>(null);
   let projects = $state<Project[]>([]);
   let myIssues = $state<Issue[]>([]);
+  /** LIF-506: what needs the signed-in person. Null until loaded or when
+   *  the request fails, which hides the box rather than the dashboard. */
+  let attention = $state<Attention | null>(null);
   let allPages = $state<Page[]>([]);
   let activityItems = $state<Activity[]>([]);
   let activityNow = $state(Date.now());
@@ -135,11 +145,13 @@
     // server-side) with no project_id, which the API filters to visible
     // projects for us (LIF-197). Capped generously — grouping/display
     // below applies its own per-project cap.
-    const [activeRes, todoRes, pagesRes] = await Promise.all([
+    const [activeRes, todoRes, pagesRes, attentionRes] = await Promise.all([
       listIssues({ status: "active", limit: 200 }),
       listIssues({ status: "todo", limit: 200 }),
       listAllPages(),
+      getAttention(),
     ]);
+    attention = attentionRes.ok ? attentionRes.data : null;
     myIssues = [
       ...(activeRes.ok ? activeRes.data : []),
       ...(todoRes.ok ? todoRes.data : []),
@@ -221,6 +233,38 @@
     return groups;
   });
 
+  // ── Needs you (LIF-506) ──────────────────────────────────────
+  //
+  // Open issues assigned to you, marked for any person, or with a wait on
+  // you, across every project you can see. Empty groups are hidden. An
+  // issue can show in "Waiting on you" and in one of the other two.
+
+  const ATTENTION_CAP = 6;
+  let attentionExpanded = $state<Set<string>>(new Set());
+
+  let attentionGroups = $derived.by(() => {
+    if (!attention) return [];
+    return [
+      { key: "assigned", label: "Assigned to you", icon: UserCheck, items: attention.assigned },
+      { key: "human", label: "For any person", icon: User, items: attention.human },
+      { key: "waiting", label: "Waiting on you", icon: Hourglass, items: attention.waiting },
+    ].filter((g) => g.items.length > 0);
+  });
+  let attentionTotal = $derived(
+    new Set(attentionGroups.flatMap((g) => g.items.map((i) => i.id))).size,
+  );
+
+  function issueProjectIdent(issue: Issue): string {
+    return projectIdent(issue.project_id) ?? projectCodeOf(issue.identifier);
+  }
+
+  function toggleAttentionGroup(key: string) {
+    const next = new Set(attentionExpanded);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    attentionExpanded = next;
+  }
+
   // ── Pinned pages ──────────────────────────────────────────────
   //
   // See api.ts's `listAllPages` doc comment for why this is one
@@ -261,6 +305,14 @@
         return "linked";
       case "unlink":
         return "unlinked";
+      case "assign":
+        return "assigned";
+      case "unassign":
+        return "unassigned";
+      case "wait":
+        return "set a wait on";
+      case "unwait":
+        return "cleared a wait on";
       default:
         return a.action;
     }
@@ -387,6 +439,21 @@
         </div>
         <div class="flex flex-col lg:flex-row gap-8 items-start">
           <div class="flex-1 min-w-0 w-full">
+            <!-- LIF-506: "Needs you" box. -->
+            <div class="mb-8">
+              <div class="flex items-center gap-2 mb-3">
+                <Skeleton variant="bar" class="h-3 w-20" />
+              </div>
+              <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                {#each [0, 1] as row (row)}
+                  <div class="flex items-center gap-2.5 px-4 py-2 border-b border-[var(--border)] last:border-b-0">
+                    <Skeleton variant="circle" class="size-3.5" />
+                    <Skeleton variant="bar" class="h-3 w-16 shrink-0" />
+                    <Skeleton variant="bar" class="h-3 flex-1 max-w-[260px]" />
+                  </div>
+                {/each}
+              </div>
+            </div>
             <!-- "My active issues" section header (matches loaded mb-3) -->
             <div class="flex items-center gap-2 mb-3">
               <Skeleton variant="bar" class="h-3 w-28" />
@@ -479,8 +546,75 @@
         </div>
 
         <div class="flex flex-col lg:flex-row gap-8 items-start">
-          <!-- ── MY ACTIVE ISSUES ────────────────────────────── -->
           <div class="flex-1 min-w-0 w-full">
+            <!-- ── NEEDS YOU (LIF-506) ─────────────────────────── -->
+            {#if attention}
+              <section class="mb-8" data-testid="needs-you">
+                <div class="flex items-center gap-2 mb-3">
+                  <Inbox size={12} class="text-[var(--text-faint)]" />
+                  <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+                    Needs you
+                  </h2>
+                  <span class="text-micro text-[var(--text-faint)] tabular-nums">{attentionTotal}</span>
+                </div>
+                {#if attentionGroups.length === 0}
+                  <p
+                    class="px-4 py-3 rounded-xl bg-[var(--surface)] border border-[var(--border)]
+                           text-body-sm text-[var(--text-muted)]"
+                  >
+                    Nothing is assigned to you or waiting on you.
+                  </p>
+                {:else}
+                  <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                    {#each attentionGroups as group (group.key)}
+                      {@const expanded = attentionExpanded.has(group.key)}
+                      {@const shown = expanded ? group.items : group.items.slice(0, ATTENTION_CAP)}
+                      <div data-attention-group={group.key} class="border-b border-[var(--border)] last:border-b-0">
+                        <div
+                          class="flex items-center gap-2 px-4 pt-2.5 pb-1.5 text-caption font-medium text-[var(--text-muted)]"
+                        >
+                          <group.icon size={13} class="shrink-0 text-[var(--text-faint)]" />
+                          <span>{group.label}</span>
+                          <span class="text-micro text-[var(--text-faint)] tabular-nums">{group.items.length}</span>
+                        </div>
+                        {#each shown as issue (issue.id)}
+                          {@const ident = issueProjectIdent(issue)}
+                          <button
+                            class="w-full flex items-center gap-2.5 px-4 py-2 text-left
+                                   hover:bg-[var(--bg-subtle)] transition-colors"
+                            data-identifier={issue.identifier}
+                            onclick={() => navigate(`/${ident}/issues/${issue.identifier}`)}
+                          >
+                            <StatusIcon status={issue.status} size={14} />
+                            <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
+                              {issue.identifier}
+                            </span>
+                            <span class="text-body-sm text-[var(--text)] truncate flex-1">{issue.title}</span>
+                            <span
+                              class="hidden sm:inline shrink-0 text-micro text-[var(--text-faint)] truncate max-w-[140px]"
+                            >
+                              {projects.find((p) => p.id === issue.project_id)?.name ?? ident}
+                            </span>
+                          </button>
+                        {/each}
+                        {#if group.items.length > ATTENTION_CAP}
+                          <button
+                            class="w-full flex items-center justify-center gap-1 px-4 py-2
+                                   text-caption text-[var(--text-muted)] hover:text-[var(--text)]
+                                   hover:bg-[var(--bg-subtle)] transition-colors"
+                            onclick={() => toggleAttentionGroup(group.key)}
+                          >
+                            {expanded ? "Show fewer" : `Show all ${group.items.length}`}
+                          </button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+            {/if}
+
+            <!-- ── MY ACTIVE ISSUES ────────────────────────────── -->
             <div class="flex items-center gap-2 mb-3">
               <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
                 My active issues
@@ -664,7 +798,7 @@
                     <button
                       type="button"
                       disabled={!dest}
-                      class="flex items-start gap-2 px-2.5 py-1.5 rounded-md text-body-sm leading-snug
+                      class="flex items-start gap-2 px-2.5 py-1.5 rounded-md text-body-sm leading-snug text-left
                              {dest ? 'hover:bg-[var(--bg-subtle)]' : ''}
                              transition-colors disabled:cursor-default"
                       onclick={() => dest && navigate(dest)}
