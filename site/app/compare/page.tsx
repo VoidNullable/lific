@@ -58,7 +58,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How many context tokens does an issue tracker's MCP server cost?",
-    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on September 25, 2026 at v2.10.0: 6,715 tokens (30 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
+    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on October 8, 2026, for v2.11.0: 5,787 tokens (31 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
   },
 ];
 
@@ -476,9 +476,9 @@ export default function Compare() {
                     <Cmd>lific mcp</Cmd>
                   </>,
                   <>
-                    30 tools: issues, nestable plans, pages, comments,
+                    31 tools: issues, nestable plans, pages, comments,
                     attachments, search, audit history. The whole surface costs
-                    about 6.7k tokens of context (measured below).
+                    about 5.8k tokens of context (measured below).
                   </>,
                 ],
               },
@@ -618,11 +618,11 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    Built in: <Cmd>lific mcp</Cmd> (v2.10.0)
+                    Built in: <Cmd>lific mcp</Cmd> (v2.11.0)
                   </>,
-                  <>30</>,
-                  <>6,715 tokens</>,
-                  <>3.4%</>,
+                  <>31</>,
+                  <>5,787 tokens</>,
+                  <>2.9%</>,
                 ],
               },
               {
@@ -719,13 +719,12 @@ export default function Compare() {
             Linear also revises its tool set regularly.
           </Body>
           <Body>
-            Lific&apos;s own 5.75k fits the budget, but not gracefully: per
-            tool, its schemas are the second wordiest on this page, after
-            Plane.
+            Lific&apos;s own 5.8k fits the budget. Per tool, its schemas are
+            the third wordiest on this page, after Plane and beads.
           </Body>
           <p className="mt-4 max-w-[75ch] text-caption leading-relaxed text-text-faint">
             Methodology: each server was launched over stdio (the others on{" "}
-            {STAMP}, Lific again on August 15, 2026),
+            {STAMP}, Lific again on October 8, 2026),
             sent <Cmd>initialize</Cmd> and <Cmd>tools/list</Cmd> via the
             official MCP Python SDK, and the returned tool definitions (name,
             description, input schema) were serialized as compact JSON and
@@ -848,7 +847,7 @@ export default function Compare() {
                 head: "A small context bill.",
                 body: (
                   <>
-                    About 6.7k tokens for the full 30-tool surface, roughly
+                    About 5.8k tokens for the full 31-tool surface, roughly
                     one long file read, so connecting the tracker doesn&apos;t
                     crowd out the actual work.
                   </>
