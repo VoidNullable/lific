@@ -63,7 +63,7 @@ export const RemotionRoot: React.FC = () => {
         width={PLAN_SYNC_W}
         height={PLAN_SYNC_H}
       />
-      {/* Landing-page everyone loop: bunx remotion render EveryoneSplit ../site/public/everyone-split.mp4 --muted */}
+      {/* Landing-page "For everyone" still: see the freeze prop in EveryoneSplit.tsx for the render and crop commands */}
       <Composition
         id="EveryoneSplit"
         component={EveryoneSplit}

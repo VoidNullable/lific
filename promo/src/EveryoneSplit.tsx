@@ -29,9 +29,12 @@ import { TUI, ToolLine, Typed, SessionChip } from "./PlanSync";
  * both, the project activity feed records each change as it lands,
  * with who did it and through which door.
  *
- * Render: bunx remotion render EveryoneSplit ../site/public/everyone-split.mp4 --muted
- * Poster: bunx remotion still EveryoneSplit /tmp/opencode/everyone-poster.png --frame=150
- *         magick /tmp/opencode/everyone-poster.png -quality 82 ../site/public/everyone-poster.webp
+ * The landing page uses a still, cut into three windows:
+ *   bunx remotion still EveryoneSplit /tmp/opencode/everyone-still.png --frame=130 --props='{"freeze":true}'
+ *   magick /tmp/opencode/everyone-still.png -crop 703x502+36+30 +repage -quality 90 ../site/public/everyone-agent.webp
+ *   magick /tmp/opencode/everyone-still.png -crop 1029x502+767+30 +repage -quality 90 ../site/public/everyone-board.webp
+ *   magick /tmp/opencode/everyone-still.png -crop 1760x153+36+552 +repage -quality 90 ../site/public/everyone-activity.webp
+ * The animated loop still renders: bunx remotion render EveryoneSplit out.mp4 --muted
  */
 
 // ── Geometry ─────────────────────────────────────────────────
@@ -260,7 +263,14 @@ const FeedRow: React.FC<{
   </div>
 );
 
-export const EveryoneSplit: React.FC = () => {
+/**
+ * `freeze` renders the landing page's still: the story's end state with
+ * both actors labelled, the cursor resting on the card it dropped, and no
+ * pane chrome, so each pane can be cut out and framed by the site's own
+ * window. Render it at a settled frame:
+ *   bunx remotion still EveryoneSplit /tmp/opencode/everyone-still.png --frame=130 --props='{"freeze":true}'
+ */
+export const EveryoneSplit: React.FC<{ freeze?: boolean }> = ({ freeze = false }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -322,9 +332,20 @@ export const EveryoneSplit: React.FC = () => {
     { at: DROP + 6, x: a1.x + grip.dx, y: a1.y + grip.dy, click: true },
     { at: DROP + 44, x: a1.x + 90, y: 300 },
   ];
-  const cur = cursorPos(frame, CURSOR);
-  const blakeTag = interpolate(frame, [4, 12, DROP + 30, DROP + 42], [0, 1, 1, 0], clamp);
-  const agentTag = interpolate(frame, [MOVE + 12, MOVE + 20, MOVE + 80, MOVE + 92], [0, 1, 1, 0], clamp);
+  const rest = { x: a1.x + grip.dx, y: a1.y + grip.dy };
+  const cursorPoints: Waypoint[] = freeze
+    ? [
+        { at: 0, ...rest },
+        { at: 1, ...rest },
+      ]
+    : CURSOR;
+  const cur = cursorPos(frame, cursorPoints);
+  const blakeTag = freeze
+    ? 1
+    : interpolate(frame, [4, 12, DROP + 30, DROP + 42], [0, 1, 1, 0], clamp);
+  const agentTag = freeze
+    ? 1
+    : interpolate(frame, [MOVE + 12, MOVE + 20, MOVE + 80, MOVE + 92], [0, 1, 1, 0], clamp);
 
   // ── Feed: newest first, so blake's row slides down when the
   //    agent's change lands on top of it.
@@ -341,9 +362,9 @@ export const EveryoneSplit: React.FC = () => {
     top: TOP,
     height: PANE_H,
     boxSizing: "border-box",
-    borderRadius: 16,
-    border: `1px solid ${C.border}`,
-    boxShadow: "0 30px 80px rgba(0,0,0,0.55)",
+    borderRadius: freeze ? 0 : 16,
+    border: freeze ? "none" : `1px solid ${C.border}`,
+    boxShadow: freeze ? "none" : "0 30px 80px rgba(0,0,0,0.55)",
     overflow: "hidden",
     opacity: panelIn,
     transform: `translateY(${lift}px)`,
@@ -491,7 +512,7 @@ export const EveryoneSplit: React.FC = () => {
             />
           </div>
 
-          <Cursor points={CURSOR} />
+          <Cursor points={cursorPoints} />
           <Tag opacity={blakeTag} style={{ left: cur.x + 14, top: cur.y + 36 }}>
             blake
           </Tag>
@@ -513,8 +534,8 @@ export const EveryoneSplit: React.FC = () => {
       >
         <div
           style={{
-            borderRadius: 11,
-            border: `1px solid ${C.border}`,
+            borderRadius: freeze ? 0 : 11,
+            border: freeze ? "none" : `1px solid ${C.border}`,
             backgroundColor: C.bgSubtle,
             padding: "8px 8px 6px",
           }}
