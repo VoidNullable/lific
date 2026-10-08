@@ -24,6 +24,7 @@
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import IssuePickerModal from "../lib/IssuePickerModal.svelte";
+  import { projectCodeOf } from "../lib/references";
   import {
     RELATION_KINDS,
     hasRelations,
@@ -535,7 +536,9 @@
       openPeek(rel);
       return;
     }
-    navigate(`/${projectIdentifier}/issues/${rel}`);
+    // A related issue may live in another project (LIF-504): route by its
+    // own project code so that project's context loads with it.
+    navigate(`/${projectCodeOf(rel)}/issues/${rel}`);
   }
 
   // ── Relations ────────────────────────────────────────
@@ -1168,6 +1171,7 @@
     bind:open={relationPickerOpen}
     projectId={issue.project_id}
     {projectIdentifier}
+    crossProject
     title={addingRelation ? `Add “${addingRelation.kind.label}” relation` : "Link an issue"}
     onSelect={addRelation}
   />

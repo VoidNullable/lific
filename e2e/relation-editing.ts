@@ -146,7 +146,7 @@ export async function checkRelationEditing(context: BrowserContext, base: string
     // A picker opened on the new issue must not adopt the late selection, nor
     // be closed by it.
     await openAddRelation(page, "Related");
-    const search = page.getByPlaceholder(/Search DEMO issues/);
+    const search = page.getByPlaceholder(/Search issues in any project/);
     await search.waitFor({ state: "visible" });
     await pick.release();
     await page.waitForTimeout(1000);

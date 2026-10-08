@@ -10,7 +10,8 @@
     "context-menu": "bun context-menu.ts",
     "peek-permissions": "bun peek-permissions.ts",
     "issue-topbar": "bun issue-topbar.ts",
-    "sidebar": "bun sidebar.ts"
+    "sidebar": "bun sidebar.ts",
+    "cross-project-relations": "bun cross-project-relations.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"

@@ -1929,9 +1929,14 @@ export interface SearchResult {
   partial_match?: boolean;
 }
 
-export async function search(query: string, projectId?: number) {
+export async function search(
+  query: string,
+  projectId?: number,
+  opts: { resultType?: "issue" | "page" | "comment" | "attachment" } = {},
+) {
   const params = new URLSearchParams({ query });
   if (projectId) params.set("project_id", String(projectId));
+  if (opts.resultType) params.set("result_type", opts.resultType);
   return request<SearchResult[]>(`/search?${params}`);
 }
 
