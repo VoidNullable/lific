@@ -103,6 +103,9 @@ async function signIn(context: BrowserContext, base: string, identity: string, p
   await page.fill("#login-password", password);
   await page.click("button[type=submit]");
   await page.waitForURL((url) => !url.href.includes("login"), { timeout: 15_000 });
+  // The route changes before the session token is stored; navigating away
+  // in that gap loads the next page signed out.
+  await page.waitForFunction(() => localStorage.getItem("lific_token"), null, { timeout: 15_000 });
   return page;
 }
 
