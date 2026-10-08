@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="LificHero.png" alt="Lific Issue tracking built for AI-driven development" width="800">
+  <img src="LificHero.png" alt="Lific: an issue tracker for prolific agents" width="800">
 </p>
 
 <p align="center">
@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <strong>Issue tracking for the agentic coding era.</strong><br>
-  One binary. One SQLite database (plus an attachments dir). MCP built in.
+  <strong>An issue tracker for prolific agents.</strong><br>
+  One binary. One SQLite file. MCP built in.
 </p>
 
 <p align="center">
@@ -25,115 +25,78 @@
 
 ---
 
-Your agent can write the code. What it can't do is remember: the plan dies with the context window, the TODO list rots in a markdown file, and the next session starts from zero. Lific is the missing memory: a self-hosted, single-binary issue tracker whose primary user is often an agent rather than a person.
+Plans and issues live on your server instead of in the context window, so work outlives the session. Agents use it over MCP; you use the web UI.
 
-Three numbers instead of adjectives:
-
-- **31 MCP tools in 5,787 tokens.** That's the measured size of the full `tools/list` tool definitions (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
-- **One binary, 25 to 32 MB depending on platform.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
-- **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
-
-Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive being spoken, logged, grepped, and pasted into a prompt.
+- **31 MCP tools in 5,787 tokens**, about one long file read.
+- **One 25 to 32 MB binary** with SQLite, the web UI and backups built in. No Docker, no Postgres.
+- **`lific connect` writes MCP config for 11 AI clients.**
+- **Identifiers like `APP-42`**, never UUIDs.
 
 ## 60-second setup
 
 ```bash
-cargo install lific     # or grab a binary from the releases page
-
-lific init              # config, database and your admin account, then
-                        # installs a background service and starts it.
-                        # The server is now on :3456 and survives reboot.
-lific connect           # writes MCP config into your AI clients
+cargo install lific   # or download a binary from Releases
+lific init            # config, database, admin account, background service on :3456
+lific connect         # MCP config for your AI clients
 ```
 
-That's the whole thing. `lific init` asks your name and how you want to sign in (login-free for a private local instance, or passwords), then sets everything up in your OS's standard locations (config in `~/.config/lific/`, data in `~/.local/share/lific/` on Linux; macOS and Windows equivalents) so it works the same from any directory. Use `lific init --here` if you'd rather keep a directory-local instance (`./lific.toml` + `./lific.db`). It registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS, a per-user startup entry on Windows), so it isn't a process tied to your terminal: it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
+Restart your AI client. The web UI is at http://localhost:3456. `lific doctor` checks config, database, server and an MCP round trip, and exits nonzero if anything is broken.
 
-Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging)? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
+- `lific init --here` keeps config and database in the current directory.
+- `lific init --no-service` skips the background service; run `lific start` yourself.
+- `lific service status | restart | stop | uninstall` manages the service.
 
-The web UI is at `http://localhost:3456`, and you are its administrator already. Login-free mode signs you in automatically; with passwords, sign in with the username `init` prints, which is your name in lowercase with hyphens (`Ada Lovelace` becomes `ada-lovelace`).
+More: [Installation](https://lific.dev/docs/installation) · [Quickstart](https://lific.dev/docs/quickstart)
 
-Verify any setup with:
+## What your agent can do
+
+| Call | What it does |
+| --- | --- |
+| `get_briefing(project="APP")` | Resume a project: plans and next steps, blocked and workable issues, and with `since`, what changed |
+| `list_issues(project="APP", workable=true)` | Open issues whose blockers are all resolved |
+| `list_issues(members=["me"])` | Your active work across the projects you belong to |
+| `create_plan` / `get_plan` | Nested step plans that survive the session; a step and its issue close together |
+| `link_issues(target="APP-9", relation_type="blocks", user="ada")` | Block an issue on a person or a date window, not only another issue |
+| `update_issue(assignees=["human"])` | Mark work a person must do; agents take unassigned issues |
+| `update_issue(status="done", evidence="cargo test: 412 passed")` | Close with the proof saved as a verification comment |
+| `edit_issue` / `edit_page` | Change one string without resending the document |
+| `get_activity(identifier="APP", since="2026-10-01")` | Who changed what while you were away |
+
+Each AI tool connects as its own bot under your account. The history says "OpenCode closed APP-42", and you can revoke one tool without touching the others.
+
+## MCP tools
+
+| Family | Tools |
+| --- | --- |
+| Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
+| Relations and waits | `link_issues` · `unlink_issues` |
+| Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
+| Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
+| Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
+| Attachments | `upload_attachment` · `get_attachment` · `list_attachments` |
+| Search and history | `get_briefing` · `search` · `get_activity` |
+| Structure | `list_resources` · `manage_resource` · `delete` |
+| Export | `export` |
+
+The 5,787 tokens are the `tools/list` definitions as compact JSON, counted with tiktoken's o200k_base. Parameters and output: [MCP tools](https://lific.dev/docs/mcp/tools).
+
+## Connect your AI tools
+
+`lific connect` supports `opencode` · `claude-code` · `claude-desktop` · `cursor` · `vscode` · `codex` · `zed` · `gemini` · `windsurf` · `goose` · `crush`.
 
 ```bash
-lific doctor            # green/yellow/red checks: config, database, server,
-                        # OAuth discovery, and a real MCP round-trip
+lific connect                                          # pick from the clients it finds
+lific connect --client opencode --client cursor --yes  # no prompts
+lific connect --client claude-code --scope project     # repo-local .mcp.json
+lific connect --client zed --stdio                     # no server: direct SQLite over stdio
 ```
 
-`doctor` exits nonzero if anything is actually broken, so agents and CI can gate on it.
-
-## What your agent can now do
-
-- **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them (issues, people, or date windows), date waits that have come due, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
-- **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
-- **See what's on your plate across every project.** `list_issues(members=["me"])` lists the active and todo issues in each project where you hold a role, sorted like the web home page and headed by your role in each. `list_resources(resource_type="project")` shows who leads, maintains and watches each project, your own role, and its issue count per status.
-- **Block on people and dates, not only issues.** `link_issues(target="APP-9", relation_type="blocks", user="ada-lovelace")` parks an issue until someone clears it; `from="2026-09-28", until="2026-10-02", note="filing office"` parks it until a window opens, then shows it as due and later overdue.
-- **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
-- **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
-- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Pass `since` to read forward from where you stopped. Every agent's work is attributed (more below).
-- **Close with the proof attached.** `update_issue(status="done", evidence="cargo test: 412 passed")` saves the evidence as a verification comment in the same write as the close. `get_issue` marks it `[verification]` and the web UI badges it, so whoever reviews the close can see what was actually checked. If the description has a `- [ ]` task list, `get_issue` and `list_issues` show its progress (`3/5`), and closing with boxes still unchecked says how many.
-- **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
-- **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
-- **Read long pages a section at a time.** A page over 30,000 characters comes back as an outline with section sizes plus its opening, and `get_page(section="Current state")` fetches just that part. Nothing is silently cut off by the harness. Coming back to a page later, `get_page(since_seq=...)` returns only the lines that changed. Writes that push a page past the budget say so, with a nudge to split it.
-- **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
-
-## Every tool gets its own identity, and that's the point
-
-`lific connect` mints a **separate bot identity per tool**, owned by your account (`opencode-blake`, `cursor-blake`, ...). When several agents work the same project, provenance is the primitive that keeps you sane:
-
-- **The audit log shows which harness made every change.** "OpenCode closed APP-42", "Cursor edited the design page". All attributed to you, never blurred together.
-- **Revoke one tool without touching the others.** Cursor misbehaving? Disconnect just its key and OpenCode keeps working.
-- **Scoped authority.** Each bot inherits its owner's project access and nothing more.
-
-This is the recommended way to connect agent harnesses.
-
-## Connecting AI tools
-
-**`lific connect`** is the front door. It supports eleven clients out of the box:
-
-`opencode` · `claude-code` · `claude-desktop` · `cursor` · `vscode` · `codex` · `zed` · `gemini` · `windsurf` · `goose` · `crush`
-
-```bash
-lific connect                                    # interactive picker
-lific connect --client opencode --client cursor --yes   # non-interactive
-lific connect --client claude-code --scope project      # repo-local .mcp.json
-lific connect --client zed --stdio               # no server: direct SQLite over stdio
-lific connect --dry-run --client vscode          # preview without writing
-```
-
-Each client gets its native schema (`mcpServers` vs `servers` vs `mcp`, Codex TOML with an env-var token, Goose YAML; the quirks are handled). JSON configs are merged non-destructively; a file `connect` can't parse safely is left untouched and you get the exact snippet to paste instead.
+It merges into existing config, and leaves a file it can't parse alone and prints the snippet instead. OAuth sign-in from the client and `lific login` for headless machines also work: [Connect agents](https://lific.dev/docs/connect).
 
 <details>
-<summary>OAuth, if you'd rather sign in from the client than paste a key</summary>
+<summary>Manual config for any MCP client</summary>
 
-Lific implements the full MCP authorization spec (RFC 9728 protected-resource metadata, dynamic client registration, PKCE), so OAuth-capable clients can connect with **just the URL** and complete auth in the browser:
-
-```bash
-lific connect --oauth --client opencode   # writes a header-less config, mints nothing
-opencode mcp auth lific                   # browser opens → sign in → approve
-
-# or with any client's native command:
-claude mcp add --transport http lific http://localhost:3456/mcp
-```
-
-The approval page asks which tool is connecting and mints that tool's bot identity under your account, the same kind `lific connect` creates, so OAuth-connected tools keep per-tool attribution and can be revoked one at a time. The difference is only where the credential comes from: the client runs the browser flow instead of `connect` writing a key into its config.
-
-**Headless / SSH / agents.** No browser on the box? The device flow has you covered:
-
-```bash
-lific login                     # prints a URL + short code; approve on any device
-lific login --non-interactive   # agent mode: prints JSON {verification_uri, user_code,
-                                #   device_code, next_step} and exits immediately
-lific login --complete <code>   # finish later, from a script or a second session
-```
-
-Tokens are stored in your OS keyring (Secret Service / Keychain / Credential Manager), falling back to a `0600` file with a loud warning when no keyring exists.
-
-</details>
-
-<details>
-<summary>Manual configuration (any MCP client)</summary>
-
-**Remote (Streamable HTTP):**
+Remote, over Streamable HTTP:
 
 ```json
 {
@@ -145,7 +108,7 @@ Tokens are stored in your OS keyring (Secret Service / Keychain / Credential Man
 }
 ```
 
-**Local (stdio, no server):**
+Local, over stdio with no server:
 
 ```json
 {
@@ -156,243 +119,44 @@ Tokens are stored in your OS keyring (Secret Service / Keychain / Credential Man
 }
 ```
 
-Without `LIFIC_TOKEN` in its environment, a stdio session runs as the instance operator; set it to an API key to act as a specific user or bot. Create keys anytime with `lific key create --name my-key` (add `--user <name>` to bind one to an account).
+Create a key with `lific key create --name my-key --user <you>`. A stdio session without `LIFIC_TOKEN` acts as the instance operator.
 
 </details>
 
-<details>
-<summary>Web UI setup (if you prefer clicking)</summary>
-
-Go to **Settings > Connected tools** in the web UI. Pick your tool, click Connect, and paste the generated config snippet.
-
-Each connection creates a bot identity tied to your account (the CLI's `connect` does the same). Changes show up attributed to you, tagged with which tool made them.
-
-</details>
-
-## Plans: state that outlives the session
-
-An agent's plan shouldn't die when its context does. A **plan** is an ordered, arbitrarily-nestable tree of steps that persists across sessions and compaction. Start a new session, call `get_plan`, and it's still there, ready to resume.
-
-- **Steps can mirror issues.** Link a step to an issue and the two stay in sync while the plan is active: mark the issue `done` and the step checks itself; check the step and the issue becomes `done`. Move the issue out of `done` and the step unchecks, with a note of why.
-- **Authored in one call.** `create_plan` builds a full nested tree at once; `edit_plan_step` and `update_plan_step` keep it current.
-- **First-class in the UI.** A Plans tab sits alongside Issues, Board, Modules, and Pages: a real tree view with done toggles, per-step markdown notes, issue chips, and an activity timeline.
-- **Fully tracked.** Every plan and step change lands in the audit log, including the issue-driven cascades.
-
-Issues stay flat and lateral; the hierarchy lives on the plan. It's the difference between an issue tracker and a project planner.
-
-## Built for agents, not just reachable by them
-
-- **`lific agents-md`** writes an idempotent, marker-delimited block into your repo's `AGENTS.md` telling every agent that this project uses Lific: project identifier, CLI examples, and the workflow conventions. `lific connect` offers to do this automatically in project context.
-- **Session instructions.** The MCP server ships its conventions in the `initialize` response, so connected agents know how Lific wants to be used without you explaining it.
-- **Self-onboarding.** On a fresh database, the MCP tools tell the agent exactly how to bootstrap (`create a project first: manage_resource(...)`) instead of returning an empty list.
-- **Pipe-native CLI.** Output auto-upgrades to JSON when piped, so `lific issue list --project APP | jq` just works, no `--json` needed (though it's there). Prompts never hang a non-interactive caller; they fail fast and name the bypass flag.
-- **Shell completions:** `lific completion fish | source` (bash, zsh, fish, powershell, elvish).
-
-The CLI works directly against the database, with no server or auth required. Data commands also support an HTTP backend when you want the CLI to operate on a remote Lific instance:
+## CLI
 
 ```bash
-lific project list
 lific issue list --project APP
 lific issue create --project APP --title "Fix login bug" --priority high
 lific issue update APP-42 --status done
 lific search "authentication" --project APP
-
-# Remote mode (the same commands use the server API)
-lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue list --project APP
-lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue update APP-42 --status done
+lific --backend http --url https://lific.example.com issue list --project APP   # after lific login
 ```
 
-`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. If no API key is supplied, it also uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file). The default backend remains direct SQL; HTTP mode never opens the local database for data commands. Both backends print the same human-readable and JSON output. A remote project export downloads one archive file from the server rather than individual Markdown files.
-
-## MCP tools
-
-All 31, in 5,787 tokens:
-
-| Family | Tools |
-|--------|-------|
-| Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
-| Relations & waits | `link_issues` · `unlink_issues` |
-| Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
-| Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
-| Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
-| Attachments | `upload_attachment` · `get_attachment` · `list_attachments` |
-| Search & history | `get_briefing` · `search` · `get_activity` |
-| Structure | `list_resources` · `manage_resource` · `delete` |
-| Export | `export` (issue, page, or whole project by ID) |
-
-Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`). The behaviors worth knowing about are covered in "What your agent can now do" above; for exact schemas, connect a client and read `tools/list`.
-
-## Features
-
-| Category | What you get |
-|----------|-------------|
-| **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
-| **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
-| **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 31 tools, human-readable identifiers, compact schema, session instructions |
-| **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
-| **REST API** | Resource endpoints, search, board view, and relationship/planning operations |
-| **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
-| **User accounts** | Individual auth, per-tool bot identities, project membership and roles |
-| **Auth** | OAuth 2.1 (PKCE, dynamic client registration, RFC 9728 discovery), RFC 8628 device flow, API keys, token revocation |
-| **Backups** | `lific dump` / `lific restore` single-archive backups, plus automatic interval archives with retention |
-| **CLI** | Scriptable issue/project/page/plan commands, TTY-aware JSON output, works with no server running |
-| **Single binary** | No runtime dependencies, embedded SQLite, ~25 MB |
+The CLI reads the database directly, or a remote server with `--backend http`. Output is JSON when piped. `lific agents-md` adds a short Lific section to a repo's `AGENTS.md`. Full reference: [CLI](https://lific.dev/docs/cli).
 
 ## When Lific is the wrong tool
 
-Honesty is cheaper than churn:
+- You coordinate a large team and need SSO, sprints or Gantt charts. Use Linear or Plane.
+- You want issues stored in the repo itself. Use a git-native tracker such as beads.
+- You need several servers syncing with each other. One Lific instance is one SQLite file.
 
-- **You need enterprise team features.** SSO/SAML isn't here, and neither is the sprint-estimate-gantt layer of project management. If you're coordinating forty humans, use Linear or Plane.
-- **You want issues as files in the repo.** Lific is a database with an API, not markdown-in-git. If you want `git diff` on your task list, a markdown-native tracker fits better.
-- **You need distributed multi-writer sync.** One Lific instance is one SQLite file: a single source of truth that's trivially backed up, not a CRDT. Multiple agents talk to one server; the server doesn't merge with other servers.
+It's built for one person directing several agents.
 
-For one human directing several agents across personal projects (the thing it's built for), none of those trade-offs bite.
+## Running it
 
-## Authorization
+**Access.** New installs check project membership on every call, reads included. Add people with `lific member add --project APP --user sam --role maintainer`. See [Self-hosting](https://lific.dev/docs/self-hosting).
 
-Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership is enforced on project-scoped REST and MCP calls, including reads. Instance administrators and operator-trusted credentials intentionally bypass project membership checks, while instance-scoped endpoints have their own rules. **Fresh installs (created on 2.0+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in, so nothing changes under you on upgrade. Toggle it at runtime:
-
-```bash
-lific instance set --authz-enforced true    # or false
-```
-
-With enforcement on, a newly created user sees nothing until they're granted membership. Manage access from the CLI (or the web UI's project members page):
+**Backups.** Lific writes an archive every hour and keeps 24. For a one-off:
 
 ```bash
-lific member add --project LIF --user sam              # viewer by default
-lific member add --all --user sam --role maintainer    # every project at once
-lific member role -p LIF -u sam -r lead                # change a role
-lific member remove -p LIF -u sam
-lific member list --project LIF
+lific dump                                    # database plus attachments, safe while running
+lific restore lific_20260703_141500.tar.gz    # stop the server first
 ```
 
-Forgotten password? The operator can reset one from the shell (this signs out all of that user's sessions):
+**Config.** `lific init` writes `lific.toml`. Set `server.public_url` before exposing the server beyond localhost. See [Configuration](https://lific.dev/docs/configuration).
 
-```bash
-lific user set-password --username sam
-```
-
-**Auth can be turned off entirely for a private, local instance** with `required = false` under `[auth]` in `lific.toml`. That is what `lific init`'s login-free mode writes, together with `host = "127.0.0.1"`. Credential-less requests then get admin-equivalent access; a presented-but-invalid token still fails loudly. The web UI signs you in automatically as the first admin instead of showing a login form. This is a config-file key on purpose (flipping it requires shell access, like minting an operator key), and it comes with a guard rail: the server refuses to start when `server.host` is not a loopback address, or when `server.public_url` points at anything other than a loopback or private-network host. Browser auto-login is refused under the same conditions.
-
-**Unbound API keys bypass authorization by design.** A key with no user binding (from `lific key create` without `--user`, from `lific connect` on an instance with no human accounts, or the one `lific start` mints on a database with neither keys nor users) is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That keeps an instance with no human accounts manageable from the shell. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
-
-```bash
-lific key list
-```
-
-Prefer per-tool **bot identities** (what `lific connect` mints when you have a user account) over unbound keys: a bot inherits its owner's project access and shows up in the audit log by name.
-
-API-key verifier upgrades are a coordinated data-format change. The first successful use of an indexed legacy key rewrites its Argon2 verifier as `sha256:v1`; keys created or rotated by the new binary are also stored as `sha256:v1`. Older Lific binaries cannot authenticate those rows. Upgrade every server, CLI, and long-lived stdio process that shares the database together, and do not roll back to a binary that only understands Argon2 after any key has been created, rotated, or migrated. Active legacy rows without an indexed ID are revoked during upgrade. `lific key list` marks those rows `UNSUPPORTED FORMAT` / `unsupported_format`; rotate before reuse only for integrations that still need credentials. Rotation preserves the key's existing expiry and owner.
-
-## Configuration
-
-<details>
-<summary><code>lific.toml</code></summary>
-
-`lific init` generates this (login-free mode then sets `host = "127.0.0.1"` and `required = false`):
-
-```toml
-[server]
-host = "0.0.0.0"
-port = 3456
-cors_origins = []
-trusted_proxies = []
-
-[database]
-path = "lific.db"
-
-[backup]
-enabled = true
-dir = "backups"
-interval_minutes = 60
-retain = 24
-
-[log]
-level = "info"
-
-[auth]
-allow_signup = true
-required = true
-
-[retention]
-trash_days = 30
-```
-
-`retention.trash_days` is how long deleted issues, pages and comments stay restorable before they are purged; `0` keeps them forever. Signup is open by default, so anyone who can reach the server can create an ordinary account; close it with `lific instance set --signups false` or in the web UI's instance settings.
-
-CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs. `server.trusted_proxies` controls which peers may supply `X-Forwarded-For` or `X-Real-IP`; it defaults to none. Add only isolated proxy IPs/CIDRs you operate, and prevent direct clients from reaching that ingress.
-
-Config is discovered in standard locations, first match wins:
-
-1. `--config <path>` (used alone, no fallback)
-2. `./lific.toml` (current directory)
-3. User config dir: `~/.config/lific/lific.toml` on Linux (`$XDG_CONFIG_HOME` respected), `~/Library/Application Support/lific/` on macOS, `%APPDATA%\lific\` on Windows
-4. System config dir: `/etc/lific/lific.toml` on Linux/BSD, `/Library/Application Support/Lific/` on macOS, `%ProgramData%\lific\` on Windows
-
-A relative `database.path` always resolves against the config file's own directory, so the same config works no matter where the process starts. `lific init --config /path/to/lific.toml` and `lific service install --config ...` root the whole instance (config, database, service working directory) at that path.
-
-</details>
-
-## Backup and restore
-
-The data set is the database plus a content-addressed `attachments/` dir beside it. `lific dump` packages both into one self-contained archive, taking a consistent DB snapshot via `VACUUM INTO` that is safe while the server is running:
-
-```bash
-lific dump                      # → ./lific_20260703_141500.tar.gz
-lific dump --out /mnt/backups   # directory → default filename inside it
-```
-
-Each archive contains the DB snapshot, every attachment blob, and a `manifest.json` (Lific version, schema version, sizes). Restoring is the mirror image. Stop the server first:
-
-```bash
-lific restore lific_20260703_141500.tar.gz          # refuses to overwrite an existing db
-lific restore lific_20260703_141500.tar.gz --force  # moves the current db aside to lific.db.pre-restore-<ts>
-```
-
-Restores are staged (a failure leaves the original data dir untouched) and refuse archives created by a newer Lific; older archives are fine, and pending migrations apply on next start. Archives over the default limits (512 MiB database, 64 MiB per attachment, 1 GiB total, 10,000 entries) need `--allow-large`.
-
-The automatic interval backups (`[backup]` in config) write the same `.tar.gz` artifact to the backup dir with rotation. External backup harnesses (restic, borg, cron) can either scoop up that dir or call `lific dump` as a pre-backup hook:
-
-```bash
-# e.g. restic pre-hook
-lific dump --out /srv/backup-staging/lific.tar.gz && restic backup /srv/backup-staging
-```
-
-## Building from source
-
-The repository provides Rust, Bun, and the release toolchains through
-[devenv](https://devenv.sh/). Approve the checkout, enter the shell, and use
-the task graph:
-
-```bash
-git clone https://github.com/VoidNullable/lific
-cd lific
-devenv allow
-devenv shell
-# inside the devenv shell:
-devenv tasks run lific:debug-build
-```
-
-To activate Devenv automatically when changing into the checkout, add the
-Devenv hook for your shell once (for zsh, `eval "$(devenv hook zsh)"`), then
-run `devenv allow` in this checkout.
-
-Release builds always build and embed the Svelte 5 web UI:
-
-```bash
-devenv --profile release-linux tasks run lific:release:x86_64-unknown-linux-gnu
-```
-
-Use `release-darwin` for macOS targets and `release-windows-msvc` for the
-Windows MSVC cross-build on Linux. `devenv build outputs.lific` builds the
-native, Nix-packaged release; it builds the locked frontend in an isolated
-derivation and embeds it before compiling Rust. SQLite is bundled via
-`rusqlite`; no system SQLite is required.
-
-### Docker (optional)
-
-You don't need Docker to run Lific; it's one binary. The `Dockerfile` in the repo exists mainly so MCP directory indexers can build and verify the server, but it produces a working image (full web UI, distroless runtime) if a container fits your setup:
+**Docker.** Optional; the binary needs nothing else.
 
 ```bash
 docker build -t lific .
@@ -402,30 +166,31 @@ docker run -p 3456:3456 -v lific-data:/data \
   lific
 ```
 
-The database lives at `/data/lific.db`, so mount a volume there to keep it. The image runs `start --init-if-missing`, which creates and migrates that file on first boot and does nothing on every boot after.
+Both variables are required on first boot and ignored after it.
 
-Both environment variables are **required for that first boot**, and they create the first admin. Leave either one out and the container refuses to start instead of creating an empty instance: an instance with no users has signup open, makes whoever loads the page first its administrator, and prints an unbound operator API key into the container log. An existing database ignores both variables, so they can stay in your compose file or machine config.
+**Upgrading.** Read [Upgrading](https://lific.dev/docs/upgrading) before you skip versions.
 
-Authentication is required either way. First-boot init creates a database; it never turns auth off.
-
-If an instance somehow ends up with no administrator, create one from inside the container (`docker exec <container> ...`, or `fly ssh console` on Fly):
+## Build from source
 
 ```bash
-lific --db /data/lific.db user create \
-  --username <name> --email <address> --password <password> --admin
+git clone https://github.com/VoidNullable/lific && cd lific
+devenv allow && devenv shell
+devenv tasks run lific:debug-build
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers tests and release builds.
 
 ## Community
 
-Questions, feedback, or a setup worth showing off? Join the [Lific Discord](https://discord.gg/uWvaFC4f7D). Release announcements land there too, and support questions get answered fastest in #support.
+Questions, bug reports and release announcements: [Discord](https://discord.gg/uWvaFC4f7D). Support questions get answered fastest in #support.
 
 ## Contributing
 
-Issues and PRs welcome. If you're planning something big, open an issue first so we can talk about it before you put in the work.
+Issues and PRs welcome. For anything large, open an issue first.
 
 ## MCP Registry
 
-Lific ships a registry manifest (`server.json`) for the official [MCP Registry](https://registry.modelcontextprotocol.io). Its canonical registry name:
+Lific publishes `server.json` to the [MCP Registry](https://registry.modelcontextprotocol.io).
 
 - `mcp-name: io.github.VoidNullable/lific`
 
