@@ -314,10 +314,10 @@ lific project update <IDENTIFIER> [--name <NAME>] [--description <TEXT>]
 ### issue
 
 ```shell
-lific issue list --project <PROJECT> [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--label <LABEL>] [--workable] [--limit <LIMIT>]
+lific issue list --project <PROJECT> [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--label <LABEL>] [--workable] [--assignee <WHO>] [--limit <LIMIT>]
 lific issue get <IDENTIFIER>
-lific issue create --project <PROJECT> --title <TITLE> [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
-lific issue update <IDENTIFIER> [--title <TITLE>] [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
+lific issue create --project <PROJECT> --title <TITLE> [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>] [--assign <WHO>]
+lific issue update <IDENTIFIER> [--title <TITLE>] [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>] [--assign <WHO> | --unassign]
 lific issue link <SOURCE> <TARGET> --type <TYPE>
 lific issue unlink <SOURCE> <TARGET>
 ```
@@ -335,6 +335,9 @@ lific issue unlink <SOURCE> <TARGET>
 | `-l, --label <LABEL>` | For `list`: shows only issues with this label. |
 | `-l, --labels <LABELS>` | For `create` and `update`: comma-separated label names. On `update` the list replaces all of the issue's labels. |
 | `-w, --workable` | For `list`: shows only open issues whose blockers are all `done`. |
+| `--assign <WHO>` | For `create` and `update`: who must do it, comma-separated. `human` for any person, or usernames; `me` is you. On `update` it replaces the assignment. See [Assignment](/docs/concepts/issues#assignment). |
+| `--unassign` | For `update`: clears the assignment so any agent may take the issue. |
+| `--assignee <WHO>` | For `list`: `none` (free for agents), `human` (a person must do it), `me`, or a username. |
 | `--limit <LIMIT>` | For `list`: the most issues to show. 50 by default, at most 500. |
 | `-r, --type <TYPE>` | For `link`: `blocks`, `relates_to` or `duplicate`. |
 

@@ -76,6 +76,7 @@ The imported project is private, even if the source was published. To publish it
 - Labels on issues and pages, relations between issues in the project, and links between pages and issues.
 - Attached files that are linked to exported content.
 - Waits on a person or a date, with their notes. A wait on a person names that person by username and is bound to the destination account with the same username; when no active account has that name, the wait is left out and listed in the report. Date waits transfer as written.
+- Assignments. Named people travel by username and bind to the destination's active human account with the same name. A name with no such account is listed in the report, and an issue left with nobody named is marked for any person instead, so it never drops into the agents' pool.
 - The project's change history and status history. The version history `get_page(since_seq)` reads from does not transfer; an imported page starts its history at its next edit.
 
 Issue, page and plan numbers, timestamps, ordering, statuses and issue import sources are kept. Internal database IDs are assigned fresh on the destination, and every link between exported records is updated to match.
@@ -125,7 +126,7 @@ An archive is refused if it is damaged or unsafe: an unknown format version, an 
 
 ### Archive format
 
-An archive is a gzip-compressed tar file. It starts with `manifest.json`, followed only by files named `blobs/<sha256>`. The format version (currently 2) is separate from the database schema version. Version 2 added each comment's kind. Lific still imports version 1 archives and treats their comments as ordinary comments, and archives written before waits existed simply have none. An older Lific that only knows version 1 refuses a version 2 archive. Lific reads only the tables and columns it knows about; an archive cannot supply SQL, column names or schema.
+An archive is a gzip-compressed tar file. It starts with `manifest.json`, followed only by files named `blobs/<sha256>`. The format version (currently 2) is separate from the database schema version. Version 2 added each comment's kind. Lific still imports version 1 archives and treats their comments as ordinary comments, and archives written before waits or assignments existed simply have none. An older Lific that only knows version 1 refuses a version 2 archive. Lific reads only the tables and columns it knows about; an archive cannot supply SQL, column names or schema.
 
 Export reads the project in one database transaction while holding the attachment lock, so the archive is a consistent snapshot.
 

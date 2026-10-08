@@ -250,7 +250,10 @@ impl Display for IssueLine<'_> {
                 formatter,
             )
         })?;
-        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)
+        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)?;
+        queries::assignees::describe(issue.needs_human, &issue.assignees).map_or(Ok(()), |who| {
+            write!(formatter, " for:{}", who.replace(", ", ","))
+        })
     }
 }
 
@@ -413,12 +416,24 @@ fn write_similar_issues(
     })
 }
 
+/// LIF-147: an assignment as the query layer takes it, with `"me"` resolved
+/// to `caller` (see [`LificMcp::caller_username`]).
+fn resolve_assignee_names(
+    names: Option<Vec<String>>,
+    caller: Option<&str>,
+) -> Result<Option<Vec<String>>, crate::error::LificError> {
+    names
+        .map(|mut names| queries::assignees::resolve_me(&mut names, caller).map(|()| names))
+        .transpose()
+}
+
 /// Create one `create_issue` batch item on the batch's transaction (LIF-478).
 fn create_batch_item(
     conn: &rusqlite::Connection,
     project_id: i64,
     item: &CreateIssueItem,
     attachments: models::AttachmentActor,
+    caller: Option<&str>,
 ) -> Result<models::Issue, crate::error::LificError> {
     use crate::error::LificError;
     if item.title.trim().is_empty() {
@@ -448,6 +463,7 @@ fn create_batch_item(
             target_date: item.target_date.clone(),
             labels,
             source: None,
+            assignees: resolve_assignee_names(item.assignees.clone(), caller)?,
             attachments,
         },
     )
@@ -1507,6 +1523,19 @@ impl Display for ActivityLine<'_> {
                 label,
                 activity.old_value.as_deref().unwrap_or("?")
             ),
+            // LIF-147: assignment.
+            "assign" => write!(
+                formatter,
+                "{} +assignee {}",
+                label,
+                activity.new_value.as_deref().unwrap_or("?")
+            ),
+            "unassign" => write!(
+                formatter,
+                "{} -assignee {}",
+                label,
+                activity.old_value.as_deref().unwrap_or("?")
+            ),
             other => write!(formatter, "{label} {other}"),
         }
     }
@@ -2126,6 +2155,8 @@ impl LificMcp {
                     order: input.order.clone(),
                     limit: Some(limit),
                     offset: Some(offset),
+                    assignee: input.assignee.clone(),
+                    caller_user_id: crate::authz::effective_user(conn, &identity).map(|u| u.id),
                 },
             )
         })?;
@@ -2360,6 +2391,10 @@ No issues found."
             crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
                 writeln!(output, "Checklist: {}/{} done", list.done, list.total)
             })?;
+            match queries::assignees::describe(issue.needs_human, &issue.assignees) {
+                Some(who) => writeln!(output, "Assigned: {who} (a person must do this)"),
+                None => Ok(()),
+            }?;
             [
                 ("Blocks: ", rels.blocks.as_slice()),
                 ("Blocked by: ", rels.blocked_by.as_slice()),
@@ -2580,6 +2615,27 @@ No issues found."
             .unwrap_or_else(error_response)
     }
 
+    /// LIF-147: the username `"me"` stands for in `names`, read only when
+    /// `names` says `me`. A bot's "me" is its owner, the same rule
+    /// `list_issues(members=["me"])` uses. Resolved before a write
+    /// transaction opens, never inside one.
+    fn caller_username(&self, names: Option<&[String]>) -> Result<Option<String>, String> {
+        let says_me = names.is_some_and(|names| {
+            names.iter().any(|name| {
+                name.trim()
+                    .trim_start_matches('@')
+                    .eq_ignore_ascii_case("me")
+            })
+        });
+        if !says_me {
+            return Ok(None);
+        }
+        let identity = super::current_identity(&self.db).map(|identity| identity.user);
+        self.read(
+            |conn| Ok(crate::authz::effective_user(conn, &identity).map(|user| user.username)),
+        )
+    }
+
     fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
         if let Some(items) = input.issues.take() {
             return self.create_issue_batch(input, items);
@@ -2595,6 +2651,7 @@ No issues found."
             None => None,
         };
         drop(conn);
+        let caller = self.caller_username(input.assignees.as_deref())?;
         let issue = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_issue` then links the
@@ -2621,6 +2678,7 @@ No issues found."
                         input.labels.as_deref().unwrap_or_default(),
                     )?,
                     source: None,
+                    assignees: resolve_assignee_names(input.assignees.clone(), caller.as_deref())?,
                     attachments,
                 },
             )
@@ -2681,7 +2739,8 @@ No issues found."
             || input.module.is_some()
             || input.labels.is_some()
             || input.start_date.is_some()
-            || input.target_date.is_some();
+            || input.target_date.is_some()
+            || input.assignees.is_some();
         if has_single_fields {
             return Err(
                 "with issues, set title and the other fields on each item; only project applies to the whole batch"
@@ -2702,6 +2761,7 @@ No issues found."
             resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?
         };
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        let caller = self.caller_username(Some(&["me".to_string()]))?;
         let created = self.transaction(|conn| {
             // Same actor re-check as the single create, once for the batch.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
@@ -2709,7 +2769,7 @@ No issues found."
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    create_batch_item(conn, pid, item, attachments)
+                    create_batch_item(conn, pid, item, attachments, caller.as_deref())
                         .map_err(|error| at_batch_item(index, error))
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -2801,6 +2861,7 @@ No issues found."
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let caller = self.caller_username(input.assignees.as_deref())?;
         let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
@@ -2862,6 +2923,7 @@ No issues found."
                         .transpose()?,
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
+                    assignees: resolve_assignee_names(input.assignees.clone(), caller.as_deref())?,
                     attachments,
                     ..Default::default()
                 },
@@ -2978,6 +3040,9 @@ No issues found."
             None => None,
         };
         drop(conn);
+        let caller = self.caller_username(input.set_assignees.as_deref())?;
+        let set_assignees = resolve_assignee_names(input.set_assignees.clone(), caller.as_deref())
+            .map_err(|e| e.to_string())?;
         // Cap the selection like get_board does; bulk changes over 500 issues
         // in a single call are out of scope for this tool.
         const BULK_CAP: i64 = 500;
@@ -3020,6 +3085,7 @@ No issues found."
                                 )
                                 .map_err(crate::error::LificError::BadRequest)?,
                                 module_id: set_module_id.map(Some),
+                                assignees: set_assignees.clone(),
                                 ..Default::default()
                             },
                         )
@@ -5770,6 +5836,10 @@ mod tests_page_reads;
 mod tests_waits;
 
 #[cfg(test)]
+#[path = "tests_assignees.rs"]
+mod tests_assignees;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn encoded_tool_result_bytes_matches_small_unicode_and_large_payloads() {
@@ -8387,6 +8457,8 @@ mod tests {
             duplicates: vec!["T-3".into()],
             duplicated_by: vec!["T-4".into()],
             waits: vec![],
+            needs_human: false,
+            assignees: vec![],
         };
         crate::mcp::reset_issue_link_context_reads();
         let context = current_issue_link_context();

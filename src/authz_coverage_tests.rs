@@ -378,6 +378,8 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         // ── Issues ──
         (("GET", "/api/issues"), Filtered),
+        // LIF-506: issues waiting on the caller, filtered to visible projects.
+        (("GET", "/api/issues/attention"), Filtered),
         (("POST", "/api/issues"), Gated(Maintainer)),
         (("GET", "/api/issues/{id}"), Gated(Viewer)),
         (("PUT", "/api/issues/{id}"), Gated(Maintainer)),

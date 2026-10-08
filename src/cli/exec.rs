@@ -222,6 +222,22 @@ fn page_folder_id(
 
 // ── Issue ────────────────────────────────────────────────────
 
+/// LIF-147: against the database directly, "me" is the account this CLI's
+/// writes are attributed to, the same one the audit log records.
+fn local_assignment(
+    conn: &rusqlite::Connection,
+    names: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
+    let Some(mut names) = names else {
+        return Ok(None);
+    };
+    let caller: Option<String> = queries::assignees::actor(conn)
+        .map(|id| queries::users::get_user_by_id(conn, id).map(|user| user.username))
+        .transpose()?;
+    queries::assignees::resolve_me(&mut names, caller.as_deref())?;
+    Ok(Some(names))
+}
+
 fn issue(
     pool: &DbPool,
     action: &IssueAction,
@@ -236,6 +252,7 @@ fn issue(
             module,
             label,
             workable,
+            assignee,
             limit,
         } => {
             let conn = pool.read()?;
@@ -255,6 +272,8 @@ fn issue(
                     module_id,
                     label: label.clone(),
                     workable: if *workable { Some(true) } else { None },
+                    assignee: assignee.clone(),
+                    caller_user_id: queries::assignees::actor(&conn),
                     limit: *limit,
                     ..Default::default()
                 },
@@ -289,6 +308,7 @@ fn issue(
             priority,
             module,
             labels,
+            assign,
         } => {
             let conn = pool.write()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
@@ -310,6 +330,7 @@ fn issue(
                     priority: priority.parse()?,
                     module_id,
                     labels: label_list,
+                    assignees: local_assignment(&conn, assignment_arg(assign.as_deref(), false))?,
                     // LIF-409: the description's attachment references are
                     // linked by `create_issue` itself. A direct-SQL caller is
                     // past every gate already, so every reference that names a
@@ -335,6 +356,8 @@ fn issue(
             priority,
             module,
             labels,
+            assign,
+            unassign,
         } => {
             let conn = pool.write()?;
             let id = queries::resolve_identifier(&conn, identifier)?;
@@ -361,6 +384,10 @@ fn issue(
                     // skips (no clear), so map Some(id) -> Some(Some(id)).
                     module_id: module_id.map(Some),
                     labels: label_list,
+                    assignees: local_assignment(
+                        &conn,
+                        assignment_arg(assign.as_deref(), *unassign),
+                    )?,
                     // LIF-409: see `issue create`. An edit that drops a
                     // reference drops its link, same as every other backend.
                     attachments: AttachmentActor::TrustedLocal,
@@ -1158,6 +1185,7 @@ mod tests {
                 priority: "high".into(),
                 module: None,
                 labels: None,
+                assign: None,
             },
         };
         run(&pool, &cmd, false, None).unwrap();
@@ -1186,6 +1214,8 @@ mod tests {
                 priority: None,
                 module: None,
                 labels: None,
+                assign: None,
+                unassign: false,
             },
         };
         run(&pool, &cmd, false, None).unwrap();
@@ -1237,9 +1267,108 @@ mod tests {
                 label: None,
                 workable: false,
                 limit: None,
+                assignee: None,
             },
         };
         run(&pool, &cmd, false, None).unwrap();
+    }
+
+    /// LIF-147: `--assign`, `--unassign` and `--assignee` against the
+    /// database directly.
+    #[test]
+    fn exec_issue_assignment_flags() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        pool.write()
+            .unwrap()
+            .execute(
+                "INSERT INTO users (username, email, password_hash, is_admin)
+                 VALUES ('alice', 'alice@test.local', 'x', 1)",
+                [],
+            )
+            .unwrap();
+        let read = |identifier: &str| {
+            let conn = pool.read().unwrap();
+            let issue = queries::get_issue(
+                &conn,
+                queries::resolve_identifier(&conn, identifier).unwrap(),
+            )
+            .unwrap();
+            (
+                issue.needs_human,
+                issue
+                    .assignees
+                    .into_iter()
+                    .map(|a| a.username)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let create = Command::Issue {
+            action: IssueAction::Create {
+                project: "TST".into(),
+                title: "Decide".into(),
+                description: String::new(),
+                status: "todo".into(),
+                priority: "none".into(),
+                module: None,
+                labels: None,
+                assign: Some("human".into()),
+            },
+        };
+        run(&pool, &create, false, None).unwrap();
+        assert_eq!(read("TST-1"), (true, vec![]));
+
+        let update = |assign: Option<&str>, unassign: bool| Command::Issue {
+            action: IssueAction::Update {
+                identifier: "TST-1".into(),
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                module: None,
+                labels: None,
+                assign: assign.map(Into::into),
+                unassign,
+            },
+        };
+        run(&pool, &update(Some("alice"), false), false, None).unwrap();
+        assert_eq!(read("TST-1"), (true, vec!["alice".to_string()]));
+
+        let list = |filter: &str| {
+            let conn = pool.read().unwrap();
+            queries::list_issues(
+                &conn,
+                &ListIssuesQuery {
+                    assignee: Some(filter.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .len()
+        };
+        assert_eq!(list("alice"), 1);
+        run(
+            &pool,
+            &Command::Issue {
+                action: IssueAction::List {
+                    project: "TST".into(),
+                    status: None,
+                    priority: None,
+                    module: None,
+                    label: None,
+                    workable: false,
+                    assignee: Some("alice".into()),
+                    limit: None,
+                },
+            },
+            true,
+            None,
+        )
+        .unwrap();
+
+        run(&pool, &update(None, true), false, None).unwrap();
+        assert_eq!(read("TST-1"), (false, vec![]));
+        assert_eq!(list("none"), 1);
     }
 
     #[test]
@@ -1673,6 +1802,7 @@ mod tests {
                 priority: "none".into(),
                 module: None,
                 labels: Some("bug,urgent".into()),
+                assign: None,
             },
         };
         run(&pool, &cmd, false, None).unwrap();
@@ -1834,6 +1964,7 @@ mod tests {
                     priority: "none".into(),
                     module: None,
                     labels: None,
+                    assign: None,
                 },
             },
             false,
@@ -1864,6 +1995,8 @@ mod tests {
                     priority: None,
                     module: None,
                     labels: None,
+                    assign: None,
+                    unassign: false,
                 },
             },
             false,
@@ -1888,6 +2021,8 @@ mod tests {
                     priority: None,
                     module: None,
                     labels: None,
+                    assign: None,
+                    unassign: false,
                 },
             },
             false,
@@ -2058,6 +2193,7 @@ mod tests {
                     priority: "none".into(),
                     module: None,
                     labels: None,
+                    assign: None,
                 },
             },
             false,

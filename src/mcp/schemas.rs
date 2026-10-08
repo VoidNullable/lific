@@ -80,6 +80,10 @@ pub struct ListIssuesInput {
         description = "Several statuses at once: backlog, todo, active, done, cancelled, or all. Not together with status"
     )]
     pub statuses: Option<Vec<String>>,
+    #[schemars(
+        description = "Assignment: none (free for agents), human (needs a person), me, or a username"
+    )]
+    pub assignee: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -152,6 +156,10 @@ pub struct CreateIssueInput {
     #[schemars(description = "Target/due date (ISO 8601 date, e.g. 2026-06-15)")]
     pub target_date: Option<String>,
     #[schemars(
+        description = "Who must do it: [\"human\"] for any person, or usernames (\"me\" is you). Omit to leave it to agents."
+    )]
+    pub assignees: Option<Vec<String>>,
+    #[schemars(
         description = "Create up to 50 issues atomically instead: each item takes the fields above except project. Only project may accompany it.",
         schema_with = "create_issue_items_schema"
     )]
@@ -183,6 +191,7 @@ pub struct CreateIssueItem {
     pub labels: Option<Vec<String>>,
     pub start_date: Option<String>,
     pub target_date: Option<String>,
+    pub assignees: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -212,6 +221,10 @@ pub struct UpdateIssueInput {
         description = "Optional concurrency check: the 'seq' you last read for this issue. The update is refused if the issue has changed since. Omit for last-writer-wins."
     )]
     pub expected_seq: Option<i64>,
+    #[schemars(
+        description = "Replace who must do it: [] frees it for agents, [\"human\"] any person, or usernames (\"me\" is you)"
+    )]
+    pub assignees: Option<Vec<String>>,
     #[schemars(
         description = "Completion evidence (markdown), only with status=done. Saved as a verification comment."
     )]
@@ -243,6 +256,8 @@ pub struct BulkUpdateInput {
     pub set_priority: Option<String>,
     #[schemars(description = "New module (by name) to set")]
     pub set_module: Option<String>,
+    #[schemars(description = "Replace assignment, as in update_issue assignees")]
+    pub set_assignees: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

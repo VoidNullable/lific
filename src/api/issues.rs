@@ -13,8 +13,11 @@ use super::{filter_visible, retain_visible_relations, with_read, with_write};
 pub(super) async fn list_issues(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Query(q): Query<ListIssuesQuery>,
+    Query(mut q): Query<ListIssuesQuery>,
 ) -> Result<Json<Vec<Issue>>, LificError> {
+    if q.assignee.is_some() {
+        q.caller_user_id = caller_id(&db, &identity)?;
+    }
     if let Some(pid) = q.project_id {
         authz::require_role(&db, &identity, pid, Role::Viewer)?;
         let mut issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
@@ -30,6 +33,56 @@ pub(super) async fn list_issues(
     })?;
     issues = filter_visible(issues, &visible, |i| Some(i.project_id));
     Ok(Json(issues))
+}
+
+/// LIF-147: the account `me` means. A bot's "me" is its owner, as in MCP.
+fn caller_id(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+) -> Result<Option<i64>, LificError> {
+    let user = identity.as_ref().map(|identity| identity.user.clone());
+    with_read(db, |conn| {
+        Ok(authz::effective_user(conn, &user).map(|u| u.id))
+    })
+}
+
+/// LIF-147: replace `me` in a requested assignment with the caller's
+/// username, on the connection that writes it.
+fn resolve_me(
+    conn: &rusqlite::Connection,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    names: Option<&mut Vec<String>>,
+) -> Result<(), LificError> {
+    let Some(names) = names else {
+        return Ok(());
+    };
+    let user = identity.as_ref().map(|identity| identity.user.clone());
+    let caller = authz::effective_user(conn, &user).map(|u| u.username);
+    crate::db::queries::assignees::resolve_me(names, caller.as_deref())
+}
+
+/// LIF-147/LIF-506: what is waiting on the caller across every project they
+/// can see. Open issues only (not done or cancelled), newest activity first,
+/// at most [`ATTENTION_LIMIT`] per group.
+pub(super) async fn my_attention(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<crate::db::queries::assignees::Attention>, LificError> {
+    super::require_user(&identity)?;
+    let user_id = caller_id(&db, &identity)?
+        .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
+    let mut attention = with_read(&db, |conn| {
+        crate::db::queries::assignees::attention(conn, user_id, visible.as_ref())
+    })?;
+    for group in [
+        &mut attention.assigned,
+        &mut attention.human,
+        &mut attention.waiting,
+    ] {
+        retain_visible_relations(&db, &identity, group)?;
+    }
+    Ok(Json(attention))
 }
 
 pub(super) async fn get_issue(
@@ -75,6 +128,7 @@ pub(super) async fn create_issue(
         // may be linked is read on the connection that writes those links,
         // inside one immediate transaction: no revocation can slip between.
         authz::require_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
+        resolve_me(conn, &identity, input.assignees.as_mut())?;
         crate::db::queries::create_issue(conn, &input)
     })?;
     realtime.send_with_seq(
@@ -120,6 +174,7 @@ pub(super) fn commit_issue_update(
         // and writing below are the same project by construction.
         let project_id = crate::db::queries::get_issue(conn, id)?.project_id;
         authz::require_role_conn(conn, identity, project_id, Role::Maintainer)?;
+        resolve_me(conn, identity, input.assignees.as_mut())?;
         // LIF-262: `update_issue` re-scans the stored description and
         // reconciles links in the same savepoint as the edit.
         crate::db::queries::update_issue(conn, id, &input)
@@ -1224,3 +1279,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "issue_assignees_tests.rs"]
+mod assignee_tests;

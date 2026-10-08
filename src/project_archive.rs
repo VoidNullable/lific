@@ -253,6 +253,13 @@ const SPECS: &[Spec] = &[
         columns: "id,issue_id,kind,username,earliest,latest,note,created_at",
         scope: "issue_id IN (SELECT id FROM issues WHERE project_id = ?1)",
     },
+    // LIF-147. Same by-name binding as waits; a NULL username is the
+    // "any human" mark. See `insert_assignee`.
+    Spec {
+        name: "issue_assignees",
+        columns: "id,issue_id,username,created_at",
+        scope: "issue_id IN (SELECT id FROM issues WHERE project_id = ?1)",
+    },
     Spec {
         name: "page_issue_links",
         columns: "page_id,issue_id",
@@ -536,6 +543,8 @@ fn read_table(
             format!("COALESCE(imported_author, (SELECT COALESCE(NULLIF(display_name,''), username) || ' (imported)' FROM users WHERE id = {}.{actor}), 'Unknown author (imported)')", s.name)
         } else if s.name == "issue_waits" && c == "username" {
             "(SELECT username FROM users WHERE id = issue_waits.user_id)".to_string()
+        } else if s.name == "issue_assignees" && c == "username" {
+            "(SELECT username FROM users WHERE id = issue_assignees.user_id)".to_string()
         } else { c.to_string() }
     }).collect::<Vec<_>>().join(",");
     let sql = format!(
@@ -1075,7 +1084,7 @@ fn upgrade_manifest(m: &mut Manifest) {
 
 /// Tables added after format v1 shipped. An archive from an older Lific
 /// lacks them, which means "none of these rows", not a damaged archive.
-const OPTIONAL_TABLES: &[&str] = &["issue_waits"];
+const OPTIONAL_TABLES: &[&str] = &["issue_waits", "issue_assignees"];
 
 fn backfill_optional_tables(m: &mut Manifest) {
     for name in OPTIONAL_TABLES {
@@ -1173,6 +1182,90 @@ fn insert_wait(conn: &Connection, row: &Row, external: &mut RewriteState) -> Res
             value("note")?,
             value("created_at")?,
         ],
+    )?;
+    Ok(())
+}
+
+/// An issue's assignment rows must form one of the three states: a single
+/// "any human" row (NULL username), or distinct usernames.
+fn validate_assignee_rows(m: &Manifest) -> Result<()> {
+    let s = spec("issue_assignees")?;
+    let mut human = BTreeSet::new();
+    let mut named = BTreeSet::new();
+    for row in m.rows("issue_assignees") {
+        let issue = number(s.get(row, "issue_id"))?;
+        match s.get(row, "username") {
+            Value::Null => {
+                if !human.insert(issue) {
+                    return Err(invalid("duplicate human assignment"));
+                }
+            }
+            value => {
+                if !named.insert((issue, text(value)?.to_lowercase())) {
+                    return Err(invalid("duplicate assignee"));
+                }
+            }
+        }
+    }
+    if named.iter().any(|(issue, _)| human.contains(issue)) {
+        return Err(invalid(
+            "an issue is assigned to a human and to named people",
+        ));
+    }
+    Ok(())
+}
+
+/// Insert one imported assignment, binding a named person to the active
+/// human account with that username. Without one, the issue still needs a
+/// person, so it is marked for any human and the name is reported;
+/// [`settle_imported_assignments`] drops that mark again if another named
+/// person on the same issue did bind.
+fn insert_assignee(conn: &Connection, row: &Row, external: &mut RewriteState) -> Result<()> {
+    let s = spec("issue_assignees")?;
+    let user_id: Option<i64> = match s.get(row, "username").as_str() {
+        None => None,
+        Some(username) => {
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM users
+                      WHERE username = ?1 COLLATE NOCASE AND is_active = 1 AND is_bot = 0",
+                    [username],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if found.is_none() {
+                external.record(&[
+                    "issue_assignees: no active person named ",
+                    username,
+                    " on this instance; marked for any human instead",
+                ])?;
+            }
+            found
+        }
+    };
+    let value = |name: &str| sql_value(s.get(row, name));
+    conn.execute(
+        "INSERT OR IGNORE INTO issue_assignees (id, issue_id, user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            value("id")?,
+            value("issue_id")?,
+            user_id,
+            value("created_at")?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Keep the human mark and named people exclusive after an import fell
+/// back to the mark for an unknown name.
+fn settle_imported_assignments(conn: &Connection, project: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM issue_assignees
+          WHERE user_id IS NULL
+            AND issue_id IN (SELECT id FROM issues WHERE project_id = ?1)
+            AND issue_id IN (SELECT issue_id FROM issue_assignees WHERE user_id IS NOT NULL)",
+        [project],
     )?;
     Ok(())
 }
@@ -1383,6 +1476,7 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
         return Err(invalid("unreferenced blob"));
     }
     validate_wait_rows(m)?;
+    validate_assignee_rows(m)?;
     let linked: BTreeSet<i64> = m
         .rows("attachment_links")
         .iter()
@@ -1868,11 +1962,14 @@ pub fn import_with(
                 let row = imported_row(s, original, &maps, &mut external)?;
                 if s.name == "issue_waits" {
                     insert_wait(&tx, &row, &mut external)?;
+                } else if s.name == "issue_assignees" {
+                    insert_assignee(&tx, &row, &mut external)?;
                 } else {
                     insert_row(&tx, s, &row)?;
                 }
             }
         }
+        settle_imported_assignments(&tx, project)?;
         // Preserve the source timestamp while assigning the destination lead.
         tx.execute("UPDATE projects SET lead_user_id = ?1 WHERE id = ?2", params![admin, project])?;
         result.external_references = external.references.into_iter().collect();
@@ -1948,3 +2045,6 @@ mod comment_kind_tests;
 
 #[cfg(test)]
 mod waits_tests;
+
+#[cfg(test)]
+mod assignees_tests;

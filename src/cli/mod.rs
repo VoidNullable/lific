@@ -54,6 +54,15 @@ pub(super) fn owned_labels(value: Option<&str>) -> Option<Vec<String>> {
     value.map(|value| split_csv(value).map(str::to_owned).collect())
 }
 
+/// LIF-147: `--assign a,b` or `--unassign` as the assignment the API takes.
+/// `None` leaves it unchanged; `Some([])` clears it.
+pub(super) fn assignment_arg(assign: Option<&str>, unassign: bool) -> Option<Vec<String>> {
+    if unassign {
+        return Some(Vec::new());
+    }
+    owned_labels(assign)
+}
+
 /// Whether `--url` was typed for `lific mcp`, rather than arriving from
 /// `LIFIC_URL`.
 ///
@@ -767,6 +776,11 @@ pub enum IssueAction {
         #[arg(short, long)]
         workable: bool,
 
+        /// Filter by assignment: none (free for agents), human (needs a
+        /// person), me, or a username
+        #[arg(long)]
+        assignee: Option<String>,
+
         /// Max results (default 50)
         #[arg(long)]
         limit: Option<i64>,
@@ -807,6 +821,11 @@ pub enum IssueAction {
         /// Labels to attach (comma-separated)
         #[arg(short, long)]
         labels: Option<String>,
+
+        /// Who must do it (comma-separated): "human" for any person, or
+        /// usernames ("me" is you). Omit to leave it free for agents
+        #[arg(long, value_name = "WHO")]
+        assign: Option<String>,
     },
 
     /// Update an existing issue
@@ -837,6 +856,15 @@ pub enum IssueAction {
         /// Replace labels (comma-separated)
         #[arg(short, long)]
         labels: Option<String>,
+
+        /// Replace who must do it (comma-separated): "human" for any person,
+        /// or usernames ("me" is you)
+        #[arg(long, value_name = "WHO", conflicts_with = "unassign")]
+        assign: Option<String>,
+
+        /// Clear the assignment so any agent may take the issue
+        #[arg(long)]
+        unassign: bool,
     },
 
     /// Link two issues with a relation (e.g. LIF-1 blocks LIF-2)
@@ -2576,10 +2604,12 @@ mod tests {
                         module,
                         label,
                         workable,
+                        assignee,
                         limit,
                     },
             } => {
                 assert_eq!(project, "LIF");
+                assert!(assignee.is_none());
                 assert!(status.is_none());
                 assert!(priority.is_none());
                 assert!(module.is_none());

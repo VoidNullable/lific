@@ -43,6 +43,8 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 duplicates: Vec::new(),
                 duplicated_by: Vec::new(),
                 waits: Vec::new(),
+                needs_human: false,
+                assignees: Vec::new(),
             })
         })
         .map_err(|e| match e {
@@ -141,6 +143,9 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
         .collect::<Result<Vec<String>, _>>()?;
 
     issue.waits = super::waits::list_waits(conn, id)?;
+    let assignment = super::assignees::assignment(conn, id)?;
+    issue.needs_human = assignment.needs_human;
+    issue.assignees = assignment.assignees;
 
     Ok(issue)
 }
@@ -361,6 +366,20 @@ pub fn list_issues_page(
             param_values.push(Box::new(v.replace('T', " ")));
         }
     }
+    // LIF-147: assignment filter.
+    if let Some(ref value) = q.assignee {
+        let (condition, user) = super::assignees::filter_condition(
+            conn,
+            value,
+            q.caller_user_id,
+            "i",
+            param_values.len() + 1,
+        )?;
+        conditions.push(condition);
+        if let Some(user) = user {
+            param_values.push(Box::new(user));
+        }
+    }
     // LIF-484: a user wait, or a date wait before its earliest day, blocks
     // exactly like an open blocking issue. "Today" is the server's local day
     // (see `waits::today`), bound as a parameter.
@@ -481,6 +500,8 @@ pub fn list_issues_page(
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
             waits: Vec::new(),
+            needs_human: false,
+            assignees: Vec::new(),
         })
     })?;
 
@@ -559,8 +580,13 @@ pub fn list_issues_page(
         // LIF-484: waits are few and always rendered, so every page carries
         // them, in one grouped query.
         let mut waits = super::waits::waits_by_issue(conn, &ids)?;
+        let mut assignments = super::assignees::assignments_by_issue(conn, &ids)?;
         for issue in &mut issues {
             issue.waits = waits.remove(&issue.id).unwrap_or_default();
+            if let Some(assignment) = assignments.remove(&issue.id) {
+                issue.needs_human = assignment.needs_human;
+                issue.assignees = assignment.assignees;
+            }
         }
     }
 
@@ -697,6 +723,15 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
             input.attachments,
             Some(input.project_id),
         )?;
+        if let Some(ref names) = input.assignees {
+            super::assignees::set_assignment(
+                conn,
+                id,
+                input.project_id,
+                names,
+                super::assignees::actor(conn),
+            )?;
+        }
         get_issue(conn, id)
     })
 }
@@ -789,6 +824,15 @@ pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<I
                     params![id, project_id, label_name],
                 )?;
             }
+        }
+        if let Some(ref names) = input.assignees {
+            super::assignees::set_assignment(
+                conn,
+                id,
+                issue.project_id,
+                names,
+                super::assignees::actor(conn),
+            )?;
         }
         // LIF-409: re-scan the stored description (edited or not) and
         // reconcile links, in the same savepoint as the edit itself. Read back

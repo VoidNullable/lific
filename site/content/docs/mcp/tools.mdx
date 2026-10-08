@@ -34,7 +34,7 @@ On an unbound session these calls fail with `project required (this session has 
 
 ### `list_issues`
 
-Lists issues in one project, or across the projects of the people you name with `members`, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then any waits and checklist progress.
+Lists issues in one project, or across the projects of the people you name with `members`, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then any waits, who must do it, and checklist progress.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -56,6 +56,7 @@ Lists issues in one project, or across the projects of the people you name with 
 | `offset` | `integer` | No | Zero-based. |
 | `members` | `string[]` | No | Issues in every project you can see where any of these users has a role. `"me"` is you; name others by username, with or without `@`. |
 | `roles` | `string[]` | No | The roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
+| `assignee` | `string` | No | `none` (free for agents), `human` (a person must do it), `me`, or a username. Works with `members` too. |
 
 `workable` and `blocked` are independent filters, not opposites. A closed issue with an open blocker is `blocked` and not `workable`; an open issue with no blockers is `workable` and not `blocked`. A cancelled blocker still blocks, and a deleted one no longer counts. Passing `false` to either is the same as omitting it. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
 
@@ -70,7 +71,7 @@ Every row that has waits carries one token per wait, whatever the filters:
 | `due_since:2026-09-28` | A date wait whose window has started. It no longer blocks. |
 | `overdue_since:2026-09-30` | A date wait whose last day has passed, dated from the day after it. It no longer blocks. |
 
-Notes are left out of the tokens; `get_issue` prints them. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker.
+Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker.
 
 #### Your work across projects
 
@@ -96,7 +97,7 @@ With `members`, the listing matches the web home page's "My active issues": `act
 
 ### `get_issue`
 
-Returns one issue: title, status, priority, module, labels, checklist progress, relations, waits, description and a window of its comments.
+Returns one issue: title, status, priority, module, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -104,6 +105,8 @@ Returns one issue: title, status, priority, module, labels, checklist progress, 
 | `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. |
 
 Relation lines include each related issue's current status, for example `Blocked by: APP-42 (done)`.
+
+An issue a person must do has an `Assigned: human (a person must do this)` or `Assigned: @ada, @bob (a person must do this)` line. An unassigned issue has none.
 
 When the description contains a Markdown task list, a `Checklist: 3/5 done` line follows the status and labels. A task item is a list item (`-`, `*`, `+`, `1.` or `1)`) that starts with `[ ]`, `[x]` or `[X]`, nested or not. Items inside fenced code blocks are not counted, so a task list quoted as an example does not become the issue's checklist.
 
@@ -133,6 +136,7 @@ Creates an issue, or up to 50 at once, and returns the new identifiers.
 | `labels` | `string[]` | No | Label names. A name that matches no label in the project is ignored. |
 | `start_date` | `string` | No | ISO 8601 date, e.g. `2026-06-01`. |
 | `target_date` | `string` | No | ISO 8601 date, e.g. `2026-06-15`. |
+| `assignees` | `string[]` | No | Who must do it: `["human"]` for any person, or usernames (`"me"` is you, or the person who connected you). Omit to leave it free for agents. See [Assignment](/docs/concepts/issues#assignment). |
 | `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project`. |
 
 Attachment links (`/api/attachments/12`) in the description are linked to the new issue.
@@ -157,6 +161,7 @@ Changes the fields you pass and leaves the rest alone. Text fields are replaced 
 | `start_date` | `string` | No | ISO 8601 date. |
 | `target_date` | `string` | No | ISO 8601 date. |
 | `expected_seq` | `integer` | No | Concurrency check. The update is refused if the issue's `seq` is no longer this value. Omit for last-writer-wins. |
+| `assignees` | `string[]` | No | Replaces who must do it. `[]` frees it for agents, `["human"]` marks it for any person, usernames name people. |
 | `evidence` | `string` | No | How the work was verified, in Markdown. Only with `status: "done"` on an issue that is not already done. Saved as a verification comment. |
 
 A refused `expected_seq` returns an error naming the current `seq` and a one-line summary of the issue's current state. Moving an issue to or from `done` completes or reopens the plan steps that mirror it, and the response lists those steps.
@@ -179,6 +184,7 @@ Sets the same fields on every issue in a project that matches the filters, in on
 | `set_status` | `string` | No | Status to set. |
 | `set_priority` | `string` | No | Priority to set. |
 | `set_module` | `string` | No | Module to set, by name. |
+| `set_assignees` | `string[]` | No | Assignment to set, as in `update_issue`'s `assignees`. |
 
 With no filters, every issue in the project matches. At most 500 matching issues are selected per call; narrow the filters when more match. The batch is all or nothing: if any single update fails, none are applied.
 

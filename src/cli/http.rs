@@ -32,7 +32,7 @@ use super::weblinks::{
 };
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
-    PageAction, ProjectAction, owned_labels, render,
+    PageAction, ProjectAction, assignment_arg, owned_labels, render,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -415,6 +415,7 @@ impl HttpBackend {
                 module,
                 label,
                 workable,
+                assignee,
                 limit,
             } => {
                 let project_id = self.project_id(project).await?;
@@ -435,6 +436,9 @@ impl HttpBackend {
                         .as_deref()
                         .map(|value| ("label", Cow::Borrowed(value))),
                     workable.then_some(("workable", Cow::Borrowed("true"))),
+                    assignee
+                        .as_deref()
+                        .map(|value| ("assignee", Cow::Borrowed(value))),
                     limit.map(|value| ("limit", Cow::Owned(value.to_string()))),
                 ]
                 .into_iter()
@@ -454,6 +458,7 @@ impl HttpBackend {
                 priority,
                 module,
                 labels,
+                assign,
             } => {
                 let project_id = self.project_id(project).await?;
                 let module_id = match module {
@@ -471,6 +476,7 @@ impl HttpBackend {
                     target_date: None,
                     labels: owned_labels(labels.as_deref()).unwrap_or_default(),
                     source: None,
+                    assignees: assignment_arg(assign.as_deref(), false),
                     // Never serialized; the server names its own actor from
                     // the authenticated caller (LIF-409).
                     ..Default::default()
@@ -485,6 +491,8 @@ impl HttpBackend {
                 priority,
                 module,
                 labels,
+                assign,
+                unassign,
             } => {
                 let id = self.issue_id(identifier).await?;
                 let module_id = match module {
@@ -510,6 +518,7 @@ impl HttpBackend {
                     // LIF-441: the CLI has no read-modify-write cycle to
                     // guard, so it stays on last-writer-wins.
                     expected_seq: None,
+                    assignees: assignment_arg(assign.as_deref(), *unassign),
                     // See the create path: server-side, never sent.
                     ..Default::default()
                 };
@@ -2926,6 +2935,81 @@ mod tests {
         fixture.server.abort();
     }
 
+    /// LIF-147: the HTTP backend sends `--assign` and `--assignee` and the
+    /// server resolves "me" to the caller.
+    #[tokio::test]
+    async fn assigns_issues_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let created = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Create {
+                        project: "TST".into(),
+                        title: "Mine".into(),
+                        description: String::new(),
+                        status: "todo".into(),
+                        priority: "none".into(),
+                        module: None,
+                        labels: None,
+                        assign: Some("me".into()),
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["needs_human"], true);
+        let me = created["assignees"][0]["username"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let listed = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::List {
+                        project: "TST".into(),
+                        status: None,
+                        priority: None,
+                        module: None,
+                        label: None,
+                        workable: false,
+                        assignee: Some(me),
+                        limit: None,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["title"], "Mine");
+
+        let identifier = created["identifier"].as_str().unwrap().to_owned();
+        let cleared = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Update {
+                        identifier,
+                        title: None,
+                        description: None,
+                        status: None,
+                        priority: None,
+                        module: None,
+                        labels: None,
+                        assign: None,
+                        unassign: true,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared["needs_human"], false);
+        fixture.server.abort();
+    }
+
     #[tokio::test]
     async fn links_and_unlinks_issues_over_http_against_real_api_router() {
         let fixture = spawn_real_api_server().await;
@@ -2941,6 +3025,7 @@ mod tests {
                         priority: "none".into(),
                         module: None,
                         labels: None,
+                        assign: None,
                     },
                 },
                 IssueLinkOutput::Url,
@@ -3625,6 +3710,7 @@ mod tests {
                 label: None,
                 workable: false,
                 limit: None,
+                assignee: None,
             },
         };
 

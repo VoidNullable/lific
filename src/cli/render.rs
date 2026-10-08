@@ -121,15 +121,19 @@ pub fn issue_list(issues: &[Issue], module_name: ModuleName<'_>) -> String {
             .and_then(module_name)
             .map(|name| format!(" ({name})"))
             .unwrap_or_default();
+        let assigned = crate::db::queries::assignees::describe(issue.needs_human, &issue.assignees)
+            .map(|who| format!(" for {who}"))
+            .unwrap_or_default();
         w!(
             out,
-            "  {:<8} {} | {} | {}{}{}",
+            "  {:<8} {} | {} | {}{}{}{}",
             issue.identifier,
             fmt_status(issue.status),
             fmt_priority(issue.priority),
             issue.title,
             bracketed_labels(&issue.labels),
-            module
+            module,
+            assigned
         );
     }
     out
@@ -145,6 +149,10 @@ pub fn issue_detail(issue: &Issue, module_name: ModuleName<'_>) -> String {
     }
     if let Some(name) = issue.module_id.and_then(module_name) {
         w!(out, "  Module:   {name}");
+    }
+    if let Some(who) = crate::db::queries::assignees::describe(issue.needs_human, &issue.assignees)
+    {
+        w!(out, "  For:      {who}");
     }
     relation_lines(&mut out, issue);
     if !issue.description.is_empty() {
@@ -583,6 +591,8 @@ mod tests {
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
             waits: Vec::new(),
+            needs_human: false,
+            assignees: Vec::new(),
         }
     }
 

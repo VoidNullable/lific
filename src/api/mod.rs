@@ -161,6 +161,7 @@ fn router_impl(
             "/api/issues",
             get(issues::list_issues).post(issues::create_issue),
         )
+        .route("/api/issues/attention", get(issues::my_attention))
         .route(
             "/api/issues/{id}",
             get(issues::get_issue)

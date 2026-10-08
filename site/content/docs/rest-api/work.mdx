@@ -19,6 +19,7 @@ Every query parameter is optional:
 | `status`, `priority` | One exact value. |
 | `module_id` | Only this module. |
 | `label` | Only issues carrying this label name. |
+| `assignee` | `none` (free for agents), `human` (a person must do it), `me`, or a username. |
 | `workable` | `true`: open issues whose blockers are all `done` and that have no wait still holding. |
 | `blocked` | `true`: issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. |
 | `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
@@ -27,13 +28,13 @@ Every query parameter is optional:
 | `order` | `asc` (default) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 
-The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads.
+The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads. Every issue carries `needs_human`, and an issue that names people carries them in `assignees` as `{user_id, username, display_name}`; see [Assignment](/docs/concepts/issues#assignment).
 
 ### POST `/api/issues`
 
 Creates an issue. **Maintainer.**
 
-Body: `project_id` and `title`, then optionally `description` (Markdown), `status` (default `backlog`), `priority` (default `none`), `module_id`, `start_date` and `target_date` (`YYYY-MM-DD`), `labels` and `source`. `labels` are names of labels that already exist in the project; a name that matches none is ignored. A module from another project is `400`.
+Body: `project_id` and `title`, then optionally `description` (Markdown), `status` (default `backlog`), `priority` (default `none`), `module_id`, `start_date` and `target_date` (`YYYY-MM-DD`), `labels`, `source` and `assignees` (`["human"]`, or usernames with `"me"` for you). `labels` are names of labels that already exist in the project; a name that matches none is ignored. A module from another project is `400`.
 
 Attachments referenced from the description as `/api/attachments/{id}` are linked to the new issue if you uploaded them, are an administrator, or they are already linked somewhere in the same project.
 
@@ -46,6 +47,10 @@ curl -X POST "$LIFIC/api/issues" \
   -d '{"project_id":1,"title":"Crash on empty cart","priority":"urgent","labels":["bug"]}'
 ```
 
+### GET `/api/issues/attention`
+
+What is waiting on you, across every project you can see: `{"assigned": [...], "human": [...], "waiting": [...]}`, each an `Issue` array of open issues (not `done` or `cancelled`), most recently updated first, at most 50. `assigned` names you, `human` is marked for any person, and `waiting` has a [wait](#waits) on you. An issue can be in `waiting` and one of the others. For an agent's key, "you" is the person who connected it. The web home page shows this.
+
 ### GET `/api/issues/{id}`
 
 One issue with its relations. **Viewer.** An issue in the trash is `404`.
@@ -56,7 +61,7 @@ The same, by identifier such as `APP-42`. Case does not matter. **Viewer.**
 
 ### PUT `/api/issues/{id}`
 
-Changes an issue. **Maintainer.** Every field is optional: `title`, `description`, `status`, `priority`, `module_id` (null unassigns), `sort_order`, `start_date`, `target_date`, `labels` and `expected_seq`. An issue cannot move between projects.
+Changes an issue. **Maintainer.** Every field is optional: `title`, `description`, `status`, `priority`, `module_id` (null unassigns), `sort_order`, `start_date`, `target_date`, `labels`, `assignees` and `expected_seq`. An issue cannot move between projects. `assignees`, when present, replaces the assignment: `[]` frees the issue for agents. Naming a bot, someone who cannot see the project, or `human` together with names is `400`.
 
 `labels`, when present, becomes the complete label set; leave it out to keep the current labels. Send `expected_seq` to refuse the update with `409` if somebody else changed the issue since you read it; see [Concurrent edits](/docs/rest-api#concurrent-edits-and-expected_seq).
 
