@@ -27,6 +27,13 @@ import {
   AGENTS_STILL_H,
   AGENTS_STILL_FRAMES,
 } from "./AgentsStill";
+import {
+  AgentsStill,
+  AGENTS_STILL_W,
+  AGENTS_STILL_H,
+  AGENTS_STILL_FRAMES,
+} from "./AgentsStill";
+import { HumansStill, HUMANS_STILL_W, HUMANS_STILL_H } from "./HumansStill";
 import { TOTAL_FRAMES } from "./timing";
 import { FPS, WIDTH, HEIGHT } from "./theme";
 import "./index.css";
@@ -86,6 +93,22 @@ export const RemotionRoot: React.FC = () => {
         fps={FPS}
         width={AGENTS_STILL_W}
         height={AGENTS_STILL_H}
+      />
+      {/* Landing-page "For agents" still: render and crop commands in AgentsStill.tsx */}
+      <Composition
+        id="AgentsStill"
+        component={AgentsStill}
+        durationInFrames={AGENTS_STILL_FRAMES}
+        fps={FPS}
+        width={AGENTS_STILL_W}
+        height={AGENTS_STILL_H}
+      />
+      {/* Landing-page "For humans" still: render and crop commands in HumansStill.tsx */}
+      <Still
+        id="HumansStill"
+        component={HumansStill}
+        width={HUMANS_STILL_W}
+        height={HUMANS_STILL_H}
       />
       {/* README hero image: npx remotion still Hero ../LificHero.png */}
       <Still id="Hero" component={Hero} width={1920} height={1080} />
