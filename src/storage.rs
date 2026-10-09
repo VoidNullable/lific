@@ -102,6 +102,9 @@ pub(crate) mod test_alloc {
 /// nothing that enumerates blobs can mistake it for one.
 pub(crate) const STORE_LOCK_FILE: &str = ".lific-attachments.lock";
 
+/// Directory name for archived projects' files, in the data dir.
+pub(crate) const ARCHIVED_PROJECTS_DIR: &str = "archived-projects";
+
 fn lock_is_busy(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         return true;
@@ -124,6 +127,10 @@ struct StorePaths {
     /// Where the cross-process lock lives. Held separately from `dir` because
     /// it must survive `dir` being replaced wholesale by a restore.
     lock_path: PathBuf,
+    /// Archived projects' files (see [`crate::archived_projects`]). Lives
+    /// with the store because it shares the store's lock: a dump scans it
+    /// under that lock, and archiving writes it under that lock.
+    archived_dir: PathBuf,
 }
 
 /// Handle to the on-disk attachments directory. Cheap to clone (just shared
@@ -204,6 +211,7 @@ impl AttachmentStore {
             paths: Arc::new(StorePaths {
                 dir: data_dir.join("attachments"),
                 lock_path: data_dir.join(STORE_LOCK_FILE),
+                archived_dir: data_dir.join(ARCHIVED_PROJECTS_DIR),
             }),
             operation_lock: Arc::new(Mutex::new(())),
         }
@@ -224,6 +232,7 @@ impl AttachmentStore {
         Self {
             paths: Arc::new(StorePaths {
                 lock_path: dir.join(STORE_LOCK_FILE),
+                archived_dir: dir.join(ARCHIVED_PROJECTS_DIR),
                 dir,
             }),
             operation_lock: Arc::new(Mutex::new(())),
@@ -235,6 +244,13 @@ impl AttachmentStore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn dir(&self) -> &Path {
         &self.paths.dir
+    }
+
+    /// Where archived projects' files live: `<data dir>/archived-projects`
+    /// beside `attachments/`, or inside `dir` for a store built with
+    /// [`Self::new`].
+    pub fn archived_dir(&self) -> &Path {
+        &self.paths.archived_dir
     }
 
     /// Absolute path to the sidecar file for a given content hash. Kept

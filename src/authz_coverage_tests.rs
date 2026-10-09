@@ -430,6 +430,20 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             ("GET", "/api/project-archives"),
             Exempt("describes the caller's own import capability and instance limits"),
         ),
+        // ── Archived projects ──
+        // Archiving removes the project from the instance, so it carries the
+        // delete gate. Listing and unarchiving are instance-level: archived
+        // projects belong to no live project, and unarchiving creates one and
+        // grants a lead membership, like an archive import.
+        (("POST", "/api/projects/{id}/archive"), Gated(ProjectDelete)),
+        (
+            ("GET", "/api/archived-projects"),
+            Exempt("instance admin; archived projects belong to no live project"),
+        ),
+        (
+            ("POST", "/api/archived-projects/{id}/unarchive"),
+            Exempt("instance admin; creates a project, like an archive import"),
+        ),
         // ── Structure: modules / labels / folders ──
         (("GET", "/api/modules"), Gated(Viewer)),
         (("POST", "/api/modules"), Gated(StructureRole)),

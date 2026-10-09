@@ -304,6 +304,12 @@ impl Spec {
         row[self.index(name)] = value;
     }
 }
+/// The `WHERE` clause (bound to the project ID as `?1`) that decides which
+/// rows of `table` belong to a project's archive.
+pub(crate) fn table_scope(table: &str) -> Result<&'static str> {
+    Ok(spec(table)?.scope)
+}
+
 fn spec(name: &str) -> Result<&'static Spec> {
     SPECS
         .iter()
@@ -1001,59 +1007,80 @@ fn export_inner(
         let tx = conn.unchecked_transaction()?;
         let project_id = resolve(&tx)?;
         authorize(&tx)?;
-        let m = collect_manifest_by_id(&tx, project_id)?;
-        let metadata = encode_manifest(&m)?;
-        let parent = out
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
-        let compressed_over = std::rc::Rc::new(std::cell::Cell::new(false));
-        let expanded_over = std::rc::Rc::new(std::cell::Cell::new(false));
-        let written = {
-            let file = BoundedWriter::new(
-                staged.as_file_mut(),
-                limits().max_compressed,
-                &compressed_over,
-            );
-            let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let mut tar = tar::Builder::new(BoundedWriter::new(
-                gzip,
-                limits().max_expanded,
-                &expanded_over,
-            ));
-            (|| {
-                append(&mut tar, "manifest.json", &metadata)?;
-                for blob in &m.blobs {
-                    let bytes =
-                        verified_blob(&store.path_for(&blob.sha256)?, blob.size, &blob.sha256)?;
-                    append(&mut tar, &format!("blobs/{}", blob.sha256), &bytes)?;
-                }
-                tar.into_inner()
-                    .map_err(io)?
-                    .inner
-                    .finish()
-                    .map_err(io)?
-                    .flush()
-                    .map_err(io)
-            })()
-        };
-        if compressed_over.get() {
-            return Err(compressed_too_large());
-        }
-        if expanded_over.get() {
-            return Err(too_large(format!(
-                "archive contents exceed {}",
-                size_label(limits().max_expanded)
-            )));
-        }
-        written?;
-        staged.as_file().sync_all().map_err(io)?;
+        let report = write_archive_locked(&tx, store, project_id, out)?;
         tx.commit()?;
-        staged.persist_noclobber(out).map_err(|e| io(e.error))?;
-        sync_directory(parent)?;
-        report(&m)
+        Ok(report)
     })
+}
+
+/// Write the archive of `project_id` as `conn` currently sees it, publishing
+/// it at `out` (never overwriting). The caller holds the store lock and owns
+/// the transaction, so it decides what the snapshot is: a read snapshot for
+/// an export, or the writer transaction that then deletes the project for an
+/// archive (see [`crate::archived_projects`]).
+pub(crate) fn write_archive_locked(
+    conn: &Connection,
+    store: &AttachmentStore,
+    project_id: i64,
+    out: &Path,
+) -> Result<Report> {
+    let m = collect_manifest_by_id(conn, project_id)?;
+    let metadata = encode_manifest(&m)?;
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+    let compressed_over = std::rc::Rc::new(std::cell::Cell::new(false));
+    let expanded_over = std::rc::Rc::new(std::cell::Cell::new(false));
+    let written = {
+        let file = BoundedWriter::new(
+            staged.as_file_mut(),
+            limits().max_compressed,
+            &compressed_over,
+        );
+        let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(BoundedWriter::new(
+            gzip,
+            limits().max_expanded,
+            &expanded_over,
+        ));
+        (|| {
+            append(&mut tar, "manifest.json", &metadata)?;
+            for blob in &m.blobs {
+                let bytes = verified_blob(&store.path_for(&blob.sha256)?, blob.size, &blob.sha256)?;
+                append(&mut tar, &format!("blobs/{}", blob.sha256), &bytes)?;
+            }
+            tar.into_inner()
+                .map_err(io)?
+                .inner
+                .finish()
+                .map_err(io)?
+                .flush()
+                .map_err(io)
+        })()
+    };
+    if compressed_over.get() {
+        return Err(compressed_too_large());
+    }
+    if expanded_over.get() {
+        return Err(too_large(format!(
+            "archive contents exceed {}",
+            size_label(limits().max_expanded)
+        )));
+    }
+    written?;
+    staged.as_file().sync_all().map_err(io)?;
+    staged.persist_noclobber(out).map_err(|e| io(e.error))?;
+    sync_directory(parent)?;
+    report(&m)
+}
+
+/// Run `operation` with `profile` as the active limits, for callers outside
+/// this module that drive [`write_archive_locked`] themselves.
+pub(crate) fn with_limits<T>(profile: Limits, operation: impl FnOnce() -> T) -> T {
+    let _limits = ActiveLimits::enter(profile);
+    operation()
 }
 
 #[cfg_attr(
@@ -1935,6 +1962,53 @@ pub fn import_with(
     profile: Limits,
     authorize: &dyn Fn(&Connection) -> Result<Grant>,
 ) -> Result<ImportOutcome> {
+    import_with_hooks(pool, store, archive, profile, authorize, &ImportHooks::NONE)
+}
+
+/// The destination IDs an import allocated, keyed by archive table and the
+/// source row ID the archive carried.
+pub(crate) struct ImportedIds<'a> {
+    pub project: i64,
+    maps: &'a IdMaps,
+}
+
+impl ImportedIds<'_> {
+    pub fn get(&self, table: &str, source: i64) -> Option<i64> {
+        self.maps.get(table)?.get(&source).copied()
+    }
+}
+
+type RestoreHook<'a> = &'a dyn Fn(&Connection, &ImportedIds<'_>) -> Result<()>;
+
+/// Extra work inside the import's own transaction, for a caller that knows
+/// more about the project than the portable format carries (an archived
+/// project coming back to the instance it left). Both hooks commit or roll
+/// back with the import.
+pub(crate) struct ImportHooks<'a> {
+    /// Runs with every trigger suspended, after all rows and derived indexes
+    /// exist, so corrections here neither audit nor bump anything.
+    pub restore: RestoreHook<'a>,
+    /// Runs after the lead grant with the grant's actor recorded, so writes
+    /// here are audited as that actor. Last step before the foreign key check
+    /// and the commit.
+    pub finish: RestoreHook<'a>,
+}
+
+impl ImportHooks<'_> {
+    const NONE: ImportHooks<'static> = ImportHooks {
+        restore: &|_, _| Ok(()),
+        finish: &|_, _| Ok(()),
+    };
+}
+
+pub(crate) fn import_with_hooks(
+    pool: &DbPool,
+    store: &AttachmentStore,
+    archive: &Path,
+    profile: Limits,
+    authorize: &dyn Fn(&Connection) -> Result<Grant>,
+    hooks: &ImportHooks<'_>,
+) -> Result<ImportOutcome> {
     let _limits = ActiveLimits::enter(profile);
     let staged = stage(archive)?;
     check_store(store)?;
@@ -1988,6 +2062,8 @@ pub fn import_with(
                 }
             }
         }
+        let ids = ImportedIds { project, maps: &maps };
+        (hooks.restore)(&tx, &ids)?;
         for sql in triggers { tx.execute_batch(&sql)?; }
         // Audit this new local grant, not an imported permission or owner action.
         let prior_actor: (Option<i64>, String) = tx.query_row(
@@ -1996,6 +2072,7 @@ pub fn import_with(
         )?;
         tx.execute("UPDATE _actor_state SET user_id=?1,transport=?2 WHERE id=1", params![grant.actor_user_id, grant.transport.as_str()])?;
         tx.execute("INSERT INTO project_members(project_id,user_id,role) VALUES (?1,?2,'lead')", params![project,admin])?;
+        (hooks.finish)(&tx, &ids)?;
         tx.execute("UPDATE _actor_state SET user_id=?1,transport=?2 WHERE id=1", params![prior_actor.0,prior_actor.1])?;
         let violations: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
         if violations != 0 { return Err(invalid("import would create invalid foreign keys")); }

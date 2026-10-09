@@ -1,5 +1,6 @@
 mod actor;
 mod api;
+mod archived_projects;
 mod auth;
 mod authz;
 #[cfg(test)]

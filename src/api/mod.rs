@@ -1,4 +1,5 @@
 mod activity;
+mod archived_projects;
 /// LIF-418: the MCP attachment tools reuse this module's authorization gates
 /// and filename hygiene verbatim rather than growing a second copy, so the
 /// module is crate-visible even though its handlers stay `pub(super)`.
@@ -398,6 +399,20 @@ fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<D
         .route(
             "/api/project-archives/{identifier}",
             get(project_archives::export_project_archive),
+        )
+        // Archived projects: moved out of the database into one file in the
+        // data dir, and back. See src/api/archived_projects.rs.
+        .route(
+            "/api/projects/{id}/archive",
+            post(archived_projects::archive_project),
+        )
+        .route(
+            "/api/archived-projects",
+            get(archived_projects::list_archived_projects),
+        )
+        .route(
+            "/api/archived-projects/{id}/unarchive",
+            post(archived_projects::unarchive_project),
         )
         // Attachments (LIF-262) — image + file uploads on issues, comments,
         // and pages. The upload route carries its own larger DefaultBodyLimit
