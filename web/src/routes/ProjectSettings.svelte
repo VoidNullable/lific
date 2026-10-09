@@ -37,6 +37,7 @@
   import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
+  import { ageLabel, daysSince, importanceScore } from "../lib/issues/importance";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
@@ -368,35 +369,12 @@
     window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
   }
 
-  // ── Importance heuristic ─────────────────────────────
-  // score = (priorityWeight + age*0.5 + staleness*0.6) * statusMultiplier,
-  // over OPEN issues only. Cheap, O(n), and honest: an old urgent todo that
-  // hasn't moved floats to the top. We never show the number — only the
-  // cause (priority + an age/idle cue).
-  const PRIORITY_WEIGHT: Record<string, number> = { urgent: 100, high: 55, medium: 25, low: 10, none: 4 };
-  const STATUS_MULT: Record<string, number> = { todo: 1.25, active: 1.15, backlog: 1.0 };
-
-  function daysSince(iso: string): number {
-    const t = new Date(iso + "Z").getTime();
-    if (Number.isNaN(t)) return 0;
-    return Math.max(0, Math.floor((Date.now() - t) / 86400000));
-  }
-  function score(i: Issue): number {
-    const pw = PRIORITY_WEIGHT[i.priority] ?? 4;
-    const sm = STATUS_MULT[i.status] ?? 1;
-    return (pw + daysSince(i.created_at) * 0.5 + daysSince(i.updated_at) * 0.6) * sm;
-  }
-  function ageLabel(days: number): string {
-    if (days >= 60) return `${Math.round(days / 30)}mo`;
-    if (days >= 1) return `${days}d`;
-    return "today";
-  }
-
+  // ── Importance heuristic (lib/issues/importance.ts) ──
   const openIssues = $derived(
     issues.filter((i) => i.status === "backlog" || i.status === "todo" || i.status === "active"),
   );
   const ranked = $derived.by(() =>
-    [...openIssues].sort((a, b) => score(b) - score(a)),
+    [...openIssues].sort((a, b) => importanceScore(b) - importanceScore(a)),
   );
   const attention = $derived(ranked.slice(0, 6));
   const moreCount = $derived(Math.max(0, openIssues.length - attention.length));

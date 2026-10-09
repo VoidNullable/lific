@@ -161,6 +161,15 @@
   --strength-weak: #c2492f;
   --strength-fair: #c97a17;
   --strength-strong: var(--success);
+
+  /* Heat ramp (LIF-507): Home's agent queue bar and project freshness.
+     Two greens, two ambers, two red-oranges; never a pure yellow. */
+  --heat-1: #1f8a4c;
+  --heat-2: #3aa865;
+  --heat-3: #c98f26;
+  --heat-4: #d97a26;
+  --heat-5: #d45a2c;
+  --heat-6: #bf3b26;
 }
 
 /* ── Dark mode ───────────────────────────────────────── */
@@ -213,6 +222,13 @@
   --strength-weak: #e06a50;
   --strength-fair: #e0a54a;
   --strength-strong: var(--success);
+
+  --heat-1: #2f9a5a;
+  --heat-2: #55c27c;
+  --heat-3: #d9a441;
+  --heat-4: #e68a3a;
+  --heat-5: #e86a42;
+  --heat-6: #dc4f3a;
 }
 
 /* ── Accent presets (LIF-238) ─────────────────────────

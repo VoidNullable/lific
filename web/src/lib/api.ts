@@ -2414,6 +2414,62 @@ export async function listAllPages() {
   return request<Page[]>("/pages");
 }
 
+/** `GET /api/home/overview` (LIF-507): Home's aggregates across every
+ *  project the caller can see. Days are the caller's local days. */
+export type AgeBucketKey = "week" | "month" | "quarter" | "half" | "older";
+
+export interface AgeBucket {
+  key: AgeBucketKey;
+  total: number;
+  urgent: number;
+  high: number;
+  medium: number;
+  low: number;
+  none: number;
+  /** Unassigned, unblocked, and not already active. */
+  agent_ready: number;
+  /** Assigned to named people or marked for any person. */
+  needs_human: number;
+}
+
+export interface DayCount {
+  /** Local YYYY-MM-DD. */
+  date: string;
+  count: number;
+}
+
+export interface ProjectPulse {
+  project_id: number;
+  open: number;
+  /** UTC timestamp of the project's latest audit entry. */
+  last_activity: string | null;
+}
+
+export interface SinceSummary {
+  agents_opened: number;
+  agents_closed: number;
+  people_opened: number;
+  people_closed: number;
+}
+
+export interface HomeOverview {
+  open_total: number;
+  age_buckets: AgeBucket[];
+  /** Open count at the end of each of the last 91 days, oldest first. */
+  open_trend: DayCount[];
+  projects: ProjectPulse[];
+  /** Null unless the request named `since`. */
+  since: SinceSummary | null;
+  /** Issues the caller or their agents moved to done, last 84 days. */
+  my_done: DayCount[];
+}
+
+export async function getHomeOverview(since: string | null) {
+  const params = new URLSearchParams({ tz: String(-new Date().getTimezoneOffset()) });
+  if (since) params.set("since", since);
+  return request<HomeOverview>(`/home/overview?${params}`);
+}
+
 // ── Insights (LIF-240) ───────────────────────────────────────
 //
 // Per-project analytics tab. One endpoint returns the full payload —
