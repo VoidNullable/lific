@@ -9,6 +9,7 @@ mod auth;
 pub mod comments;
 mod export;
 mod git_hook;
+mod home;
 mod insights;
 mod issues;
 mod members;
@@ -162,6 +163,7 @@ fn router_impl(
             get(issues::list_issues).post(issues::create_issue),
         )
         .route("/api/issues/attention", get(issues::my_attention))
+        .route("/api/home/overview", get(home::home_overview))
         .route(
             "/api/issues/{id}",
             get(issues::get_issue)
