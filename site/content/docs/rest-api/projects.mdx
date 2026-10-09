@@ -46,6 +46,18 @@ Changing the identifier renames every issue, page and plan identifier in the pro
 
 Deletes the project and everything in it, immediately and permanently, including anything in its trash. **Lead**, or **administrator** when enforcement is off. The check is repeated inside the delete transaction. Returns `{"deleted": true}`.
 
+### POST `/api/projects/{id}/archive`
+
+Takes the project out of the instance and keeps it as one compressed file in the data directory. Same permission as deleting: **Lead**, or **administrator** when enforcement is off, checked again inside the transaction. Returns `201` with the `ArchivedProject` below. See [Archiving projects](/docs/archiving-projects).
+
+### GET `/api/archived-projects`
+
+Every archived project, newest first. **Administrator** only, in both modes. Each entry has `id`, `identifier`, `name`, `description`, `emoji`, `file_name`, `size_bytes`, `issue_count`, `page_count`, `archived_at`, `archived_by`, `archived_by_name`, `was_public`, and `file_present`, which is `false` when the file is no longer on disk.
+
+### POST `/api/archived-projects/{id}/unarchive`
+
+Brings the project back from its file. **Administrator** only, in both modes. Returns `{"project_id", "identifier", "was_public"}`. `409` when a live project already has the identifier or the file no longer matches its recorded checksum, `404` when the file is missing, `429` while another archive operation is running.
+
 ### PUT `/api/projects/reorder`
 
 Sets your own sidebar order. Other people's order is unaffected. Body: `ids`, the project ids in the order you want. Ids you leave out keep their relative order after the ones you list. A duplicate or an id you cannot see is `400`. Returns the reordered `Project` array.
