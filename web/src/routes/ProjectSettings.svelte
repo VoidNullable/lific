@@ -13,6 +13,7 @@
     getIssueCounts,
     updateProject,
     deleteProject,
+    archiveProject,
     downloadProjectExport,
     listProjectGroups,
     assignProjectGroup,
@@ -103,6 +104,9 @@
   let deleteConfirmText = $state("");
   let deleting = $state(false);
   let deleteError = $state("");
+  let showArchiveSection = $state(false);
+  let archiving = $state(false);
+  let archiveError = $state("");
   let exportError = $state("");
   let exporting = $state(false);
 
@@ -455,6 +459,19 @@
     const res = await deleteProject(project.id);
     if (res.ok) navigate("/settings");
     else { deleteError = res.error; deleting = false; }
+  }
+
+  async function handleArchive() {
+    if (!project || archiving) return;
+    archiving = true; archiveError = "";
+    const res = await archiveProject(project.id);
+    if (res.ok) {
+      toast(`Archived ${res.data.identifier}. An admin can unarchive it from Settings, Instance.`, { kind: "success" });
+      navigate("/settings");
+    } else {
+      archiveError = res.error;
+      archiving = false;
+    }
   }
 
   async function exportProject() {
@@ -902,6 +919,47 @@
                   </button>
                 </div>
                 {#if identError}<p class="text-caption text-[var(--error)] mt-1.5">{identError}</p>{/if}
+              </div>
+
+              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
+
+              <!-- Archive -->
+              <div>
+                <p class="text-body-sm font-medium text-[var(--text)]">Archive project</p>
+                <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                  Compresses the project into a single file on the server and removes it from Lific.
+                  Nothing is lost: an instance admin can unarchive it from Settings, Instance.
+                </p>
+                {#if !showArchiveSection}
+                  <button
+                    class="mt-2 text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
+                    onclick={() => { showArchiveSection = true; }}
+                  >
+                    Archive this project
+                  </button>
+                {:else}
+                  <p class="text-caption text-[var(--text-muted)] mt-2 mb-2 leading-relaxed">
+                    <strong class="font-mono">{project.identifier}</strong> and its <strong>{total}</strong> issue{total !== 1 ? 's' : ''},
+                    pages, plans, and attachments disappear for everyone until it is unarchived. It comes back private, with its
+                    members and history. Page revision history, saved views, and repository bindings are not kept.
+                  </p>
+                  <div class="flex items-center gap-2">
+                    <button
+                      class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
+                             hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={archiving}
+                      onclick={handleArchive}
+                    >
+                      {archiving ? "Archiving…" : "Archive"}
+                    </button>
+                    <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                            disabled={archiving}
+                            onclick={() => { showArchiveSection = false; archiveError = ''; }}>
+                      Cancel
+                    </button>
+                  </div>
+                {/if}
+                {#if archiveError}<p class="text-caption text-[var(--error)] mt-1.5">{archiveError}</p>{/if}
               </div>
 
               <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>

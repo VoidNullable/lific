@@ -745,6 +745,45 @@ export async function deleteProject(id: number) {
   });
 }
 
+/** A project moved out of the instance into one compressed file in the data
+ *  directory. Unarchiving brings it back. */
+export interface ArchivedProject {
+  id: number;
+  identifier: string;
+  name: string;
+  description: string;
+  emoji: string | null;
+  file_name: string;
+  size_bytes: number;
+  issue_count: number;
+  page_count: number;
+  archived_at: string;
+  archived_by: number | null;
+  archived_by_name: string | null;
+  /** Published when archived. Unarchiving always brings it back private. */
+  was_public: boolean;
+  /** False when the file is gone from disk; such an entry cannot be unarchived. */
+  file_present: boolean;
+}
+
+export interface UnarchivedProject {
+  project_id: number;
+  identifier: string;
+  was_public: boolean;
+}
+
+export async function archiveProject(id: number) {
+  return request<ArchivedProject>(`/projects/${id}/archive`, { method: "POST" });
+}
+
+export async function listArchivedProjects() {
+  return request<ArchivedProject[]>("/archived-projects");
+}
+
+export async function unarchiveProject(id: number) {
+  return request<UnarchivedProject>(`/archived-projects/${id}/unarchive`, { method: "POST" });
+}
+
 /** A user's sidebar project group. `project_ids` carries only projects the
  *  caller can see — the server drops memberships pointing at projects whose
  *  access was revoked, so a group never renders an entry that 403s on click. */
