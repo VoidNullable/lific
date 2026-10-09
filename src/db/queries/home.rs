@@ -274,11 +274,11 @@ fn project_pulse(
     visible: &dyn Fn(Option<i64>) -> bool,
     mut open: HashMap<i64, i64>,
 ) -> Result<Vec<ProjectPulse>, LificError> {
-    // MAX(id) per project walks idx_audit_project instead of the table.
+    // MAX(ts), not MAX(id): an imported project's history arrives with its
+    // original timestamps, so insertion order is not time order.
     let mut stmt = conn.prepare(
-        "SELECT a.project_id, a.ts FROM audit_log a
-          WHERE a.id IN (SELECT MAX(id) FROM audit_log
-                          WHERE project_id IS NOT NULL GROUP BY project_id)",
+        "SELECT project_id, MAX(ts) FROM audit_log
+          WHERE project_id IS NOT NULL GROUP BY project_id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))

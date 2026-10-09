@@ -274,6 +274,32 @@ fn my_done_counts_the_caller_and_their_own_agents_only() {
 }
 
 #[test]
+fn project_freshness_reads_the_latest_timestamp_not_the_latest_row() {
+    let pool = crate::db::open_memory().unwrap();
+    let conn = pool.write().unwrap();
+    let pid = project(&conn, "IMP");
+    issue(&conn, pid, "Recent", Priority::None, 0);
+    conn.execute(
+        "UPDATE audit_log SET ts = '2026-09-01 10:00:00' WHERE project_id = ?1",
+        params![pid],
+    )
+    .unwrap();
+    // An imported row lands later in the table with an older timestamp.
+    conn.execute(
+        "INSERT INTO audit_log (ts, transport, entity_type, entity_id, project_id, action)
+         VALUES ('2025-01-01 00:00:00', 'system', 'issue', 999, ?1, 'create')",
+        params![pid],
+    )
+    .unwrap();
+
+    let out = overview(&conn, &input(now())).unwrap();
+    assert_eq!(
+        out.projects[0].last_activity.as_deref(),
+        Some("2026-09-01 10:00:00")
+    );
+}
+
+#[test]
 fn a_since_that_is_not_a_timestamp_is_rejected() {
     let pool = crate::db::open_memory().unwrap();
     let conn = pool.write().unwrap();
