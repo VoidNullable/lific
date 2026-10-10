@@ -1,8 +1,10 @@
 pub(crate) mod activity;
+pub(crate) mod assignees;
 pub(crate) mod attachments;
 pub(crate) mod briefing;
 pub(crate) mod changes;
 pub(crate) mod comments;
+pub(crate) mod home;
 pub(crate) mod insights;
 mod issues;
 pub(crate) mod members;

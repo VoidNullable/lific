@@ -13,6 +13,10 @@
     demoteUser,
     deactivateUser,
     reactivateUser,
+    listArchivedProjects,
+    unarchiveProject,
+    formatBytes,
+    type ArchivedProject,
     type AuthUser,
     type UserSummary,
     type InstanceSettings,
@@ -30,7 +34,8 @@
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
-  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users, ShieldPlus, ShieldMinus, UserMinus, UserPlus, RotateCcw } from "lucide-svelte";
+  import { toast } from "../lib/toast/toast.svelte";
+  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users, ShieldPlus, ShieldMinus, UserMinus, UserPlus, RotateCcw, Archive, ArchiveRestore } from "lucide-svelte";
   import { getContext, onMount } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -48,6 +53,13 @@
   let users = $state<UserSummary[]>([]);
   let settings = $state<InstanceSettings | null>(null);
   let loading = $state(true);
+
+  // Archived projects: listed here because they belong to no live project,
+  // so this admin-only page is the one place they can be brought back.
+  let archived = $state<ArchivedProject[]>([]);
+  let archivedError = $state("");
+  let unarchivingId = $state<number | null>(null);
+  let unarchiveErrors = $state<Record<number, string>>({});
 
   // Editable copies.
   let fName = $state("");
@@ -80,17 +92,39 @@
       // `/api/instance` reports the *effective* sign-in mode: it is true both
       // for `web_auto_login` and for `[auth] required = false`, which the
       // stored settings row does not capture on its own.
-      const [u, s, instance] = await Promise.all([
+      const [u, s, instance, a] = await Promise.all([
         listUsers(),
         getInstanceSettings(),
         getInstance(),
+        listArchivedProjects(),
       ]);
       if (u.ok) users = u.data;
+      if (a.ok) archived = a.data;
+      else archivedError = a.error;
       if (s.ok) hydrate(s.data);
       if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     }
     loading = false;
   });
+
+  async function unarchive(entry: ArchivedProject) {
+    if (unarchivingId !== null) return;
+    unarchivingId = entry.id;
+    unarchiveErrors = { ...unarchiveErrors, [entry.id]: "" };
+    const res = await unarchiveProject(entry.id);
+    unarchivingId = null;
+    if (!res.ok) {
+      unarchiveErrors = { ...unarchiveErrors, [entry.id]: res.error };
+      return;
+    }
+    archived = archived.filter((a) => a.id !== entry.id);
+    toast(
+      res.data.was_public
+        ? `Unarchived ${res.data.identifier}. It was public before; publish it again from its settings if you want it public.`
+        : `Unarchived ${res.data.identifier}.`,
+      { kind: "success" },
+    );
+  }
 
   function parseDomains(csv: string): string[] {
     return csv.split(/[,\s]+/).map((d) => d.trim()).filter(Boolean);
@@ -1084,6 +1118,67 @@
           <p class="text-caption text-[var(--text-faint)] mt-2 max-w-[60ch] leading-relaxed">
             Deactivating an account ends its sessions and revokes its API keys and tokens. Nothing it wrote is
             removed. The last admin who can still sign in cannot be demoted or deactivated.
+          </p>
+        </section>
+
+        <!-- ── ARCHIVED PROJECTS ──────────────────────────── -->
+        <section class="mt-10 animate-reveal delay-300">
+          <div class="flex items-center gap-2 mb-1">
+            <Archive size={16} class="text-[var(--text-muted)]" />
+            <h2 class="text-[1rem] font-semibold text-[var(--text)]">Archived projects</h2>
+          </div>
+          <p class="text-body text-[var(--text-muted)] mb-5 leading-relaxed">
+            Projects archived from their settings live as one compressed file each on the server.
+            Unarchiving brings one back with its members and history, as a private project.
+          </p>
+
+          <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden">
+            {#if archivedError}
+              <div class="px-4 py-3 text-caption text-[var(--error)]" role="alert">{archivedError}</div>
+            {:else if archived.length === 0}
+              <div class="px-4 py-6 text-body-sm text-[var(--text-faint)] text-center">No archived projects.</div>
+            {:else}
+              {#each archived as a, i (a.id)}
+                <div class="px-4 py-3 {i > 0 ? 'border-t border-[var(--border)]' : ''}">
+                  <div class="flex items-center gap-3">
+                    <span class="text-micro font-mono font-semibold px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] text-[var(--text-muted)] shrink-0">
+                      {a.identifier}
+                    </span>
+                    <div class="flex-1 min-w-0">
+                      <div class="text-body text-[var(--text)] truncate leading-tight">
+                        {#if a.emoji}<span class="mr-1">{a.emoji}</span>{/if}{a.name}
+                      </div>
+                      <div class="text-caption text-[var(--text-faint)] truncate leading-tight mt-0.5">
+                        {a.issue_count} issue{a.issue_count === 1 ? "" : "s"} · {a.page_count} page{a.page_count === 1 ? "" : "s"} ·
+                        {formatBytes(a.size_bytes)} · archived <TimeAgo date={a.archived_at} />{#if a.archived_by_name}{" "}by {a.archived_by_name}{/if}
+                      </div>
+                    </div>
+                    {#if !a.file_present}
+                      <span class="text-micro font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 text-[var(--error)] bg-[var(--error-bg)]"
+                            title={a.file_name}>
+                        File missing
+                      </span>
+                    {/if}
+                    <button
+                      class="flex items-center gap-1.5 text-body-sm text-[var(--text)] border border-[var(--border)] px-3 py-1.5 rounded-md
+                             hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      disabled={unarchivingId !== null || !a.file_present}
+                      onclick={() => unarchive(a)}
+                    >
+                      <ArchiveRestore size={14} />
+                      {unarchivingId === a.id ? "Unarchiving…" : "Unarchive"}
+                    </button>
+                  </div>
+                  {#if unarchiveErrors[a.id]}
+                    <p class="text-caption text-[var(--error)] mt-1.5" role="alert">{unarchiveErrors[a.id]}</p>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          </div>
+          <p class="text-caption text-[var(--text-faint)] mt-2 max-w-[60ch] leading-relaxed">
+            Files are kept in <span class="font-mono">archived-projects/</span> next to the database and are included in backups.
+            Each one is an ordinary project archive, so it can also be imported on another instance.
           </p>
         </section>
       {/if}

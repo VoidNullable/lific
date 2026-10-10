@@ -17,6 +17,8 @@
 //! * a project's `lead_user_id` is dropped;
 //! * an issue's waits (user and date blockers, LIF-484) are dropped from
 //!   every issue and sync row: they name accounts and carry private notes;
+//! * an issue's assignment (LIF-147) is dropped the same way: it names
+//!   accounts;
 //! * an issue's `source` (import provenance) is dropped, and every relation
 //!   identifier naming an issue outside this project is filtered out, so a
 //!   public issue never names a private one;
@@ -85,6 +87,8 @@ pub fn scrub_issue(project: &Project, issue: &mut Issue) {
     // LIF-484: waits name accounts and carry private notes. The public view
     // shows none of them, not even a marker.
     issue.waits.clear();
+    issue.needs_human = false;
+    issue.assignees.clear();
     for relations in [
         &mut issue.blocks,
         &mut issue.blocked_by,
@@ -158,6 +162,8 @@ pub fn public_index(conn: &Connection, project: &Project) -> Result<IndexSnapsho
     let (mut issues, pages) = super::changes::index_rows(conn, project.id)?;
     for issue in &mut issues {
         issue.waits.clear();
+        issue.needs_human = false;
+        issue.assignees.clear();
     }
     Ok(IndexSnapshot {
         cursor,
@@ -181,6 +187,8 @@ pub fn public_changes(
     for change in &mut page.changes {
         if let Change::Issue(issue) = change {
             issue.waits.clear();
+            issue.needs_human = false;
+            issue.assignees.clear();
         }
     }
     page.changes.retain(|change| match change {

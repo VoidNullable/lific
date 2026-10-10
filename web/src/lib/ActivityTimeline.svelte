@@ -15,6 +15,7 @@
   import StatusIcon from "./StatusIcon.svelte";
   import PriorityIcon from "./PriorityIcon.svelte";
   import { History, ChevronDown } from "lucide-svelte";
+  import { assignActivity } from "./issues/assignees";
 
   let {
     items,
@@ -115,6 +116,10 @@
         return "started waiting on";
       case "unwait":
         return "stopped waiting on";
+      // LIF-147: the value is "@username" or "human".
+      case "assign":
+      case "unassign":
+        return assignActivity(a.action, a.action === "assign" ? a.new_value : a.old_value).verb;
       default:
         return a.action;
     }
@@ -238,6 +243,11 @@
               <span class="text-[var(--text)]">
                 {shortValue(a.action === "wait" ? a.new_value : a.old_value, 60)}
               </span>
+            {:else if a.action === "assign" || a.action === "unassign"}
+              {@const subject = assignActivity(a.action, a.action === "assign" ? a.new_value : a.old_value).subject}
+              {#if subject}
+                <span class="text-[var(--text)]">{subject}</span>
+              {/if}
             {:else if a.action === "create" && a.entity_type === "comment"}
               <span class="text-[var(--text-faint)] italic">
                 “{shortValue(a.new_value, 60)}”

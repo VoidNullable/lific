@@ -2,7 +2,7 @@ import React from "react";
 import { C } from "../theme";
 import { BODY, DISPLAY, MONO } from "../fonts";
 import { Sidebar, StatusIcon, PriorityIcon, IssueData, Label } from "./lific-ui";
-import { ChevronRight, History, Plus } from "./icons";
+import { ChevronDown, ChevronRight, History, Plus } from "./icons";
 
 /*
  * Pixel-faithful replica of the web UI's ISSUE DETAIL view —
@@ -33,6 +33,7 @@ const CAPTION = 12;
 const BODY_SM = 13;
 const BODY_TXT = 14;
 const TITLE = 22; // --text-title (InlineTitle md)
+const SUCCESS_BG = "#142a1b"; // --success-bg (green-bg-dark)
 
 // Canonical status text color (StatusIcon.svelte statusCssColor).
 const statusTextColor = (s: string): string => {
@@ -74,6 +75,10 @@ export type DetailComment = {
   body: string;
   /** Renders the "agent" badge next to the author (bot commenter). */
   bot?: boolean;
+  /** Comment number, shown as the "#N" anchor before the author. */
+  id?: number;
+  /** "verification": evidence recorded when the issue was closed. */
+  kind?: "verification";
 };
 
 export type ActivityLine = {
@@ -425,7 +430,7 @@ const MetaSidebar: React.FC<{ issue: IssueDetailData }> = ({ issue }) => (
 
 // ── Activity timeline (ActivityTimeline.svelte) ──────────────
 
-const AgentBadge: React.FC = () => (
+export const AgentBadge: React.FC = () => (
   <span
     style={{
       display: "inline-block",
@@ -445,7 +450,15 @@ const AgentBadge: React.FC = () => (
   </span>
 );
 
-const ActivityTimeline: React.FC<{ items: ActivityLine[] }> = ({ items }) => (
+/**
+ * `total` is the full entry count. The real timeline shows the newest six
+ * (initialCount) and puts the rest behind a "Show all N entries" button,
+ * so pass at most six items and the true total.
+ */
+export const ActivityTimeline: React.FC<{
+  items: ActivityLine[];
+  total?: number;
+}> = ({ items, total = items.length }) => (
   <section style={{ marginTop: 40 }}>
     {/* Header — uppercase-tracking, hairline underline. */}
     <div
@@ -477,7 +490,7 @@ const ActivityTimeline: React.FC<{ items: ActivityLine[] }> = ({ items }) => (
           fontVariantNumeric: "tabular-nums",
         }}
       >
-        {items.length}
+        {total}
       </span>
     </div>
 
@@ -522,8 +535,13 @@ const ActivityTimeline: React.FC<{ items: ActivityLine[] }> = ({ items }) => (
               color: C.textMuted,
             }}
           >
-            <span style={{ fontWeight: 500, color: C.text }}>{a.actor}</span>
-            {a.bot ? <AgentBadge /> : " "}
+            <span style={{ fontWeight: 500, color: C.text }}>{a.actor}</span>{" "}
+            {/* ActivityTimeline.svelte keeps a space on both sides of the badge. */}
+            {a.bot ? (
+              <>
+                <AgentBadge />{" "}
+              </>
+            ) : null}
             {a.text}
             <span
               style={{
@@ -539,12 +557,30 @@ const ActivityTimeline: React.FC<{ items: ActivityLine[] }> = ({ items }) => (
         </li>
       ))}
     </ol>
+
+    {/* "Show all" expander (mt-2 ml-5 text-caption, ChevronDown 12). */}
+    {total > items.length ? (
+      <div
+        style={{
+          marginTop: 8,
+          marginLeft: 20,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: CAPTION,
+          color: C.textMuted,
+        }}
+      >
+        <ChevronDown size={12} color={C.textMuted} />
+        Show all {total} entries
+      </div>
+    ) : null}
   </section>
 );
 
 // ── Comments thread (Comments.svelte) ────────────────────────
 
-const CommentThread: React.FC<{ comments: DetailComment[] }> = ({
+export const CommentThread: React.FC<{ comments: DetailComment[] }> = ({
   comments,
 }) => (
   <section
@@ -648,6 +684,17 @@ const CommentThread: React.FC<{ comments: DetailComment[] }> = ({
                 marginBottom: 2,
               }}
             >
+              {c.id !== undefined ? (
+                <span
+                  style={{
+                    fontSize: CAPTION,
+                    fontVariantNumeric: "tabular-nums",
+                    color: C.textFaint,
+                  }}
+                >
+                  #{c.id}
+                </span>
+              ) : null}
               <span
                 style={{
                   fontSize: BODY_TXT,
@@ -658,6 +705,24 @@ const CommentThread: React.FC<{ comments: DetailComment[] }> = ({
                 {c.author}
               </span>
               {c.bot ? <AgentBadge /> : null}
+              {/* .cmt__kind: the role-badge pill, success tones. */}
+              {c.kind === "verification" ? (
+                <span
+                  style={{
+                    alignSelf: "center",
+                    padding: "2px 6px",
+                    borderRadius: 999,
+                    backgroundColor: SUCCESS_BG,
+                    color: C.success,
+                    fontSize: MICRO,
+                    fontWeight: 600,
+                    letterSpacing: "0.025em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Verification
+                </span>
+              ) : null}
               <span style={{ fontSize: CAPTION, color: C.textMuted }}>
                 {c.time}
               </span>

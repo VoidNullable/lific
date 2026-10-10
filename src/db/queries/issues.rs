@@ -43,6 +43,8 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 duplicates: Vec::new(),
                 duplicated_by: Vec::new(),
                 waits: Vec::new(),
+                needs_human: false,
+                assignees: Vec::new(),
             })
         })
         .map_err(|e| match e {
@@ -141,6 +143,9 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
         .collect::<Result<Vec<String>, _>>()?;
 
     issue.waits = super::waits::list_waits(conn, id)?;
+    let assignment = super::assignees::assignment(conn, id)?;
+    issue.needs_human = assignment.needs_human;
+    issue.assignees = assignment.assignees;
 
     Ok(issue)
 }
@@ -301,6 +306,21 @@ pub fn list_issues_page(
         conditions.push(format!("i.project_id = ?{}", param_values.len() + 1));
         param_values.push(Box::new(pid));
     }
+    if let Some(project_ids) = &q.project_ids {
+        if project_ids.is_empty() {
+            conditions.push("0".to_string());
+        } else {
+            let placeholders = project_ids
+                .iter()
+                .map(|pid| {
+                    param_values.push(Box::new(*pid));
+                    format!("?{}", param_values.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!("i.project_id IN ({placeholders})"));
+        }
+    }
     if let Some(status) = q.status {
         conditions.push(format!("i.status = ?{}", param_values.len() + 1));
         param_values.push(Box::new(status));
@@ -344,6 +364,20 @@ pub fn list_issues_page(
         if let Some(v) = value {
             conditions.push(format!("{col} {op} ?{}", param_values.len() + 1));
             param_values.push(Box::new(v.replace('T', " ")));
+        }
+    }
+    // LIF-147: assignment filter.
+    if let Some(ref value) = q.assignee {
+        let (condition, user) = super::assignees::filter_condition(
+            conn,
+            value,
+            q.caller_user_id,
+            "i",
+            param_values.len() + 1,
+        )?;
+        conditions.push(condition);
+        if let Some(user) = user {
+            param_values.push(Box::new(user));
         }
     }
     // LIF-484: a user wait, or a date wait before its earliest day, blocks
@@ -403,6 +437,12 @@ pub fn list_issues_page(
         }
     };
     let order_clause = match q.order_by.as_deref() {
+        None if q.triage_order && q.order.is_none() => String::from(concat!(
+            "CASE i.status WHEN 'active' THEN 0 WHEN 'todo' THEN 1 WHEN 'backlog' THEN 2 ELSE 3 END, ",
+            "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ",
+            "WHEN 'low' THEN 3 ELSE 4 END, ",
+            "i.updated_at DESC, p.identifier, i.sequence",
+        )),
         None | Some("sort_order") => format!("i.sort_order {dir}, i.sequence {dir}"),
         Some("sequence") => format!("i.sequence {dir}"),
         Some("created") | Some("created_at") => format!("i.created_at {dir}, i.sequence {dir}"),
@@ -460,6 +500,8 @@ pub fn list_issues_page(
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
             waits: Vec::new(),
+            needs_human: false,
+            assignees: Vec::new(),
         })
     })?;
 
@@ -538,8 +580,13 @@ pub fn list_issues_page(
         // LIF-484: waits are few and always rendered, so every page carries
         // them, in one grouped query.
         let mut waits = super::waits::waits_by_issue(conn, &ids)?;
+        let mut assignments = super::assignees::assignments_by_issue(conn, &ids)?;
         for issue in &mut issues {
             issue.waits = waits.remove(&issue.id).unwrap_or_default();
+            if let Some(assignment) = assignments.remove(&issue.id) {
+                issue.needs_human = assignment.needs_human;
+                issue.assignees = assignment.assignees;
+            }
         }
     }
 
@@ -547,6 +594,31 @@ pub fn list_issues_page(
         items: issues,
         has_more,
     })
+}
+
+/// [`count_issues_by_status`] for every project in one GROUP BY, keyed by
+/// project id (GitHub #87). A project without live issues has no entry.
+pub fn count_issues_by_status_all(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, IssueStatusCounts>, LificError> {
+    let mut all: std::collections::HashMap<i64, IssueStatusCounts> =
+        std::collections::HashMap::new();
+    let mut stmt = conn.prepare_cached(
+        "SELECT project_id, status, COUNT(*) FROM issues
+         WHERE deleted_at IS NULL GROUP BY project_id, status",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (project_id, status, n) = row?;
+        all.entry(project_id).or_default().add(&status, n);
+    }
+    Ok(all)
 }
 
 /// Per-status issue counts for a project (LIF-161). One indexed GROUP BY
@@ -566,18 +638,7 @@ pub fn count_issues_by_status(
     })?;
     for row in rows {
         let (status, n) = row?;
-        // Parsed rather than read as `Status` directly: an unparseable value
-        // can't be created through the API, but a hand-edited DB row still
-        // counts toward the total instead of failing the whole query.
-        match status.parse() {
-            Ok(Status::Backlog) => counts.backlog = n,
-            Ok(Status::Todo) => counts.todo = n,
-            Ok(Status::Active) => counts.active = n,
-            Ok(Status::Done) => counts.done = n,
-            Ok(Status::Cancelled) => counts.cancelled = n,
-            Err(_) => {}
-        }
-        counts.total += n;
+        counts.add(&status, n);
     }
     Ok(counts)
 }
@@ -662,6 +723,15 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
             input.attachments,
             Some(input.project_id),
         )?;
+        if let Some(ref names) = input.assignees {
+            super::assignees::set_assignment(
+                conn,
+                id,
+                input.project_id,
+                names,
+                super::assignees::actor(conn),
+            )?;
+        }
         get_issue(conn, id)
     })
 }
@@ -754,6 +824,15 @@ pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<I
                     params![id, project_id, label_name],
                 )?;
             }
+        }
+        if let Some(ref names) = input.assignees {
+            super::assignees::set_assignment(
+                conn,
+                id,
+                issue.project_id,
+                names,
+                super::assignees::actor(conn),
+            )?;
         }
         // LIF-409: re-scan the stored description (edited or not) and
         // reconcile links, in the same savepoint as the edit itself. Read back
@@ -1061,6 +1140,44 @@ mod tests {
         .unwrap();
         assert_eq!(tail.items.len(), 1);
         assert!(!tail.has_more);
+    }
+
+    // GitHub #87: a cross-project listing filters its project set in SQL, so
+    // every page is full and `has_more` is exact, and an empty set lists
+    // nothing rather than dropping the filter.
+    #[test]
+    fn list_issues_page_filters_a_project_set_before_paging() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let [first, hidden, second] = ["ONE", "HID", "TWO"].map(|ident| seed_project(&conn, ident));
+        for pid in [first, hidden, second, hidden] {
+            quick_issue(&conn, pid, "work", Status::Todo, Priority::None);
+        }
+        let page = |project_ids: Vec<i64>, offset: i64| {
+            list_issues_page(
+                &conn,
+                &ListIssuesQuery {
+                    project_ids: Some(project_ids),
+                    limit: Some(1),
+                    offset: Some(offset),
+                    order_by: Some("sequence".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        let head = page(vec![first, second], 0);
+        let tail = page(vec![first, second], 1);
+        let listed: Vec<&str> = [&head, &tail]
+            .iter()
+            .flat_map(|page| page.items.iter().map(|issue| issue.identifier.as_str()))
+            .collect();
+        assert_eq!(listed, ["ONE-1", "TWO-1"]);
+        assert!(head.has_more, "a full page with a row past it has more");
+        assert!(!tail.has_more, "the last page has nothing past it");
+
+        assert!(page(Vec::new(), 0).items.is_empty());
     }
 
     #[test]

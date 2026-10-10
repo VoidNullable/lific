@@ -330,14 +330,12 @@ pub(crate) fn issue_link_context_reads() -> usize {
 /// `get_info`. This is unconditional context cost on every session, so the
 /// convention guidance appended after the discovery guidance is kept tight
 /// (imperative, no filler). Extracted as a const so it stays testable.
-const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use list_resources(resource_type='project') to discover projects. \
-     Use list_issues to browse issues with filters. Use get_issue with an identifier like 'PRO-42' \
-     for details. Use workable=true to find issues ready to work on (no unresolved blockers). \
-     Use search to find anything by text across issues and pages. \
-     Conventions: when you finish work on an issue, mark it done (status='done'). \
-     Organize issues into modules; keep each issue a self-contained work item. \
-     Prefer edit_issue/edit_page (exact string replacement) over update_issue/update_page for small changes. \
-      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, call get_briefing(project='X', since='<last cursor>') first (omit since the first time) for plans' next steps, blocked, workable and active issues, and key pages; get_plan(plan='X-PLAN-1') gives a plan's full tree. \
+const SERVER_INSTRUCTIONS: &str = "Lific is an issue tracker. On resume, call get_briefing(project='X', since='<last cursor>') first; omit since the first time. \
+     list_resources(resource_type='project') lists projects. list_issues filters issues; workable=true gives open issues with no open blocker. \
+     An issue marked for a person (for:human or for:@name) is not yours; take unmarked ones. search finds text in issues and pages. \
+     When you finish an issue, set status='done'. Keep each issue one self-contained change, filed in one of the project's modules. \
+     For small text changes use edit_issue and edit_page, not full updates. \
+     Use plans (create_plan) for multi-step or multi-session work; a step can mirror an issue. get_plan(plan='X-PLAN-1') gives a plan's full tree. \
      Use pages for documentation and design notes.";
 
 /// LIF-452: the one sentence a repository-bound stdio session appends to
@@ -1119,18 +1117,15 @@ mod tests {
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     }
 
-    // The appended convention guidance is unconditional per-session context
-    // cost; keep the whole addition tight (~150 tokens / ~600 chars).
+    // Every connected agent pays for these instructions at session start
+    // (LIF-505). Hold the whole string, not just the conventions, to a
+    // budget.
     #[test]
     fn server_instructions_stay_compact() {
-        let base = "Lific is a local-first issue tracker. Use list_resources(resource_type='project') to discover projects. \
-     Use list_issues to browse issues with filters. Use get_issue with an identifier like 'PRO-42' \
-     for details. Use workable=true to find issues ready to work on (no unresolved blockers). \
-     Use search to find anything by text across issues and pages. ";
-        let addition = SERVER_INSTRUCTIONS.len() - base.len();
+        let length = SERVER_INSTRUCTIONS.len();
         assert!(
-            addition <= 700,
-            "convention addition grew to {addition} chars; keep it tight"
+            length <= 900,
+            "server instructions grew to {length} chars; keep them tight"
         );
 
         // LIF-452: the binding sentence is a second unconditional cost, paid

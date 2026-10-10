@@ -306,6 +306,24 @@ pub struct Issue {
     /// and list). Empty on the public surface.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waits: Vec<IssueWait>,
+    /// LIF-147: true when a person must do this issue, either anyone
+    /// (`assignees` empty) or the named people in `assignees`. False means
+    /// unassigned: any agent may work it. Populated on every issue read.
+    #[serde(default)]
+    pub needs_human: bool,
+    /// LIF-147: the named people, by username. Empty for unassigned issues
+    /// and for issues marked for any human.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<IssueAssignee>,
+}
+
+/// LIF-147: one named assignee. Always a human account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueAssignee {
+    pub user_id: i64,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// LIF-484: what a wait is waiting on.
@@ -410,6 +428,11 @@ pub struct CreateIssue {
     /// Import provenance marker (LIF-264/265). `None` for hand-created issues.
     #[serde(default)]
     pub source: Option<String>,
+    /// LIF-147: `["human"]` marks the issue for any person; usernames name
+    /// people. `None` or empty leaves it unassigned. Transports resolve
+    /// `"me"` to a username before the query layer sees it.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
     /// LIF-409: whose reach the description's attachment references inherit.
     /// Never deserialized — a request body cannot name its own actor.
     #[serde(skip)]
@@ -450,6 +473,10 @@ pub struct UpdateIssue {
     /// [`crate::error::LificError::UpdateConflict`] and nothing is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_seq: Option<i64>,
+    /// LIF-147: replaces the whole assignment. `[]` clears it (unassigned),
+    /// `["human"]` marks it for any person, usernames name people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignees: Option<Vec<String>>,
     /// LIF-409: see [`CreateIssue::attachments`].
     #[serde(skip)]
     pub attachments: AttachmentActor,
@@ -483,6 +510,24 @@ pub struct ListIssuesQuery {
     /// cannot crowd eligible ones off a page. Internal: not a REST parameter.
     #[serde(skip)]
     pub exclude_statuses: Vec<Status>,
+    /// Only issues in these projects, applied in SQL before paging so a
+    /// cross-project page is never short (GitHub #87). `Some(vec![])` matches
+    /// nothing. Internal: not a REST parameter.
+    #[serde(skip)]
+    pub project_ids: Option<Vec<i64>>,
+    /// With no `order_by`/`order`, sort the way the web home page's "My
+    /// active issues" does: active before todo before backlog, then priority,
+    /// then most recently updated. `sort_order` is a per-project rank, so it
+    /// means nothing across projects (GitHub #87). Internal: not a REST
+    /// parameter.
+    #[serde(skip)]
+    pub triage_order: bool,
+    /// LIF-147: `none` (unassigned), `human` (any issue a person must do),
+    /// `me`, or a username.
+    pub assignee: Option<String>,
+    /// Who `assignee=me` means. Internal: set by the transport.
+    #[serde(skip)]
+    pub caller_user_id: Option<i64>,
 }
 
 /// Per-status issue counts for a project (LIF-161). `total` is the sum of
@@ -496,6 +541,37 @@ pub struct IssueStatusCounts {
     pub done: i64,
     pub cancelled: i64,
     pub total: i64,
+}
+
+impl IssueStatusCounts {
+    /// Add `n` issues stored with `status`. An unparseable value (only a
+    /// hand-edited row can hold one) still counts toward the total.
+    pub fn add(&mut self, status: &str, n: i64) {
+        if let Ok(status) = status.parse() {
+            *self.slot(status) = n;
+        }
+        self.total += n;
+    }
+
+    pub fn get(&self, status: Status) -> i64 {
+        match status {
+            Status::Backlog => self.backlog,
+            Status::Todo => self.todo,
+            Status::Active => self.active,
+            Status::Done => self.done,
+            Status::Cancelled => self.cancelled,
+        }
+    }
+
+    fn slot(&mut self, status: Status) -> &mut i64 {
+        match status {
+            Status::Backlog => &mut self.backlog,
+            Status::Todo => &mut self.todo,
+            Status::Active => &mut self.active,
+            Status::Done => &mut self.done,
+            Status::Cancelled => &mut self.cancelled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1230,6 +1306,10 @@ pub struct IssueChange {
     /// or clearing one advances the issue's seq, so a replica sees it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub waits: Vec<IssueWait>,
+    /// LIF-147: see [`Issue::needs_human`].
+    pub needs_human: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<IssueAssignee>,
 }
 
 /// A live page in the sync stream. `identifier` is the `PRO-DOC-7` form

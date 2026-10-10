@@ -9,7 +9,7 @@ Every view has its own link, so you can paste or bookmark any of them: `/APP/iss
 
 ## Find your way around
 
-**Home** (`/`) gathers My active issues, Recently viewed, Pinned pages and Recent activity from every project you can see.
+**Home** (`/`) covers every project you can see. It shows open work by how long it has been open, the open count over the last 90 days, and how recently each project changed. Below that, the **Agent queue** ranks unassigned, unblocked issues by priority, age and idle time, and **Only you** lists issues assigned to you, marked for a person, or waiting on you. Recent activity, your finished work over the last twelve weeks and your pinned pages close the page. Recently viewed items are in the command palette.
 
 The sidebar lists your projects. Expand one to reach its sections: **Overview**, **Issues**, **Board**, **Graph**, **Modules**, **Pages**, **Files**, **Plans**, **Activity** and **Insights**. Under the active section it also lists the items you opened recently in that section.
 
@@ -50,6 +50,8 @@ Deleting an issue removes it from the list straight away and shows a toast with 
 
 The issue view puts the description on the left and the fields on the right: Status, Priority, Module and Labels, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. Relation chips show the other issue's current status and change when it does. `Shift`-click a chip to preview that issue instead of opening it.
 
+To add a relation, click **Add relation** under the relations, choose its kind, then pick the other issue. The picker searches the current project; type a full identifier such as `OPS-12` to link an issue in another project. Click the × on a chip to remove it. That removes every relation between the two issues, so a pair that both blocks and relates loses both. Viewers see the chips without these controls.
+
 The **Waiting on** field holds blockers that are not issues: a person, or a window of days with an optional note. Choose **Add blocker**, then **Person** or **Dates**. Each one shows whether it is still waiting, due to check or overdue, and its clear button removes it. List rows and board cards show a small marker naming who or when the issue waits on, in red once overdue. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
 
 The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
@@ -67,7 +69,7 @@ Issue descriptions and pages use the same editor. Choose **Edit**, or press `E`,
 
 ### Link issues in the graph
 
-The issue view shows relations but cannot create or remove them. Use **Graph** for that, or the CLI, API or MCP.
+Besides the issue view, relations can be drawn in **Graph**, or created from the CLI, API or MCP.
 
 Graph has two views. **Linked** draws the issues that have at least one relation, arranged by their `blocks` chains. **Unlinked** lays out the rest in a grid so you can connect them. Closed issues are hidden until you turn on **Closed issues**.
 
@@ -151,7 +153,7 @@ A copy control sits beside identifiers in the breadcrumb trail, on board cards a
 
 ## Run a project
 
-**Overview** is the project's home page. Everyone sees its progress, a "Needs attention" list of open issues and recent activity. A lead can also change the project's name, icon and description, change its lead, manage members and their viewer, maintainer or lead roles, import issues from GitHub, and delete the project. Maintainers manage labels here; modules are managed in **Modules**. [Projects](/docs/concepts/projects#members-and-roles) explains what each role can do. You can also file the project into one of your sidebar groups. **Export** in the top bar downloads the project as Markdown for reading.
+**Overview** is the project's home page. Everyone sees its progress, a "Needs attention" list of open issues and recent activity. A lead can also change the project's name, icon and description, change its lead, manage members and their viewer, maintainer or lead roles, import issues from GitHub, and [archive](/docs/archiving-projects) or delete the project. Maintainers manage labels here; modules are managed in **Modules**. [Projects](/docs/concepts/projects#members-and-roles) explains what each role can do. You can also file the project into one of your sidebar groups. **Export** in the top bar downloads the project as Markdown for reading.
 
 Two more panels appear only for the project's lead or an instance administrator, even when project permissions are off:
 
@@ -178,6 +180,8 @@ Settings has an **Account** tab for everyone and an **Instance** tab for adminis
 - **Project permissions**: when on, only a project's members can see or edit it. Add yourself as lead of your projects before turning it on.
 
 The same tab lists every account. From there an administrator creates accounts, makes or removes administrators, and deactivates or restores accounts.
+
+Below the accounts, **Archived projects** lists every [archived project](/docs/archiving-projects), with **Unarchive** to bring one back.
 
 ### Connect an AI tool
 

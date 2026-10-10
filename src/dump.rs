@@ -4,7 +4,10 @@
 //! `lific.db` plus a content-addressed `attachments/` sidecar dir living beside
 //! it (blobs named by their sha256; in-progress writes carry a `.tmp`
 //! extension — see [`crate::storage`]). A DB snapshot alone would restore
-//! metadata rows pointing at missing blobs.
+//! metadata rows pointing at missing blobs. Archived projects add a second
+//! sidecar, `archived-projects/`, holding each archived project's portable
+//! `.lific.tar.gz`; those projects exist nowhere else, so a dump that skipped
+//! the directory would silently drop them from backup coverage.
 //!
 //! This module follows the `gitea dump` pattern: one command produces one
 //! self-contained, timestamped `lific_YYYYMMDD_HHMMSS.tar.gz` archive with
@@ -30,6 +33,16 @@ pub const ARCHIVE_DB_NAME: &str = "lific.db";
 pub const ARCHIVE_MANIFEST_NAME: &str = "manifest.json";
 /// The prefix under which attachment blobs are stored inside the archive.
 pub const ARCHIVE_ATTACHMENTS_PREFIX: &str = "attachments/";
+/// Directory name of the archived-project store beside the database, a
+/// sibling of `attachments/`. Each file in it is one project's portable
+/// `.lific.tar.gz` archive, written when the project was archived.
+pub const ARCHIVED_PROJECTS_DIR_NAME: &str = "archived-projects";
+/// The prefix under which archived-project files are stored inside the dump.
+pub const ARCHIVE_ARCHIVED_PROJECTS_PREFIX: &str = "archived-projects/";
+/// Longest accepted archived-project filename, in bytes.
+pub const MAX_ARCHIVED_PROJECT_NAME_BYTES: usize = 160;
+/// Required suffix of every archived-project filename.
+const ARCHIVED_PROJECT_SUFFIX: &str = ".lific.tar.gz";
 
 /// Restore limits apply to the uncompressed archive contents. They prevent a
 /// tiny gzip/tar upload from allocating unbounded memory or filling the data
@@ -37,6 +50,11 @@ pub const ARCHIVE_ATTACHMENTS_PREFIX: &str = "attachments/";
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_DB_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Per-file ceiling for one archived project. A project archive carries the
+/// project's rows and its attachment blobs, so it gets the database's ceiling
+/// rather than a single attachment's; the running total is still bounded by
+/// [`MAX_TOTAL_RESTORE_BYTES`].
+pub const MAX_ARCHIVED_PROJECT_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_TOTAL_RESTORE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_RESTORE_ENTRIES: u64 = 10_000;
 const ATTACHMENTS_SCHEMA_VERSION: i64 = 31;
@@ -65,7 +83,10 @@ pub struct RestoreLimits {
     pub max_manifest_bytes: u64,
     pub max_db_bytes: u64,
     pub max_attachment_bytes: u64,
+    /// Ceiling for one file under `archived-projects/`.
+    pub max_archived_project_bytes: u64,
     pub max_total_bytes: u64,
+    /// Ceiling on attachment plus archived-project entries.
     pub max_entries: u64,
 }
 
@@ -75,6 +96,7 @@ impl Default for RestoreLimits {
             max_manifest_bytes: MAX_MANIFEST_BYTES,
             max_db_bytes: MAX_DB_BYTES,
             max_attachment_bytes: MAX_ATTACHMENT_BYTES,
+            max_archived_project_bytes: MAX_ARCHIVED_PROJECT_BYTES,
             max_total_bytes: MAX_TOTAL_RESTORE_BYTES,
             max_entries: MAX_RESTORE_ENTRIES,
         }
@@ -91,6 +113,7 @@ impl RestoreLimits {
             max_manifest_bytes: TRUSTED_MANIFEST_BYTES,
             max_db_bytes: TRUSTED_RESTORE_BYTES,
             max_attachment_bytes: TRUSTED_RESTORE_BYTES,
+            max_archived_project_bytes: TRUSTED_RESTORE_BYTES,
             max_total_bytes: TRUSTED_RESTORE_BYTES,
             max_entries: TRUSTED_RESTORE_ENTRIES,
         }
@@ -153,6 +176,13 @@ pub struct Manifest {
     pub attachment_count: u64,
     /// Total bytes across all attachment blobs.
     pub attachment_bytes: u64,
+    /// Number of archived-project files included. Absent (zero) in dumps
+    /// taken before project archiving existed.
+    #[serde(default)]
+    pub archived_project_count: u64,
+    /// Total bytes across all archived-project files.
+    #[serde(default)]
+    pub archived_project_bytes: u64,
 }
 
 /// A UTC timestamp in the archive filename convention (`YYYYMMDD_HHMMSS`),
@@ -174,6 +204,35 @@ fn attachments_dir_for(db_path: &Path) -> PathBuf {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join("attachments"),
         _ => PathBuf::from("attachments"),
     }
+}
+
+/// Resolve the archived-projects dir for a database path: a sibling of
+/// `attachments/` in the data dir.
+pub(crate) fn archived_projects_dir_for(db_path: &Path) -> PathBuf {
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(ARCHIVED_PROJECTS_DIR_NAME),
+        _ => PathBuf::from(ARCHIVED_PROJECTS_DIR_NAME),
+    }
+}
+
+/// Whether `name` is an acceptable archived-project filename:
+/// `^[A-Za-z0-9][A-Za-z0-9._-]*\.lific\.tar\.gz$`, at most
+/// [`MAX_ARCHIVED_PROJECT_NAME_BYTES`] bytes. The rule excludes separators,
+/// a leading dot (so `.`/`..` and in-progress `.tmp*` files never match) and
+/// anything non-ASCII.
+pub(crate) fn valid_archived_project_name(name: &str) -> bool {
+    if name.len() > MAX_ARCHIVED_PROJECT_NAME_BYTES {
+        return false;
+    }
+    let Some(stem) = name.strip_suffix(ARCHIVED_PROJECT_SUFFIX) else {
+        return false;
+    };
+    let mut bytes = stem.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// Return whether another process currently owns a dump staging lock.
@@ -372,7 +431,8 @@ fn refresh_activity(file: &File) -> std::io::Result<()> {
 /// Shared code path used by both `lific dump` and the interval backup task.
 /// Produces a gzip-compressed tar containing `lific.db` (a consistent snapshot
 /// taken with SQLite's online backup API), every non-`.tmp` attachment blob
-/// under `attachments/`, and `manifest.json`. The finished file is chmod 0600
+/// under `attachments/`, every archived-project file under
+/// `archived-projects/`, and `manifest.json`. The finished file is chmod 0600
 /// (it contains the whole DB).
 ///
 /// Everything is staged in a private directory beside the output and published
@@ -434,40 +494,23 @@ fn write_dump_locked(
         .map(|m| m.len())
         .map_err(|e| LificError::Internal(format!("size db snapshot: {e}")))?;
 
-    // Gather attachment blobs (skip .tmp in-progress writes). Each candidate is
+    // Gather attachment blobs and archived-project files. Each candidate is
     // opened no-follow and verified here; the manifest is built from what those
     // handles reported, and the archive pass below re-opens each one and
-    // refuses to archive anything that is no longer the same object.
-    let attachments_dir = attachments_dir_for(db_path);
-    let mut blobs: Vec<(String, PathBuf, BlobIdentity)> = Vec::new();
-    let mut attachment_bytes: u64 = 0;
-    if attachments_dir.is_dir() {
-        for entry in std::fs::read_dir(&attachments_dir)
-            .map_err(|e| LificError::Internal(format!("read attachments dir: {e}")))?
-        {
-            let entry =
-                entry.map_err(|e| LificError::Internal(format!("read attachments entry: {e}")))?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            // A blob filename is a bare lowercase sha256; anything else in the
-            // store is not ours to archive.
-            if validate_attachment_entry(&format!("{ARCHIVE_ATTACHMENTS_PREFIX}{name}")).is_err() {
-                continue;
-            }
-            let Some(blob) = open_verified_blob(&path)? else {
-                continue;
-            };
-            attachment_bytes = attachment_bytes
-                .checked_add(blob.identity.size)
-                .ok_or_else(|| LificError::Internal("attachment size overflow".into()))?;
-            blobs.push((name.to_string(), path.clone(), blob.identity));
-        }
-    }
+    // refuses to archive anything that is no longer the same object. A blob
+    // filename is a bare lowercase sha256 (so in-progress `.tmp` writes never
+    // qualify); anything else in the store is not ours to archive. The
+    // archived-project files are written under the same store lock this dump
+    // holds, so the file set agrees with the database snapshot above.
+    let (blobs, attachment_bytes) =
+        scan_verified_files(&attachments_dir_for(db_path), &ATTACHMENT_FILES, |name| {
+            validate_attachment_entry(&format!("{ARCHIVE_ATTACHMENTS_PREFIX}{name}")).is_ok()
+        })?;
+    let (archived_projects, archived_project_bytes) = scan_verified_files(
+        &archived_projects_dir_for(db_path),
+        &ARCHIVED_PROJECT_FILES,
+        valid_archived_project_name,
+    )?;
 
     let manifest = Manifest {
         lific_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -476,6 +519,8 @@ fn write_dump_locked(
         db_size_bytes,
         attachment_count: blobs.len() as u64,
         attachment_bytes,
+        archived_project_count: archived_projects.len() as u64,
+        archived_project_bytes,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| LificError::Internal(format!("serialize manifest: {e}")))?;
@@ -495,24 +540,16 @@ fn write_dump_locked(
         // lific.db (from the snapshot file)
         tar.append_path_with_name(tmp_db.path(), ARCHIVE_DB_NAME)
             .map_err(|e| LificError::Internal(format!("append db to archive: {e}")))?;
-        // attachments/<sha256>. One handle is open at a time, so a store with
-        // thousands of blobs cannot exhaust the process's file descriptors.
-        for (name, path, identity) in &blobs {
-            refresh_activity(&activity.file)
-                .map_err(|e| LificError::Internal(format!("refresh dump staging activity: {e}")))?;
-            let Some(mut blob) = open_verified_blob(path)? else {
-                return Err(LificError::Internal(format!(
-                    "attachment {name} was replaced while the dump was running"
-                )));
-            };
-            if blob.identity != *identity {
-                return Err(LificError::Internal(format!(
-                    "attachment {name} changed while the dump was running"
-                )));
-            }
-            let entry_name = format!("{ARCHIVE_ATTACHMENTS_PREFIX}{name}");
-            blob.append_to(&mut tar, &entry_name, name)?;
-        }
+        // attachments/<sha256> and archived-projects/<name>. One handle is
+        // open at a time, so a store with thousands of blobs cannot exhaust
+        // the process's file descriptors.
+        append_verified_files(&mut tar, &activity.file, &blobs, &ATTACHMENT_FILES)?;
+        append_verified_files(
+            &mut tar,
+            &activity.file,
+            &archived_projects,
+            &ARCHIVED_PROJECT_FILES,
+        )?;
 
         let enc = tar
             .into_inner()
@@ -535,13 +572,130 @@ fn write_dump_locked(
     Ok(manifest)
 }
 
-/// An attachment blob opened once, verified through that same handle, and
-/// archived from it.
+/// One kind of sidecar file a dump carries beside the database.
+struct SidecarFiles {
+    /// Singular noun for messages ("attachment").
+    label: &'static str,
+    /// Tar entry prefix, ending in `/`.
+    prefix: &'static str,
+    /// Whether each filename is the sha256 of its content, verified while
+    /// the bytes stream into the archive.
+    content_addressed: bool,
+}
+
+const ATTACHMENT_FILES: SidecarFiles = SidecarFiles {
+    label: "attachment",
+    prefix: ARCHIVE_ATTACHMENTS_PREFIX,
+    content_addressed: true,
+};
+
+/// Archived-project files are not content addressed: the app checks each
+/// one against the sha256 in its `archived_projects` row at unarchive time.
+const ARCHIVED_PROJECT_FILES: SidecarFiles = SidecarFiles {
+    label: "archived project",
+    prefix: ARCHIVE_ARCHIVED_PROJECTS_PREFIX,
+    content_addressed: false,
+};
+
+/// A file the scan pass accepted: its bare name, its path and the identity
+/// the archive pass must find again.
+struct ScannedFile {
+    name: String,
+    path: PathBuf,
+    identity: BlobIdentity,
+}
+
+/// Scan `dir` for regular files whose names pass `accept`, opening each one
+/// no-follow and recording its identity. Symlinks, directories, vanished
+/// entries and non-UTF-8 names are skipped; a hard-linked file fails the
+/// dump. A missing `dir` yields nothing. Returns the files and their total
+/// size.
+fn scan_verified_files(
+    dir: &Path,
+    kind: &SidecarFiles,
+    accept: impl Fn(&str) -> bool,
+) -> Result<(Vec<ScannedFile>, u64), LificError> {
+    let label = kind.label;
+    let mut files = Vec::new();
+    let mut total: u64 = 0;
+    if !dir.is_dir() {
+        return Ok((files, total));
+    }
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| LificError::Internal(format!("read {label} directory: {e}")))?
+    {
+        let entry = entry.map_err(|e| LificError::Internal(format!("read {label} entry: {e}")))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !accept(name) {
+            continue;
+        }
+        let Some(file) = open_verified_blob(&path, label)? else {
+            continue;
+        };
+        total = total
+            .checked_add(file.identity.size)
+            .ok_or_else(|| LificError::Internal(format!("{label} size overflow")))?;
+        files.push(ScannedFile {
+            name: name.to_string(),
+            path: path.clone(),
+            identity: file.identity,
+        });
+    }
+    Ok((files, total))
+}
+
+/// Archive every scanned file under `kind.prefix`, re-opening each one and
+/// refusing anything that is no longer the object the scan recorded.
+fn append_verified_files<W: Write>(
+    tar: &mut tar::Builder<W>,
+    activity: &File,
+    files: &[ScannedFile],
+    kind: &SidecarFiles,
+) -> Result<(), LificError> {
+    let label = kind.label;
+    for scanned in files {
+        let name = &scanned.name;
+        refresh_activity(activity)
+            .map_err(|e| LificError::Internal(format!("refresh dump staging activity: {e}")))?;
+        let Some(mut file) = open_verified_blob(&scanned.path, label)? else {
+            return Err(LificError::Internal(format!(
+                "{label} {name} was replaced while the dump was running"
+            )));
+        };
+        if file.identity != scanned.identity {
+            return Err(LificError::Internal(format!(
+                "{label} {name} changed while the dump was running"
+            )));
+        }
+        let entry_name = format!("{}{name}", kind.prefix);
+        let digest = file.append_to(tar, &entry_name, label, name)?;
+        // In a content-addressed store the name IS the digest. Hashing during
+        // the copy is the only way to be sure the bytes in the archive are the
+        // bytes that were verified: hashing a second pass over the file would
+        // prove something about a different read. A mismatch fails the dump
+        // before publication, so a corrupted store (bit rot, a hand-edited
+        // blob, a name that never matched its content) can never be published
+        // as a valid-looking backup that a restore would then reject.
+        if kind.content_addressed && digest != *name {
+            return Err(LificError::Internal(format!(
+                "{label} {name} does not match its content address (hashed {digest}); \
+                 refusing to publish a corrupt archive"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A sidecar file (an attachment blob or an archived project) opened once,
+/// verified through that same handle, and archived from it.
 ///
 /// Checking a pathname and then handing the pathname to `tar` for a second
-/// open is a TOCTOU window: whoever can write the attachments directory can
-/// swap the name for a symlink between the two. Everything here — the file
-/// type, the Unix link count, and the size written into the tar header — comes
+/// open is a TOCTOU window: whoever can write the sidecar directory can
+/// swap the name for a symlink between the two. Everything here (the file
+/// type, the Unix link count, and the size written into the tar header) comes
 /// from the one descriptor whose bytes end up in the archive.
 struct VerifiedBlob {
     file: File,
@@ -579,7 +733,7 @@ fn is_symlink(error: &std::io::Error) -> bool {
 /// blob. `Ok(None)` means "not ours to archive" (a symlink, a directory, or an
 /// entry that vanished mid-scan); `Err` means the store is in a state a dump
 /// must not silently paper over.
-fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
+fn open_verified_blob(path: &Path, label: &str) -> Result<Option<VerifiedBlob>, LificError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -597,7 +751,7 @@ fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
         }
         Err(error) => {
             return Err(LificError::Internal(format!(
-                "open attachment {}: {error}",
+                "open {label} {}: {error}",
                 path.display()
             )));
         }
@@ -605,7 +759,7 @@ fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
 
     let metadata = file
         .metadata()
-        .map_err(|e| LificError::Internal(format!("inspect attachment {}: {e}", path.display())))?;
+        .map_err(|e| LificError::Internal(format!("inspect {label} {}: {e}", path.display())))?;
     if !metadata.is_file() {
         return Ok(None);
     }
@@ -616,7 +770,7 @@ fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
         // store, so its bytes are not under Lific's control.
         if metadata.nlink() != 1 {
             return Err(LificError::Internal(format!(
-                "attachment entry is hard-linked: {}",
+                "{label} entry is hard-linked: {}",
                 path.display()
             )));
         }
@@ -649,23 +803,17 @@ fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
 }
 
 impl VerifiedBlob {
-    /// Stream this blob into the archive from its verified handle, hashing the
-    /// bytes on the way through.
-    ///
-    /// `expected_sha` is the blob's filename, which in a content-addressed
-    /// store *is* its digest. Hashing during the copy is the only way to be
-    /// sure the bytes in the archive are the bytes that were verified: hashing
-    /// a second pass over the file would prove something about a different
-    /// read. A mismatch fails the dump before publication, so a store that has
-    /// been corrupted (bit rot, a hand-edited blob, a name that never matched
-    /// its content) can never be published as a valid-looking backup that a
-    /// restore would then reject.
+    /// Stream this file into the archive from its verified handle, hashing the
+    /// bytes on the way through, and return their sha256 so the caller can
+    /// check a content address against exactly the bytes that were archived.
+    /// `name` is the bare filename, used in messages.
     fn append_to<W: Write>(
         &mut self,
         tar: &mut tar::Builder<W>,
         entry_name: &str,
-        expected_sha: &str,
-    ) -> Result<(), LificError> {
+        label: &str,
+        name: &str,
+    ) -> Result<String, LificError> {
         let size = self.identity.size;
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
@@ -675,30 +823,24 @@ impl VerifiedBlob {
         header.set_cksum();
         self.file
             .rewind()
-            .map_err(|e| LificError::Internal(format!("rewind attachment {expected_sha}: {e}")))?;
+            .map_err(|e| LificError::Internal(format!("rewind {label} {name}: {e}")))?;
         let mut hashing = HashingReader::new((&self.file).take(size));
         tar.append_data(&mut header, entry_name, &mut hashing)
-            .map_err(|e| LificError::Internal(format!("append attachment {expected_sha}: {e}")))?;
+            .map_err(|e| LificError::Internal(format!("append {label} {name}: {e}")))?;
         let digest = hashing.hex_digest();
         // The header already promised `size` bytes; publishing an archive whose
         // body is shorter would leave every later entry misaligned.
         let written = self
             .file
             .stream_position()
-            .map_err(|e| LificError::Internal(format!("measure attachment {expected_sha}: {e}")))?;
+            .map_err(|e| LificError::Internal(format!("measure {label} {name}: {e}")))?;
         if written != size {
             return Err(LificError::Internal(format!(
-                "attachment {expected_sha} changed size while being archived \
+                "{label} {name} changed size while being archived \
                  ({written} of {size} bytes)"
             )));
         }
-        if digest != expected_sha {
-            return Err(LificError::Internal(format!(
-                "attachment {expected_sha} does not match its content address (hashed {digest}); \
-                 refusing to publish a corrupt archive"
-            )));
-        }
-        Ok(())
+        Ok(digest)
     }
 }
 
@@ -727,6 +869,39 @@ impl<R: Read> Read for HashingReader<R> {
         let read = self.inner.read(buf)?;
         self.hasher.update(&buf[..read]);
         Ok(read)
+    }
+}
+
+/// A writer that digests everything written through it, so a restore can
+/// stage a file and learn its sha256 in the same pass.
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// The inner writer and the lowercase hex digest of what reached it.
+    fn finish(self) -> (W, String) {
+        (self.inner, crate::auth::hex_encode(&self.hasher.finalize()))
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -863,6 +1038,7 @@ pub fn run_dump(db_path: &Path, out: Option<&Path>) -> Result<DumpResult, LificE
 pub struct RestoreResult {
     pub manifest: Manifest,
     pub attachment_count: u64,
+    pub archived_project_count: u64,
     pub db_path: PathBuf,
     /// Where the pre-existing DB was moved, if `--force` displaced one.
     pub moved_existing_to: Option<PathBuf>,
@@ -894,6 +1070,21 @@ fn validate_attachment_entry(name: &str) -> Result<String, LificError> {
     Ok(rest.to_string())
 }
 
+/// Validate that an entry is a single archived-project filename under
+/// `archived-projects/` (see [`valid_archived_project_name`]). Returns the
+/// bare filename on success.
+fn validate_archived_project_entry(name: &str) -> Result<String, LificError> {
+    let rest = name
+        .strip_prefix(ARCHIVE_ARCHIVED_PROJECTS_PREFIX)
+        .ok_or_else(|| LificError::BadRequest(format!("unexpected archive entry: {name}")))?;
+    if !valid_archived_project_name(rest) {
+        return Err(LificError::BadRequest(format!(
+            "rejected archived project entry (path traversal or invalid name): {name}"
+        )));
+    }
+    Ok(rest.to_string())
+}
+
 fn validate_manifest_limits(manifest: &Manifest, limits: &RestoreLimits) -> Result<(), LificError> {
     if manifest.db_size_bytes > limits.max_db_bytes {
         return Err(LificError::BadRequest(format!(
@@ -907,9 +1098,20 @@ fn validate_manifest_limits(manifest: &Manifest, limits: &RestoreLimits) -> Resu
             manifest.attachment_count, limits.max_entries
         )));
     }
-    if manifest.attachment_bytes > limits.max_total_bytes
-        || manifest.db_size_bytes > limits.max_total_bytes - manifest.attachment_bytes
-    {
+    let entries = manifest
+        .attachment_count
+        .checked_add(manifest.archived_project_count);
+    if entries.is_none_or(|entries| entries > limits.max_entries) {
+        return Err(LificError::BadRequest(format!(
+            "archive has too many attachments and archived projects (limit {})",
+            limits.max_entries
+        )));
+    }
+    let total = manifest
+        .db_size_bytes
+        .checked_add(manifest.attachment_bytes)
+        .and_then(|sum| sum.checked_add(manifest.archived_project_bytes));
+    if total.is_none_or(|total| total > limits.max_total_bytes) {
         return Err(LificError::BadRequest(
             "archive contents exceed total restore size limit".into(),
         ));
@@ -1321,6 +1523,96 @@ fn validate_staged_database(
     Ok(())
 }
 
+/// Size and sha256 of one archived-project file, recorded while it was
+/// written into the restore staging tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedFile {
+    size: u64,
+    digest: String,
+}
+
+/// Check every `archived_projects` row in the staged database against the
+/// staged `archived-projects/` files, before anything is installed.
+///
+/// A restore replaces the live directory wholesale, so a row whose file is
+/// missing or whose bytes differ would swap a healthy archive for one that can
+/// never be unarchived. `staged` maps each staged filename to the size and
+/// digest computed while it was written; the staging tree is private to this
+/// restore, so it holds exactly those files. Files with no row are accepted:
+/// a crash between writing an archive file and committing its row leaves such
+/// a stray, and it does no harm. A database from before migration 059 has no
+/// table and nothing to check.
+fn validate_staged_archived_projects(
+    staging: &Path,
+    staged: &std::collections::HashMap<String, StagedFile>,
+) -> Result<(), LificError> {
+    let conn = rusqlite::Connection::open_with_flags(
+        staging.join(ARCHIVE_DB_NAME),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| LificError::BadRequest(format!("open staged database: {e}")))?;
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                           WHERE type = 'table' AND name = 'archived_projects')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| LificError::BadRequest(format!("inspect staged schema: {e}")))?;
+    if !has_table {
+        return Ok(());
+    }
+
+    let read_error =
+        |e: rusqlite::Error| LificError::BadRequest(format!("read staged archived projects: {e}"));
+    let mut stmt = conn
+        .prepare("SELECT file_name, sha256, size_bytes FROM archived_projects ORDER BY id")
+        .map_err(read_error)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(read_error)?;
+    for row in rows {
+        let (file_name, sha256, size_bytes) = row.map_err(read_error)?;
+        if !valid_archived_project_name(&file_name) {
+            return Err(LificError::BadRequest(format!(
+                "staged archived project row has an invalid file name: {file_name:?}"
+            )));
+        }
+        let Some(file) = staged.get(&file_name) else {
+            return Err(LificError::BadRequest(format!(
+                "staged database references missing archived project file {file_name}"
+            )));
+        };
+        // The map is the authority for what was staged; still confirm the
+        // file is where the install will look for it.
+        let on_disk =
+            std::fs::symlink_metadata(staging.join(ARCHIVED_PROJECTS_DIR_NAME).join(&file_name));
+        if !on_disk.is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.size) {
+            return Err(LificError::BadRequest(format!(
+                "staged archived project file {file_name} is not a regular file of the staged size"
+            )));
+        }
+        if u64::try_from(size_bytes).ok() != Some(file.size) {
+            return Err(LificError::BadRequest(format!(
+                "staged archived project file {file_name} is {} bytes, but its row records {size_bytes}",
+                file.size
+            )));
+        }
+        if file.digest != sha256 {
+            return Err(LificError::BadRequest(format!(
+                "staged archived project file {file_name} does not match the sha256 its row records"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Read and validate an archive's manifest + entry list without extracting.
 /// Returns the parsed manifest. Rejects archives missing `manifest.json` or
 /// `lific.db`, and any attachment entry that fails [`validate_attachment_entry`].
@@ -1340,6 +1632,9 @@ pub fn inspect_archive(archive: &Path, limits: &RestoreLimits) -> Result<Manifes
     let mut entry_count = 0u64;
     let mut attachment_count = 0u64;
     let mut attachment_bytes = 0u64;
+    let mut archived_project_names = std::collections::HashSet::new();
+    let mut archived_project_count = 0u64;
+    let mut archived_project_bytes = 0u64;
     let mut payload_bytes = 0u64;
     for entry in tar
         .entries()
@@ -1402,7 +1697,7 @@ pub fn inspect_archive(archive: &Path, limits: &RestoreLimits) -> Result<Manifes
             payload_bytes = payload_bytes
                 .checked_add(size)
                 .ok_or_else(|| LificError::BadRequest("archive size overflow".into()))?;
-            if attachment_count > limits.max_entries
+            if attachment_count.saturating_add(archived_project_count) > limits.max_entries
                 || attachment_bytes > manifest.attachment_bytes
                 || payload_bytes > limits.max_total_bytes
             {
@@ -1410,11 +1705,45 @@ pub fn inspect_archive(archive: &Path, limits: &RestoreLimits) -> Result<Manifes
                     "archive attachment contents exceed manifest limits".into(),
                 ));
             }
+        } else if name.starts_with(ARCHIVE_ARCHIVED_PROJECTS_PREFIX) {
+            validate_archived_project_entry(&name)?;
+            if !archived_project_names.insert(name.clone()) {
+                return Err(LificError::BadRequest(format!(
+                    "archive contains duplicate archived project: {name}"
+                )));
+            }
+            if size > limits.max_archived_project_bytes {
+                return Err(LificError::BadRequest(
+                    "archived project exceeds restore limit".into(),
+                ));
+            }
+            archived_project_count += 1;
+            archived_project_bytes = archived_project_bytes
+                .checked_add(size)
+                .ok_or_else(|| LificError::BadRequest("archived project size overflow".into()))?;
+            payload_bytes = payload_bytes
+                .checked_add(size)
+                .ok_or_else(|| LificError::BadRequest("archive size overflow".into()))?;
+            if attachment_count.saturating_add(archived_project_count) > limits.max_entries
+                || archived_project_bytes > manifest.archived_project_bytes
+                || payload_bytes > limits.max_total_bytes
+            {
+                return Err(LificError::BadRequest(
+                    "archived project contents exceed manifest limits".into(),
+                ));
+            }
         } else {
             return Err(LificError::BadRequest(format!(
                 "rejected unexpected archive entry: {name}"
             )));
         }
+    }
+    if archived_project_count != manifest.archived_project_count
+        || archived_project_bytes != manifest.archived_project_bytes
+    {
+        return Err(LificError::BadRequest(
+            "archive archived-project entries do not match manifest".into(),
+        ));
     }
     if !has_db {
         return Err(LificError::BadRequest("archive is missing lific.db".into()));
@@ -1541,12 +1870,22 @@ pub fn run_restore_with(
         .map_err(|e| LificError::Internal(format!("secure restore staging dir: {e}")))?;
     set_owner_only_dir(&staging_path.join("attachments"))
         .map_err(|e| LificError::Internal(format!("secure restore attachments dir: {e}")))?;
+    // Always staged, even when the dump carries no archived projects: the
+    // install replaces the live directory wholesale, so restoring an older
+    // dump leaves an empty directory rather than files no restored row tracks.
+    let staged_archived = staging_path.join(ARCHIVED_PROJECTS_DIR_NAME);
+    std::fs::create_dir(&staged_archived)
+        .map_err(|e| LificError::Internal(format!("create staging dir: {e}")))?;
+    set_owner_only_dir(&staged_archived)
+        .map_err(|e| LificError::Internal(format!("secure restore archived projects dir: {e}")))?;
 
-    let extract = (|| -> Result<u64, LificError> {
+    let extract = (|| -> Result<(u64, u64), LificError> {
         let file = std::fs::File::open(archive)
             .map_err(|e| LificError::BadRequest(format!("open archive: {e}")))?;
         let mut tar = bounded_archive(file, limits);
         let mut attachment_count = 0u64;
+        let mut archived_project_count = 0u64;
+        let mut staged_archived_digests = std::collections::HashMap::new();
         let mut total_bytes = 0u64;
         for entry in tar
             .entries()
@@ -1605,6 +1944,29 @@ pub fn run_restore_with(
                     .sync_all()
                     .map_err(|e| LificError::Internal(format!("sync staged attachment: {e}")))?;
                 attachment_count += 1;
+            } else if name.starts_with(ARCHIVE_ARCHIVED_PROJECTS_PREFIX) {
+                let bare = validate_archived_project_entry(&name)?;
+                let path = staged_archived.join(&bare);
+                // Hash while staging, so validating the staged database
+                // against these bytes does not have to read them again.
+                let mut hashing = HashingWriter::new(create_staging_file(&path)?);
+                let size = copy_entry_bounded(
+                    &mut entry,
+                    &mut hashing,
+                    limits.max_archived_project_bytes,
+                    &mut total_bytes,
+                    limits.max_total_bytes,
+                    "archived project",
+                )?;
+                let (output, digest) = hashing.finish();
+                staged_archived_digests.insert(bare, StagedFile { size, digest });
+                set_owner_only_file(&output).map_err(|e| {
+                    LificError::Internal(format!("chmod staged archived project: {e}"))
+                })?;
+                output.sync_all().map_err(|e| {
+                    LificError::Internal(format!("sync staged archived project: {e}"))
+                })?;
+                archived_project_count += 1;
             } else {
                 return Err(LificError::BadRequest(format!(
                     "rejected unexpected archive entry: {name}"
@@ -1614,16 +1976,21 @@ pub fn run_restore_with(
         if !staging_path.join(ARCHIVE_DB_NAME).exists() {
             return Err(LificError::BadRequest("archive is missing lific.db".into()));
         }
+        // `inspect_archive` already matched the entries against the manifest;
+        // recheck what was actually staged, since the archive was reopened.
+        if archived_project_count != manifest.archived_project_count {
+            return Err(LificError::BadRequest(
+                "archive archived-project entries do not match manifest".into(),
+            ));
+        }
+        sync_dir(&staged_archived)
+            .map_err(|e| LificError::Internal(format!("sync staged archived projects: {e}")))?;
         validate_staged_database(staging_path, &manifest, limits)?;
-        Ok(attachment_count)
+        validate_staged_archived_projects(staging_path, &staged_archived_digests)?;
+        Ok((attachment_count, archived_project_count))
     })();
 
-    let attachment_count = match extract {
-        Ok(n) => n,
-        Err(e) => {
-            return Err(e);
-        }
-    };
+    let (attachment_count, archived_project_count) = extract?;
 
     // Recheck after staging in case another process created the destination
     // while the archive was being validated.
@@ -1641,11 +2008,12 @@ pub fn run_restore_with(
         .unwrap_or("restore")
         .to_string();
 
-    // The install phase swaps the live database and the whole attachments
-    // directory. A dump, upload, delete or GC sweep crossing that swap would
-    // be reading one half of the old data set and one half of the new one, so
-    // it runs under the attachment store's lock like every other operation
-    // that moves blobs. The lock file is a sibling of `attachments/`, not
+    // The install phase swaps the live database and the whole attachments and
+    // archived-projects directories. A dump, upload, delete, GC sweep,
+    // archive or unarchive crossing that swap would be reading one half of the
+    // old data set and one half of the new one, so it runs under the
+    // attachment store's lock like every other operation that moves blobs or
+    // archived-project files. The lock file is a sibling of `attachments/`, not
     // inside it, so it is the same lock before and after the directory is
     // replaced. Store lock first, then the database work inside: the ordering
     // every other caller uses.
@@ -1656,6 +2024,7 @@ pub fn run_restore_with(
     Ok(RestoreResult {
         manifest,
         attachment_count,
+        archived_project_count,
         db_path: db_path.to_path_buf(),
         moved_existing_to,
     })
@@ -1706,33 +2075,59 @@ fn install_restore(
     let fail = move |cause: LificError| fail_after_move(moved.as_deref(), db_path, cause);
 
     // Move restored files into place as one recoverable transaction. Keep the
-    // old attachment directory until both the DB and new directory are live so
-    // a filesystem failure cannot leave mismatched metadata and blobs.
-    let attachments_dest = attachments_dir_for(db_path);
-    let attachments_backup = PathBuf::from(format!(
-        "{}.pre-restore-{restore_id}",
-        attachments_dest.display()
-    ));
-    let had_attachments = attachments_dest.exists();
-    if had_attachments && std::fs::symlink_metadata(&attachments_backup).is_ok() {
-        return Err(fail(LificError::Conflict(format!(
-            "restore attachment backup already exists: {}",
-            attachments_backup.display()
-        ))));
-    }
-    if had_attachments && let Err(e) = std::fs::rename(&attachments_dest, &attachments_backup) {
-        return Err(fail(LificError::Internal(format!(
-            "move existing attachments aside: {e}"
-        ))));
+    // old sidecar directories until the DB and every new directory are live so
+    // a filesystem failure cannot leave mismatched metadata and files. Both
+    // directories are replaced wholesale: an archived-project file the restored
+    // database has no row for would be unreachable and never cleaned up.
+    let mut sidecars = [
+        SidecarSwap::new(
+            attachments_dir_for(db_path),
+            "attachments",
+            "attachment",
+            restore_id,
+        ),
+        SidecarSwap::new(
+            archived_projects_dir_for(db_path),
+            ARCHIVED_PROJECTS_DIR_NAME,
+            "archived project",
+            restore_id,
+        ),
+    ];
+    // Refuse before moving any directory, so this path only has the database
+    // to put back.
+    for sidecar in &sidecars {
+        if std::fs::symlink_metadata(&sidecar.live).is_ok()
+            && std::fs::symlink_metadata(&sidecar.aside).is_ok()
+        {
+            return Err(fail(LificError::Conflict(format!(
+                "restore {} backup already exists: {}",
+                sidecar.label,
+                sidecar.aside.display()
+            ))));
+        }
     }
 
+    let mut db_installed = false;
     let install_result = (|| -> Result<(), LificError> {
+        for sidecar in &mut sidecars {
+            if std::fs::symlink_metadata(&sidecar.live).is_ok() {
+                std::fs::rename(&sidecar.live, &sidecar.aside).map_err(|e| {
+                    LificError::Internal(format!("move existing {} aside: {e}", sidecar.dir_name))
+                })?;
+                sidecar.moved_aside = true;
+            }
+        }
         std::fs::rename(staging_path.join(ARCHIVE_DB_NAME), db_path)
             .map_err(|e| LificError::Internal(format!("install restored db: {e}")))?;
+        db_installed = true;
         set_owner_only(db_path)
             .map_err(|e| LificError::Internal(format!("chmod restored db: {e}")))?;
-        std::fs::rename(staging_path.join("attachments"), &attachments_dest)
-            .map_err(|e| LificError::Internal(format!("install restored attachments: {e}")))?;
+        for sidecar in &mut sidecars {
+            std::fs::rename(staging_path.join(sidecar.dir_name), &sidecar.live).map_err(|e| {
+                LificError::Internal(format!("install restored {}: {e}", sidecar.dir_name))
+            })?;
+            sidecar.installed = true;
+        }
         let data_dir = db_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -1747,18 +2142,50 @@ fn install_restore(
             error,
             staging_path,
             db_path,
-            &attachments_dest,
-            &attachments_backup,
-            had_attachments,
+            db_installed,
+            &sidecars,
             moved_existing_to.as_deref(),
         ));
     }
 
-    if had_attachments {
-        let _ = std::fs::remove_dir_all(&attachments_backup);
+    for sidecar in &sidecars {
+        if sidecar.moved_aside {
+            let _ = std::fs::remove_dir_all(&sidecar.aside);
+        }
     }
 
     Ok(moved_existing_to)
+}
+
+/// One sidecar directory beside the database that a restore swaps wholesale,
+/// with enough state for [`rollback_install`] to undo exactly what happened.
+struct SidecarSwap {
+    /// Directory name inside the staging tree.
+    dir_name: &'static str,
+    /// Singular noun for messages.
+    label: &'static str,
+    /// The live directory in the data dir.
+    live: PathBuf,
+    /// Where the previous live directory is kept until the install succeeds.
+    aside: PathBuf,
+    /// The previous live directory now sits at `aside`.
+    moved_aside: bool,
+    /// The staged directory now sits at `live`.
+    installed: bool,
+}
+
+impl SidecarSwap {
+    fn new(live: PathBuf, dir_name: &'static str, label: &'static str, restore_id: &str) -> Self {
+        let aside = PathBuf::from(format!("{}.pre-restore-{restore_id}", live.display()));
+        Self {
+            dir_name,
+            label,
+            live,
+            aside,
+            moved_aside: false,
+            installed: false,
+        }
+    }
 }
 
 /// Surface `cause`, first putting a moved-aside database back if there is one.
@@ -1785,24 +2212,33 @@ fn remove_dir_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Undo a partial install: take out whatever was installed, put back every
+/// directory and the database that were moved aside, and drop the staging
+/// tree. Only steps that actually happened are reversed, so a failure while
+/// moving the second directory aside never deletes that directory.
 fn rollback_install(
     cause: LificError,
     staging: &Path,
     db_path: &Path,
-    attachments_dest: &Path,
-    attachments_backup: &Path,
-    had_attachments: bool,
+    db_installed: bool,
+    sidecars: &[SidecarSwap],
     moved_existing_to: Option<&Path>,
 ) -> LificError {
     let mut failures = Vec::new();
-    if let Err(error) = remove_file_if_present(db_path) {
+    if db_installed && let Err(error) = remove_file_if_present(db_path) {
         failures.push(format!("remove installed database: {error}"));
     }
-    if let Err(error) = remove_dir_if_present(attachments_dest) {
-        failures.push(format!("remove installed attachments: {error}"));
-    }
-    if had_attachments && let Err(error) = std::fs::rename(attachments_backup, attachments_dest) {
-        failures.push(format!("restore previous attachments: {error}"));
+    for sidecar in sidecars.iter().rev() {
+        if sidecar.installed
+            && let Err(error) = remove_dir_if_present(&sidecar.live)
+        {
+            failures.push(format!("remove installed {}: {error}", sidecar.dir_name));
+        }
+        if sidecar.moved_aside
+            && let Err(error) = std::fs::rename(&sidecar.aside, &sidecar.live)
+        {
+            failures.push(format!("restore previous {}: {error}", sidecar.dir_name));
+        }
     }
     if let Some(moved) = moved_existing_to
         && let Err(error) = std::fs::rename(moved, db_path)
@@ -2593,6 +3029,8 @@ mod tests {
             db_size_bytes: fs::metadata(&legacy_db).unwrap().len(),
             attachment_count: 0,
             attachment_bytes: 0,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
         let file = fs::File::create(&archive).unwrap();
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -2659,6 +3097,8 @@ mod tests {
             db_size_bytes: fs::metadata(&db).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 6,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         validate_staged_database(&staging, &manifest, &RestoreLimits::default())
@@ -2683,6 +3123,8 @@ mod tests {
                 db_size_bytes: 1,
                 attachment_count: 1,
                 attachment_bytes: 1,
+                archived_project_count: 0,
+                archived_project_bytes: 0,
             };
             let mj = serde_json::to_vec(&manifest).unwrap();
             append_bytes(&mut tar, ARCHIVE_MANIFEST_NAME, &mj).unwrap();
@@ -2927,6 +3369,8 @@ mod tests {
             db_size_bytes: 1,
             attachment_count: 0,
             attachment_bytes: 0,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
         let bytes = serde_json::to_vec(&manifest).unwrap();
         append_bytes(&mut builder, ARCHIVE_MANIFEST_NAME, &bytes).unwrap();
@@ -3075,6 +3519,7 @@ mod tests {
 
         let staging = root.join("staging");
         fs::create_dir_all(staging.join("attachments")).unwrap();
+        fs::create_dir_all(staging.join(ARCHIVED_PROJECTS_DIR_NAME)).unwrap();
         fs::write(staging.join(ARCHIVE_DB_NAME), b"restored database bytes").unwrap();
         (dir_tmp, db_path, staging, sha)
     }
@@ -3261,6 +3706,8 @@ mod tests {
                 db_size_bytes: 13,
                 attachment_count: 1,
                 attachment_bytes: 5,
+                archived_project_count: 0,
+                archived_project_bytes: 0,
             };
             let mj = serde_json::to_vec(&manifest).unwrap();
             append_bytes(&mut tar, ARCHIVE_MANIFEST_NAME, &mj).unwrap();
@@ -3325,6 +3772,8 @@ mod tests {
             db_size_bytes: fs::metadata(&db_path).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 4,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         let error =
@@ -3362,6 +3811,8 @@ mod tests {
             db_size_bytes: fs::metadata(&db_path).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 4,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         let error =
@@ -3401,6 +3852,8 @@ mod tests {
             db_size_bytes: fs::metadata(&db_path).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 4,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         let error =
@@ -3432,6 +3885,8 @@ mod tests {
             db_size_bytes: fs::metadata(&db_path).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 4,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         let error =
@@ -3464,6 +3919,8 @@ mod tests {
             db_size_bytes: 0,
             attachment_count: 0,
             attachment_bytes: 0,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
 
         let error =
@@ -3500,10 +3957,643 @@ mod tests {
             db_size_bytes: fs::metadata(&db_path).unwrap().len(),
             attachment_count: 1,
             attachment_bytes: 4,
+            archived_project_count: 0,
+            archived_project_bytes: 0,
         };
         let error =
             validate_staged_database(&staging, &manifest, &RestoreLimits::default()).unwrap_err();
         assert!(error.to_string().contains("missing attachment"));
+    }
+
+    // ── archived projects ────────────────────────────────────
+
+    const ARCHIVED_ALPHA: (&str, &[u8]) = ("ALPHA-1.lific.tar.gz", b"alpha project archive");
+    const ARCHIVED_BETA: (&str, &[u8]) = ("beta_2.v1.lific.tar.gz", b"beta project archive bytes");
+
+    /// Write two qualifying archived-project files into the data dir beside
+    /// `db_path`, owner-only like the app writes them. Returns the dir.
+    fn seed_archived_projects(db_path: &Path) -> PathBuf {
+        let dir = archived_projects_dir_for(db_path);
+        fs::create_dir_all(&dir).unwrap();
+        set_owner_only_dir(&dir).unwrap();
+        for (name, bytes) in [ARCHIVED_ALPHA, ARCHIVED_BETA] {
+            fs::write(dir.join(name), bytes).unwrap();
+            set_owner_only(&dir.join(name)).unwrap();
+        }
+        dir
+    }
+
+    /// Build an archive with a manifest declaring one archived project, a
+    /// placeholder database, and one entry under a hand-written name. The
+    /// name goes straight into the header bytes, because `tar` refuses to
+    /// write a `..` component through its path setters.
+    fn archive_with_archived_project_entry(path: &Path, entry_name: &str) {
+        let file = fs::File::create(path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        let body = b"project bytes";
+        let manifest = Manifest {
+            lific_version: "x".into(),
+            schema_version: 1,
+            created_at: "now".into(),
+            db_size_bytes: 13,
+            attachment_count: 0,
+            attachment_bytes: 0,
+            archived_project_count: 1,
+            archived_project_bytes: body.len() as u64,
+        };
+        append_bytes(
+            &mut tar,
+            ARCHIVE_MANIFEST_NAME,
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        append_bytes(&mut tar, ARCHIVE_DB_NAME, b"not a real db").unwrap();
+        let mut header = tar::Header::new_old();
+        let raw = entry_name.as_bytes();
+        header.as_old_mut().name[..raw.len()].copy_from_slice(raw);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(body.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn archived_project_names_follow_the_published_rule() {
+        for good in [
+            "a.lific.tar.gz",
+            "ALPHA-1.lific.tar.gz",
+            "beta_2.v1.lific.tar.gz",
+            "9.lific.tar.gz",
+        ] {
+            assert!(valid_archived_project_name(good), "{good} must qualify");
+        }
+        let longest = format!("{}.lific.tar.gz", "a".repeat(160 - ".lific.tar.gz".len()));
+        assert_eq!(longest.len(), 160);
+        assert!(valid_archived_project_name(&longest));
+        for bad in [
+            ".lific.tar.gz",
+            ".tmpAbC12",
+            ".hidden.lific.tar.gz",
+            "-dash.lific.tar.gz",
+            "_under.lific.tar.gz",
+            "name.tar.gz",
+            "name.lific.tar.gz.tmp",
+            "sub/name.lific.tar.gz",
+            "sub\\name.lific.tar.gz",
+            "spa ce.lific.tar.gz",
+            "caf\u{e9}.lific.tar.gz",
+            &format!("{}.lific.tar.gz", "a".repeat(161 - ".lific.tar.gz".len())),
+        ] {
+            assert!(!valid_archived_project_name(bad), "{bad} must not qualify");
+        }
+        assert_eq!(
+            validate_archived_project_entry("archived-projects/ALPHA-1.lific.tar.gz").unwrap(),
+            "ALPHA-1.lific.tar.gz"
+        );
+        assert!(validate_archived_project_entry("archived-projects/../x.lific.tar.gz").is_err());
+        assert!(validate_archived_project_entry("archived-projects/").is_err());
+        assert!(validate_archived_project_entry("attachments/x.lific.tar.gz").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_includes_archived_project_files_and_skips_everything_else() {
+        use std::os::unix::fs::symlink;
+
+        let (dir_tmp, db_path) = seed_data_dir("archived_dump");
+        let dir = dir_tmp.path();
+        let archived = seed_archived_projects(&db_path);
+        // Not ours: an in-progress temp file, a stray name, a hidden name, a
+        // name over the length cap, a directory and a symlink that both carry
+        // a qualifying name.
+        fs::write(archived.join(".tmpXy12Ab"), b"partial").unwrap();
+        fs::write(archived.join("notes.txt"), b"stray").unwrap();
+        fs::write(archived.join(".hidden.lific.tar.gz"), b"hidden").unwrap();
+        let too_long = format!("{}.lific.tar.gz", "a".repeat(161 - ".lific.tar.gz".len()));
+        fs::write(archived.join(&too_long), b"long").unwrap();
+        fs::create_dir(archived.join("nested.lific.tar.gz")).unwrap();
+        let outside = dir.join("outside-secret");
+        fs::write(&outside, b"outside secret").unwrap();
+        symlink(&outside, archived.join("link.lific.tar.gz")).unwrap();
+
+        let out = dir.join("out.tar.gz");
+        let manifest = write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
+
+        let entries = archive_entries(&out);
+        let mut expected = vec![
+            format!("{ARCHIVE_ARCHIVED_PROJECTS_PREFIX}{}", ARCHIVED_ALPHA.0),
+            format!("{ARCHIVE_ARCHIVED_PROJECTS_PREFIX}{}", ARCHIVED_BETA.0),
+        ];
+        expected.sort();
+        let mut found: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.starts_with(ARCHIVE_ARCHIVED_PROJECTS_PREFIX))
+            .collect();
+        found.sort();
+        assert_eq!(found, expected, "only qualifying regular files are dumped");
+
+        assert_eq!(manifest.archived_project_count, 2);
+        assert_eq!(
+            manifest.archived_project_bytes,
+            (ARCHIVED_ALPHA.1.len() + ARCHIVED_BETA.1.len()) as u64
+        );
+        assert_eq!(
+            manifest.attachment_count, 2,
+            "attachments are counted apart"
+        );
+        assert_eq!(
+            read_manifest(&out, &RestoreLimits::default())
+                .unwrap()
+                .archived_project_count,
+            2,
+            "the counts are written into manifest.json"
+        );
+        inspect_archive(&out, &RestoreLimits::default()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_refuses_a_hard_linked_archived_project() {
+        let (dir_tmp, db_path) = seed_data_dir("archived_hardlink");
+        let archived = seed_archived_projects(&db_path);
+        let outside = dir_tmp.path().join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        fs::hard_link(&outside, archived.join("linked.lific.tar.gz")).unwrap();
+
+        let out = dir_tmp.path().join("out.tar.gz");
+        let error = write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap_err();
+        assert!(error.to_string().contains("hard-linked"), "got {error}");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn dump_without_an_archived_projects_dir_declares_none() {
+        let (dir_tmp, db_path) = seed_data_dir("archived_absent");
+        let out = dir_tmp.path().join("out.tar.gz");
+        let manifest = write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
+        assert_eq!(manifest.archived_project_count, 0);
+        assert_eq!(manifest.archived_project_bytes, 0);
+        assert!(
+            !archive_entries(&out)
+                .iter()
+                .any(|e| e.starts_with(ARCHIVE_ARCHIVED_PROJECTS_PREFIX))
+        );
+    }
+
+    #[test]
+    fn manifest_from_before_archived_projects_still_parses() {
+        let json = r#"{
+            "lific_version": "2.10.0",
+            "schema_version": 56,
+            "created_at": "2026-09-25T00:00:00Z",
+            "db_size_bytes": 4096,
+            "attachment_count": 3,
+            "attachment_bytes": 120
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.attachment_count, 3);
+        assert_eq!(manifest.archived_project_count, 0);
+        assert_eq!(manifest.archived_project_bytes, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_round_trips_archived_projects_byte_identical_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (src_tmp, src_db) = seed_data_dir("archived_rt_src");
+        seed_archived_projects(&src_db);
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+
+        let dst = temp_dir("archived_rt_dst");
+        let dst_db = dst.path().join(ARCHIVE_DB_NAME);
+        let result = run_restore(&archive, &dst_db, false).unwrap();
+        assert_eq!(result.archived_project_count, 2);
+        assert_eq!(result.attachment_count, 2);
+
+        let restored = dst.path().join(ARCHIVED_PROJECTS_DIR_NAME);
+        assert_eq!(
+            fs::metadata(&restored).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the restored directory is owner-only"
+        );
+        for (name, bytes) in [ARCHIVED_ALPHA, ARCHIVED_BETA] {
+            let path = restored.join(name);
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name} is byte-identical");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{name} is owner-only"
+            );
+        }
+        assert_eq!(fs::read_dir(&restored).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn restore_of_a_dump_without_archived_projects_empties_the_live_directory() {
+        // The restored database replaces the live one wholesale, so an
+        // archived-project file left over from before would have no row
+        // tracking it: unreachable and never cleaned up.
+        let (src_tmp, src_db) = seed_data_dir("archived_stale_src");
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+
+        let (dst_tmp, dst_db) = seed_data_dir("archived_stale_dst");
+        let stale = seed_archived_projects(&dst_db);
+        checkpoint_db_file(&dst_db).unwrap();
+
+        let result = run_restore(&archive, &dst_db, true).unwrap();
+        assert_eq!(result.archived_project_count, 0);
+
+        assert!(stale.is_dir(), "the directory exists after the restore");
+        assert_eq!(
+            fs::read_dir(&stale).unwrap().count(),
+            0,
+            "stale archived-project files are gone"
+        );
+        let leftovers: Vec<String> = fs::read_dir(dst_tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(ARCHIVED_PROJECTS_DIR_NAME) && n.contains(".pre-restore-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the aside copy is deleted: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_bad_archived_project_entry_names() {
+        for (tag, entry) in [
+            ("dotdot", "archived-projects/../escape.lific.tar.gz"),
+            ("nested", "archived-projects/sub/nested.lific.tar.gz"),
+            ("hidden", "archived-projects/.hidden.lific.tar.gz"),
+            ("stray", "archived-projects/notes.txt"),
+            ("tmp", "archived-projects/.tmpAbC123"),
+        ] {
+            let dir = temp_dir(&format!("archived_bad_{tag}"));
+            let archive = dir.path().join("evil.tar.gz");
+            archive_with_archived_project_entry(&archive, entry);
+
+            let error = inspect_archive(&archive, &RestoreLimits::default()).unwrap_err();
+            assert!(
+                matches!(error, LificError::BadRequest(_)),
+                "{entry}: got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("archived project entry"),
+                "{entry}: the name check rejects it, got {error}"
+            );
+
+            let dst = temp_dir(&format!("archived_bad_{tag}_dst"));
+            let dst_db = dst.path().join(ARCHIVE_DB_NAME);
+            assert!(run_restore(&archive, &dst_db, false).is_err(), "{entry}");
+            assert!(!dst_db.exists(), "{entry}: nothing is installed");
+            assert!(!dst.path().join(ARCHIVED_PROJECTS_DIR_NAME).exists());
+            assert!(!dst.path().join("escape.lific.tar.gz").exists());
+        }
+    }
+
+    #[test]
+    fn restore_rejects_archived_projects_the_manifest_does_not_declare() {
+        let (src_tmp, src_db) = seed_data_dir("archived_undeclared");
+        seed_archived_projects(&src_db);
+        let archive = src_tmp.path().join("backup.tar.gz");
+        let mut manifest =
+            write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+        manifest.archived_project_count = 0;
+        manifest.archived_project_bytes = 0;
+        let rewritten = src_tmp.path().join("undeclared.tar.gz");
+        rewrite_archive_manifest(&archive, &rewritten, &manifest);
+
+        let error = inspect_archive(&rewritten, &RestoreLimits::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("manifest"),
+            "an undeclared archived project is refused: {error}"
+        );
+    }
+
+    #[test]
+    fn restore_applies_the_per_file_archived_project_limit() {
+        let (src_tmp, src_db) = seed_data_dir("archived_limit");
+        seed_archived_projects(&src_db);
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+        let tight = RestoreLimits {
+            max_archived_project_bytes: ARCHIVED_ALPHA.1.len() as u64,
+            ..RestoreLimits::default()
+        };
+        let error = inspect_archive(&archive, &tight).unwrap_err();
+        assert!(
+            error.to_string().contains("archived project exceeds"),
+            "got {error}"
+        );
+        inspect_archive(&archive, &RestoreLimits::trusted()).unwrap();
+    }
+
+    /// Record an `archived_projects` row the way the app does when it
+    /// archives a project.
+    fn track_archived_project(db_path: &Path, file_name: &str, sha256: &str, size_bytes: i64) {
+        let pool = crate::db::open(db_path).unwrap();
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "INSERT INTO archived_projects (identifier, name, file_name, sha256, size_bytes)
+             VALUES ('ARC', 'Archived', ?1, ?2, ?3)",
+            rusqlite::params![file_name, sha256, size_bytes],
+        )
+        .unwrap();
+    }
+
+    fn track_seeded(db_path: &Path, (name, bytes): (&str, &[u8])) {
+        track_archived_project(
+            db_path,
+            name,
+            &crate::storage::AttachmentStore::hash_bytes(bytes),
+            bytes.len() as i64,
+        );
+    }
+
+    /// Force-restore `archive` over a live data dir that holds healthy
+    /// archived projects, assert it is refused naming `expected`, and assert
+    /// the live archived projects were not replaced.
+    fn assert_restore_refused_keeping_live_archives(tag: &str, archive: &Path, expected: &str) {
+        let (dst_tmp, dst_db) = seed_data_dir(tag);
+        let live = seed_archived_projects(&dst_db);
+        let error = run_restore(archive, &dst_db, true).unwrap_err();
+        assert!(matches!(error, LificError::BadRequest(_)), "got {error:?}");
+        assert!(error.to_string().contains(expected), "got {error}");
+        for (name, bytes) in [ARCHIVED_ALPHA, ARCHIVED_BETA] {
+            assert_eq!(
+                fs::read(live.join(name)).unwrap(),
+                bytes,
+                "the healthy live archive {name} is untouched"
+            );
+        }
+        let conn = rusqlite::Connection::open(&dst_db).unwrap();
+        let live_project: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE identifier = 'DMP'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live_project, 1, "the live database is still in place");
+        drop(dst_tmp);
+    }
+
+    #[test]
+    fn restore_rejects_an_archived_project_row_whose_file_is_missing() {
+        let (src_tmp, src_db) = seed_data_dir("archived_row_missing_src");
+        seed_archived_projects(&src_db);
+        track_seeded(&src_db, ARCHIVED_ALPHA);
+        track_seeded(&src_db, ("gone.lific.tar.gz", b"never written"));
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+
+        let fresh = temp_dir("archived_row_missing_fresh");
+        let fresh_db = fresh.path().join(ARCHIVE_DB_NAME);
+        let error = run_restore(&archive, &fresh_db, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing archived project file gone.lific.tar.gz"),
+            "got {error}"
+        );
+        assert!(!fresh_db.exists(), "nothing is installed");
+
+        assert_restore_refused_keeping_live_archives(
+            "archived_row_missing_dst",
+            &archive,
+            "gone.lific.tar.gz",
+        );
+    }
+
+    #[test]
+    fn restore_rejects_an_archived_project_whose_bytes_differ_from_its_row() {
+        // Same size, different bytes: only the digest can tell.
+        let (src_tmp, src_db) = seed_data_dir("archived_row_hash_src");
+        seed_archived_projects(&src_db);
+        let (name, bytes) = ARCHIVED_ALPHA;
+        let impostor = vec![b'x'; bytes.len()];
+        track_archived_project(
+            &src_db,
+            name,
+            &crate::storage::AttachmentStore::hash_bytes(&impostor),
+            bytes.len() as i64,
+        );
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+        assert_restore_refused_keeping_live_archives("archived_row_hash_dst", &archive, name);
+        let error = run_restore(
+            &archive,
+            &temp_dir("archived_row_hash_fresh")
+                .path()
+                .join(ARCHIVE_DB_NAME),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("sha256"), "got {error}");
+
+        // A size that disagrees with the row is refused too.
+        let (src_tmp, src_db) = seed_data_dir("archived_row_size_src");
+        seed_archived_projects(&src_db);
+        track_archived_project(
+            &src_db,
+            name,
+            &crate::storage::AttachmentStore::hash_bytes(bytes),
+            bytes.len() as i64 + 1,
+        );
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+        assert_restore_refused_keeping_live_archives(
+            "archived_row_size_dst",
+            &archive,
+            "its row records",
+        );
+    }
+
+    #[test]
+    fn restore_accepts_an_archived_project_file_no_row_tracks() {
+        // A crash between writing the file and committing its row leaves a
+        // stray. It is harmless and must not make the backup unrestorable.
+        let (src_tmp, src_db) = seed_data_dir("archived_stray_src");
+        seed_archived_projects(&src_db);
+        track_seeded(&src_db, ARCHIVED_ALPHA);
+        let archive = src_tmp.path().join("backup.tar.gz");
+        write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &archive).unwrap();
+
+        let dst = temp_dir("archived_stray_dst");
+        let dst_db = dst.path().join(ARCHIVE_DB_NAME);
+        let result = run_restore(&archive, &dst_db, false).expect("a stray file is accepted");
+        assert_eq!(result.archived_project_count, 2);
+        let restored = dst.path().join(ARCHIVED_PROJECTS_DIR_NAME);
+        for (name, bytes) in [ARCHIVED_ALPHA, ARCHIVED_BETA] {
+            assert_eq!(fs::read(restored.join(name)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn restore_accepts_a_database_from_before_the_archived_projects_table() {
+        let dir_tmp = temp_dir("archived_legacy");
+        let dir = dir_tmp.path();
+        let legacy_db = dir.join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY);
+                 INSERT INTO _migrations (version) VALUES (30);",
+            )
+            .unwrap();
+        }
+        let (name, bytes) = ARCHIVED_ALPHA;
+        let manifest = Manifest {
+            lific_version: "old".into(),
+            schema_version: 30,
+            created_at: "now".into(),
+            db_size_bytes: fs::metadata(&legacy_db).unwrap().len(),
+            attachment_count: 0,
+            attachment_bytes: 0,
+            archived_project_count: 1,
+            archived_project_bytes: bytes.len() as u64,
+        };
+        let archive = dir.join("legacy.tar.gz");
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_bytes(
+            &mut builder,
+            ARCHIVE_MANIFEST_NAME,
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        builder
+            .append_path_with_name(&legacy_db, ARCHIVE_DB_NAME)
+            .unwrap();
+        append_bytes(
+            &mut builder,
+            &format!("{ARCHIVE_ARCHIVED_PROJECTS_PREFIX}{name}"),
+            bytes,
+        )
+        .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dst = temp_dir("archived_legacy_dst");
+        let dst_db = dst.path().join(ARCHIVE_DB_NAME);
+        run_restore(&archive, &dst_db, false).expect("a database without the table restores");
+        assert_eq!(
+            fs::read(dst.path().join(ARCHIVED_PROJECTS_DIR_NAME).join(name)).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn install_rollback_restores_the_previous_archived_projects_directory() {
+        // The staged archived-projects directory is the last thing installed.
+        // Taking it away makes that final rename fail after the database and
+        // attachments are already live, so every swap has to be undone.
+        let (dir_tmp, db_path, staging, sha) = seed_install_fixture("archived_rollback");
+        let root = dir_tmp.path();
+        let live_archived = seed_archived_projects(&db_path);
+        fs::remove_dir(staging.join(ARCHIVED_PROJECTS_DIR_NAME)).unwrap();
+
+        let error = install_restore(&staging, &db_path, "boom").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("install restored archived-projects"),
+            "the original cause surfaces: {error}"
+        );
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE identifier = 'LIV'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1, "the user's database is back in place");
+        assert_eq!(
+            fs::read(root.join("attachments").join(&sha)).unwrap(),
+            b"live blob",
+            "the previous attachments are back"
+        );
+        for (name, bytes) in [ARCHIVED_ALPHA, ARCHIVED_BETA] {
+            assert_eq!(
+                fs::read(live_archived.join(name)).unwrap(),
+                bytes,
+                "the previous archived projects are back"
+            );
+        }
+        for aside in [
+            format!("{ARCHIVE_DB_NAME}.pre-restore-boom"),
+            "attachments.pre-restore-boom".to_string(),
+            format!("{ARCHIVED_PROJECTS_DIR_NAME}.pre-restore-boom"),
+        ] {
+            assert!(!root.join(&aside).exists(), "{aside} is not stranded");
+        }
+    }
+
+    #[test]
+    fn install_refuses_a_taken_archived_projects_backup_path_before_moving_anything() {
+        let (dir_tmp, db_path, staging, sha) = seed_install_fixture("archived_clash");
+        let root = dir_tmp.path();
+        let live_archived = seed_archived_projects(&db_path);
+        fs::create_dir(root.join(format!("{ARCHIVED_PROJECTS_DIR_NAME}.pre-restore-clash")))
+            .unwrap();
+
+        let error = install_restore(&staging, &db_path, "clash").unwrap_err();
+        assert!(matches!(error, LificError::Conflict(_)), "got {error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("archived project backup already exists"),
+            "got {error}"
+        );
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE identifier = 'LIV'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1);
+        assert!(root.join("attachments").join(&sha).exists());
+        assert!(live_archived.join(ARCHIVED_ALPHA.0).exists());
+        assert!(!root.join("attachments.pre-restore-clash").exists());
+    }
+
+    #[test]
+    fn install_replaces_the_archived_projects_directory_wholesale() {
+        let (dir_tmp, db_path, staging, _sha) = seed_install_fixture("archived_install_ok");
+        let root = dir_tmp.path();
+        let live_archived = seed_archived_projects(&db_path);
+        fs::write(
+            staging
+                .join(ARCHIVED_PROJECTS_DIR_NAME)
+                .join("restored.lific.tar.gz"),
+            b"restored project",
+        )
+        .unwrap();
+
+        install_restore(&staging, &db_path, "ok").unwrap();
+
+        assert_eq!(
+            fs::read(live_archived.join("restored.lific.tar.gz")).unwrap(),
+            b"restored project"
+        );
+        assert!(!live_archived.join(ARCHIVED_ALPHA.0).exists());
+        assert!(
+            !root
+                .join(format!("{ARCHIVED_PROJECTS_DIR_NAME}.pre-restore-ok"))
+                .exists(),
+            "the aside copy is removed on success"
+        );
     }
 
     // Test helper: re-pack an archive but overwrite the manifest's

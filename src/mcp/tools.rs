@@ -32,8 +32,68 @@ impl LificMcp {
         // Stateless HTTP creates a handler per request. Share immutable routes so
         // rmcp's thread-local schema cache doesn't retain a copy on each worker.
         // Calls still receive the current handler's database and session state.
-        static ROUTER: LazyLock<ToolRouter<LificMcp>> = LazyLock::new(LificMcp::tool_router);
+        static ROUTER: LazyLock<ToolRouter<LificMcp>> = LazyLock::new(|| {
+            let mut router = LificMcp::tool_router();
+            for route in router.map.values_mut() {
+                let mut schema = serde_json::Value::Object((*route.attr.input_schema).clone());
+                compact_schema(&mut schema, true);
+                if let serde_json::Value::Object(schema) = schema {
+                    route.attr.input_schema = Arc::new(schema);
+                }
+            }
+            router
+        });
         &ROUTER
+    }
+}
+
+/// LIF-505: strip what a derived input schema says twice or not at all.
+/// Every connected agent pays for `tools/list` on every session, and about
+/// half of it was boilerplate: the draft URL and Rust type name on each
+/// schema, `format: int64` on every integer, and `["string", "null"]` on
+/// every optional field, whose optionality `required` already states. Plain
+/// types are also what Gemini-family clients accept; they reject type
+/// arrays. Validation is unaffected: arguments are checked by serde, and an
+/// omitted field is still `None`.
+pub(crate) fn compact_schema(schema: &mut serde_json::Value, top: bool) {
+    let serde_json::Value::Object(map) = schema else {
+        return;
+    };
+    if top {
+        map.remove("$schema");
+    }
+    map.remove("title");
+    map.remove("format");
+    if map.get("default").is_some_and(serde_json::Value::is_null) {
+        map.remove("default");
+    }
+    if let Some(serde_json::Value::Array(types)) = map.get("type") {
+        let concrete: Vec<serde_json::Value> =
+            types.iter().filter(|t| *t != "null").cloned().collect();
+        if concrete.len() == 1 {
+            map.insert("type".into(), concrete[0].clone());
+        }
+    }
+    // Keys of these maps are field and definition names, not keywords, so
+    // only their values are schemas.
+    for named in ["properties", "$defs", "definitions"] {
+        if let Some(serde_json::Value::Object(children)) = map.get_mut(named) {
+            children
+                .values_mut()
+                .for_each(|child| compact_schema(child, false));
+        }
+    }
+    for single in ["items", "additionalProperties", "not"] {
+        if let Some(child) = map.get_mut(single) {
+            compact_schema(child, false);
+        }
+    }
+    for list in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(serde_json::Value::Array(children)) = map.get_mut(list) {
+            children
+                .iter_mut()
+                .for_each(|child| compact_schema(child, false));
+        }
     }
 }
 
@@ -250,7 +310,10 @@ impl Display for IssueLine<'_> {
                 formatter,
             )
         })?;
-        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)
+        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)?;
+        queries::assignees::describe(issue.needs_human, &issue.assignees).map_or(Ok(()), |who| {
+            write!(formatter, " for:{}", who.replace(", ", ","))
+        })
     }
 }
 
@@ -413,12 +476,24 @@ fn write_similar_issues(
     })
 }
 
+/// LIF-147: an assignment as the query layer takes it, with `"me"` resolved
+/// to `caller` (see [`LificMcp::caller_username`]).
+fn resolve_assignee_names(
+    names: Option<Vec<String>>,
+    caller: Option<&str>,
+) -> Result<Option<Vec<String>>, crate::error::LificError> {
+    names
+        .map(|mut names| queries::assignees::resolve_me(&mut names, caller).map(|()| names))
+        .transpose()
+}
+
 /// Create one `create_issue` batch item on the batch's transaction (LIF-478).
 fn create_batch_item(
     conn: &rusqlite::Connection,
     project_id: i64,
     item: &CreateIssueItem,
     attachments: models::AttachmentActor,
+    caller: Option<&str>,
 ) -> Result<models::Issue, crate::error::LificError> {
     use crate::error::LificError;
     if item.title.trim().is_empty() {
@@ -448,6 +523,7 @@ fn create_batch_item(
             target_date: item.target_date.clone(),
             labels,
             source: None,
+            assignees: resolve_assignee_names(item.assignees.clone(), caller)?,
             attachments,
         },
     )
@@ -727,6 +803,14 @@ impl Display for ProjectAgentStats<'_> {
         parts.try_for_each(|part| write!(formatter, ", {part}"))?;
         formatter.write_char(')')
     }
+}
+
+/// Which issues a `list_issues` call reads: one project, or a `members`
+/// filter's project set with the roles header that introduces it.
+struct IssueScope {
+    project_id: Option<i64>,
+    project_ids: Option<Vec<i64>>,
+    header: Option<String>,
 }
 
 fn cmp_projects_by_activity(
@@ -1101,6 +1185,7 @@ fn canonical_project_identifier(
 
 mod export_pages;
 mod names;
+mod roles;
 
 fn resolve_module(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
     names::module_id(conn, project_id, name).map_err(|e| e.to_string())
@@ -1498,6 +1583,19 @@ impl Display for ActivityLine<'_> {
                 label,
                 activity.old_value.as_deref().unwrap_or("?")
             ),
+            // LIF-147: assignment.
+            "assign" => write!(
+                formatter,
+                "{} +assignee {}",
+                label,
+                activity.new_value.as_deref().unwrap_or("?")
+            ),
+            "unassign" => write!(
+                formatter,
+                "{} -assignee {}",
+                label,
+                activity.old_value.as_deref().unwrap_or("?")
+            ),
             other => write!(formatter, "{label} {other}"),
         }
     }
@@ -1844,7 +1942,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values; pass since to read forward from a timestamp."
+        description = "Read who changed what and when, and through which interface, for an issue, page, or project. Newest first; since reads forward."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
         self.get_activity_inner(input)
@@ -2001,7 +2099,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Call first when resuming a project: active plans with next steps, blocked, workable and active issues, key pages (metadata only) and, with since, what changed. Bounded to about 6,000 characters."
+        description = "Call first when resuming a project: plans and next steps, blocked, workable and active issues, key pages, and with since, what changed. About 6,000 characters."
     )]
     fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
         self.get_briefing_inner(input)
@@ -2009,7 +2107,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List issues for a project. workable=true gives issues with no blockers, blocked=true for issues with at least one blocker."
+        description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
         self.list_issues_inner(input).unwrap_or_else(error_response)
@@ -2019,14 +2117,73 @@ impl LificMcp {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
-        let conn = self.read_conn()?;
-        let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
-        require_role_mcp(&self.db, pid, models::Role::Viewer)?;
-        let module_id = match &input.module {
-            Some(name) => Some(resolve_module(&conn, pid, name)?),
-            None => None,
+        if input.status.is_some() && input.statuses.is_some() {
+            return Err("pass status or statuses, not both".into());
+        }
+        let statuses = roles::parse_list(input.statuses.as_deref(), &roles::COUNT_ORDER, "status")?;
+        if statuses.as_ref().is_some_and(Vec::is_empty) {
+            return Err("statuses must name at least one status, or all".into());
+        }
+        let identity = super::current_identity(&self.db).map(|identity| identity.user);
+        let filter = self.read(|conn| {
+            // The gates' view of the caller: a bot's "me" is its owner.
+            let caller = crate::authz::effective_user(conn, &identity);
+            Ok(roles::MemberFilter::parse(
+                conn,
+                input.members.as_deref(),
+                input.roles.as_deref(),
+                caller.as_ref(),
+            ))
+        })??;
+        // `sort_order` is a per-project rank, so a bare `order` would sort a
+        // cross-project list by nothing meaningful.
+        if filter.is_some() && input.order.is_some() && input.order_by.is_none() {
+            return Err(
+                "order needs order_by when members is used; without both, issues sort by priority, status, then most recently updated"
+                    .into(),
+            );
+        }
+        let scope = match &filter {
+            None => {
+                let conn = self.read_conn()?;
+                let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
+                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                IssueScope {
+                    project_id: Some(pid),
+                    project_ids: None,
+                    header: None,
+                }
+            }
+            Some(filter) => match self.member_issue_scope(filter, &input)? {
+                Ok(scope) => scope,
+                Err(empty) => return Ok(empty),
+            },
         };
-        drop(conn);
+        let IssueScope {
+            project_id: pid,
+            project_ids,
+            header,
+        } = scope;
+        let module_id = match (&input.module, pid) {
+            (Some(name), Some(pid)) => Some(resolve_module(&*self.read_conn()?, pid, name)?),
+            (Some(_), None) => return Err("module requires project".into()),
+            (None, _) => None,
+        };
+        if input.label.is_some() && pid.is_none() {
+            return Err("label requires project".into());
+        }
+        // Cross-project listings default to the web home page's "My active
+        // issues": active and todo. Backlog and closed work come on request.
+        let statuses = statuses.or_else(|| {
+            (filter.is_some() && input.status.is_none())
+                .then(|| vec![models::Status::Active, models::Status::Todo])
+        });
+        let exclude_statuses = statuses.map_or_else(Vec::new, |statuses| {
+            roles::COUNT_ORDER
+                .into_iter()
+                .filter(|status| !statuses.contains(status))
+                .collect()
+        });
         // The query's own default (50) is this tool's documented default, so
         // the shared clamp needs no override; it runs here as well to give the
         // paging hint below the numbers the query paged by.
@@ -2035,17 +2192,19 @@ impl LificMcp {
             queries::list_issues_page(
                 conn,
                 &models::ListIssuesQuery {
-                    project_id: Some(pid),
+                    project_id: pid,
+                    project_ids,
+                    exclude_statuses,
+                    triage_order: filter.is_some(),
                     status: models::Status::parse_opt(input.status.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     priority: models::Priority::parse_opt(input.priority.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
-                    label: input
-                        .label
-                        .as_deref()
-                        .map(|name| names::stored_label_name(conn, pid, name))
-                        .transpose()?,
+                    label: match (input.label.as_deref(), pid) {
+                        (Some(name), Some(pid)) => Some(names::stored_label_name(conn, pid, name)?),
+                        _ => None,
+                    },
                     workable: input.workable,
                     blocked: input.blocked,
                     created_since: input.created_since.clone(),
@@ -2056,29 +2215,50 @@ impl LificMcp {
                     order: input.order.clone(),
                     limit: Some(limit),
                     offset: Some(offset),
-                    ..Default::default()
+                    assignee: input.assignee.clone(),
+                    caller_user_id: crate::authz::effective_user(conn, &identity).map(|u| u.id),
                 },
             )
         })?;
         if issues.items.is_empty() {
-            return Ok("No issues found.".into());
+            // Keep the roles header: "on three projects, nothing open" is an
+            // answer, where a bare "No issues found." is not.
+            return Ok(match &header {
+                Some(header) => format!(
+                    "{header}
+No issues found."
+                ),
+                None => "No issues found.".into(),
+            });
         }
         let has_more = issues.has_more;
         let mut issues = issues.items;
         self.retain_visible_relations(&mut issues)?;
         // Resolve module ids to names once for the whole page, so each row can
         // carry its module without a per-issue lookup (GitHub #48).
-        let module_names: std::collections::HashMap<i64, String> =
-            if issues.iter().any(|issue| issue.module_id.is_some()) {
-                self.read(|conn| queries::list_modules(conn, pid))?
-                    .into_iter()
-                    .map(|module| (module.id, module.name))
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
+        // One module lookup per project on the page (one project unless
+        // `members` spans several), and none when no row carries a module.
+        let mut module_projects: Vec<i64> = issues
+            .iter()
+            .filter(|issue| issue.module_id.is_some())
+            .map(|issue| issue.project_id)
+            .collect();
+        module_projects.sort_unstable();
+        module_projects.dedup();
+        let module_names: std::collections::HashMap<i64, String> = self.read(|conn| {
+            let mut names = std::collections::HashMap::new();
+            for project_id in module_projects {
+                for module in queries::list_modules(conn, project_id)? {
+                    names.insert(module.id, module.name);
+                }
+            }
+            Ok(names)
+        })?;
         let context = current_issue_link_context();
         Ok(render_response(|output| {
+            if let Some(header) = &header {
+                writeln!(output, "{header}")?;
+            }
             writeln!(output, "{} issues:", issues.len())?;
             issues.iter().try_for_each(|issue| {
                 write!(
@@ -2102,9 +2282,75 @@ impl LificMcp {
         }))
     }
 
-    #[tool(
-        description = "Get an issue by ID (e.g. LIF-1): full details plus the last 3 comments by default."
-    )]
+    /// The projects a `members`-filtered `list_issues` spans: the caller's
+    /// visible projects where a filtered user holds a filtered role, or just
+    /// `project` when one is named. `Err` carries the reply for an empty scope.
+    fn member_issue_scope(
+        &self,
+        filter: &roles::MemberFilter,
+        input: &ListIssuesInput,
+    ) -> Result<Result<IssueScope, String>, String> {
+        let only = match input.project.as_deref() {
+            Some(project) => {
+                let pid = resolve_project(&*self.read_conn()?, project)?;
+                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                Some(pid)
+            }
+            None => None,
+        };
+        let visible = visible_project_ids_mcp(&self.db)?;
+        let identity = super::current_identity(&self.db).map(|identity| identity.user);
+        let (projects, mut rosters, caller, team) = self.read(|conn| {
+            Ok((
+                queries::list_projects(conn)?,
+                queries::members::rosters_by_project(conn)?,
+                crate::authz::effective_user(conn, &identity),
+                queries::users::has_several_active_humans(conn)?,
+            ))
+        })?;
+        let mut projects = filter_visible(projects, &visible, |p| Some(p.id));
+        if !team {
+            roles::credit_solo_owner(
+                &mut rosters,
+                projects.iter().map(|project| project.id),
+                caller.as_ref(),
+            );
+        }
+        let roster = |pid: i64| rosters.get(&pid).map_or(&[][..], Vec::as_slice);
+        if let Some(pid) = only {
+            projects.retain(|project| project.id == pid);
+            if let Some(project) = projects.first()
+                && !filter.matches(roster(pid))
+            {
+                return Ok(Err(format!(
+                    "No issues: {} no role in {}.",
+                    filter.subject(),
+                    project.identifier
+                )));
+            }
+        }
+        projects.retain(|project| filter.matches(roster(project.id)));
+        if projects.is_empty() {
+            return Ok(Err(filter.no_projects()));
+        }
+        projects.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        let listed: Vec<(&str, &[models::MemberWithUser])> = projects
+            .iter()
+            .map(|project| (project.identifier.as_str(), roster(project.id)))
+            .collect();
+        let header = roles::RolesHeader {
+            filter,
+            projects: &listed,
+        }
+        .to_string();
+        Ok(Ok(IssueScope {
+            project_id: only,
+            project_ids: Some(projects.iter().map(|project| project.id).collect()),
+            header: Some(header),
+        }))
+    }
+
+    #[tool(description = "Get an issue with its details and last 3 comments.")]
     fn get_issue(&self, Parameters(input): Parameters<GetIssueInput>) -> String {
         self.get_issue_inner(input).unwrap_or_else(error_response)
     }
@@ -2203,6 +2449,10 @@ impl LificMcp {
             crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
                 writeln!(output, "Checklist: {}/{} done", list.done, list.total)
             })?;
+            match queries::assignees::describe(issue.needs_human, &issue.assignees) {
+                Some(who) => writeln!(output, "Assigned: {who} (a person must do this)"),
+                None => Ok(()),
+            }?;
             [
                 ("Blocks: ", rels.blocks.as_slice()),
                 ("Blocked by: ", rels.blocked_by.as_slice()),
@@ -2334,7 +2584,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). A project returns its issue and page documents a page at a time; continue with offset."
+        description = "Export Markdown for an issue, a page, or a whole project. A project comes back in pages; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
         self.export_inner(input)
@@ -2417,10 +2667,31 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "Create a new issue in a project, or several at once with issues")]
+    #[tool(description = "Create an issue, or up to 50 with issues.")]
     fn create_issue(&self, Parameters(input): Parameters<CreateIssueInput>) -> String {
         self.create_issue_inner(input)
             .unwrap_or_else(error_response)
+    }
+
+    /// LIF-147: the username `"me"` stands for in `names`, read only when
+    /// `names` says `me`. A bot's "me" is its owner, the same rule
+    /// `list_issues(members=["me"])` uses. Resolved before a write
+    /// transaction opens, never inside one.
+    fn caller_username(&self, names: Option<&[String]>) -> Result<Option<String>, String> {
+        let says_me = names.is_some_and(|names| {
+            names.iter().any(|name| {
+                name.trim()
+                    .trim_start_matches('@')
+                    .eq_ignore_ascii_case("me")
+            })
+        });
+        if !says_me {
+            return Ok(None);
+        }
+        let identity = super::current_identity(&self.db).map(|identity| identity.user);
+        self.read(
+            |conn| Ok(crate::authz::effective_user(conn, &identity).map(|user| user.username)),
+        )
     }
 
     fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
@@ -2438,6 +2709,7 @@ impl LificMcp {
             None => None,
         };
         drop(conn);
+        let caller = self.caller_username(input.assignees.as_deref())?;
         let issue = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_issue` then links the
@@ -2464,6 +2736,7 @@ impl LificMcp {
                         input.labels.as_deref().unwrap_or_default(),
                     )?,
                     source: None,
+                    assignees: resolve_assignee_names(input.assignees.clone(), caller.as_deref())?,
                     attachments,
                 },
             )
@@ -2524,7 +2797,8 @@ impl LificMcp {
             || input.module.is_some()
             || input.labels.is_some()
             || input.start_date.is_some()
-            || input.target_date.is_some();
+            || input.target_date.is_some()
+            || input.assignees.is_some();
         if has_single_fields {
             return Err(
                 "with issues, set title and the other fields on each item; only project applies to the whole batch"
@@ -2545,6 +2819,7 @@ impl LificMcp {
             resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?
         };
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        let caller = self.caller_username(Some(&["me".to_string()]))?;
         let created = self.transaction(|conn| {
             // Same actor re-check as the single create, once for the batch.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
@@ -2552,7 +2827,7 @@ impl LificMcp {
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    create_batch_item(conn, pid, item, attachments)
+                    create_batch_item(conn, pid, item, attachments, caller.as_deref())
                         .map_err(|error| at_batch_item(index, error))
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -2612,9 +2887,7 @@ impl LificMcp {
         }))
     }
 
-    #[tool(
-        description = "Update an existing issue by identifier. Only provided fields are changed."
-    )]
+    #[tool(description = "Update an issue. Only the fields you pass change.")]
     fn update_issue(&self, Parameters(input): Parameters<UpdateIssueInput>) -> String {
         self.update_issue_inner(input)
             .unwrap_or_else(error_response)
@@ -2644,6 +2917,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let caller = self.caller_username(input.assignees.as_deref())?;
         let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
@@ -2705,6 +2979,7 @@ impl LificMcp {
                         .transpose()?,
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
+                    assignees: resolve_assignee_names(input.assignees.clone(), caller.as_deref())?,
                     attachments,
                     ..Default::default()
                 },
@@ -2800,7 +3075,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Apply field changes to matching issues in one call. At most 500 matching issues are selected; narrow filters when more matches exist. Returns the number of issues updated."
+        description = "Change every matching issue in one call, at most 500; narrow the filters for more. Returns the count."
     )]
     fn bulk_update(&self, Parameters(input): Parameters<BulkUpdateInput>) -> String {
         self.bulk_update_inner(input).unwrap_or_else(error_response)
@@ -2821,6 +3096,9 @@ impl LificMcp {
             None => None,
         };
         drop(conn);
+        let caller = self.caller_username(input.set_assignees.as_deref())?;
+        let set_assignees = resolve_assignee_names(input.set_assignees.clone(), caller.as_deref())
+            .map_err(|e| e.to_string())?;
         // Cap the selection like get_board does; bulk changes over 500 issues
         // in a single call are out of scope for this tool.
         const BULK_CAP: i64 = 500;
@@ -2863,6 +3141,7 @@ impl LificMcp {
                                 )
                                 .map_err(crate::error::LificError::BadRequest)?,
                                 module_id: set_module_id.map(Some),
+                                assignees: set_assignees.clone(),
                                 ..Default::default()
                             },
                         )
@@ -2881,7 +3160,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Edit an issue by replacing an exact string. Targets the description by default; pass field='title' for the title. Fails if old_string is missing or ambiguous (unless replace_all=true). Cheaper than update_issue for small changes."
+        description = "Replace one exact string in an issue's description, or title with field='title'. Cheaper than update_issue for small edits."
     )]
     fn edit_issue(&self, Parameters(input): Parameters<EditIssueInput>) -> String {
         self.edit_issue_inner(input).unwrap_or_else(error_response)
@@ -2970,7 +3249,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Board view of issues grouped by status (default), priority, or module. Done/cancelled are count-only stubs unless include_closed=true."
+        description = "Issues grouped by status (default), priority, or module. Closed columns show only counts unless include_closed=true."
     )]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
         self.get_board_inner(input).unwrap_or_else(error_response)
@@ -3132,7 +3411,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Link two issues with a relation: blocks, relates_to, or duplicate. A blocks link with user or from/until instead of source makes target wait on a person or dates."
+        description = "Link two issues: blocks, relates_to, or duplicate. For blocks, pass user or from/until instead of source to make target wait on a person or dates."
     )]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
         self.link_issues_inner(input).unwrap_or_else(error_response)
@@ -3224,7 +3503,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Get a page by identifier (e.g. LIF-DOC-1). Pages over 30,000 chars return their outline and opening; read the rest by section."
+        description = "Get a page. Over 30,000 characters you get its outline and opening; read the rest by section."
     )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
         self.get_page_inner(input).unwrap_or_else(error_response)
@@ -3359,7 +3638,7 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Update a page by identifier. Only provided fields are changed.")]
+    #[tool(description = "Update a page. Only the fields you pass change.")]
     fn update_page(&self, Parameters(input): Parameters<UpdatePageInput>) -> String {
         self.update_page_inner(input).unwrap_or_else(error_response)
     }
@@ -3433,7 +3712,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Edit a page by exact string replacement; same contract as edit_issue. Targets the content by default; pass field='title' for the title."
+        description = "Replace one exact string in a page's content, or title with field='title'."
     )]
     fn edit_page(&self, Parameters(input): Parameters<EditPageInput>) -> String {
         self.edit_page_inner(input).unwrap_or_else(error_response)
@@ -3511,9 +3790,7 @@ impl LificMcp {
         }))
     }
 
-    #[tool(
-        description = "Delete any resource by type and identifier. Types: issue, page, plan, project, module, label, folder."
-    )]
+    #[tool(description = "Delete an issue, page, plan, project, module, label, or folder.")]
     fn delete(&self, Parameters(input): Parameters<DeleteInput>) -> String {
         self.delete_inner(input).unwrap_or_else(error_response)
     }
@@ -3617,7 +3894,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List resources by type: project, module, label, folder, page, issue, or plan. Most types need a project identifier."
+        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show members, your role, and counts per status."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
         self.list_resources_inner(input)
@@ -3679,14 +3956,64 @@ impl LificMcp {
                 if let Some(nudge) = self.no_projects_nudge() {
                     return Ok(nudge);
                 }
+                let statuses =
+                    roles::parse_list(input.statuses.as_deref(), &roles::COUNT_ORDER, "status")?
+                        .unwrap_or_else(|| roles::COUNT_ORDER.to_vec());
+                let show_members =
+                    roles::parse_list(input.show_members.as_deref(), &roles::ROSTER_ORDER, "role")?;
+                // `project` narrows the listing to one project, behind the
+                // same Viewer gate as every project-scoped read.
+                let only = match input.project.as_deref() {
+                    Some(project) => {
+                        let pid = resolve_project(&*self.read_conn()?, project)?;
+                        require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                        Some(pid)
+                    }
+                    None => None,
+                };
                 let visible = visible_project_ids_mcp(&self.db)?;
-                let (ps, stats) = self.read(|conn| {
+                let identity = super::current_identity(&self.db).map(|identity| identity.user);
+                let (ps, stats, mut rosters, caller, counts, team) = self.read(|conn| {
                     Ok((
                         queries::list_projects(conn)?,
                         queries::project_agent_stats(conn)?,
+                        queries::members::rosters_by_project(conn)?,
+                        // The gates' view of the caller: a bot answers as its
+                        // owner, so "you" matches what the caller may see.
+                        crate::authz::effective_user(conn, &identity),
+                        queries::count_issues_by_status_all(conn)?,
+                        queries::users::has_several_active_humans(conn)?,
                     ))
                 })?;
+                // A single-person instance's roster is always just its owner.
+                let show_roster = team || show_members.is_some();
                 let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
+                if let Some(pid) = only {
+                    ps.retain(|project| project.id == pid);
+                }
+                if !team {
+                    roles::credit_solo_owner(
+                        &mut rosters,
+                        ps.iter().map(|project| project.id),
+                        caller.as_ref(),
+                    );
+                }
+                let filter = self.read(|conn| {
+                    Ok(roles::MemberFilter::parse(
+                        conn,
+                        input.members.as_deref(),
+                        input.roles.as_deref(),
+                        caller.as_ref(),
+                    ))
+                })??;
+                if let Some(filter) = &filter {
+                    ps.retain(|project| {
+                        filter.matches(rosters.get(&project.id).map_or(&[], Vec::as_slice))
+                    });
+                    if ps.is_empty() {
+                        return Ok(filter.no_projects());
+                    }
+                }
                 ps.sort_by(|left, right| cmp_projects_by_activity(left, right, &stats));
                 let now = Utc::now();
                 Ok(render_response(|output| {
@@ -3704,6 +4031,25 @@ impl LificMcp {
                         stats.get(&project.id).map_or(Ok(()), |stats| {
                             write!(output, "{}", ProjectAgentStats { stats, now })
                         })?;
+                        if show_roster {
+                            write!(
+                                output,
+                                "{}",
+                                roles::ProjectRoster {
+                                    members: rosters.get(&project.id).map_or(&[], Vec::as_slice),
+                                    caller: caller.as_ref(),
+                                    show: show_members.as_deref(),
+                                }
+                            )?;
+                        }
+                        write!(
+                            output,
+                            "{}",
+                            roles::ProjectStatusCounts {
+                                counts: counts.get(&project.id),
+                                statuses: &statuses,
+                            }
+                        )?;
                         output.write_char('\n')
                     })
                 }))
@@ -3909,10 +4255,10 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Create or update a project, module, label, or folder. Create project requires name and identifier; project update requires project=<IDENT>; module/label/folder create requires project and name; module/label/folder update requires project and current_name. Use delete for deletion."
+        description = "Create or update a project, module, label, or folder. Project: name and identifier to create, project to update. Others: project, plus name to create or current_name to update."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
-        self.manage_resource_inner(input)
+        self.manage_resource_inner(input.normalize_quotes())
             .unwrap_or_else(error_response)
     }
 
@@ -4160,9 +4506,7 @@ impl LificMcp {
         }
     }
 
-    #[tool(
-        description = "Add a comment to an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). The author is the authenticated user."
-    )]
+    #[tool(description = "Add a comment to an issue or page. The author is the caller.")]
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
         self.add_comment_inner(input).unwrap_or_else(error_response)
     }
@@ -4225,7 +4569,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List comments on an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). Returns the 50 newest by default; page back with offset, or pass order=asc to read oldest first."
+        description = "List comments on an issue or page: the 50 newest by default. Page with offset, or order=asc for oldest first."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
         self.list_comments_inner(input)
@@ -4375,7 +4719,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Edit a comment by id. Either pass old_string/new_string for exact string replacement (same contract as edit_issue), or pass content to replace the entire body. Author or admin only; @mentions re-resolve."
+        description = "Edit a comment: old_string/new_string replaces one exact string, content replaces the body. Author or admin only."
     )]
     fn edit_comment(&self, Parameters(input): Parameters<EditCommentInput>) -> String {
         self.edit_comment_inner(input)
@@ -4504,7 +4848,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Create a nestable step-by-step plan that survives outside the context window. Steps can mirror issues via 'issue': closing the issue completes the step and vice versa."
+        description = "Create a nested step plan that outlives the session. A step with issue mirrors it: closing either closes both."
     )]
     fn create_plan(&self, Parameters(input): Parameters<CreatePlanInput>) -> String {
         self.create_plan_inner(input).unwrap_or_else(error_response)
@@ -4569,7 +4913,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Rehydrate a plan's full step tree (e.g. LIF-PLAN-3) when resuming work. Step lines show the #id used by edit_plan_step and update_plan_step, done state, and linked issues."
+        description = "Get a plan's full step tree. Each step shows its #id (the step_id), done state, and linked issue."
     )]
     fn get_plan(&self, Parameters(input): Parameters<GetPlanInput>) -> String {
         self.get_plan_inner(input).unwrap_or_else(error_response)
@@ -4585,7 +4929,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Edit a plan step's text by exact string replacement; same contract as edit_issue. Targets description by default; pass field='title'."
+        description = "Replace one exact string in a plan step's description, or title with field='title'."
     )]
     fn edit_plan_step(&self, Parameters(input): Parameters<EditPlanStepInput>) -> String {
         self.edit_plan_step_inner(input)
@@ -4644,7 +4988,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Mutate a plan or one step. With step_id: step CRUD, done toggling, attach/detach issue (linked issues sync state). Without step_id: update the plan itself; plan status never closes the anchor issue. Returns a delta."
+        description = "Change one step (step_id): done, rename, attach or detach an issue, add a child, move, delete. Without step_id: change the plan or add a top-level step. Plan status never closes the anchor issue."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
         self.update_plan_step_inner(input)
@@ -4652,6 +4996,37 @@ impl LificMcp {
     }
 
     fn update_plan_step_inner(&self, input: UpdatePlanStepInput) -> Result<String, String> {
+        // LIF-503: these act on an existing step. Without step_id they used
+        // to be dropped while the receipt still said "Updated plan", which
+        // agents read as success.
+        if input.add_child_title.is_none()
+            && (input.add_child_issue.is_some() || input.add_child_description.is_some())
+        {
+            return Err("add_child_issue and add_child_description need add_child_title.".into());
+        }
+        if input.step_id.is_none() {
+            let step_only = [
+                ("done", input.done.is_some()),
+                ("attach_issue", input.attach_issue.is_some()),
+                ("detach_issue", input.detach_issue.is_some()),
+                ("move_parent_step_id", input.move_parent_step_id.is_some()),
+                ("move_to_root", input.move_to_root.is_some()),
+                ("move_position", input.move_position.is_some()),
+                ("delete", input.delete.is_some()),
+            ];
+            if let Some((name, _)) = step_only.iter().find(|(_, set)| *set) {
+                return Err(format!(
+                    "{name} needs step_id. Without step_id only plan fields and add_child_title (a top-level step) apply."
+                ));
+            }
+        } else if input.status.is_some()
+            || input.anchor_issue.is_some()
+            || input.clear_anchor.is_some()
+        {
+            return Err(
+                "status, anchor_issue and clear_anchor change the plan; omit step_id.".into(),
+            );
+        }
         // LIF-198: Maintainer on the plan's own project gates every mutation
         // below (plan-level and step-level alike).
         let plan_project_id = self.read(|conn| {
@@ -4698,16 +5073,36 @@ impl LificMcp {
                         (None, Some(true)) => Some(None),
                         _ => None,
                     };
-                    queries::plans::update_plan(
-                        conn,
-                        plan_id,
-                        &models::UpdatePlan {
-                            title: input.title.clone(),
-                            status: input.status.clone(),
-                            issue_id: anchor,
-                        },
-                    )?;
-                    notes.push("Updated plan".into());
+                    if input.title.is_some() || input.status.is_some() || anchor.is_some() {
+                        queries::plans::update_plan(
+                            conn,
+                            plan_id,
+                            &models::UpdatePlan {
+                                title: input.title.clone(),
+                                status: input.status.clone(),
+                                issue_id: anchor,
+                            },
+                        )?;
+                        notes.push("Updated plan".into());
+                    }
+                    if let Some(ref step_title) = input.add_child_title {
+                        let step_issue = match &input.add_child_issue {
+                            Some(ident) => Some(queries::resolve_identifier(conn, ident)?),
+                            None => None,
+                        };
+                        let new_id = queries::plans::add_step(
+                            conn,
+                            plan_id,
+                            None,
+                            step_title,
+                            input.add_child_description.as_deref().unwrap_or(""),
+                            step_issue,
+                        )?;
+                        notes.push(format!("Added top-level step #{new_id}"));
+                    }
+                    if notes.is_empty() {
+                        notes.push("No changes specified".into());
+                    }
                 }
                 // ── Step-level update ──
                 Some(step_id) => {
@@ -4876,7 +5271,7 @@ impl LificMcp {
     // ── Attachments (LIF-418) ────────────────────────────────
 
     #[tool(
-        description = "Upload a file (base64) and get a markdown snippet to embed. Optionally links it to an issue (LIF-42), page (LIF-DOC-3), or comment. Max 10 MiB; images, PDF, zip, SVG and plain text only."
+        description = "Upload a base64 file (max 10 MiB; images, PDF, zip, SVG, plain text) and get Markdown to embed. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
         self.upload_attachment_inner(input)
@@ -5113,9 +5508,7 @@ impl LificMcp {
         }
     }
 
-    #[tool(
-        description = "List attachments on an issue (LIF-42) or page (LIF-DOC-3), or across a whole project."
-    )]
+    #[tool(description = "List attachments on an issue or page, or in a project.")]
     fn list_attachments(&self, Parameters(input): Parameters<ListAttachmentsInput>) -> String {
         self.list_attachments_inner(input)
             .unwrap_or_else(error_response)
@@ -5498,6 +5891,9 @@ mod input_hardening_tests;
 mod relation_visibility_tests;
 
 #[cfg(test)]
+mod roles_tests;
+
+#[cfg(test)]
 mod tests_verification;
 
 #[cfg(test)]
@@ -5514,6 +5910,10 @@ mod tests_page_reads;
 #[cfg(test)]
 #[path = "tests_waits.rs"]
 mod tests_waits;
+
+#[cfg(test)]
+#[path = "tests_assignees.rs"]
+mod tests_assignees;
 
 #[cfg(test)]
 mod tests {
@@ -5654,7 +6054,7 @@ mod tests {
         result
     }
 
-    fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
+    pub(super) fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
         mcp.read(|conn| queries::resolve_project_identifier(conn, identifier))
             .expect("project id")
     }
@@ -7740,12 +8140,14 @@ mod tests {
             recent.starts_with("- REC | Recent (1 workable, 1 active plan, last activity "),
             "got: {recent}"
         );
-        assert!(recent.ends_with(" ago)"), "got: {recent}");
+        assert!(recent.contains(" ago) | "), "got: {recent}");
+        // GitHub #87 appends status counts after the stats; a single-person
+        // instance leaves the roster out.
         assert_eq!(
             result
                 .lines()
                 .find(|line| line.starts_with("- EMP | Empty")),
-            Some("- EMP | Empty"),
+            Some("- EMP | Empty | no issues"),
             "fresh empty project must have no stats suffix: {result}"
         );
         assert!(
@@ -8131,6 +8533,8 @@ mod tests {
             duplicates: vec!["T-3".into()],
             duplicated_by: vec!["T-4".into()],
             waits: vec![],
+            needs_human: false,
+            assignees: vec![],
         };
         crate::mcp::reset_issue_link_context_reads();
         let context = current_issue_link_context();
@@ -11889,6 +12293,57 @@ mod tests {
     }
 
     #[test]
+    fn published_schemas_carry_no_boilerplate() {
+        fn walk(value: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for key in ["$schema", "format"] {
+                        if map.contains_key(key) {
+                            found.push(format!("{path}: {key}"));
+                        }
+                    }
+                    if map.get("type").is_some_and(serde_json::Value::is_array) {
+                        found.push(format!("{path}: type array"));
+                    }
+                    if map.get("title").is_some_and(serde_json::Value::is_string) {
+                        found.push(format!("{path}: title"));
+                    }
+                    for (key, child) in map {
+                        walk(child, &format!("{path}.{key}"), found);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, path, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (m, _guard) = mcp();
+        let schemas = m.list_tool_schemas();
+        let mut found = Vec::new();
+        for (name, schema) in &schemas {
+            walk(schema, name, &mut found);
+        }
+        assert!(found.is_empty(), "{found:#?}");
+        // A field named like a keyword is a field, and survives.
+        let (_, create) = schemas
+            .iter()
+            .find(|(name, _)| name == "create_issue")
+            .unwrap();
+        assert_eq!(create["properties"]["title"]["type"], "string");
+        // Neither a single title nor a batch is mandatory on its own.
+        assert!(
+            create
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "{create}"
+        );
+    }
+
+    #[test]
     fn plan_step_schemas_explain_numeric_ids_instead_of_positions() {
         let (m, _guard) = mcp();
         let schemas = m.list_tool_schemas();
@@ -12117,6 +12572,83 @@ mod tests {
             !out.contains("only step"),
             "receipt must omit the tree: {out}"
         );
+    }
+
+    // LIF-503: without step_id, add_child_title appends a top-level step
+    // after the existing roots instead of being silently dropped.
+    #[test]
+    fn update_plan_step_without_step_id_adds_a_top_level_step() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PTL");
+        seed_issue(&m, "PTL", "Linked work");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PTL".into()),
+            title: "Roots".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "existing root".into(),
+                steps: Some(vec![PlanStepInput {
+                    title: "nested".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]),
+        }));
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PTL-PLAN-1".into(),
+            add_child_title: Some("new root".into()),
+            add_child_issue: Some("PTL-1".into()),
+            ..Default::default()
+        }));
+        assert!(out.contains("Added top-level step #"), "got: {out}");
+        assert!(
+            !out.contains("Updated plan"),
+            "no plan field changed: {out}"
+        );
+
+        let conn = m.db.read().unwrap();
+        let plan_id = queries::plans::resolve_plan_identifier(&conn, "PTL-PLAN-1").unwrap();
+        let plan = queries::plans::get_plan(&conn, plan_id).unwrap();
+        let roots: Vec<&str> = plan.steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(roots, ["existing root", "new root"]);
+        assert!(plan.steps[1].children.is_empty());
+        assert_eq!(plan.steps[1].issue_identifier.as_deref(), Some("PTL-1"));
+    }
+
+    #[test]
+    fn update_plan_step_refuses_step_fields_without_step_id() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PSF");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PSF".into()),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "only".into(),
+                ..Default::default()
+            }]),
+        }));
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            done: Some(true),
+            ..Default::default()
+        }));
+        assert!(out.contains("done needs step_id"), "got: {out}");
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            add_child_issue: Some("PSF-1".into()),
+            ..Default::default()
+        }));
+        assert!(out.contains("need add_child_title"), "got: {out}");
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PSF-PLAN-1".into(),
+            ..Default::default()
+        }));
+        assert!(out.contains("No changes specified"), "got: {out}");
     }
 
     #[test]

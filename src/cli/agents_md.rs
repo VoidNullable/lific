@@ -44,31 +44,24 @@ pub fn render_block(project: Option<&str>) -> String {
     let ident_note = if project.is_some() {
         String::new()
     } else {
-        "\n> Replace `APP` with this repo's project identifier — run `lific project list` to find it.\n"
+        "\n> Replace `APP` with this repo's project identifier. Run `lific project list` to find it.\n"
             .to_string()
     };
 
+    // LIF-505: agents read this on every session. Each sentence must tell
+    // them something they act on; one instruction per sentence.
     format!(
         "{BEGIN_MARKER}\n\
 ## Issue tracking: Lific\n\
 \n\
-This project uses **Lific** for issue tracking and project management (local-first, \
-single-binary, SQLite-backed).\n\
+This project tracks its work in Lific.\n\
 {ident_note}\
 \n\
-Lific reaches you two ways, and they do different jobs rather than one being a \
-lesser version of the other.\n\
-\n\
-**MCP is for the tracker itself.** If a Lific MCP server is configured in your \
-client (see the tools/MCP config in this repo or your global config), read and \
-write issues, pages, and plans through those tools. It is already connected, so \
-prefer it for anything that is just data.\n\
-\n\
-**The CLI is for anything involving this machine.** The MCP server may be running \
-on another host and cannot see your filesystem, your working directory, or your \
-git history. Work that depends on where you are is the CLI's job. It also mirrors \
-every data command, so it works when MCP is not configured at all (add `--json` \
-for machine-readable output):\n\
+Use the Lific MCP tools for issues, pages, and plans when they are connected. \
+Use the `lific` CLI for work that needs this machine. The MCP server can run on \
+another host, so it cannot see your files, working directory, or git history. \
+The CLI also has every data command, for when MCP is not connected. Add `--json` \
+for machine-readable output:\n\
 \n\
 ```bash\n\
 lific issue list --project {ident} --json      # browse issues\n\
@@ -77,11 +70,11 @@ lific issue update {ident}-1 --status done      # close an issue\n\
 lific search \"auth flow\" --project {ident}      # full-text search\n\
 ```\n\
 \n\
-**Conventions:**\n\
-- Mark an issue `done` as soon as you finish its work — don't leave it open.\n\
-- Group related work with **modules**; fit each issue into the right module.\n\
-- For multi-session work, use a **plan** so the next session can resume.\n\
-- Issues are self-contained work items; keep scope tight.\n\
+Rules:\n\
+- When you finish an issue, set its status to `done`.\n\
+- File each issue in the right module, and keep it to one change.\n\
+- Use a plan for work that spans sessions.\n\
+- An issue assigned to a person (`for:` in lists) is theirs. Take only unassigned issues.\n\
 {END_MARKER}"
     )
 }

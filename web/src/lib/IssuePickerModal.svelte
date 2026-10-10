@@ -12,18 +12,18 @@
   import {
     search as searchApi,
     resolveIssue,
+    listProjects,
     type Issue,
   } from "./api";
+  import {
+    mergePickerHits,
+    startsForeignGroup,
+    type PickerHit as Hit,
+    type PickerProject,
+  } from "./issuePickerHits";
   import StatusIcon from "./StatusIcon.svelte";
   import { Search, CornerDownLeft, X } from "lucide-svelte";
   import { tick } from "svelte";
-
-  type Hit = {
-    id: number;
-    identifier: string;
-    title: string;
-    status?: string;
-  };
 
   let {
     open = $bindable(false),
@@ -34,6 +34,10 @@
     currentIdentifier = null,
     /** Show a "Clear" action that resolves with null (used by anchor). */
     allowClear = false,
+    /** LIF-504: also search every other project the user can see. Hits
+     *  from this project stay first; others are labelled with their
+     *  project. Off by default so plan and filter pickers stay scoped. */
+    crossProject = false,
     onSelect,
     onClear,
   }: {
@@ -43,9 +47,21 @@
     title?: string;
     currentIdentifier?: string | null;
     allowClear?: boolean;
+    crossProject?: boolean;
     onSelect: (issue: Issue) => void;
     onClear?: () => void;
   } = $props();
+
+  // Visible projects, for labelling cross-project hits. Fetched once per
+  // mounted picker, the first time it opens in cross-project mode.
+  let projects = $state<PickerProject[]>([]);
+  let projectsLoad: Promise<void> | null = null;
+  function loadProjects(): Promise<void> {
+    projectsLoad ??= listProjects().then((res) => {
+      if (res.ok) projects = res.data;
+    });
+    return projectsLoad;
+  }
 
   // Same reasoning as CommandPalette: the long form of this placeholder
   // clips on a phone, where the overlay goes full-screen (LIF-227).
@@ -61,6 +77,19 @@
   let resolving = $state(false);
   let errorMsg = $state("");
   let searchGen = 0;
+
+  // Bumped whenever the picker opens, closes or is unmounted. A pick still
+  // resolving across any of those is stale: the caller may have moved on
+  // (another issue, another kind of link), and closing through the bound
+  // `open` would shut a picker opened since, even from an unmounted instance.
+  let session = 0;
+  $effect(() => {
+    void open;
+    session += 1;
+    return () => {
+      session += 1;
+    };
+  });
 
   // Open transition: focus the input and seed the list with recent /
   // identifier-shaped results.
@@ -107,40 +136,25 @@
     searching = true;
     const idShape = identifierShape(trimmed);
 
-    const [idHit, ftsRes] = await Promise.all([
+    const cross = crossProject && trimmed !== "";
+    const [idHit, ftsRes, globalRes] = await Promise.all([
       idShape ? resolveIssue(idShape) : Promise.resolve(null),
       trimmed ? searchApi(trimmed, projectId) : Promise.resolve(null),
+      // Without a project_id the server searches every project the caller
+      // can view and nothing else.
+      cross ? searchApi(trimmed, undefined, { resultType: "issue" }) : Promise.resolve(null),
+      cross ? loadProjects() : Promise.resolve(),
     ]);
     if (gen !== searchGen) return; // superseded
 
-    const merged: Hit[] = [];
-    const seen = new Set<string>();
-
-    if (idHit && idHit.ok) {
-      merged.push({
-        id: idHit.data.id,
-        identifier: idHit.data.identifier,
-        title: idHit.data.title,
-        status: idHit.data.status,
-      });
-      seen.add(idHit.data.identifier);
-    }
-
-    if (ftsRes && ftsRes.ok) {
-      for (const r of ftsRes.data) {
-        if (r.result_type !== "issue" || !r.identifier) continue;
-        if (seen.has(r.identifier)) continue;
-        if (r.project_id !== null && r.project_id !== projectId) continue;
-        merged.push({
-          id: r.id,
-          identifier: r.identifier,
-          title: r.title,
-        });
-        seen.add(r.identifier);
-      }
-    }
-
-    hits = merged;
+    hits = mergePickerHits({
+      projectId,
+      crossProject,
+      idHit: idHit && idHit.ok ? idHit.data : null,
+      scoped: ftsRes && ftsRes.ok ? ftsRes.data : null,
+      global: globalRes && globalRes.ok ? globalRes.data : null,
+      projects,
+    });
     selectedIdx = 0;
     searching = false;
   }
@@ -152,10 +166,12 @@
   }
 
   async function pick(hit: Hit) {
+    const started = session;
     resolving = true;
     errorMsg = "";
     const res = await resolveIssue(hit.identifier);
     resolving = false;
+    if (started !== session) return;
     if (!res.ok) {
       errorMsg = res.error;
       return;
@@ -230,9 +246,13 @@
           type="text"
           class="flex-1 bg-transparent border-0 outline-none text-body-lg
                  text-[var(--text)] placeholder:text-[var(--text-faint)]"
-          placeholder={narrow
-            ? `Search ${projectIdentifier} issues…`
-            : `Search ${projectIdentifier} issues or type ${projectIdentifier}-42…`}
+          placeholder={crossProject
+            ? narrow
+              ? "Search issues…"
+              : `Search issues in any project or type ${projectIdentifier}-42…`
+            : narrow
+              ? `Search ${projectIdentifier} issues…`
+              : `Search ${projectIdentifier} issues or type ${projectIdentifier}-42…`}
           oninput={onInput}
           onkeydown={onKeydown}
         />
@@ -288,6 +308,14 @@
           </p>
         {:else}
           {#each hits as hit, i (hit.identifier)}
+            {#if crossProject && startsForeignGroup(hits, i, projectId)}
+              <p
+                class="px-4 pt-2.5 pb-1 text-micro uppercase tracking-widest
+                       font-semibold text-[var(--text-faint)]"
+              >
+                Other projects
+              </p>
+            {/if}
             <button
               class="w-full flex items-center gap-2.5 px-4 py-2 text-left
                      transition-colors
@@ -307,6 +335,15 @@
               <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
                 {hit.title}
               </span>
+              {#if hit.projectLabel}
+                <span
+                  class="max-w-[40%] truncate shrink rounded px-1.5 py-0.5 text-micro
+                         bg-[var(--bg-subtle)] text-[var(--text-muted)]"
+                  title="In project {hit.projectLabel}"
+                >
+                  {hit.projectLabel}
+                </span>
+              {/if}
               <span class="font-mono text-micro text-[var(--text-faint)] shrink-0">
                 {hit.identifier}
               </span>

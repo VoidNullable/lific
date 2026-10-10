@@ -29,6 +29,12 @@ import {
 } from "./persistence";
 import { loadSubTab, saveSubTab } from "../subtab";
 import { updateIssue, type Issue, type Module } from "../api";
+import {
+  assignmentNames,
+  describeNames,
+  normalizeAssigneeFilter,
+  type Person,
+} from "./assignees";
 import { toast } from "../toast/toast.svelte";
 
 // LIF-308: issue-list content slices are deliberately separate from the
@@ -71,6 +77,7 @@ export function describeIssueChange(
   patch: Record<string, unknown>,
   prevPatch: Record<string, unknown>,
   modules: Module[],
+  people: Person[] = [],
 ): string {
   if ("status" in patch && patch.status !== prevPatch.status) {
     return `→ ${capitalize(String(patch.status))}`;
@@ -83,6 +90,10 @@ export function describeIssueChange(
   if ("priority" in patch && patch.priority !== prevPatch.priority) {
     return `→ ${capitalize(String(patch.priority))} priority`;
   }
+  // LIF-147: assignment, as the names a person reads.
+  if ("assignees" in patch && Array.isArray(patch.assignees)) {
+    return `→ ${describeNames(patch.assignees as string[], people)}`;
+  }
   return "updated";
 }
 
@@ -94,6 +105,7 @@ export function prevPatchFor(issue: Issue, patch: Record<string, unknown>): Reco
   if ("status" in patch) prev.status = issue.status;
   if ("priority" in patch) prev.priority = issue.priority;
   if ("module_id" in patch) prev.module_id = issue.module_id;
+  if ("assignees" in patch) prev.assignees = assignmentNames(issue);
   return prev;
 }
 
@@ -109,24 +121,27 @@ export async function updateIssueWithUndo(opts: {
   patch: Record<string, unknown>;
   prevPatch: Record<string, unknown>;
   modules: Module[];
+  /** Resolves usernames in an assignment toast (LIF-147). */
+  people?: Person[];
   /** Sync the caller's local issue list after the forward mutation AND
-   *  after a successful undo (called again with `prevPatch` then). */
-  onApplied?: (patch: Record<string, unknown>) => void;
+   *  after a successful undo (called again with `prevPatch` then).
+   *  `updated` is the server's copy of the issue after that write. */
+  onApplied?: (patch: Record<string, unknown>, updated: Issue) => void;
 }): Promise<boolean> {
   const res = await updateIssue(opts.id, opts.patch);
   if (!res.ok) {
     toast(`Couldn't update ${opts.identifier}: ${res.error}`, { kind: "error" });
     return false;
   }
-  opts.onApplied?.(opts.patch);
-  toast(`${opts.identifier} ${describeIssueChange(opts.patch, opts.prevPatch, opts.modules)}`, {
+  opts.onApplied?.(opts.patch, res.data);
+  toast(`${opts.identifier} ${describeIssueChange(opts.patch, opts.prevPatch, opts.modules, opts.people)}`, {
     kind: "success",
     action: {
       label: "Undo",
       fn: async () => {
         const undoRes = await updateIssue(opts.id, opts.prevPatch);
         if (undoRes.ok) {
-          opts.onApplied?.(opts.prevPatch);
+          opts.onApplied?.(opts.prevPatch, undoRes.data);
           toast(`Restored ${opts.identifier}`, { kind: "info", duration: 3000 });
         } else {
           toast(`Couldn't undo ${opts.identifier}: ${undoRes.error}`, { kind: "error" });
@@ -147,23 +162,32 @@ export async function bulkUpdateIssuesWithUndo(opts: {
   targets: { id: number; identifier: string; prevPatch: Record<string, unknown> }[];
   patch: Record<string, unknown>;
   modules: Module[];
-  onApplied?: (patches: Map<number, Record<string, unknown>>) => void;
+  /** Resolves usernames in an assignment toast (LIF-147). */
+  people?: Person[];
+  /** `updated` holds the server's copy of each issue the write changed. */
+  onApplied?: (
+    patches: Map<number, Record<string, unknown>>,
+    updated: Map<number, Issue>,
+  ) => void;
 }): Promise<{ okIds: Set<number>; failedIds: Set<number> }> {
   const results = await Promise.allSettled(
     opts.targets.map((t) => updateIssue(t.id, opts.patch)),
   );
   const okIds = new Set<number>();
   const failedIds = new Set<number>();
+  const updated = new Map<number, Issue>();
   results.forEach((r, i) => {
     const t = opts.targets[i];
-    if (r.status === "fulfilled" && r.value.ok) okIds.add(t.id);
-    else failedIds.add(t.id);
+    if (r.status === "fulfilled" && r.value.ok) {
+      okIds.add(t.id);
+      updated.set(t.id, r.value.data);
+    } else failedIds.add(t.id);
   });
 
   if (okIds.size > 0) {
     const applied = new Map<number, Record<string, unknown>>();
     for (const id of okIds) applied.set(id, opts.patch);
-    opts.onApplied?.(applied);
+    opts.onApplied?.(applied, updated);
   }
 
   if (failedIds.size > 0) {
@@ -181,7 +205,7 @@ export async function bulkUpdateIssuesWithUndo(opts: {
       okTargets.length === 1
         ? okTargets[0].identifier
         : `${okTargets.length} issue${okTargets.length === 1 ? "" : "s"}`;
-    toast(`${label} ${describeIssueChange(opts.patch, okTargets[0].prevPatch, opts.modules)}`, {
+    toast(`${label} ${describeIssueChange(opts.patch, okTargets[0].prevPatch, opts.modules, opts.people)}`, {
       kind: "success",
       action: {
         label: "Undo",
@@ -190,15 +214,17 @@ export async function bulkUpdateIssuesWithUndo(opts: {
             okTargets.map((t) => updateIssue(t.id, t.prevPatch)),
           );
           const restored = new Map<number, Record<string, unknown>>();
+          const restoredIssues = new Map<number, Issue>();
           let failCount = 0;
           undoResults.forEach((r, i) => {
             if (r.status === "fulfilled" && r.value.ok) {
               restored.set(okTargets[i].id, okTargets[i].prevPatch);
+              restoredIssues.set(okTargets[i].id, r.value.data);
             } else {
               failCount++;
             }
           });
-          if (restored.size > 0) opts.onApplied?.(restored);
+          if (restored.size > 0) opts.onApplied?.(restored, restoredIssues);
           if (failCount > 0) {
             toast(`Restored ${restored.size} of ${okTargets.length}`, { kind: "error" });
           } else {
@@ -228,6 +254,9 @@ export class IssueListState {
   filterPriority = $state("");
   filterLabel = $state("");
   filterModule = $state("");
+  /** LIF-147: "", "none", "human", "me" or "@username". See
+   *  lib/issues/assignees.ts. */
+  filterAssignee = $state("");
   searchQuery = $state("");
 
   // ── Sort ──
@@ -318,7 +347,8 @@ export class IssueListState {
       this.filterStatus ||
       this.filterPriority ||
       this.filterLabel ||
-      this.filterModule
+      this.filterModule ||
+      this.filterAssignee
     );
   }
 
@@ -327,6 +357,7 @@ export class IssueListState {
     this.filterPriority = "";
     this.filterLabel = "";
     this.filterModule = "";
+    this.filterAssignee = "";
     this.searchQuery = "";
   }
 
@@ -344,6 +375,10 @@ export class IssueListState {
 
   toggleLabelFilter(name: string): void {
     this.filterLabel = this.filterLabel === name ? "" : name;
+  }
+
+  toggleAssigneeFilter(value: string): void {
+    this.filterAssignee = this.filterAssignee === value ? "" : value;
   }
 
   // ── Sort helper ──
@@ -434,6 +469,7 @@ export class IssueListState {
     if (this.filterPriority) n++;
     if (this.filterLabel) n++;
     if (this.filterModule) n++;
+    if (this.filterAssignee) n++;
     return n;
   }
 
@@ -468,6 +504,7 @@ export class IssueListState {
     this.filterPriority = s.filterPriority ?? "";
     this.filterLabel = s.filterLabel ?? "";
     this.filterModule = s.filterModule ?? "";
+    this.filterAssignee = normalizeAssigneeFilter(s.filterAssignee);
     this.searchQuery = s.searchQuery ?? "";
     if (s.sortField) this.sortField = s.sortField;
     if (s.sortDir) this.sortDir = s.sortDir;
@@ -488,6 +525,7 @@ export class IssueListState {
       filterPriority: this.filterPriority,
       filterLabel: this.filterLabel,
       filterModule: this.filterModule,
+      filterAssignee: this.filterAssignee,
       searchQuery: this.searchQuery,
       sortField: this.sortField,
       sortDir: this.sortDir,

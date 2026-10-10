@@ -378,6 +378,9 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         // ── Issues ──
         (("GET", "/api/issues"), Filtered),
+        // LIF-506: issues waiting on the caller, filtered to visible projects.
+        (("GET", "/api/issues/attention"), Filtered),
+        (("GET", "/api/home/overview"), Filtered),
         (("POST", "/api/issues"), Gated(Maintainer)),
         (("GET", "/api/issues/{id}"), Gated(Viewer)),
         (("PUT", "/api/issues/{id}"), Gated(Maintainer)),
@@ -426,6 +429,20 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (
             ("GET", "/api/project-archives"),
             Exempt("describes the caller's own import capability and instance limits"),
+        ),
+        // ── Archived projects ──
+        // Archiving removes the project from the instance, so it carries the
+        // delete gate. Listing and unarchiving are instance-level: archived
+        // projects belong to no live project, and unarchiving creates one and
+        // grants a lead membership, like an archive import.
+        (("POST", "/api/projects/{id}/archive"), Gated(ProjectDelete)),
+        (
+            ("GET", "/api/archived-projects"),
+            Exempt("instance admin; archived projects belong to no live project"),
+        ),
+        (
+            ("POST", "/api/archived-projects/{id}/unarchive"),
+            Exempt("instance admin; creates a project, like an archive import"),
         ),
         // ── Structure: modules / labels / folders ──
         (("GET", "/api/modules"), Gated(Viewer)),

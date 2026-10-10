@@ -15,6 +15,7 @@ An issue is one piece of work inside a project. It is identified by the project'
 | `priority` | `urgent`, `high`, `medium`, `low` or `none`. New issues start at `none`. |
 | `module` | At most one [module](/docs/concepts/modules-and-labels) from the same project. |
 | `labels` | Any number of the project's [labels](/docs/concepts/modules-and-labels). |
+| `assignees` | Who must do it: nobody (any agent), any person, or named people. See [Assignment](#assignment). |
 | `start_date`, `target_date` | Optional calendar dates, written `YYYY-MM-DD`. |
 | `created_at`, `updated_at` | Set by Lific. Adding a comment or changing labels also moves `updated_at`. |
 
@@ -61,6 +62,22 @@ Only `blocks` changes behavior. A duplicate is not closed automatically; set its
 
 When project-scoped authorization is enforced, every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins, and instances without enforcement, see every relation.
 
+## Assignment
+
+Assignment says whether an agent may take an issue. An issue is in one of three states:
+
+| State | Set with | Meaning |
+| --- | --- | --- |
+| Unassigned | `[]` or nothing | Any agent may work it, unless it is blocked, `done` or `cancelled`. This is the default. |
+| Human | `["human"]` | Some person must do it. Nobody in particular. |
+| Named people | `["ada-lovelace", "me"]` | These people must do it. |
+
+Only human accounts can be named; an agent's own account cannot, because unassigned already means "any agent". `me` stands for the caller, and for an agent it stands for the person who connected it. A named person must be able to see the project. Human and named people are exclusive in one request. Every write replaces the whole assignment, and the activity log records each person added or removed.
+
+Responses carry `needs_human` (true for the second and third states) and `assignees` (the named people). `workable=true` does not look at assignment; filter with `assignee`: `none` for the agents' pool, `human` for every issue a person must do, `me`, or a username. The web UI's home page lists the open issues that name you, the ones marked for any person, and the ones waiting on you.
+
+Assignments are private: the public view of a [published project](/docs/public-projects) leaves them out. A project archive carries them by username; on import, a name with no matching person falls back to "any person".
+
 ## Waiting on a person or a date
 
 Some work is blocked by something that is not an issue: a decision someone owes you, or a reply that should arrive next week. Record that as a wait instead of a placeholder issue.
@@ -106,4 +123,4 @@ By default the last write wins. To avoid overwriting someone else's change, send
 
 ## Who can change an issue
 
-When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
+When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.

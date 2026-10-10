@@ -8,7 +8,7 @@
   // popover state are read and mutated directly on it. Data-derived inputs
   // (option lists, tallies, count label) and the few component-owned bits
   // (navigate, searchInputEl, inline-create trigger) come in as props.
-  import type { Label, Module } from "../api";
+  import type { IssueAssignee, Label, Module } from "../api";
   import {
     Plus, Search, ChevronDown, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
@@ -40,6 +40,7 @@
     onCycleChanged = () => {},
     labels,
     modules,
+    assignees = [],
     priorityCssColor,
     searchInputEl = $bindable(),
     onOpenSearch,
@@ -71,6 +72,8 @@
     /** Label + module lists feed the filter modal's Label / Module sections. */
     labels: Label[];
     modules: Module[];
+    /** LIF-147: people named on this project's issues, for the filter. */
+    assignees?: IssueAssignee[];
     priorityCssColor: (p: string) => string;
     /** The search <input> DOM ref the parent focuses on `/` and openSearch. */
     searchInputEl: HTMLInputElement | null;
@@ -339,7 +342,7 @@
 
   <!-- Full filter modal (LIF-222 follow-up). Lives outside the trigger
        wrapper but is fixed-positioned, so DOM placement is irrelevant. -->
-  <FilterModal {view} {labels} {modules} {priorityCssColor} />
+  <FilterModal {view} {labels} {modules} {assignees} {priorityCssColor} />
 
   <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
   <div class="ml-auto flex items-center gap-0.5 shrink-0">

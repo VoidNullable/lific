@@ -215,7 +215,7 @@ pub fn get_wait(conn: &Connection, wait_id: i64) -> Result<IssueWait, LificError
 }
 
 /// An active account by username, with or without a leading `@`.
-fn resolve_user(conn: &Connection, name: &str) -> Result<(i64, String), LificError> {
+pub(crate) fn resolve_user(conn: &Connection, name: &str) -> Result<(i64, String), LificError> {
     let name = name.trim().trim_start_matches('@');
     conn.query_row(
         "SELECT id, username FROM users

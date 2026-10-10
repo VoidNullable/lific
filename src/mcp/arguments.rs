@@ -11,6 +11,25 @@
 
 use rmcp::ErrorData;
 
+/// Remove one matching pair of quote characters around an MCP string value.
+/// Some clients include the source-language string delimiters in the value
+/// itself instead of sending only the string contents.
+pub(super) fn unquote(value: String) -> String {
+    match unquote_if_wrapped(&value) {
+        Some(unquoted) => unquoted.to_owned(),
+        None => value,
+    }
+}
+
+/// Return the value inside one matching pair of outer quote characters.
+pub(super) fn unquote_if_wrapped(value: &str) -> Option<&str> {
+    let quote = match value.chars().next()? {
+        quote @ ('\'' | '"') => quote,
+        _ => return None,
+    };
+    value.strip_prefix(quote)?.strip_suffix(quote)
+}
+
 /// Rewrite an rmcp parameter-deserialization error that is about an unknown
 /// field. Every other error passes through unchanged.
 pub(crate) fn explain_unknown_parameter(
@@ -127,6 +146,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn valid() -> Vec<&'static str> {
         vec!["identifier", "include_comments"]
@@ -196,5 +216,22 @@ mod tests {
         .unwrap();
         assert!(!aliased.contains("oldString"), "{aliased}");
         assert!(aliased.contains("Did you mean `old_string`?"), "{aliased}");
+    }
+
+    proptest! {
+        #[test]
+        fn removes_exactly_one_matching_quote_pair(value in any::<String>(), quote in prop_oneof![Just('\''), Just('"')]) {
+            let wrapped = format!("{quote}{value}{quote}");
+            prop_assert_eq!(unquote(wrapped), value);
+        }
+
+        #[test]
+        fn leaves_unquoted_and_mismatched_values_unchanged(value in any::<String>(), quotes in prop_oneof![Just(('\'', '"')), Just(('"', '\''))]) {
+            let plain = format!("prefix {value} suffix");
+            prop_assert_eq!(unquote(plain.clone()), plain);
+
+            let mixed = format!("{}{value}{}", quotes.0, quotes.1);
+            prop_assert_eq!(unquote(mixed.clone()), mixed);
+        }
     }
 }

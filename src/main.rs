@@ -1,5 +1,6 @@
 mod actor;
 mod api;
+mod archived_projects;
 mod auth;
 mod authz;
 #[cfg(test)]
@@ -594,6 +595,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     "db_size_bytes": m.db_size_bytes,
                     "attachment_count": m.attachment_count,
                     "attachment_bytes": m.attachment_bytes,
+                    "archived_project_count": m.archived_project_count,
+                    "archived_project_bytes": m.archived_project_bytes,
                 });
                 println!("{}", serde_json::to_string_pretty(&out_json)?);
             } else {
@@ -603,12 +606,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     ui::command(result.archive_path.display())
                 ));
                 ui::info(ui::dim(format!(
-                    "lific {} · schema v{} · db {} bytes · {} attachments ({} bytes)",
+                    "lific {} · schema v{} · db {} bytes · {} attachments ({} bytes) · \
+                     {} archived projects ({} bytes)",
                     m.lific_version,
                     m.schema_version,
                     m.db_size_bytes,
                     m.attachment_count,
-                    m.attachment_bytes
+                    m.attachment_bytes,
+                    m.archived_project_count,
+                    m.archived_project_bytes
                 )));
             }
             return Ok(());
@@ -639,6 +645,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     "schema_version": m.schema_version,
                     "created_at": m.created_at,
                     "attachment_count": result.attachment_count,
+                    "archived_project_count": result.archived_project_count,
                     "moved_existing_to": result
                         .moved_existing_to
                         .as_ref()
@@ -650,11 +657,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 ui::intro("lific restore");
                 ui::step(format!("Restored from {}", ui::command(archive.display())));
                 ui::info(ui::dim(format!(
-                    "database {} · from lific {} · schema v{} · {} attachments",
+                    "database {} · from lific {} · schema v{} · {} attachments · \
+                     {} archived projects",
                     result.db_path.display(),
                     m.lific_version,
                     m.schema_version,
-                    result.attachment_count
+                    result.attachment_count,
+                    result.archived_project_count
                 )));
                 if let Some(moved) = &result.moved_existing_to {
                     ui::warn(format!(

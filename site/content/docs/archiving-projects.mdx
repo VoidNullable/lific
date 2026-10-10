@@ -1,0 +1,52 @@
+---
+title: Archiving projects
+description: Take a project you no longer use out of Lific without losing it, then bring it back later with its members and history.
+---
+
+Archiving takes a project out of Lific and keeps it as one compressed file on the server. The project disappears from the sidebar, search, the MCP tools and the API for everyone. Nothing in it is lost: an administrator can unarchive it, and it comes back with its content, history, members and authors.
+
+Use it for a project you are done with but want to keep. To remove a project for good, delete it instead. To move a project to another instance, use a [project archive](/docs/project-archives).
+
+## Archive a project
+
+1. Open the project's **Overview** and expand **Danger zone**.
+2. Under **Archive project**, choose **Archive this project**, read what happens, and choose **Archive**.
+
+Archiving takes the same permission as deleting the project: the project's lead when project permissions are enforced, or an administrator when they are not.
+
+The file is written, recorded and the project removed in one step. If anything fails, the project stays where it was and no file is left behind.
+
+## Unarchive a project
+
+1. Open **Settings**, then **Instance**. Only administrators see it.
+2. Under **Archived projects**, find the project and choose **Unarchive**.
+
+Unarchiving needs an administrator even when project permissions are not enforced, because it creates a project. The project returns under its old identifier. If a live project has taken that identifier in the meantime, change that project's identifier first.
+
+## What comes back
+
+Everything a [project archive](/docs/project-archives#what-transfers) carries: issues, pages, plans, comments, modules, labels, folders, attachments, waits, assignments, deleted items and the change history. Issue, page and plan numbers are unchanged.
+
+Because the project returns to the same instance, Lific also puts back what a transfer between instances cannot:
+
+- **Members and roles**, and the project lead. The administrator who unarchives it is also added as a lead.
+- **Authors.** Comments and files are linked to their original accounts again instead of showing `(imported)` names, and history entries keep their original actor and transport.
+
+An account deleted while the project was archived is skipped: its membership is dropped, and its comments keep the `(imported)` name.
+
+## What does not come back
+
+- **Publication.** A published project comes back private. Settings says so when you unarchive it; [publish it again](/docs/public-projects) if you still want it public.
+- Page version history, saved views, sidebar groups, repository bindings, and relations to issues in other projects.
+
+## Where the files live
+
+Each archived project is one file in `archived-projects/`, next to the database and `attachments/`, named `<IDENTIFIER>-<date>-<time>.lific.tar.gz` and readable only by the server's user. Lific records its size and checksum, and refuses to unarchive a file that has changed. Unarchiving deletes the file.
+
+The files are included in [backups and `lific dump`](/docs/self-hosting#backups), and `lific restore` puts them back along with the database. Do not move, rename or delete them by hand: Settings marks an entry whose file is missing, and it cannot be unarchived.
+
+Each file is an ordinary project archive, so `lific project-archive import` or the web import can also load it on another instance, with the limits and attribution rules of a transfer.
+
+## Reference
+
+Archiving and unarchiving share the single archive slot with project archive exports and imports, so only one runs at a time and a second request gets `429`. The routes are listed under [Projects](/docs/rest-api/projects). There is no MCP or CLI interface for archiving.

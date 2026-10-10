@@ -281,6 +281,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "HWP attachment MIME",
         include_str!("../../migrations/057_hwp_attachment_mime.sql"),
     ),
+    (
+        58,
+        "issue assignees",
+        include_str!("../../migrations/058_issue_assignees.sql"),
+    ),
+    (
+        59,
+        "archived projects",
+        include_str!("../../migrations/059_archived_projects.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

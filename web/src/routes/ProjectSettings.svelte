@@ -13,6 +13,7 @@
     getIssueCounts,
     updateProject,
     deleteProject,
+    archiveProject,
     downloadProjectExport,
     listProjectGroups,
     assignProjectGroup,
@@ -37,6 +38,7 @@
   import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
+  import { ageLabel, daysSince, importanceScore } from "../lib/issues/importance";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
@@ -102,6 +104,9 @@
   let deleteConfirmText = $state("");
   let deleting = $state(false);
   let deleteError = $state("");
+  let showArchiveSection = $state(false);
+  let archiving = $state(false);
+  let archiveError = $state("");
   let exportError = $state("");
   let exporting = $state(false);
 
@@ -368,35 +373,12 @@
     window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
   }
 
-  // ── Importance heuristic ─────────────────────────────
-  // score = (priorityWeight + age*0.5 + staleness*0.6) * statusMultiplier,
-  // over OPEN issues only. Cheap, O(n), and honest: an old urgent todo that
-  // hasn't moved floats to the top. We never show the number — only the
-  // cause (priority + an age/idle cue).
-  const PRIORITY_WEIGHT: Record<string, number> = { urgent: 100, high: 55, medium: 25, low: 10, none: 4 };
-  const STATUS_MULT: Record<string, number> = { todo: 1.25, active: 1.15, backlog: 1.0 };
-
-  function daysSince(iso: string): number {
-    const t = new Date(iso + "Z").getTime();
-    if (Number.isNaN(t)) return 0;
-    return Math.max(0, Math.floor((Date.now() - t) / 86400000));
-  }
-  function score(i: Issue): number {
-    const pw = PRIORITY_WEIGHT[i.priority] ?? 4;
-    const sm = STATUS_MULT[i.status] ?? 1;
-    return (pw + daysSince(i.created_at) * 0.5 + daysSince(i.updated_at) * 0.6) * sm;
-  }
-  function ageLabel(days: number): string {
-    if (days >= 60) return `${Math.round(days / 30)}mo`;
-    if (days >= 1) return `${days}d`;
-    return "today";
-  }
-
+  // ── Importance heuristic (lib/issues/importance.ts) ──
   const openIssues = $derived(
     issues.filter((i) => i.status === "backlog" || i.status === "todo" || i.status === "active"),
   );
   const ranked = $derived.by(() =>
-    [...openIssues].sort((a, b) => score(b) - score(a)),
+    [...openIssues].sort((a, b) => importanceScore(b) - importanceScore(a)),
   );
   const attention = $derived(ranked.slice(0, 6));
   const moreCount = $derived(Math.max(0, openIssues.length - attention.length));
@@ -477,6 +459,19 @@
     const res = await deleteProject(project.id);
     if (res.ok) navigate("/settings");
     else { deleteError = res.error; deleting = false; }
+  }
+
+  async function handleArchive() {
+    if (!project || archiving) return;
+    archiving = true; archiveError = "";
+    const res = await archiveProject(project.id);
+    if (res.ok) {
+      toast(`Archived ${res.data.identifier}. An admin can unarchive it from Settings, Instance.`, { kind: "success" });
+      navigate("/settings");
+    } else {
+      archiveError = res.error;
+      archiving = false;
+    }
   }
 
   async function exportProject() {
@@ -924,6 +919,47 @@
                   </button>
                 </div>
                 {#if identError}<p class="text-caption text-[var(--error)] mt-1.5">{identError}</p>{/if}
+              </div>
+
+              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
+
+              <!-- Archive -->
+              <div>
+                <p class="text-body-sm font-medium text-[var(--text)]">Archive project</p>
+                <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                  Compresses the project into a single file on the server and removes it from Lific.
+                  Nothing is lost: an instance admin can unarchive it from Settings, Instance.
+                </p>
+                {#if !showArchiveSection}
+                  <button
+                    class="mt-2 text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
+                    onclick={() => { showArchiveSection = true; }}
+                  >
+                    Archive this project
+                  </button>
+                {:else}
+                  <p class="text-caption text-[var(--text-muted)] mt-2 mb-2 leading-relaxed">
+                    <strong class="font-mono">{project.identifier}</strong> and its <strong>{total}</strong> issue{total !== 1 ? 's' : ''},
+                    pages, plans, and attachments disappear for everyone until it is unarchived. It comes back private, with its
+                    members and history. Page revision history, saved views, and repository bindings are not kept.
+                  </p>
+                  <div class="flex items-center gap-2">
+                    <button
+                      class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
+                             hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={archiving}
+                      onclick={handleArchive}
+                    >
+                      {archiving ? "Archiving…" : "Archive"}
+                    </button>
+                    <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                            disabled={archiving}
+                            onclick={() => { showArchiveSection = false; archiveError = ''; }}>
+                      Cancel
+                    </button>
+                  </div>
+                {/if}
+                {#if archiveError}<p class="text-caption text-[var(--error)] mt-1.5">{archiveError}</p>{/if}
               </div>
 
               <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>

@@ -34,12 +34,13 @@ On an unbound session these calls fail with `project required (this session has 
 
 ### `list_issues`
 
-Lists issues in one project, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then any waits and checklist progress.
+Lists issues in one project, or across the projects of the people you name with `members`, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then any waits, who must do it, and checklist progress.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `project` | `string` | No | Project identifier, e.g. `APP`. Falls back to the repository binding; required on an unbound session. |
+| `project` | `string` | No | Project identifier, e.g. `APP`. Falls back to the repository binding; required on an unbound session unless `members` or `roles` is given. |
 | `status` | `string` | No | `backlog`, `todo`, `active`, `done` or `cancelled`. |
+| `statuses` | `string[]` | No | Several statuses at once, or `all`. Cannot be combined with `status` or be empty. |
 | `priority` | `string` | No | `urgent`, `high`, `medium`, `low` or `none`. |
 | `module` | `string` | No | Module name. |
 | `label` | `string` | No | Label name. |
@@ -53,6 +54,9 @@ Lists issues in one project, filtered and paged. Each row shows the identifier, 
 | `order` | `string` | No | `asc` (default) or `desc`. |
 | `limit` | `integer` | No | Default 50, capped at 500. |
 | `offset` | `integer` | No | Zero-based. |
+| `members` | `string[]` | No | Issues in every project you can see where any of these users has a role. `"me"` is you; name others by username, with or without `@`. |
+| `roles` | `string[]` | No | The roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
+| `assignee` | `string` | No | `none` (free for agents), `human` (a person must do it), `me`, or a username. Works with `members` too. |
 
 `workable` and `blocked` are independent filters, not opposites. A closed issue with an open blocker is `blocked` and not `workable`; an open issue with no blockers is `workable` and not `blocked`. A cancelled blocker still blocks, and a deleted one no longer counts. Passing `false` to either is the same as omitting it. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
 
@@ -67,11 +71,33 @@ Every row that has waits carries one token per wait, whatever the filters:
 | `due_since:2026-09-28` | A date wait whose window has started. It no longer blocks. |
 | `overdue_since:2026-09-30` | A date wait whose last day has passed, dated from the day after it. It no longer blocks. |
 
-Notes are left out of the tokens; `get_issue` prints them. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker.
+Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker.
+
+#### Your work across projects
+
+`members` turns `list_issues` into a triage list across projects:
+
+```text
+list_issues(members=["me"])
+list_issues(roles=["lead", "maintainer"], statuses=["active", "todo"])
+list_issues(members=["@bob"], priority="urgent")
+```
+
+The response starts with the roles held in each listed project, then the rows in their usual format:
+
+```text
+Your roles: APP lead · WEB viewer
+3 issues:
+- APP-7 | active | high | Ship the export
+- WEB-12 | todo | urgent | Fix the login redirect
+- APP-9 | todo | high | Review the import
+```
+
+With `members`, the listing matches the web home page's "My active issues": `active` and `todo` issues, `active` first, then by priority, then most recently updated. `status` or `statuses` brings in `backlog` or closed work, which sorts after `todo`. Unlike the home page, which shows every project you can see, only projects where the named users hold a role are listed. An explicit `order_by` still wins, and `order` needs `order_by` alongside it. An empty result still starts with the roles line, so "on three projects, nothing open" reads as such. `roles=["lead", "maintainer"]` is the sharpest "my work" filter: viewers often watch many projects they do not work on. `module` and `label` need `project`. Given `project` as well, `members` filters that one project, and the call says so when none of the named users has a role there. `members` never reaches beyond the projects you can see, and `"me"` resolves the same way as in [`list_resources`](#list_resources).
 
 ### `get_issue`
 
-Returns one issue: title, status, priority, module, labels, checklist progress, relations, waits, description and a window of its comments.
+Returns one issue: title, status, priority, module, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -79,6 +105,8 @@ Returns one issue: title, status, priority, module, labels, checklist progress, 
 | `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. |
 
 Relation lines include each related issue's current status, for example `Blocked by: APP-42 (done)`.
+
+An issue a person must do has an `Assigned: human (a person must do this)` or `Assigned: @ada, @bob (a person must do this)` line. An unassigned issue has none.
 
 When the description contains a Markdown task list, a `Checklist: 3/5 done` line follows the status and labels. A task item is a list item (`-`, `*`, `+`, `1.` or `1)`) that starts with `[ ]`, `[x]` or `[X]`, nested or not. Items inside fenced code blocks are not counted, so a task list quoted as an example does not become the issue's checklist.
 
@@ -108,6 +136,7 @@ Creates an issue, or up to 50 at once, and returns the new identifiers.
 | `labels` | `string[]` | No | Label names. A name that matches no label in the project is ignored. |
 | `start_date` | `string` | No | ISO 8601 date, e.g. `2026-06-01`. |
 | `target_date` | `string` | No | ISO 8601 date, e.g. `2026-06-15`. |
+| `assignees` | `string[]` | No | Who must do it: `["human"]` for any person, or usernames (`"me"` is you, or the person who connected you). Omit to leave it free for agents. See [Assignment](/docs/concepts/issues#assignment). |
 | `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project`. |
 
 Attachment links (`/api/attachments/12`) in the description are linked to the new issue.
@@ -132,6 +161,7 @@ Changes the fields you pass and leaves the rest alone. Text fields are replaced 
 | `start_date` | `string` | No | ISO 8601 date. |
 | `target_date` | `string` | No | ISO 8601 date. |
 | `expected_seq` | `integer` | No | Concurrency check. The update is refused if the issue's `seq` is no longer this value. Omit for last-writer-wins. |
+| `assignees` | `string[]` | No | Replaces who must do it. `[]` frees it for agents, `["human"]` marks it for any person, usernames name people. |
 | `evidence` | `string` | No | How the work was verified, in Markdown. Only with `status: "done"` on an issue that is not already done. Saved as a verification comment. |
 
 A refused `expected_seq` returns an error naming the current `seq` and a one-line summary of the issue's current state. Moving an issue to or from `done` completes or reopens the plan steps that mirror it, and the response lists those steps.
@@ -154,6 +184,7 @@ Sets the same fields on every issue in a project that matches the filters, in on
 | `set_status` | `string` | No | Status to set. |
 | `set_priority` | `string` | No | Priority to set. |
 | `set_module` | `string` | No | Module to set, by name. |
+| `set_assignees` | `string[]` | No | Assignment to set, as in `update_issue`'s `assignees`. |
 
 With no filters, every issue in the project matches. At most 500 matching issues are selected per call; narrow the filters when more match. The batch is all or nothing: if any single update fails, none are applied.
 
@@ -236,7 +267,7 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `resource_type` | `string` | Yes | `project`, `module`, `label`, `folder`, `page`, `issue` or `plan`. |
-| `project` | `string` | No | Required for `issue`, `plan`, `module`, `label` and `folder` unless the session has a binding. Optional for `page`, where omitting it lists pages from every project you can see. Ignored for `project`. |
+| `project` | `string` | No | Required for `issue`, `plan`, `module`, `label` and `folder` unless the session has a binding. Optional for `page`, where omitting it lists pages from every project you can see. For `project`, lists only that project; you need `viewer` on it. |
 | `folder` | `string` | No | Pages only: folder name. Needs `project`. |
 | `label` | `string` | No | Pages only: label name. |
 | `status` | `string` | No | Pages: `draft`, `active`, `complete` or `archived`. Plans: `active`, `done` or `archived`. |
@@ -244,8 +275,18 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | `order` | `string` | No | Pages only: `asc` (default) or `desc`. |
 | `limit` | `integer` | No | Issues and pages default to 100, plans to 50; all cap at 500. Ignored for projects, modules, labels and folders. |
 | `offset` | `integer` | No | Zero-based, for issues, pages and plans. |
+| `members` | `string[]` | No | Projects only: keep projects where any of these users has a role. `"me"` is you; name others by username, with or without `@`. `"all"` is rejected. |
+| `roles` | `string[]` | No | Projects only: the roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
+| `statuses` | `string[]` | No | Projects only: which per-status issue counts each row prints: `backlog`, `todo`, `active`, `done`, `cancelled` or `all` (default). `[]` prints none. |
+| `show_members` | `string[]` | No | Projects only: roles whose members are all named, uncapped: `lead`, `maintainer`, `viewer` or `all`. `[]` prints only counts per role. |
 
-Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long ago anything happened. The issue listing takes no filters (its `label` is ignored); use `list_issues` to filter. Issue and page listings end with the next `offset` when more rows exist. The plan listing honors `limit` and `offset` but prints no paging hint, so request the next page yourself when a full page comes back.
+Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long ago anything happened. It then shows the project's members by role, your own role, and its issue count per status:
+
+```text
+- APP | App (3 workable, last activity 2h ago) | lead @alice · maintainers @bob, @carol · 12 viewers | you: maintainer | 2 active · 5 todo · 9 backlog · 40 done
+```
+
+By default, leads and maintainers are named, up to five per role followed by `+N more`, and viewers are counted. An instance with only one active person leaves the roster and `you:` segments out, since they would only ever name that person; pass `show_members` to print them anyway. `you: admin` marks an admin who holds no role in the project; `you:` is left out when you hold none and are not an admin. Deactivated accounts are left out of the roster. Zero counts are left out, and a project without issues shows `no issues`; when all its issues fall outside `statuses`, the chosen statuses print as `0 active · 0 todo`. `"me"` is the caller the permission checks see: a bot counts as its owner, and a session without a user-bound credential counts as the first admin. On an instance with one active person, that person counts as lead of every project they hold no role in, so `members: ["me"]` also covers projects created without a lead, such as those from the CLI or an import. `members` only ever narrows the projects you can already see; it never reveals another user's projects that are hidden from you. When nothing matches, the call returns `No projects where @bob has a role (among projects you can see).` The issue listing takes no filters (its `label` is ignored); use `list_issues` to filter. Issue and page listings end with the next `offset` when more rows exist. The plan listing honors `limit` and `offset` but prints no paging hint, so request the next page yourself when a full page comes back.
 
 An unrecognized `resource_type` returns a line naming the accepted values.
 
@@ -418,7 +459,7 @@ The double-escape repair applies to descriptions, not titles.
 
 ### `update_plan_step`
 
-Changes a plan, or one step in it. Without `step_id` the call targets the plan; with it, the step.
+Changes a plan, or one step in it. Without `step_id` the call targets the plan; with it, the step. A field that belongs to the other target is refused with an error rather than ignored.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -431,9 +472,9 @@ Changes a plan, or one step in it. Without `step_id` the call targets the plan; 
 | `done` | `boolean` | No | Step only: mark done or not done. Marking done also closes a linked issue, and the response says so. |
 | `attach_issue` | `string` | No | Step only: link an issue, e.g. `APP-42`. |
 | `detach_issue` | `boolean` | No | Step only: remove the step's issue link. |
-| `add_child_title` | `string` | No | Step only: add a child step with this title. |
-| `add_child_description` | `string` | No | Step only: description for the new child. |
-| `add_child_issue` | `string` | No | Step only: issue the new child mirrors. |
+| `add_child_title` | `string` | No | Add a step with this title: a child of `step_id`, or a top-level step when `step_id` is omitted. |
+| `add_child_description` | `string` | No | Description for the new step. Needs `add_child_title`. |
+| `add_child_issue` | `string` | No | Issue the new step mirrors. Needs `add_child_title`. |
 | `move_parent_step_id` | `integer` | No | Step only: move the step under this step. |
 | `move_to_root` | `boolean` | No | Step only: move the step to the top level. |
 | `move_position` | `integer` | No | Step only: new zero-based position among its siblings. |

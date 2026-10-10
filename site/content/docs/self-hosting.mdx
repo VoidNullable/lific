@@ -30,7 +30,7 @@ lific start --config /etc/lific/lific.toml
 
 `start` does not create a database. Set the instance up first with `lific init`, using the configuration the server will run with. Containers are the one exception, with their [own bootstrap](#containers).
 
-The process needs read access to the configuration file and write access to the directory holding the database. That directory also receives `attachments/` and, by default, `backups/`.
+The process needs read access to the configuration file and write access to the directory holding the database. That directory also receives `attachments/`, `archived-projects/` and, by default, `backups/`.
 
 ### As a user service
 
@@ -204,7 +204,8 @@ Each backup is one archive named `<database name>_YYYYMMDD_HHMMSS.tar.gz`, such 
 | --- | --- |
 | `lific.db` | A consistent copy of the database, taken with SQLite's online backup while the server keeps serving. |
 | `attachments/` | Every attachment file, named by content hash. |
-| `manifest.json` | The Lific version, schema version, time, database size, and attachment count and size. |
+| `archived-projects/` | One file per [archived project](/docs/archiving-projects). |
+| `manifest.json` | The Lific version, schema version, time, database size, and attachment and archived-project counts and sizes. |
 
 The archive covers everything in the database: every project, account, API key, setting and audit record. It does not include `lific.toml`, so keep a copy of that yourself. An interrupted backup leaves staging files behind, which the next cycle removes.
 
@@ -231,9 +232,9 @@ lific restore /var/backups/lific/lific_20260101_120000.tar.gz --force
 
 Restore checks the archive before it touches anything. The manifest and database must be present, attachment entries must be plain content hashes that match their contents, the database must pass an integrity check, and its schema must not be newer than the running binary. The files are unpacked into a staging directory and moved into place, so a failed restore leaves your current data as it was.
 
-Without `--force`, restore refuses to replace an existing database. With `--force`, the current database is moved aside to `lific.db.pre-restore-<timestamp>` and kept. The current `attachments` directory is replaced by the archive's and is not kept, so take a `lific dump` first if you might want it back. Start the server afterwards; if the archive came from an older release, its migrations run on startup.
+Without `--force`, restore refuses to replace an existing database. With `--force`, the current database is moved aside to `lific.db.pre-restore-<timestamp>` and kept. The current `attachments` and `archived-projects` directories are replaced by the archive's and are not kept, so take a `lific dump` first if you might want it back. Start the server afterwards; if the archive came from an older release, its migrations run on startup.
 
-Restore also caps the unpacked size, so a hostile archive cannot fill the disk before validation rejects it: 512 MiB of database, 64 MiB per attachment, 1 GiB in total and 10,000 entries. A large instance can produce archives beyond that. `--allow-large` accepts them; use it only for an archive you made yourself. Every other check still runs.
+Restore also caps the unpacked size, so a hostile archive cannot fill the disk before validation rejects it: 512 MiB of database, 64 MiB per attachment, 512 MiB per archived project, 1 GiB in total and 10,000 entries. A large instance can produce archives beyond that. `--allow-large` accepts them; use it only for an archive you made yourself. Every other check still runs.
 
 To move one project to another instance, use a [project archive](/docs/project-archives) instead. It carries the project's content and history but not accounts, credentials or membership, and it is no substitute for a full backup when an upgrade goes wrong. Read [Upgrading](/docs/upgrading) before you replace a running binary.
 

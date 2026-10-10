@@ -6,6 +6,7 @@
     | "priority"
     | "module"
     | "label"
+    | "assign"
     | "delete"
     | null;
 </script>
@@ -24,6 +25,8 @@
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import { STATUSES, PRIORITIES } from "./grouping";
+  import AssigneePicker from "./AssigneePicker.svelte";
+  import type { Person } from "./assignees";
 
   let {
     selectedCount,
@@ -31,6 +34,9 @@
     bulkMenu = $bindable(),
     modules,
     labels,
+    projectId = null,
+    selectedAssignment = null,
+    onAssign,
     onUpdate,
     onAddLabel,
     onDelete,
@@ -43,6 +49,12 @@
     bulkMenu: BulkMenu;
     modules: Module[];
     labels: Label[];
+    /** LIF-147: the project the selection belongs to; null hides Assign. */
+    projectId?: number | null;
+    /** The selection's shared assignment, or null when it is mixed. */
+    selectedAssignment?: string[] | null;
+    /** Give every selected issue this assignment. */
+    onAssign?: (names: string[], people: Person[]) => void;
     /** Apply a field update to every selected issue. */
     onUpdate: (input: Record<string, unknown>) => void;
     /** Add one label (by name) to every selected issue. */
@@ -87,7 +99,7 @@
     <button class="text-body-sm px-2 py-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] disabled:opacity-50"
       disabled={bulkBusy} onclick={onExport}>Export</button>
 
-    {#snippet bulkTrigger(menu: "status" | "priority" | "module" | "label", label: string)}
+    {#snippet bulkTrigger(menu: "status" | "priority" | "module" | "label" | "assign", label: string)}
       <button
         class="text-body-sm px-2 py-1 rounded-md transition-colors
                disabled:opacity-50 disabled:cursor-not-allowed
@@ -214,6 +226,11 @@
       </div>
     {/if}
 
+    <!-- Assign (LIF-147). Opens the same picker as the issue view. -->
+    {#if projectId !== null && onAssign}
+      {@render bulkTrigger("assign", "Assign")}
+    {/if}
+
     <div class="w-px h-4 bg-[var(--border)] mx-1"></div>
 
     <!-- Delete (confirm popover) -->
@@ -282,3 +299,13 @@
     {/if}
   </div>
 </div>
+
+{#if projectId !== null && onAssign}
+  <AssigneePicker
+    bind:open={() => bulkMenu === "assign", (next) => (bulkMenu = next ? "assign" : null)}
+    {projectId}
+    subject="{selectedCount} issue{selectedCount === 1 ? '' : 's'}"
+    current={selectedAssignment}
+    onApply={onAssign}
+  />
+{/if}

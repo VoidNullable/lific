@@ -688,7 +688,7 @@
         busy={attach.uploads.busy}
         onFiles={(files, source) => attach.enqueue(files, source)}
       />
-      <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
+      <span class="cmt__hint">Markdown · drag, paste or attach files</span>
     </div>
     <div class="cmt__actions">
       <span class="cmt__kbd" aria-hidden="true">

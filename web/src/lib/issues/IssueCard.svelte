@@ -14,6 +14,7 @@
   import { copyToClipboard } from "../clipboard";
   import CopyIdButton from "../CopyIdButton.svelte";
   import WaitChip from "./WaitChip.svelte"; // LIF-485
+  import AssigneeMarker from "./AssigneeMarker.svelte"; // LIF-147
 
   let {
     issue,
@@ -173,6 +174,7 @@
       </span>
     {/if}
     <div class="flex-1"></div>
+    <AssigneeMarker {issue} />
     <span class="text-micro text-[var(--text-faint)] tabular-nums">
       <TimeAgo date={issue.updated_at} />
     </span>

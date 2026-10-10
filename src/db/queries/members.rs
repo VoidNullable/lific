@@ -56,6 +56,40 @@ pub fn list_members_with_users(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Every project's roster joined with `users`, grouped by project id, in one
+/// read, so the MCP project and issue listings show members without a query
+/// per project (GitHub #87). Callers keep only the projects they may show.
+/// Deactivated accounts are left out: they can no longer act on a project,
+/// and the `members` filter cannot name them either.
+pub fn rosters_by_project(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, Vec<MemberWithUser>>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.project_id, m.user_id, m.role, m.created_at, u.username, u.display_name
+         FROM project_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE u.is_active = 1
+         ORDER BY m.project_id, m.created_at, m.user_id",
+    )?;
+    let mut rosters: std::collections::HashMap<i64, Vec<MemberWithUser>> =
+        std::collections::HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok(MemberWithUser {
+            project_id: row.get(0)?,
+            user_id: row.get(1)?,
+            role: row.get(2)?,
+            created_at: row.get(3)?,
+            username: row.get(4)?,
+            display_name: row.get(5)?,
+        })
+    })?;
+    for member in rows {
+        let member = member?;
+        rosters.entry(member.project_id).or_default().push(member);
+    }
+    Ok(rosters)
+}
+
 /// Look up a single user's role on a project. `None` when they aren't a
 /// member (distinct from an error — "not a member" is a normal state).
 /// Called by `authz::require_role` (LIF-196).

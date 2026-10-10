@@ -333,6 +333,201 @@ fn manage_resource_updates_resolve_escaped_current_names() {
 }
 
 #[test]
+fn manage_resource_accepts_single_and_double_quoted_arguments() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Quoted", "QTE");
+
+    let created = m.manage_resource(Parameters(parse(json!({
+        "resource_type": "'label'",
+        "action": "'create'",
+        "project": "'QTE'",
+        "name": "'migration'",
+        "color": "'#F59E0B'",
+    }))));
+    assert!(
+        created.contains("Created label: migration (#F59E0B)"),
+        "got: {created}"
+    );
+
+    let updated = m.manage_resource(Parameters(parse(json!({
+        "resource_type": "\"label\"",
+        "action": "\"update\"",
+        "project": "\"QTE\"",
+        "current_name": "\"migration\"",
+        "name": "\"migration-kit\"",
+    }))));
+    assert!(
+        updated.contains("Updated label: migration-kit"),
+        "got: {updated}"
+    );
+
+    let unmatched = m.manage_resource(Parameters(ManageResourceInput {
+        resource_type: "label".into(),
+        action: "create".into(),
+        project: Some("QTE".into()),
+        name: Some("'unfinished".into()),
+        ..Default::default()
+    }));
+    assert!(unmatched.contains("'unfinished"), "got: {unmatched}");
+}
+
+#[test]
+fn manage_resource_unquotes_project_module_and_update_fields() {
+    let (m, _guard) = mcp();
+
+    let project = m.manage_resource(Parameters(parse(json!({
+        "resource_type": "\"project\"",
+        "action": "\"create\"",
+        "name": "\"Quoted Project\"",
+        "identifier": "\"QTP\"",
+        "description": "\"project docs\"",
+        "emoji": "\"lucide:Blocks\"",
+    }))));
+    assert!(
+        project.contains("Created project QTP | Quoted Project"),
+        "got: {project}"
+    );
+    let description = m
+        .read(|conn| {
+            let project_id = queries::resolve_project_identifier(conn, "QTP")?;
+            Ok(queries::get_project(conn, project_id)?.description)
+        })
+        .unwrap();
+    assert_eq!(description, "\"project docs\"");
+
+    let module = m.manage_resource(Parameters(parse(json!({
+        "resource_type": "'module'",
+        "action": "'create'",
+        "project": "'QTP'",
+        "name": "'core'",
+        "status": "'planned'",
+        "emoji": "'lucide:Blocks'",
+    }))));
+    assert!(module.contains("Created module"), "got: {module}");
+    assert!(module.contains("core"), "got: {module}");
+
+    let updated = m.manage_resource(Parameters(parse(json!({
+        "resource_type": "\"module\"",
+        "action": "\"update\"",
+        "project": "\"QTP\"",
+        "current_name": "\"core\"",
+        "name": "\"platform\"",
+        "status": "\"active\"",
+        "emoji": "\"lucide:Blocks\"",
+    }))));
+    assert!(updated.contains("Updated module"), "got: {updated}");
+    assert!(updated.contains("platform"), "got: {updated}");
+}
+
+#[test]
+fn manage_resource_prefers_an_exact_quoted_current_name() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Quoted", "NAM");
+    let pid = project_id(&m);
+    m.write(|conn| {
+        queries::create_label(
+            conn,
+            &models::CreateLabel {
+                project_id: pid,
+                name: "\"release\"".into(),
+                color: "#111111".into(),
+            },
+        )?;
+        queries::create_label(
+            conn,
+            &models::CreateLabel {
+                project_id: pid,
+                name: "release".into(),
+                color: "#222222".into(),
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let updated = m.manage_resource(Parameters(ManageResourceInput {
+        resource_type: "label".into(),
+        action: "update".into(),
+        project: Some("NAM".into()),
+        current_name: Some("\"release\"".into()),
+        name: Some("quoted-release".into()),
+        ..Default::default()
+    }));
+    assert!(
+        updated.contains("Updated label: quoted-release"),
+        "got: {updated}"
+    );
+
+    let names = m
+        .read(|conn| {
+            queries::list_labels(conn, pid).map(|labels| {
+                labels
+                    .into_iter()
+                    .map(|label| label.name)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap();
+    assert!(names.contains(&"quoted-release".to_string()), "{names:?}");
+    assert!(names.contains(&"release".to_string()), "{names:?}");
+}
+
+#[test]
+fn quoted_literal_names_win_before_html_decoding_in_updates_and_deletes() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Names", "NAM");
+    let pid = project_id(&m);
+    for (resource_type, table) in [
+        ("module", "modules"),
+        ("label", "labels"),
+        ("folder", "folders"),
+    ] {
+        for (index, quote) in ['\'', '"'].into_iter().enumerate() {
+            let literal = format!("literal-{index}&amp;name");
+            let decoded = format!("{quote}literal-{index}&name{quote}");
+            for name in [&literal, &decoded] {
+                let created = m.manage_resource(Parameters(ManageResourceInput {
+                    resource_type: resource_type.into(),
+                    action: "create".into(),
+                    project: Some("NAM".into()),
+                    name: Some(format!("{quote}{name}{quote}")),
+                    ..Default::default()
+                }));
+                assert!(created.starts_with("Created"), "{created}");
+            }
+
+            let wrapped = format!("{quote}{literal}{quote}");
+            let updated = m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: resource_type.into(),
+                action: "update".into(),
+                project: Some("NAM".into()),
+                current_name: Some(wrapped.clone()),
+                name: Some(wrapped.clone()),
+                ..Default::default()
+            }));
+            assert!(updated.starts_with("Updated"), "{resource_type}: {updated}");
+
+            let deleted = m.delete(Parameters(DeleteInput {
+                resource_type: resource_type.into(),
+                identifier: wrapped,
+                project: Some("NAM".into()),
+            }));
+            assert!(deleted.starts_with("Deleted"), "{resource_type}: {deleted}");
+            m.read(|conn| {
+                let remaining: Vec<String> = conn
+                    .prepare(&format!("SELECT name FROM {table} WHERE project_id = ?1"))?
+                    .query_map([pid], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                assert!(!remaining.contains(&literal), "{remaining:?}");
+                assert!(remaining.contains(&decoded), "{remaining:?}");
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn delete_resolves_escaped_names() {
     let (m, _guard) = mcp();
     seed_escapable_names(&m);

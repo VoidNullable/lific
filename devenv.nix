@@ -342,12 +342,20 @@ in
       tasks = {
         "lific:release:x86_64-apple-darwin" = {
           cwd = repoRoot;
-          exec = "cargo build --locked --profile dist --target x86_64-apple-darwin";
+          exec = ''
+            set -e
+            cargo build --locked --profile dist --target x86_64-apple-darwin
+            bash scripts/fix-macos-release-linkage.sh target/x86_64-apple-darwin/dist/lific
+          '';
           after = [ "lific:web:build" ];
         };
         "lific:release:aarch64-apple-darwin" = {
           cwd = repoRoot;
-          exec = "cargo build --locked --profile dist --target aarch64-apple-darwin";
+          exec = ''
+            set -e
+            cargo build --locked --profile dist --target aarch64-apple-darwin
+            bash scripts/fix-macos-release-linkage.sh target/aarch64-apple-darwin/dist/lific
+          '';
           after = [ "lific:web:build" ];
         };
       };
