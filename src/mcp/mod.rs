@@ -23,6 +23,9 @@ use crate::links::IssueLinkContext;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 use crate::storage::AttachmentStore;
 
+/// HTTP content negotiation used by stdio proxies to carry binary results.
+pub(crate) const INLINE_ATTACHMENT_HEADER: &str = "x-lific-mcp-inline-attachment";
+
 /// Direct-call tests still use process-wide context; production HTTP requests
 /// carry their context through rmcp's request extensions instead.
 #[cfg(test)]

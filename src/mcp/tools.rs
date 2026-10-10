@@ -5400,7 +5400,7 @@ No issues found."
     }
 
     #[tool(
-        description = "Read an attachment by ID: paged text, inline images, or metadata plus a download URL."
+        description = "Read attachment text, images, or binary content; HTTP may return a download URL."
     )]
     fn get_attachment(
         &self,
@@ -5468,18 +5468,44 @@ No issues found."
         let download_url = current_issue_link_context()
             .as_deref()
             .and_then(|context| context.attachment_url(attachment.id))
-            .map_or_else(
-                || format!("/api/attachments/{}", attachment.id),
-                |url| url.to_string(),
-            );
-        Ok(vec![Content::text(format!(
-            "attachment {}: {} ({}, {}, sha {}). Binary, download at {download_url}",
+            .map(|url| url.to_string());
+        let metadata = format!(
+            "attachment {}: {} ({}, {}, sha {})",
             attachment.id,
             attachment.filename,
             attachment.mime,
             HumanSize(attachment.size_bytes),
             &attachment.sha256[..attachment.sha256.len().min(12)]
-        ))])
+        );
+        match download_url {
+            Some(url) => Ok(vec![Content::text(format!(
+                "{metadata}. Binary, download at {url}"
+            ))]),
+            None => {
+                let bytes = self
+                    .store
+                    .read(&attachment.sha256)
+                    .map_err(sanitize_error)?;
+                Ok(vec![
+                    Content::text(format!(
+                        "{metadata}. Binary content is attached as an MCP resource."
+                    )),
+                    Content::resource(
+                        rmcp::model::ResourceContents::blob(
+                            base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            format!("attachment://{}", attachment.id),
+                        )
+                        .with_mime_type(
+                            if attachment.mime == "image/svg+xml" {
+                                "application/octet-stream"
+                            } else {
+                                &attachment.mime
+                            },
+                        ),
+                    ),
+                ])
+            }
+        }
     }
 
     #[tool(description = "List attachments on an issue or page, or in a project.")]
@@ -13456,6 +13482,7 @@ mod tests {
                     bytes.len() as i64,
                     None,
                 )?;
+                m.store.write_unlocked(bytes)?;
                 Ok(attachment.id)
             })
             .expect("seed media attachment");
@@ -13471,13 +13498,14 @@ mod tests {
                 .iter()
                 .all(|content| content.as_image().is_none())
         );
-        assert!(text_of(&result).contains("Binary, download at"));
+        assert!(text_of(&result).contains("Binary content is attached as an MCP resource."));
     }
 
     #[test]
-    fn get_attachment_summarizes_other_binary_types_without_the_bytes() {
+    fn get_attachment_returns_other_binary_types_as_stdio_resources() {
         let (m, _tmp, _guard, _identity) = mcp_with_attachments();
-        let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody");
+        let bytes = b"%PDF-1.7\nbody";
+        let pdf = base64::engine::general_purpose::STANDARD.encode(bytes);
         let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
             filename: "spec.pdf".into(),
             content_base64: pdf,
@@ -13501,10 +13529,62 @@ mod tests {
             )),
             "{text}"
         );
-        assert!(
-            text.ends_with(&format!("Binary, download at /api/attachments/{id}")),
-            "{text}"
-        );
+        assert!(!text.contains("download at"), "{text}");
+        let resource = result
+            .content
+            .iter()
+            .find_map(|content| content.as_resource().map(|resource| &resource.resource))
+            .expect("stdio should return the binary attachment as an embedded resource");
+        match resource {
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                assert_eq!(uri, &format!("attachment://{id}"));
+                assert_eq!(mime_type.as_deref(), Some("application/pdf"));
+                assert_eq!(
+                    blob,
+                    &base64::engine::general_purpose::STANDARD.encode(bytes)
+                );
+            }
+            rmcp::model::ResourceContents::TextResourceContents { .. } => {
+                panic!("expected an embedded blob resource, got {resource:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn get_attachment_returns_svg_as_inert_stdio_resource() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let svg = base64::engine::general_purpose::STANDARD
+            .encode(br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#);
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "diagram.svg".into(),
+            content_base64: svg,
+            entity: None,
+            comment_id: None,
+        })));
+
+        let result = m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+        }));
+        let resource = result
+            .content
+            .iter()
+            .find_map(|content| content.as_resource().map(|resource| &resource.resource))
+            .expect("stdio should return the SVG as an embedded resource");
+        match resource {
+            rmcp::model::ResourceContents::BlobResourceContents { mime_type, .. } => {
+                assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
+            }
+            rmcp::model::ResourceContents::TextResourceContents { .. } => {
+                panic!("expected an embedded blob resource, got {resource:?}")
+            }
+        }
     }
 
     #[test]
