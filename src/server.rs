@@ -41,28 +41,6 @@ use crate::{
 #[allow(dead_code)]
 struct WebAssets;
 
-/// Stdio proxies ask for bytes in the MCP result because their client cannot
-/// use the HTTP backend's authenticated download URL directly.
-fn mcp_issue_link_context(
-    public_url: Option<&str>,
-    headers: &HeaderMap,
-    allowed_hosts: &[String],
-) -> Option<links::IssueLinkContext> {
-    if headers
-        .get(mcp::INLINE_ATTACHMENT_HEADER)
-        .is_some_and(|value| value == "1")
-    {
-        return None;
-    }
-    links::IssueLinkContext::for_http_request(
-        public_url,
-        headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok()),
-        allowed_hosts,
-    )
-}
-
 #[cfg(test)]
 mod inline_attachment_tests {
     use super::*;
@@ -776,6 +754,8 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     }
 }
 
+/// Stdio proxies ask for bytes in the MCP result because their client cannot
+/// use the HTTP backend's authenticated download URL directly.
 fn mcp_issue_link_context(
     public_url: Option<&str>,
     headers: &HeaderMap,
