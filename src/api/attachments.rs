@@ -49,10 +49,13 @@ pub struct AttachmentConfig {
     pub max_bytes: usize,
 }
 
+/// Largest attachment accepted by default, in bytes.
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
 impl Default for AttachmentConfig {
     fn default() -> Self {
         Self {
-            max_bytes: 10 * 1024 * 1024,
+            max_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         }
     }
 }

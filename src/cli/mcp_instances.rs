@@ -37,8 +37,10 @@ use crate::mcp::INLINE_ATTACHMENT_HEADER;
 
 /// Largest response body accepted from a backend, per request.
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-/// A 10 MiB attachment expands to about 13.4 MiB when base64-encoded in JSON.
-const MAX_ATTACHMENT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// The largest attachment, base64-encoded, plus the normal budget for the
+/// surrounding JSON-RPC envelope and metadata text.
+const MAX_ATTACHMENT_RESPONSE_BYTES: usize =
+    crate::api::attachments::DEFAULT_MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + MAX_RESPONSE_BYTES;
 /// Largest single JSON-RPC line accepted from the client on stdin.
 const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
 /// Largest instances config file.
