@@ -1517,11 +1517,7 @@ async fn cmd_init(
                 }
             }
             None => {
-                service_error = Some(
-                    "no supported service manager found (needs a systemd user session on \
-                     Linux, or launchd on macOS)"
-                        .to_string(),
-                )
+                service_error = Some(cli::service::missing_manager_message())
             }
         }
     }
@@ -1664,11 +1660,7 @@ fn cmd_service(
         return Ok(());
     }
     let Some(mgr) = cli::service::detect() else {
-        return Err(
-            "no supported service manager found (needs a systemd user session on \
-                    Linux, or launchd on macOS)"
-                .into(),
-        );
+        return Err(cli::service::missing_manager_message().into());
     };
     match action {
         ServiceAction::Install => {
