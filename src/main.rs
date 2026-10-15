@@ -464,8 +464,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             *repair,
             json,
         )
-            .await
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         return Ok(());
     }
     let resolved_config_path = resolution

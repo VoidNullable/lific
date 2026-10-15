@@ -1034,7 +1034,10 @@ mod tests {
 
         let remote = issued("https://lific.example.com");
         // Its own origin, however spelled.
-        assert_eq!(remote.for_endpoint("https://lific.example.com"), Some("tok"));
+        assert_eq!(
+            remote.for_endpoint("https://lific.example.com"),
+            Some("tok")
+        );
         assert_eq!(
             remote.for_endpoint("https://lific.example.com:443"),
             Some("tok")
