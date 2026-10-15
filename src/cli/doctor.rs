@@ -199,6 +199,7 @@ fn connect_base(cfg: &Config) -> String {
 /// explicitly opts into applying migrations.
 pub async fn run(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    explicit_config: bool,
     database_override: Option<&Path>,
     key: Option<&str>,
     repair: bool,
@@ -209,9 +210,14 @@ pub async fn run(
     } else {
         DatabaseCheckMode::ReadOnly
     };
-    let running = service::running_config();
-    let installed = service::installed_config();
+    // An explicit --config stands the witnesses down: nothing is discovered.
+    let (running, installed) = if explicit_config {
+        (None, None)
+    } else {
+        (service::running_config(), service::installed_config())
+    };
     let witnesses = Witnesses {
+        explicit: explicit_config,
         running: running.as_deref(),
         installed: installed.as_deref(),
     };
@@ -255,9 +261,20 @@ const INSTALLED_SERVICE_LABEL: &str = "the installed service's definition";
 /// the same entrance the report uses.
 fn select_instance_config(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    explicit: bool,
     running: Option<&Path>,
     installed: Option<&Path>,
 ) -> ConfigSelection {
+    // An operator-named config is the object of diagnosis; its failure is
+    // reported as found, never replaced by a machine witness.
+    if explicit {
+        return ConfigSelection {
+            resolution,
+            provenance: None,
+            superseded: None,
+            divergent: Vec::new(),
+        };
+    }
     let witnesses = [
         (RUNNING_PROCESS_LABEL, running),
         (INSTALLED_SERVICE_LABEL, installed),
@@ -341,6 +358,10 @@ fn same_config(a: &Path, b: &Path) -> bool {
 /// world instead of whatever happens to run on the machine the test is on.
 #[derive(Default)]
 struct Witnesses<'a> {
+    /// The operator named a config with `--config`: that choice is the object
+    /// of diagnosis, and its failure (missing, unparseable) is the report —
+    /// witnesses stand down rather than overrule the instruction.
+    explicit: bool,
     running: Option<&'a Path>,
     installed: Option<&'a Path>,
 }
@@ -355,7 +376,8 @@ async fn build_report(
     key: Option<&str>,
     database_mode: DatabaseCheckMode,
 ) -> Report {
-    let selection = select_instance_config(resolution, witnesses.running, witnesses.installed);
+    let selection =
+        select_instance_config(resolution, witnesses.explicit, witnesses.running, witnesses.installed);
     let config_check = check_config(&selection);
     let service_check = check_service();
     let Ok(resolved) = selection.resolution else {
@@ -523,7 +545,8 @@ fn check_config(selection: &ConfigSelection) -> Check {
                     let advice = if *label == RUNNING_PROCESS_LABEL {
                         "restore the file, or restart the server against one that exists"
                     } else {
-                        "reinstall with `lific service install`, or restore the file"
+                        "reinstall with `lific service install`, restore the file, \
+                         or remove the service with `lific service uninstall`"
                     };
                     format!("{label} names {}, which does not exist — {advice}", path.display())
                 }
@@ -947,7 +970,7 @@ fn service_check_outcome(observation: ServiceObservation) -> Check {
             Status::Warn,
             format!(
                 "installed but not running — start with `lific service restart` \
-                 (logs: {})",
+                 (logs: {}), or remove it with `lific service uninstall`",
                 service::logs_hint(mgr)
             ),
         );
@@ -1949,6 +1972,8 @@ mod tests {
         assert!(c.detail.contains("lific service restart"));
         // The detail names where to look when a restart does not stick.
         assert!(c.detail.contains("logs:"));
+        // Turning the service off is surfaced, not just restarting it.
+        assert!(c.detail.contains("uninstall"));
     }
 
     #[test]
@@ -2503,6 +2528,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_explicit_config_failure_is_not_overridden_by_witnesses() {
+        // The operator named a config with --config; a live server elsewhere
+        // must not turn that failure into a pass. This exact scenario failed
+        // on machines running lific while CI (no server) stayed green — the
+        // cli_contract tests pin it end-to-end; this pins it deterministically.
+        let tmp = tempfile::tempdir().unwrap();
+        let witness = witness_config_file(tmp.path(), "live.toml");
+
+        let report = build_report(
+            Err(crate::config::ConfigError::MissingExplicit {
+                path: tmp.path().join("named.toml"),
+            }),
+            Witnesses {
+                explicit: true,
+                running: Some(&witness),
+                installed: None,
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        let detail = detail_of(&report.checks, "config");
+        assert!(detail.contains("named.toml"), "detail: {detail}");
+        assert!(
+            !detail.contains("the running lific process"),
+            "detail: {detail}"
+        );
+        // Fail-closed holds: nothing reads a config that was never selected.
+        assert!(
+            detail_of(&report.checks, "database").contains(CONFIG_UNRESOLVED),
+            "detail: {}",
+            detail_of(&report.checks, "database")
+        );
+    }
+
+    #[tokio::test]
     async fn running_process_witness_supplies_the_config_when_candidates_find_none() {
         let tmp = tempfile::tempdir().unwrap();
         let witness_config = witness_config_file(tmp.path(), "lific.toml");
@@ -2510,6 +2574,7 @@ mod tests {
         let report = build_report(
             Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
+                explicit: false,
                 running: Some(&witness_config),
                 installed: None,
             },
@@ -2548,6 +2613,7 @@ mod tests {
         let report = build_report(
             Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
+                explicit: false,
                 running: Some(&running_config),
                 installed: Some(&installed_config),
             },
@@ -2580,6 +2646,7 @@ mod tests {
         let report = build_report(
             Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
+                explicit: false,
                 running: None,
                 installed: Some(&missing),
             },
@@ -2597,8 +2664,10 @@ mod tests {
             "detail: {detail}"
         );
         assert!(detail.contains("gone.toml"), "detail: {detail}");
-        // The install-time witness gets the reinstall advice.
+        // The install-time witness gets the reinstall advice, with
+        // uninstall as the opt-out for an operator who no longer wants it.
         assert!(detail.contains("reinstall"), "detail: {detail}");
+        assert!(detail.contains("uninstall"), "detail: {detail}");
     }
 
     #[tokio::test]
@@ -2611,6 +2680,7 @@ mod tests {
         let report = build_report(
             Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
+                explicit: false,
                 running: Some(&missing),
                 installed: None,
             },
@@ -2644,6 +2714,7 @@ mod tests {
         let report = build_report(
             resolution,
             Witnesses {
+                explicit: false,
                 running: Some(&running),
                 installed: None,
             },
