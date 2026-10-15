@@ -250,8 +250,9 @@ const RUNNING_PROCESS_LABEL: &str = "the running lific process";
 const INSTALLED_SERVICE_LABEL: &str = "the installed service's definition";
 
 /// Apply the freshness-ranked witnesses to the ordinary resolution. Pure
-/// apart from [`crate::config::Config::resolve`], so the policy is tested
-/// with tempdir files through the same entrance the report uses.
+/// apart from [`crate::config::Config::resolve`] and the same-file probe
+/// ([`same_config`]), so the policy is tested with tempdir files through
+/// the same entrance the report uses.
 fn select_instance_config(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
     running: Option<&Path>,
@@ -274,7 +275,10 @@ fn select_instance_config(
             .iter()
             .filter_map(|(label, path)| {
                 let path = (*path)?;
-                (Some(path) != selected.as_deref()).then(|| (*label, path.to_path_buf()))
+                let same = selected
+                    .as_deref()
+                    .is_some_and(|selected| same_config(selected, path));
+                (!same).then(|| (*label, path.to_path_buf()))
             })
             .collect();
         return ConfigSelection {
@@ -306,7 +310,8 @@ fn select_instance_config(
         .iter()
         .filter_map(|(other, other_path)| {
             let other_path = (*other_path)?;
-            (other_path != path && *other != label).then(|| (*other, other_path.to_path_buf()))
+            (!same_config(other_path, path) && *other != label)
+                .then(|| (*other, other_path.to_path_buf()))
         })
         .collect();
     ConfigSelection {
@@ -315,6 +320,20 @@ fn select_instance_config(
         superseded,
         divergent,
     }
+}
+
+/// Whether two config paths name the same file. Witness paths arrive as raw
+/// command-line and definition text — symlinks, `./` prefixes, whatever the
+/// installer wrote — so textual equality alone would report divergence
+/// between two spellings of one file. Canonicalize when both sides exist; a
+/// missing side cannot be canonicalized, and a missing witness file is its
+/// own check outcome rather than a same-file question.
+fn same_config(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
 }
 
 /// The local witnesses of "which instance runs on this machine", fetched by
@@ -340,12 +359,12 @@ async fn build_report(
     let config_check = check_config(&selection);
     let service_check = check_service();
     let Ok(resolved) = selection.resolution else {
-        let mut checks = unconfigured_checks(config_check, database_override, database_mode);
-        // The service check reads no configured value — it inspects the
-        // machine's installed service — so the fail-closed policy does not
-        // hold it back; it slots in after `backups` like in the normal report.
-        checks.insert(3, service_check);
-        return Report::new(checks);
+        return Report::new(unconfigured_checks(
+            config_check,
+            service_check,
+            database_override,
+            database_mode,
+        ));
     };
 
     let mut cfg = resolved.config;
@@ -366,6 +385,7 @@ async fn build_report(
 /// reads the configuration is skipped with the reason spelled out.
 fn unconfigured_checks(
     config_check: Check,
+    service_check: Check,
     database_override: Option<&Path>,
     database_mode: DatabaseCheckMode,
 ) -> Vec<Check> {
@@ -381,6 +401,10 @@ fn unconfigured_checks(
         config_check,
         database,
         Check::new("backups", Status::Skipped, CONFIG_UNRESOLVED),
+        // Reads no configured value — it inspects the machine's installed
+        // service — so the fail-closed policy does not hold it back; same
+        // slot as in the configured report.
+        service_check,
         Check::new("server", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("oauth_discovery", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("mcp", Status::Skipped, CONFIG_UNRESOLVED),
@@ -867,44 +891,47 @@ fn newest_backup_age_minutes(dir: &Path) -> Option<u64> {
 /// config file this run resolved — so it stays out even when configuration
 /// selection failed.
 fn check_service() -> Check {
-    let mgr = service::detect();
-    service_check_outcome(mgr, mgr.map(service::status))
+    let observation = match service::detect() {
+        None => ServiceObservation::NoManager,
+        Some(mgr) => ServiceObservation::State(mgr, service::status(mgr)),
+    };
+    service_check_outcome(observation)
 }
 
-/// Map service facts onto doctor's statuses. The judgement runs on whatever
-/// [`check_service`] fetched so tests can construct the same facts without
-/// touching systemctl or the registry: `mgr` is `None` when the platform has
-/// no service manager at all (and then `report` is `None` too — there is
-/// nothing whose state could be read).
-fn service_check_outcome(
-    mgr: Option<Manager>,
-    report: Option<Result<StatusReport, String>>,
-) -> Check {
-    let Some(mgr) = mgr else {
-        return Check::new(
-            "service",
-            Status::Skipped,
-            "no service manager on this platform — the server runs in the foreground \
-             (`lific start`)",
-        );
-    };
-    let report = match report {
-        Some(Ok(report)) => report,
-        Some(Err(e)) => {
+/// What [`check_service`] observed about this machine's background service.
+/// One variant per state the platform can actually be in: with the old
+/// two-argument shape, "manager present but no state" was representable and
+/// needed a dead defensive branch.
+enum ServiceObservation {
+    /// The platform has no service manager at all.
+    NoManager,
+    /// A manager exists; this is what probing its state returned. The
+    /// manager rides along because the not-running advice names its log
+    /// location.
+    State(Manager, Result<StatusReport, String>),
+}
+
+/// Map service observations onto doctor's statuses. The judgement runs on
+/// whatever [`check_service`] fetched so tests can construct the same
+/// observations without touching systemctl or the registry.
+fn service_check_outcome(observation: ServiceObservation) -> Check {
+    let (mgr, report) = match observation {
+        ServiceObservation::NoManager => {
+            return Check::new(
+                "service",
+                Status::Skipped,
+                "no service manager on this platform — the server runs in the foreground \
+                 (`lific start`)",
+            );
+        }
+        ServiceObservation::State(_, Err(e)) => {
             return Check::new(
                 "service",
                 Status::Warn,
                 format!("could not read the service's state: {e}"),
             );
         }
-        // The contract above: no manager means no report.
-        None => {
-            return Check::new(
-                "service",
-                Status::Warn,
-                "service manager present but its state could not be probed",
-            );
-        }
+        ServiceObservation::State(mgr, Ok(report)) => (mgr, report),
     };
     if !report.installed {
         return Check::new(
@@ -1894,30 +1921,30 @@ mod tests {
 
     #[test]
     fn service_check_passes_when_installed_and_running() {
-        let c = service_check_outcome(
-            Some(Manager::SystemdUser),
-            Some(Ok(status_report(true, true))),
-        );
+        let c = service_check_outcome(ServiceObservation::State(
+            Manager::SystemdUser,
+            Ok(status_report(true, true)),
+        ));
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
         assert!(c.detail.contains("installed and running"));
     }
 
     #[test]
     fn service_check_warns_when_not_installed() {
-        let c = service_check_outcome(
-            Some(Manager::SystemdUser),
-            Some(Ok(status_report(false, false))),
-        );
+        let c = service_check_outcome(ServiceObservation::State(
+            Manager::SystemdUser,
+            Ok(status_report(false, false)),
+        ));
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("lific service install"));
     }
 
     #[test]
     fn service_check_warns_when_installed_but_stopped() {
-        let c = service_check_outcome(
-            Some(Manager::SystemdUser),
-            Some(Ok(status_report(true, false))),
-        );
+        let c = service_check_outcome(ServiceObservation::State(
+            Manager::SystemdUser,
+            Ok(status_report(true, false)),
+        ));
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("lific service restart"));
         // The detail names where to look when a restart does not stick.
@@ -1926,20 +1953,42 @@ mod tests {
 
     #[test]
     fn service_check_warns_when_state_is_unreadable() {
-        let c = service_check_outcome(
-            Some(Manager::SystemdUser),
-            Some(Err("systemctl exploded".into())),
-        );
+        let c = service_check_outcome(ServiceObservation::State(
+            Manager::SystemdUser,
+            Err("systemctl exploded".into()),
+        ));
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("could not read"));
     }
 
     #[test]
     fn service_check_skips_when_there_is_no_service_manager() {
-        // No manager means no report — the contract check_service upholds.
-        let c = service_check_outcome(None, None);
+        let c = service_check_outcome(ServiceObservation::NoManager);
         assert_eq!(c.status, Status::Skipped, "detail: {}", c.detail);
         assert!(c.detail.contains("lific start"));
+    }
+
+    #[test]
+    fn same_config_tolerates_symlinked_spellings_of_one_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = witness_config_file(tmp.path(), "real.toml");
+
+        // Textually identical.
+        assert!(same_config(&real, &real));
+        // Different files are divergent.
+        let other = witness_config_file(tmp.path(), "other.toml");
+        assert!(!same_config(&real, &other));
+        // A missing side cannot be canonicalized; divergence stands (the
+        // missing witness file is reported by its own check outcome).
+        assert!(!same_config(&real, &tmp.path().join("gone.toml")));
+
+        // Two spellings of one file — the case textual equality got wrong.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link.toml");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(same_config(&link, &real));
+        }
     }
 
     // ── server probe (offline) ───────────────────────────────────────────

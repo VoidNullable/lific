@@ -281,9 +281,11 @@ fn find_own_processes() -> Vec<Vec<String>> {
             let arg0 = args.first()?.clone();
             let is_lific = arg0.ends_with("/lific")
                 || me.as_ref().is_ok_and(|me| arg0 == me.to_string_lossy());
-            // ps splits on whitespace, so arg0 for a binary under a path
-            // with spaces arrives split; those installs are missed rather
-            // than misparsed.
+            // ps splits on whitespace, so a path with spaces — in arg0 or
+            // in the --config value — arrives split: those installs are
+            // missed (arg0) and their config paths truncated (the value).
+            // The live scan is best-effort; where a service is installed,
+            // the plist witness is the accurate one.
             is_lific.then_some(args)
         })
         .collect()
