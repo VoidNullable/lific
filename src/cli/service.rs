@@ -188,9 +188,15 @@ pub fn missing_manager_message() -> String {
 
 /// The config file of the lific server running on this machine right now,
 /// read from its own command line — the live witness. It is exactly what is
-/// serving, whatever the port, with or without a service. `None` when no
-/// lific server process is found; the caller falls back to the install-time
-/// snapshot ([`installed_config`]) and then to the default candidates.
+/// serving, whatever the port, with or without a service.
+///
+/// A process is a witness only when it belongs to this user, and — on Linux —
+/// its own executable is this same binary. `argv[0]` is never taken on its own:
+/// the Linux scan reads the kernel's exe link, and the macOS scan requires the
+/// process's uid to match. `None` therefore means "no lific server found", which
+/// includes "a process claimed to be lific but is not". The caller falls back to
+/// the install-time snapshot ([`installed_config`]) and then to the default
+/// candidates.
 pub fn running_config() -> Option<PathBuf> {
     // Only a `lific start` process is the server witness: any lific
     // subcommand may carry `--config` (a concurrent `lific doctor` does),
@@ -220,6 +226,20 @@ pub fn installed_config() -> Option<PathBuf> {
     Some(config)
 }
 
+/// Whether a process's own executable is this program. The basename — not the
+/// resolved path — is compared, so a dev build and an installed release of the
+/// same program both count. A forged `argv[0]` never enters this decision: the
+/// exe link is read from the kernel, not from the process's arguments.
+//
+// Only the Linux scan calls this; the macOS scan gates on uid instead and the
+// Windows scan has no live witness. The allow keeps the helper compiled for its
+// unit test on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn exe_is_ours(exe: &Path, me: &Path) -> bool {
+    exe.file_name()
+        .is_some_and(|name| name == me.file_name().unwrap_or_default())
+}
+
 /// Command lines (`argv` vectors) of *other* processes running this same
 /// lific binary. The per-OS scan is the platform seam; the `--config` parse
 /// ([`config_from_cmdline`]) is shared.
@@ -240,6 +260,21 @@ fn find_own_processes() -> Vec<Vec<String>> {
         if !name.bytes().all(|b| b.is_ascii_digit()) || name == std::process::id().to_string() {
             continue;
         }
+        // Trust the process's own executable, never its argv: argv[0] is
+        // caller-chosen and this file is world-readable, so a basename match
+        // there would let any local user forge a witness. `read_link` on
+        // `/proc/<pid>/exe` is subject to the kernel's ptrace permission check,
+        // so a process owned by another user is refused outright.
+        //
+        // A binary replaced while it runs reads " (deleted)" from the exe link
+        // and drops out of the witness set. That is deliberate, not a bug:
+        // doctor falls back to the installed-definition witness.
+        let Ok(exe) = std::fs::read_link(entry.path().join("exe")) else {
+            continue;
+        };
+        if !exe_is_ours(&exe, &me) {
+            continue;
+        }
         let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
             continue;
         };
@@ -248,45 +283,49 @@ fn find_own_processes() -> Vec<Vec<String>> {
             .filter(|part| !part.is_empty())
             .map(|part| String::from_utf8_lossy(part).into_owned())
             .collect();
-        // Compare arg0's file name, not the resolved path: the server may
-        // run a different build (older release, cargo target dir) of the
-        // same program — the basename is the honest common denominator.
-        let is_lific = args.first().is_some_and(|arg0| {
-            Path::new(arg0)
-                .file_name()
-                .is_some_and(|name| name == me.file_name().unwrap_or_default())
-                || std::fs::canonicalize(arg0).is_ok_and(|p| p == me)
-        });
-        if is_lific && args.len() > 1 {
+        if args.len() > 1 {
             found.push(args);
         }
     }
     found
 }
 
+/// One `ps -axo uid=,command=` line, parsed into this program's argv when the
+/// process belongs to `uid` and its command names this program. Pure, so the
+/// uid gate is testable without `ps` and on every platform.
+//
+// Only the macOS scan calls this; the allow keeps it compiled for its unit test
+// elsewhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ps_witness_line(line: &str, uid: &str, me: Option<&Path>) -> Option<Vec<String>> {
+    let (owner, rest) = line.trim_start().split_once(|c: char| c.is_whitespace())?;
+    if owner != uid {
+        return None;
+    }
+    let args: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+    let arg0 = args.first()?;
+    let is_lific =
+        arg0.ends_with("/lific") || me.is_some_and(|me| arg0.as_str() == me.to_string_lossy());
+    is_lific.then_some(args)
+}
+
 #[cfg(target_os = "macos")]
 fn find_own_processes() -> Vec<Vec<String>> {
-    let Ok(output) = Command::new("ps").arg("-axo").arg("command=").output() else {
+    // The uid column gates on ownership before argv is even considered: `ps`
+    // lists every user's processes, and argv is caller-chosen, so without it
+    // any local user could forge a witness. (A same-uid process can still forge
+    // one, but a same-uid process already owns this user's keyring.)
+    let Ok(output) = Command::new("ps").arg("-axo").arg("uid=,command=").output() else {
         return Vec::new();
     };
     let me = std::env::current_exe().ok();
+    // SAFETY: POSIX getuid() always succeeds and sets no errno.
+    let uid = unsafe { libc::getuid() }.to_string();
     output
         .stdout
         .split(|b| *b == b'\n')
         .filter_map(|line| {
-            let mut args: Vec<String> = String::from_utf8_lossy(line)
-                .split_whitespace()
-                .map(str::to_string)
-                .collect();
-            let arg0 = args.first()?.clone();
-            let is_lific = arg0.ends_with("/lific")
-                || me.as_ref().is_ok_and(|me| arg0 == me.to_string_lossy());
-            // ps splits on whitespace, so a path with spaces — in arg0 or
-            // in the --config value — arrives split: those installs are
-            // missed (arg0) and their config paths truncated (the value).
-            // The live scan is best-effort; where a service is installed,
-            // the plist witness is the accurate one.
-            is_lific.then_some(args)
+            ps_witness_line(&String::from_utf8_lossy(line), &uid, me.as_deref())
         })
         .collect()
 }
@@ -512,8 +551,8 @@ fn xml_escape(s: &str) -> String {
 /// The launchd domain every `launchctl` invocation below is addressed to:
 /// `gui/<uid>`, the current user's GUI session.
 ///
-/// This is the crate's only use of `libc` outside the `#[cfg(unix)]` SIGPIPE
-/// setup in `main.rs`, and `libc` is declared as a unix-only dependency. The
+/// Like the macOS process scan, this reaches for `libc` only for `getuid()`,
+/// and `libc` is declared as a unix-only dependency. The
 /// non-unix arm exists so the crate still *typechecks* on Windows, where
 /// `detect()` never yields `Manager::Launchd` and none of this can run
 /// (reported as GitHub #20: v2.4.0 failed to compile on Windows because five
@@ -1025,5 +1064,83 @@ mod tests {
                 "windows copy must not name systemd: {msg}"
             );
         }
+    }
+
+    // ── Witness trust: the process's own exe, never its argv ────
+
+    /// A process counts as this program by its executable's basename, never by
+    /// its argv: argv[0] is caller-chosen and `/proc/<pid>/cmdline` is
+    /// world-readable, so a basename match there proves nothing. The basename
+    /// (not the resolved path) keeps a dev build and an installed release of
+    /// the same program both visible.
+    #[test]
+    fn a_process_is_ours_by_its_executable_not_its_argv() {
+        let me = Path::new("/usr/local/bin/lific");
+        assert!(exe_is_ours(Path::new("/usr/local/bin/lific"), me));
+        // A different build of the same program, elsewhere on disk.
+        assert!(exe_is_ours(Path::new("/home/u/target/debug/lific"), me));
+        // Not this program, whatever the argv claimed.
+        assert!(!exe_is_ours(Path::new("/usr/bin/sleep"), me));
+        assert!(!exe_is_ours(
+            Path::new("/tmp/lific"),
+            Path::new("/usr/local/bin/lific2")
+        ));
+    }
+
+    /// The macOS scan's uid gate: another user's process is refused before its
+    /// argv is read, so a forged command name never becomes a witness.
+    #[test]
+    fn ps_witness_line_gates_on_uid_before_argv() {
+        let me = Path::new("/home/u/.cargo/bin/lific");
+        let line = "  501 /home/u/.cargo/bin/lific start --config /home/u/lific.toml";
+
+        assert_eq!(
+            ps_witness_line(line, "501", Some(me)),
+            Some(vec![
+                "/home/u/.cargo/bin/lific".to_string(),
+                "start".to_string(),
+                "--config".to_string(),
+                "/home/u/lific.toml".to_string(),
+            ])
+        );
+        // Another user's process, even one named lific, is refused.
+        assert_eq!(ps_witness_line(line, "502", Some(me)), None);
+        // A same-user process that is not this program is not a witness.
+        assert_eq!(
+            ps_witness_line("  501 /usr/bin/sleep 10", "501", Some(me)),
+            None
+        );
+        // A blank line yields nothing.
+        assert_eq!(ps_witness_line("", "501", Some(me)), None);
+    }
+
+    /// A forged `argv[0]` must not become a witness. Under the old
+    /// basename-of-argv matching this child was adopted; the exe gate reads
+    /// the kernel's own record of the executable, which the child cannot
+    /// forge. Cross-uid forgery is the same rule but cannot be staged
+    /// in-process (spawning another user needs privilege).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_forged_argv0_is_not_a_witness() {
+        use std::os::unix::process::CommandExt;
+
+        let me = std::env::current_exe().expect("test binary path");
+        let forged = format!("/tmp/{}", me.file_name().unwrap().to_string_lossy());
+        let mut child = Command::new("sleep")
+            .arg0(&forged)
+            .arg("10")
+            .spawn()
+            .expect("spawn the forged-argv child");
+        // Let it exec so `/proc/<pid>/exe` and `cmdline` are settled.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let found = find_own_processes();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            !found.iter().any(|args| args.first() == Some(&forged)),
+            "a process whose argv[0] was forged must not be a witness; found: {found:?}"
+        );
     }
 }
