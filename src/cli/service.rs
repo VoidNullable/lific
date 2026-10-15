@@ -192,8 +192,12 @@ pub fn missing_manager_message() -> String {
 /// lific server process is found; the caller falls back to the install-time
 /// snapshot ([`installed_config`]) and then to the default candidates.
 pub fn running_config() -> Option<PathBuf> {
+    // Only a `lific start` process is the server witness: any lific
+    // subcommand may carry `--config` (a concurrent `lific doctor` does),
+    // and a witness for "the running server" must not pick one up.
     find_own_processes()
         .iter()
+        .filter(|args| args.get(1).is_some_and(|sub| sub == "start"))
         .find_map(|args| config_from_cmdline(args))
 }
 
@@ -202,7 +206,7 @@ pub fn running_config() -> Option<PathBuf> {
 /// the authority on what was *set up* to run, not on what is running now
 /// (the operator may have moved the config since), and it is the only
 /// witness left when the server is down — which is when doctor is run most.
-pub fn installed_config() -> Option<(Manager, PathBuf)> {
+pub fn installed_config() -> Option<PathBuf> {
     let mgr = detect()?;
     let path = definition_path(mgr).ok()?;
     let config = match mgr {
@@ -213,7 +217,7 @@ pub fn installed_config() -> Option<(Manager, PathBuf)> {
             windows::parse_run_command(&command).map(|(_, config)| config)?
         }
     };
-    Some((mgr, config))
+    Some(config)
 }
 
 /// Command lines (`argv` vectors) of *other* processes running this same

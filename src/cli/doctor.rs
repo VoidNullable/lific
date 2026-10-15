@@ -210,7 +210,7 @@ pub async fn run(
         DatabaseCheckMode::ReadOnly
     };
     let running = service::running_config();
-    let installed = service::installed_config().map(|(_, path)| path);
+    let installed = service::installed_config();
     let witnesses = Witnesses {
         running: running.as_deref(),
         installed: installed.as_deref(),
@@ -491,11 +491,18 @@ fn check_config(selection: &ConfigSelection) -> Check {
             // failure ("the service points at X, which does not exist"),
             // not the CLI-flavoured "--config path ... does not exist".
             let detail = match (provenance, error) {
-                (Some(label), crate::config::ConfigError::MissingExplicit { path }) => format!(
-                    "{label} names {}, which does not exist — reinstall with \
-                     `lific service install` or restore the file",
-                    path.display()
-                ),
+                (Some(label), crate::config::ConfigError::MissingExplicit { path }) => {
+                    // Advice follows the witness: a live process pointing at
+                    // a vanished file needs the file back (or a restart
+                    // against one that exists); a stale definition is what a
+                    // reinstall rewrites.
+                    let advice = if *label == RUNNING_PROCESS_LABEL {
+                        "restore the file, or restart the server against one that exists"
+                    } else {
+                        "reinstall with `lific service install`, or restore the file"
+                    };
+                    format!("{label} names {}, which does not exist — {advice}", path.display())
+                }
                 _ => error.to_string(),
             };
             let detail = match superseded {
@@ -2541,6 +2548,34 @@ mod tests {
             "detail: {detail}"
         );
         assert!(detail.contains("gone.toml"), "detail: {detail}");
+        // The install-time witness gets the reinstall advice.
+        assert!(detail.contains("reinstall"), "detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_named_by_the_running_process_skips_the_reinstall_advice() {
+        // The process is alive but its config vanished — restoring the file
+        // is the advice; "reinstall" would rewrite a definition that is fine.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("gone.toml");
+
+        let report = build_report(
+            Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
+            Witnesses {
+                running: Some(&missing),
+                installed: None,
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        let detail = detail_of(&report.checks, "config");
+        assert!(detail.contains("the running lific process"), "detail: {detail}");
+        assert!(!detail.contains("reinstall"), "detail: {detail}");
+        assert!(detail.contains("restore the file"), "detail: {detail}");
     }
 
     #[tokio::test]
