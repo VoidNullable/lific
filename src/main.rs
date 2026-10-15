@@ -456,9 +456,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let resolution = Config::resolve(cli.config.as_deref());
     if let Command::Doctor { key, repair } = &cli.command {
         let json = cli::term::wants_json(cli.json);
-        cli::doctor::run(resolution, cli.db.as_deref(), key.as_deref(), *repair, json)
-            .await
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        cli::doctor::run(
+            resolution,
+            cli.config.is_some(),
+            cli.db.as_deref(),
+            key.as_deref(),
+            *repair,
+            json,
+        )
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         return Ok(());
     }
     let resolved_config_path = resolution
@@ -1516,13 +1523,7 @@ async fn cmd_init(
                     Err(e) => service_error = Some(e),
                 }
             }
-            None => {
-                service_error = Some(
-                    "no supported service manager found (needs a systemd user session on \
-                     Linux, or launchd on macOS)"
-                        .to_string(),
-                )
-            }
+            None => service_error = Some(cli::service::missing_manager_message()),
         }
     }
 
@@ -1581,7 +1582,8 @@ async fn cmd_init(
 
     if let Some((mgr, ref report)) = service_report {
         ui::step(format!(
-            "Service installed — {} {}",
+            "Service installed — starts automatically at login · remove anytime with {} — {} {}",
+            ui::command("lific service uninstall"),
             report.manager,
             ui::dim(&report.definition)
         ));
@@ -1664,11 +1666,7 @@ fn cmd_service(
         return Ok(());
     }
     let Some(mgr) = cli::service::detect() else {
-        return Err(
-            "no supported service manager found (needs a systemd user session on \
-                    Linux, or launchd on macOS)"
-                .into(),
-        );
+        return Err(cli::service::missing_manager_message().into());
     };
     match action {
         ServiceAction::Install => {
@@ -1695,7 +1693,8 @@ fn cmd_service(
             } else {
                 ui::intro("lific service install");
                 ui::step(format!(
-                    "Service installed and started — {} {}",
+                    "Service installed and started — starts at login · remove with {} — {} {}",
+                    ui::command("lific service uninstall"),
                     report.manager,
                     ui::dim(&report.definition)
                 ));
@@ -1742,9 +1741,10 @@ fn cmd_service(
                 ));
             } else if s.installed {
                 ui::error(format!(
-                    "Service is installed but NOT running ({}). Start it: {}",
+                    "Service is installed but NOT running ({}). Start it: {} · or remove it: {}",
                     s.manager,
-                    ui::command("lific service restart")
+                    ui::command("lific service restart"),
+                    ui::command("lific service uninstall")
                 ));
             } else {
                 ui::error(format!(

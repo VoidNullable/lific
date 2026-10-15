@@ -99,6 +99,45 @@ pub fn origin_of(url: &str) -> Option<String> {
     Some(format!("{scheme}://{host}:{port}"))
 }
 
+/// A token together with the origin it was issued for. The secret is handed out
+/// by [`Credential::for_endpoint`] only for an endpoint this credential may
+/// travel to, so the origin check and the use cannot diverge.
+pub struct Credential {
+    token: String,
+    origin: Option<String>,
+}
+
+impl Credential {
+    /// The token, when `endpoint` is an origin this credential may be presented
+    /// to: the origin it was issued for, or a loopback endpoint. `lific login`
+    /// keys a token by the server's `public_url`, while `doctor` dials the local
+    /// bind address, so a loopback endpoint is the same instance reached another
+    /// way.
+    #[must_use]
+    pub fn for_endpoint(&self, endpoint: &str) -> Option<&str> {
+        let same_origin = match (origin_of(endpoint), self.origin.as_deref()) {
+            (Some(endpoint_origin), Some(issued_for)) => endpoint_origin.as_str() == issued_for,
+            _ => false,
+        };
+        (same_origin || host_is_loopback(endpoint)).then_some(self.token.as_str())
+    }
+
+    /// The token, consumed. Used by [`load`], whose caller named exactly the
+    /// origin this credential was loaded for, so no further check is needed.
+    fn into_token(self) -> String {
+        self.token
+    }
+}
+
+/// Whether a URL's host is a loopback address this machine owns. Unparseable
+/// input is not loopback.
+fn host_is_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .is_some_and(|host| crate::config::is_localhost_host(&host))
+}
+
 /// What the environment says about the token for one target server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvToken {
@@ -839,7 +878,7 @@ pub fn store(base_url: &str, token: &str) -> Result<(), CredentialStoreError> {
 /// Load a token for `base_url`. Precedence: `LIFIC_TOKEN` env (only when bound
 /// to `base_url`'s origin, see [`env_token_for`]) > keyring > file.
 pub fn load(base_url: &str) -> Result<Option<String>, PlaintextCredentialFileError> {
-    load_with_source(base_url).map(|value| value.map(|(token, _)| token))
+    load_with_source(base_url).map(|value| value.map(|(credential, _)| credential.into_token()))
 }
 
 /// Describes where a loaded token came from, for `doctor`'s detail note.
@@ -862,26 +901,37 @@ impl TokenSource {
 
 /// Like [`load`] but also reports which backend supplied the token, so callers
 /// (doctor) can tell the user where it came from.
+///
+/// Returns a [`Credential`] rather than a bare token: the caller must name the
+/// endpoint it will present the token to ([`Credential::for_endpoint`]), so the
+/// origin the token was issued for and the origin it is sent to cannot drift
+/// apart.
 pub fn load_with_source(
     base_url: &str,
-) -> Result<Option<(String, TokenSource)>, PlaintextCredentialFileError> {
+) -> Result<Option<(Credential, TokenSource)>, PlaintextCredentialFileError> {
+    // The credential carries the origin it was issued for, so a caller can
+    // only read the secret for an endpoint it may travel to.
+    let issued = |token: String| Credential {
+        origin: origin_of(base_url),
+        token,
+    };
     match env_token_for(
         std::env::var(TOKEN_ENV).ok().as_deref(),
         std::env::var(URL_ENV).ok().as_deref(),
         base_url,
     ) {
-        EnvToken::Bound(token) => return Ok(Some((token, TokenSource::Env))),
+        EnvToken::Bound(token) => return Ok(Some((issued(token), TokenSource::Env))),
         EnvToken::Unbound => warn_env_token_unbound(base_url),
         EnvToken::Absent => {}
     }
     let key = CredentialStoreKey::from_base_url(base_url);
     if let Some(tok) = keyring_load(key.as_str()) {
-        return Ok(Some((tok, TokenSource::Keyring)));
+        return Ok(Some((issued(tok), TokenSource::Keyring)));
     }
     match default_file_path() {
         Some(path) => PlaintextCredentialFileStore::new(path)
             .load_credential_for_server_key(&key)
-            .map(|token| token.map(|token| (token, TokenSource::File))),
+            .map(|token| token.map(|token| (issued(token), TokenSource::File))),
         None => Ok(None),
     }
 }
@@ -966,6 +1016,46 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("credentials.json");
         (PlaintextCredentialFileStore::new(path), tmp)
+    }
+
+    // ── Origin binding for stored credentials ───────────────────
+
+    /// A stored token is bound to the origin it was issued for. It may travel
+    /// to that origin or to a loopback endpoint (`lific login` keys by the
+    /// server's `public_url`, while `doctor` dials the local bind). Any other
+    /// pairing — the shape a hostile config uses to harvest the token — yields
+    /// nothing, and an unparseable endpoint fails closed.
+    #[test]
+    fn a_credential_only_travels_to_its_own_origin_or_loopback() {
+        let issued = |base: &str| Credential {
+            token: "tok".to_owned(),
+            origin: origin_of(base),
+        };
+
+        let remote = issued("https://lific.example.com");
+        // Its own origin, however spelled.
+        assert_eq!(
+            remote.for_endpoint("https://lific.example.com"),
+            Some("tok")
+        );
+        assert_eq!(
+            remote.for_endpoint("https://lific.example.com:443"),
+            Some("tok")
+        );
+        // The same instance reached over the loopback bind.
+        assert_eq!(remote.for_endpoint("http://127.0.0.1:3456"), Some("tok"));
+        assert_eq!(remote.for_endpoint("http://localhost:3456"), Some("tok"));
+        // A different remote origin gets nothing.
+        assert_eq!(remote.for_endpoint("https://evil.example.com"), None);
+        assert_eq!(remote.for_endpoint("http://192.168.1.5:3456"), None);
+        // Unparseable endpoints fail closed.
+        assert_eq!(remote.for_endpoint("not a url"), None);
+
+        // A credential issued for the local bind travels only there (or to
+        // its own origin), never out to a remote host.
+        let local = issued("http://127.0.0.1:3456");
+        assert_eq!(local.for_endpoint("http://127.0.0.1:3456"), Some("tok"));
+        assert_eq!(local.for_endpoint("https://lific.example.com"), None);
     }
 
     /// The remembered client id is what keeps `lific login` from registering

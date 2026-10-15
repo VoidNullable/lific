@@ -303,6 +303,14 @@ fn invalid_config_never_repairs_an_implicit_database() {
             serde_json::from_slice(&assertion.get_output().stdout).unwrap();
         assert_eq!(report["ok"], false);
         for check in report["checks"].as_array().unwrap() {
+            // The service check reads no configured value — it inspects the
+            // machine's installed service — so it runs even though
+            // configuration selection failed, and its status is whatever
+            // this machine's service state is (on Windows detect() never
+            // returns None, so it always runs). Not assertable here.
+            if check["name"] == "service" {
+                continue;
+            }
             let expected = if check["name"] == "config" {
                 "fail"
             } else {
