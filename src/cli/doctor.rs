@@ -18,6 +18,16 @@
 //!    A file that exists but fails to parse = fail; the already-computed
 //!    resolution is reported without repeating candidate discovery.
 //!
+//!    When the candidate search finds nothing (or fails), the run diagnoses
+//!    the operator's instance instead of an abstraction, via witnesses ranked
+//!    by freshness: the running server process's own `--config` first, then
+//!    the config the installed background service's definition names. A
+//!    witness-found config passes with its provenance named ("the running
+//!    lific process"); a witness naming a missing file fails with that path
+//!    named; a witness that disagrees with a candidate-found config warns,
+//!    naming both (a repo-local config beside a running personal instance is
+//!    legitimate — the divergence is the fact worth surfacing).
+//!
 //!    A failed resolution is **fail-closed**: every check that would otherwise
 //!    read a configured value is skipped with that reason named, because the
 //!    built-in defaults describe a different instance than the one the operator
@@ -42,24 +52,34 @@
 //! 3. **backups** — only when enabled. Dir missing = warn (server creates it);
 //!    dir present but unwritable = fail; no backups yet = warn; otherwise pass
 //!    with the most-recent backup age vs the configured interval.
-//! 4. **server** — HTTP reachability of `http://{host}:{port}/api/health`
+//! 4. **service** — the background service installed by `lific init`. No
+//!    service manager on this platform = skipped (the operator's only mode is
+//!    foreground `lific start`; there is nothing to diagnose). Unreadable
+//!    service state = warn. Not installed = warn (the server only runs while
+//!    you keep a terminal open). Installed but not running = warn with the
+//!    restart command and the platform's log hint. Installed and running =
+//!    pass. The check reads no configured value — it inspects the machine's
+//!    installed service — so it still runs when configuration resolution
+//!    failed (see the fail-closed note under config).
+//! 5. **server** — HTTP reachability of `http://{host}:{port}/api/health`
 //!    (0.0.0.0 → 127.0.0.1). A 2xx response passes; another HTTP status warns
 //!    while dependent checks continue. Not running warns and skips them.
-//! 5. **oauth_discovery** — `GET {base}/.well-known/oauth-protected-resource/mcp`
+//! 6. **oauth_discovery** — `GET {base}/.well-known/oauth-protected-resource/mcp`
 //!    → 200 + JSON containing `resource`. Skipped when the server is unreachable.
-//! 6. **mcp** — `POST {base}/mcp` JSON-RPC `initialize`. No key → expect 401 with
+//! 7. **mcp** — `POST {base}/mcp` JSON-RPC `initialize`. No key → expect 401 with
 //!    a `WWW-Authenticate` header (auth enforced, discovery advertised) = pass.
 //!    With a key → expect 200 + a `serverInfo` result = pass; wrong key = fail.
 //!    Skipped when the server is unreachable.
-//! 7. **public_url** — only when `server.public_url` is set. `GET
+//! 8. **public_url** — only when `server.public_url` is set. `GET
 //!    {public_url}/.well-known/oauth-protected-resource/mcp` reachable = pass;
 //!    unreachable = warn (may be firewalled from this vantage point).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::cli::service::{self, Manager, StatusReport};
 use crate::config::Config;
 
 /// How long read-only inspection waits for a competing lock before reporting
@@ -189,7 +209,13 @@ pub async fn run(
     } else {
         DatabaseCheckMode::ReadOnly
     };
-    let report = build_report(resolution, database_override, key, database_mode).await;
+    let running = service::running_config();
+    let installed = service::installed_config().map(|(_, path)| path);
+    let witnesses = Witnesses {
+        running: running.as_deref(),
+        installed: installed.as_deref(),
+    };
+    let report = build_report(resolution, witnesses, database_override, key, database_mode).await;
     print_report(&report, json);
     match report.fail_count() {
         0 => Ok(()),
@@ -201,22 +227,125 @@ pub async fn run(
 /// failed. Named on each check so the output says why it did not run.
 const CONFIG_UNRESOLVED: &str = "configuration could not be resolved; skipped";
 
+/// Which config this doctor run diagnoses, and how it was found. Doctor's
+/// object of diagnosis is the operator's instance on this machine, and the
+/// witnesses of that instance are ranked by freshness: the live process's
+/// own `--config` beats the install-time service definition, which beats the
+/// ordinary candidate search. An explicit `--config` overrides them all.
+struct ConfigSelection {
+    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    /// Where the config came from, when a witness found it rather than the
+    /// ordinary candidate search.
+    provenance: Option<&'static str>,
+    /// The candidate-search failure a witness replaced, if any — kept so a
+    /// broken candidate file is still named, not silently papered over.
+    superseded: Option<String>,
+    /// Witnesses that point somewhere other than the selected config:
+    /// `(witness label, their path)`. The canonical case is a stale service
+    /// definition naming a config the live process left behind.
+    divergent: Vec<(&'static str, PathBuf)>,
+}
+
+const RUNNING_PROCESS_LABEL: &str = "the running lific process";
+const INSTALLED_SERVICE_LABEL: &str = "the installed service's definition";
+
+/// Apply the freshness-ranked witnesses to the ordinary resolution. Pure
+/// apart from [`crate::config::Config::resolve`], so the policy is tested
+/// with tempdir files through the same entrance the report uses.
+fn select_instance_config(
+    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    running: Option<&Path>,
+    installed: Option<&Path>,
+) -> ConfigSelection {
+    let witnesses = [
+        (RUNNING_PROCESS_LABEL, running),
+        (INSTALLED_SERVICE_LABEL, installed),
+    ];
+    // A candidate that named a real file wins on its own; witnesses only
+    // diverge from it (reported, not overruled — a repo-local lific.toml
+    // beside a running personal instance is a legitimate state).
+    let candidate_won = matches!(&resolution, Ok(resolved) if resolved.source != crate::config::ConfigSource::BuiltInDefault);
+    if candidate_won {
+        let selected = resolution
+            .as_ref()
+            .ok()
+            .and_then(|resolved| resolved.path.clone());
+        let divergent = witnesses
+            .iter()
+            .filter_map(|(label, path)| {
+                let path = (*path)?;
+                (Some(path) != selected.as_deref()).then(|| (*label, path.to_path_buf()))
+            })
+            .collect();
+        return ConfigSelection {
+            resolution,
+            provenance: None,
+            superseded: None,
+            divergent,
+        };
+    }
+    // Nothing found by candidates (or the search itself failed): the
+    // freshest witness that has a path decides what this run diagnoses.
+    let Some((label, path)) = witnesses
+        .iter()
+        .find_map(|(label, path)| path.map(|p| (*label, p)))
+    else {
+        return ConfigSelection {
+            resolution,
+            provenance: None,
+            superseded: None,
+            divergent: Vec::new(),
+        };
+    };
+    let superseded = match &resolution {
+        Err(error) => Some(error.to_string()),
+        Ok(resolved) if resolved.source == crate::config::ConfigSource::BuiltInDefault => None,
+        Ok(_) => None,
+    };
+    let divergent = witnesses
+        .iter()
+        .filter_map(|(other, other_path)| {
+            let other_path = (*other_path)?;
+            (other_path != path && *other != label).then(|| (*other, other_path.to_path_buf()))
+        })
+        .collect();
+    ConfigSelection {
+        resolution: crate::config::Config::resolve(Some(&path)),
+        provenance: Some(label),
+        superseded,
+        divergent,
+    }
+}
+
+/// The local witnesses of "which instance runs on this machine", fetched by
+/// [`run`] and injected into [`build_report`] so tests diagnose a constructed
+/// world instead of whatever happens to run on the machine the test is on.
+#[derive(Default)]
+struct Witnesses<'a> {
+    running: Option<&'a Path>,
+    installed: Option<&'a Path>,
+}
+
 /// Assemble the structured report from the single configuration-selection
 /// result. This function owns doctor's fail-closed policy, so callers cannot
 /// report one resolution while checking an unrelated configuration.
 async fn build_report(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    witnesses: Witnesses<'_>,
     database_override: Option<&Path>,
     key: Option<&str>,
     database_mode: DatabaseCheckMode,
 ) -> Report {
-    let config_check = check_config(&resolution);
-    let Ok(resolved) = resolution else {
-        return Report::new(unconfigured_checks(
-            config_check,
-            database_override,
-            database_mode,
-        ));
+    let selection = select_instance_config(resolution, witnesses.running, witnesses.installed);
+    let config_check = check_config(&selection);
+    let service_check = check_service();
+    let Ok(resolved) = selection.resolution else {
+        let mut checks = unconfigured_checks(config_check, database_override, database_mode);
+        // The service check reads no configured value — it inspects the
+        // machine's installed service — so the fail-closed policy does not
+        // hold it back; it slots in after `backups` like in the normal report.
+        checks.insert(3, service_check);
+        return Report::new(checks);
     };
 
     let mut cfg = resolved.config;
@@ -225,6 +354,7 @@ async fn build_report(
     }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
     checks.extend(check_backups(&cfg));
+    checks.push(service_check);
     checks.extend(check_remote(&cfg, key).await);
     Report::new(checks)
 }
@@ -232,7 +362,8 @@ async fn build_report(
 /// The report doctor produces when configuration selection failed. The failure
 /// itself is retained, an explicit `--db` target is still inspected because it
 /// was named on the command line rather than read from the file we could not
-/// load, and everything else is skipped with the reason spelled out.
+/// load, the config-independent service check still runs, and everything that
+/// reads the configuration is skipped with the reason spelled out.
 fn unconfigured_checks(
     config_check: Check,
     database_override: Option<&Path>,
@@ -343,15 +474,36 @@ fn skipped_local_checks(detail: &str) -> [Check; 2] {
 
 // ── Check 1: config ──────────────────────────────────────────────────────
 
-/// Report the already-computed configuration selection or its typed failure.
-///
-/// Doctor keeps running after a configuration error so it can report other
-/// independent checks, but it never hides the failed selection behind defaults.
-fn check_config(
-    resolution: &Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
-) -> Check {
+/// Report the configuration selection this run made: which file, and how it
+/// was found. Doctor keeps running after a configuration error so it can
+/// report other independent checks, but it never hides the failed selection
+/// behind defaults.
+fn check_config(selection: &ConfigSelection) -> Check {
+    let ConfigSelection {
+        resolution,
+        provenance,
+        superseded,
+        divergent,
+    } = selection;
     match resolution {
-        Err(error) => Check::new("config", Status::Fail, error.to_string()),
+        Err(error) => {
+            // A witness-named config that is gone is a named, actionable
+            // failure ("the service points at X, which does not exist"),
+            // not the CLI-flavoured "--config path ... does not exist".
+            let detail = match (provenance, error) {
+                (Some(label), crate::config::ConfigError::MissingExplicit { path }) => format!(
+                    "{label} names {}, which does not exist — reinstall with \
+                     `lific service install` or restore the file",
+                    path.display()
+                ),
+                _ => error.to_string(),
+            };
+            let detail = match superseded {
+                Some(original) => format!("{detail}; candidate search had failed with: {original}"),
+                None => detail,
+            };
+            Check::new("config", Status::Fail, detail)
+        }
         Ok(resolved) if resolved.source == crate::config::ConfigSource::BuiltInDefault => {
             Check::new(
                 "config",
@@ -364,11 +516,26 @@ fn check_config(
                 .path
                 .as_deref()
                 .expect("non-default config resolution must have a path");
-            Check::new(
-                "config",
-                Status::Pass,
-                format!("using {} ({})", path.display(), resolved.source.label()),
-            )
+            let mut detail = format!(
+                "using {} ({})",
+                path.display(),
+                provenance.unwrap_or_else(|| resolved.source.label()),
+            );
+            if let Some(original) = superseded {
+                detail.push_str(&format!("; candidate search had failed with: {original}"));
+            }
+            // Witnesses that disagree with the selected config surface here
+            // rather than overruling it: the divergence is the fact worth
+            // knowing (a stale service definition is its own problem).
+            let status = if divergent.is_empty() {
+                Status::Pass
+            } else {
+                Status::Warn
+            };
+            for (label, other) in divergent {
+                detail.push_str(&format!("; note: {label} points at {}", other.display()));
+            }
+            Check::new("config", status, detail)
         }
     }
 }
@@ -685,7 +852,83 @@ fn newest_backup_age_minutes(dir: &Path) -> Option<u64> {
     Some(elapsed.as_secs() / 60)
 }
 
-// ── Check 4: server reachability ─────────────────────────────────────────
+// ── Check 4: background service ────────────────────────────────────────
+
+/// Inspect the background service installed by `lific init` (`lific service
+/// status|restart|stop|uninstall` manages it). The check reads no configured
+/// value — the installed service belongs to the machine, not to whichever
+/// config file this run resolved — so it stays out even when configuration
+/// selection failed.
+fn check_service() -> Check {
+    let mgr = service::detect();
+    service_check_outcome(mgr, mgr.map(service::status))
+}
+
+/// Map service facts onto doctor's statuses. The judgement runs on whatever
+/// [`check_service`] fetched so tests can construct the same facts without
+/// touching systemctl or the registry: `mgr` is `None` when the platform has
+/// no service manager at all (and then `report` is `None` too — there is
+/// nothing whose state could be read).
+fn service_check_outcome(
+    mgr: Option<Manager>,
+    report: Option<Result<StatusReport, String>>,
+) -> Check {
+    let Some(mgr) = mgr else {
+        return Check::new(
+            "service",
+            Status::Skipped,
+            "no service manager on this platform — the server runs in the foreground \
+             (`lific start`)",
+        );
+    };
+    let report = match report {
+        Some(Ok(report)) => report,
+        Some(Err(e)) => {
+            return Check::new(
+                "service",
+                Status::Warn,
+                format!("could not read the service's state: {e}"),
+            );
+        }
+        // The contract above: no manager means no report.
+        None => {
+            return Check::new(
+                "service",
+                Status::Warn,
+                "service manager present but its state could not be probed",
+            );
+        }
+    };
+    if !report.installed {
+        return Check::new(
+            "service",
+            Status::Warn,
+            "not installed — the server only runs while you keep it started. \
+             Install with `lific service install`",
+        );
+    }
+    if !report.active {
+        return Check::new(
+            "service",
+            Status::Warn,
+            format!(
+                "installed but not running — start with `lific service restart` \
+                 (logs: {})",
+                service::logs_hint(mgr)
+            ),
+        );
+    }
+    Check::new(
+        "service",
+        Status::Pass,
+        format!(
+            "installed and running — {} ({})",
+            report.manager, report.definition
+        ),
+    )
+}
+
+// ── Check 5: server reachability ─────────────────────────────────────────
 
 /// Result of probing the server's health endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -732,7 +975,7 @@ fn server_check_result(probe: &ServerProbe) -> Check {
     }
 }
 
-// ── Check 5: OAuth discovery ─────────────────────────────────────────────
+// ── Check 6: OAuth discovery ──────────────────────────────────────────────
 
 /// `GET {base}/.well-known/oauth-protected-resource/mcp` → 200 + JSON with a
 /// `resource` field.
@@ -784,7 +1027,7 @@ fn check_oauth_discovery_body(body: serde_json::Value) -> Check {
     }
 }
 
-// ── Check 6: MCP round-trip ──────────────────────────────────────────────
+// ── Check 7: MCP round-trip ───────────────────────────────────────────────
 
 /// The JSON-RPC `initialize` request body. Protocol version pinned to the one
 /// the server supports (`V_2025_03_26`).
@@ -921,7 +1164,7 @@ fn check_mcp_json_response(body: serde_json::Value) -> Check {
     }
 }
 
-// ── Check 7: public_url ──────────────────────────────────────────────────
+// ── Check 8: public_url ───────────────────────────────────────────────────
 
 async fn check_public_url(client: &reqwest::Client, public_url: &str) -> Check {
     let url = format!(
@@ -1162,7 +1405,12 @@ mod tests {
             resolution,
             Err(crate::config::ConfigError::Parse { .. })
         ));
-        let check = check_config(&resolution);
+        let check = check_config(&ConfigSelection {
+            resolution,
+            provenance: None,
+            superseded: None,
+            divergent: Vec::new(),
+        });
 
         assert_eq!(check.status, Status::Fail);
         assert!(
@@ -1180,7 +1428,12 @@ mod tests {
             source: crate::config::ConfigSource::BuiltInDefault,
         };
 
-        let check = check_config(&Ok(resolution));
+        let check = check_config(&ConfigSelection {
+            resolution: Ok(resolution),
+            provenance: None,
+            superseded: None,
+            divergent: Vec::new(),
+        });
 
         assert_eq!(check.status, Status::Warn);
         assert!(check.detail.contains("built-in defaults"));
@@ -1195,7 +1448,12 @@ mod tests {
                 path: std::path::PathBuf::from(format!("{name}.toml")),
             };
 
-            let check = check_config(&Err(error));
+            let check = check_config(&ConfigSelection {
+                resolution: Err(error),
+                provenance: None,
+                superseded: None,
+                divergent: Vec::new(),
+            });
 
             prop_assert_eq!(check.status, Status::Fail);
             prop_assert!(check.detail.contains("does not exist"));
@@ -1616,6 +1874,67 @@ mod tests {
         assert!(c.detail.contains("no backups yet"));
     }
 
+    // ── service check ────────────────────────────────────────────
+
+    fn status_report(installed: bool, active: bool) -> StatusReport {
+        StatusReport {
+            manager: Manager::SystemdUser.label().into(),
+            installed,
+            active,
+            definition: "~/.config/systemd/user/lific.service".into(),
+        }
+    }
+
+    #[test]
+    fn service_check_passes_when_installed_and_running() {
+        let c = service_check_outcome(
+            Some(Manager::SystemdUser),
+            Some(Ok(status_report(true, true))),
+        );
+        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
+        assert!(c.detail.contains("installed and running"));
+    }
+
+    #[test]
+    fn service_check_warns_when_not_installed() {
+        let c = service_check_outcome(
+            Some(Manager::SystemdUser),
+            Some(Ok(status_report(false, false))),
+        );
+        assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
+        assert!(c.detail.contains("lific service install"));
+    }
+
+    #[test]
+    fn service_check_warns_when_installed_but_stopped() {
+        let c = service_check_outcome(
+            Some(Manager::SystemdUser),
+            Some(Ok(status_report(true, false))),
+        );
+        assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
+        assert!(c.detail.contains("lific service restart"));
+        // The detail names where to look when a restart does not stick.
+        assert!(c.detail.contains("logs:"));
+    }
+
+    #[test]
+    fn service_check_warns_when_state_is_unreadable() {
+        let c = service_check_outcome(
+            Some(Manager::SystemdUser),
+            Some(Err("systemctl exploded".into())),
+        );
+        assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
+        assert!(c.detail.contains("could not read"));
+    }
+
+    #[test]
+    fn service_check_skips_when_there_is_no_service_manager() {
+        // No manager means no report — the contract check_service upholds.
+        let c = service_check_outcome(None, None);
+        assert_eq!(c.status, Status::Skipped, "detail: {}", c.detail);
+        assert!(c.detail.contains("lific start"));
+    }
+
     // ── server probe (offline) ───────────────────────────────────────────
 
     #[tokio::test]
@@ -1879,7 +2198,14 @@ mod tests {
             path: Some(dir.join("lific.toml")),
             source: crate::config::ConfigSource::Explicit,
         });
-        let report = build_report(resolution, None, None, DatabaseCheckMode::ReadOnly).await;
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
         assert_eq!(report.fail_count(), 0, "offline run must not fail");
         assert!(report.ok);
 
@@ -1910,6 +2236,7 @@ mod tests {
 
         let report = build_report(
             resolution,
+            Witnesses::default(),
             None,
             Some("unused-explicit-key"),
             DatabaseCheckMode::ReadOnly,
@@ -1973,7 +2300,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let resolution = malformed_config_resolution(tmp.path());
 
-        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            None,
+            None,
+            DatabaseCheckMode::Repair,
+        )
+        .await;
 
         assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
         assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
@@ -1994,7 +2328,14 @@ mod tests {
             Err(crate::config::ConfigError::MissingExplicit { .. })
         ));
 
-        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            None,
+            None,
+            DatabaseCheckMode::Repair,
+        )
+        .await;
 
         assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
         assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
@@ -2011,6 +2352,7 @@ mod tests {
 
         let report = build_report(
             resolution,
+            Witnesses::default(),
             Some(&database_path),
             None,
             DatabaseCheckMode::ReadOnly,
@@ -2035,6 +2377,7 @@ mod tests {
 
         let report = build_report(
             resolution,
+            Witnesses::default(),
             Some(&database_path),
             None,
             DatabaseCheckMode::Repair,
@@ -2065,12 +2408,179 @@ mod tests {
             source: crate::config::ConfigSource::BuiltInDefault,
         });
 
-        let report = build_report(resolution, None, None, DatabaseCheckMode::ReadOnly).await;
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
 
         assert_eq!(status_of(&report.checks, "config"), Some(Status::Warn));
         assert_eq!(status_of(&report.checks, "database"), Some(Status::Warn));
         assert_eq!(status_of(&report.checks, "backups"), Some(Status::Warn));
         assert_eq!(status_of(&report.checks, "server"), Some(Status::Warn));
         assert!(report.ok);
+    }
+
+    // ── instance witnesses (the running process, the installed service) ──
+
+    /// An empty lific.toml resolves to all defaults, which is exactly what a
+    /// witness-found file needs to parse in a test.
+    fn witness_config_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
+    fn builtin_default_resolution(
+        db_path: PathBuf,
+    ) -> Result<crate::config::ResolvedConfig, crate::config::ConfigError> {
+        let mut config = Config::default();
+        config.database.path = db_path;
+        Ok(crate::config::ResolvedConfig {
+            config,
+            path: None,
+            source: crate::config::ConfigSource::BuiltInDefault,
+        })
+    }
+
+    #[tokio::test]
+    async fn running_process_witness_supplies_the_config_when_candidates_find_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let witness_config = witness_config_file(tmp.path(), "lific.toml");
+
+        let report = build_report(
+            builtin_default_resolution(tmp.path().join("lific.db")),
+            Witnesses {
+                running: Some(&witness_config),
+                installed: None,
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        let config = status_of(&report.checks, "config");
+        assert_eq!(config, Some(Status::Pass));
+        let detail = detail_of(&report.checks, "config");
+        assert!(
+            detail.contains(witness_config.to_str().unwrap()),
+            "detail: {detail}"
+        );
+        assert!(
+            detail.contains("the running lific process"),
+            "detail: {detail}"
+        );
+        // The database check now inspects the witness instance's database
+        // instead of being skipped by the fail-closed policy.
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Warn));
+        assert!(!detail_of(&report.checks, "database").contains(CONFIG_UNRESOLVED));
+    }
+
+    #[tokio::test]
+    async fn stale_service_definition_diverges_from_the_running_process() {
+        // The key temporal case: the server was started with config X, the
+        // service definition still names the config Y it was installed with.
+        // Doctor diagnoses the live instance and surfaces the stale snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        let running_config = witness_config_file(tmp.path(), "running.toml");
+        let installed_config = witness_config_file(tmp.path(), "installed.toml");
+
+        let report = build_report(
+            builtin_default_resolution(tmp.path().join("lific.db")),
+            Witnesses {
+                running: Some(&running_config),
+                installed: Some(&installed_config),
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        let detail = detail_of(&report.checks, "config");
+        assert!(
+            detail.contains("the running lific process"),
+            "detail: {detail}"
+        );
+        assert!(
+            detail.contains(&format!(
+                "the installed service's definition points at {}",
+                installed_config.display()
+            )),
+            "detail: {detail}"
+        );
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Warn));
+    }
+
+    #[tokio::test]
+    async fn witness_naming_a_missing_file_fails_with_the_path_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("gone.toml");
+
+        let report = build_report(
+            builtin_default_resolution(tmp.path().join("lific.db")),
+            Witnesses {
+                running: None,
+                installed: Some(&missing),
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        let detail = detail_of(&report.checks, "config");
+        assert!(detail.contains("which does not exist"), "detail: {detail}");
+        assert!(
+            detail.contains("the installed service's definition"),
+            "detail: {detail}"
+        );
+        assert!(detail.contains("gone.toml"), "detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn candidate_found_config_warns_when_the_running_process_uses_another() {
+        // A repo-local lific.toml beside a running personal instance is a
+        // legitimate state; doctor diagnoses the found config and surfaces
+        // the divergence instead of silently diagnosing either one.
+        let tmp = tempfile::tempdir().unwrap();
+        let candidate = witness_config_file(tmp.path(), "candidate.toml");
+        let running = witness_config_file(tmp.path(), "running.toml");
+        let resolution = Ok(crate::config::ResolvedConfig {
+            config: Config::default(),
+            path: Some(candidate.clone()),
+            source: crate::config::ConfigSource::ProjectLocal,
+        });
+
+        let report = build_report(
+            resolution,
+            Witnesses {
+                running: Some(&running),
+                installed: None,
+            },
+            None,
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Warn));
+        let detail = detail_of(&report.checks, "config");
+        assert!(
+            detail.contains(candidate.to_str().unwrap()),
+            "detail: {detail}"
+        );
+        assert!(
+            detail.contains(&format!(
+                "the running lific process points at {}",
+                running.display()
+            )),
+            "detail: {detail}"
+        );
     }
 }
