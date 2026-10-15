@@ -491,7 +491,13 @@ async fn check_reachable_remote(
     let (key, key_source) = match explicit_key {
         Some(key) => (Some(key.to_owned()), None),
         None => match crate::cli::credentials::load_with_source(credential_base) {
-            Ok(Some((key, source))) => (Some(key), Some(source)),
+            // A stored credential is issued for `credential_base`; present it
+            // only to an endpoint it may travel to. A mismatch yields no token,
+            // so the check runs unauthenticated rather than leaking the token.
+            Ok(Some((credential, source))) => match credential.for_endpoint(base) {
+                Some(token) => (Some(token.to_owned()), Some(source)),
+                None => (None, None),
+            },
             Ok(None) => (None, None),
             Err(error) => {
                 checks.push(Check::new(
