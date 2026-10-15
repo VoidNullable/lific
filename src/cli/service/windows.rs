@@ -263,6 +263,19 @@ pub fn supervise_service(config: &Path) -> Result<Outcome, String> {
 
 // ── Public operations (elsewhere) ────────────────────────────
 
+/// The command the installed autostart entry runs, if any. Doctor (and any
+/// other local diagnostic) parses it with [`parse_run_command`] to learn
+/// which config this machine's instance runs — the install-time witness.
+#[cfg(windows)]
+pub fn installed_run_command() -> Result<Option<String>, String> {
+    sys::read_run_value(RUN_VALUE)
+}
+
+#[cfg(not(windows))]
+pub fn installed_run_command() -> Result<Option<String>, String> {
+    Err(NOT_WINDOWS.into())
+}
+
 #[cfg(not(windows))]
 pub fn install(_exe: &Path, _config: &Path) -> Result<(), String> {
     Err(NOT_WINDOWS.into())

@@ -186,6 +186,215 @@ pub fn missing_manager_message() -> String {
     }
 }
 
+/// The config file of the lific server running on this machine right now,
+/// read from its own command line — the live witness. It is exactly what is
+/// serving, whatever the port, with or without a service. `None` when no
+/// lific server process is found; the caller falls back to the install-time
+/// snapshot ([`installed_config`]) and then to the default candidates.
+pub fn running_config() -> Option<PathBuf> {
+    find_own_processes()
+        .iter()
+        .find_map(|args| config_from_cmdline(args))
+}
+
+/// The config file the installed background service runs, if a service is
+/// installed — the install-time witness. The definition is a snapshot: it is
+/// the authority on what was *set up* to run, not on what is running now
+/// (the operator may have moved the config since), and it is the only
+/// witness left when the server is down — which is when doctor is run most.
+pub fn installed_config() -> Option<(Manager, PathBuf)> {
+    let mgr = detect()?;
+    let path = definition_path(mgr).ok()?;
+    let config = match mgr {
+        Manager::SystemdUser => config_from_systemd_unit(&std::fs::read_to_string(path).ok()?)?,
+        Manager::Launchd => config_from_plist(&std::fs::read_to_string(path).ok()?)?,
+        Manager::WindowsUser => {
+            let command = windows::installed_run_command().ok()??;
+            windows::parse_run_command(&command).map(|(_, config)| config)?
+        }
+    };
+    Some((mgr, config))
+}
+
+/// Command lines (`argv` vectors) of *other* processes running this same
+/// lific binary. The per-OS scan is the platform seam; the `--config` parse
+/// ([`config_from_cmdline`]) is shared.
+#[cfg(target_os = "linux")]
+fn find_own_processes() -> Vec<Vec<String>> {
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(_) => return Vec::new(),
+    };
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        // Numeric directory names only: one per process. Skip our own pid —
+        // `lific doctor` itself is a lific process, but holds no --config.
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.bytes().all(|b| b.is_ascii_digit()) || name == std::process::id().to_string() {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let args: Vec<String> = cmdline
+            .split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect();
+        // Compare arg0's file name, not the resolved path: the server may
+        // run a different build (older release, cargo target dir) of the
+        // same program — the basename is the honest common denominator.
+        let is_lific = args
+            .first()
+            .map(|arg0| {
+                Path::new(arg0)
+                    .file_name()
+                    .is_some_and(|name| name == me.file_name().unwrap_or_default())
+                    || std::fs::canonicalize(arg0).is_ok_and(|p| p == me)
+            })
+            .unwrap_or(false);
+        if is_lific && args.len() > 1 {
+            found.push(args);
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn find_own_processes() -> Vec<Vec<String>> {
+    let Ok(output) = Command::new("ps").arg("-axo").arg("command=").output() else {
+        return Vec::new();
+    };
+    let me = std::env::current_exe().ok();
+    output
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter_map(|line| {
+            let mut args: Vec<String> = String::from_utf8_lossy(line)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let arg0 = args.first()?.clone();
+            let is_lific = arg0.ends_with("/lific")
+                || me.as_ref().is_ok_and(|me| arg0 == me.to_string_lossy());
+            // ps splits on whitespace, so arg0 for a binary under a path
+            // with spaces arrives split; those installs are missed rather
+            // than misparsed.
+            is_lific.then_some(args)
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn find_own_processes() -> Vec<Vec<String>> {
+    // Windows: the Run key ([`installed_config`]) covers every way Lific
+    // starts itself there; a live scan would need PowerShell and adds no
+    // witness the Run key lacks.
+    Vec::new()
+}
+
+/// The `--config` argument of a `lific start` command line. Pure so tests
+/// exercise the same parse the process scan feeds.
+fn config_from_cmdline(args: &[String]) -> Option<PathBuf> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" {
+            return iter.next().map(PathBuf::from);
+        }
+        if let Some(value) = arg.strip_prefix("--config=") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+/// The `--config` path in a systemd unit's `ExecStart` line, as
+/// [`systemd_unit`] writes it (space-separated, [`systemd_quote`] escaping).
+/// Pure: the text format knowledge stays testable without a unit file.
+fn config_from_systemd_unit(contents: &str) -> Option<PathBuf> {
+    let exec_start = contents
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))?
+        .strip_prefix("ExecStart=")?;
+    let mut tokens = systemd_tokens(exec_start);
+    while let Some(token) = tokens.next() {
+        if token == "--config" {
+            return tokens.next().map(PathBuf::from);
+        }
+        if let Some(value) = token.strip_prefix("--config=") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+/// Split a systemd command line into unquoted tokens, inverting
+/// [`systemd_quote`]'s escaping (`\\`, `\"`, `$$`, `%%` inside quotes).
+fn systemd_tokens(line: &str) -> impl Iterator<Item = String> + '_ {
+    let mut chars = line.chars().peekable();
+    std::iter::from_fn(move || {
+        // Skip leading whitespace.
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            return None;
+        }
+        let quoted = chars.peek() == Some(&'"');
+        if quoted {
+            chars.next();
+        }
+        let mut token = String::new();
+        loop {
+            match chars.next() {
+                None => break,
+                Some('"') if quoted => break,
+                Some('\\') if quoted => match chars.next() {
+                    Some('"') => token.push('"'),
+                    Some('\\') => token.push('\\'),
+                    // Not an escape we wrote; keep both characters.
+                    Some(other) => {
+                        token.push('\\');
+                        token.push(other);
+                    }
+                    None => break,
+                },
+                Some(c) if !quoted && c.is_whitespace() => break,
+                Some(c) => token.push(c),
+            }
+        }
+        // Unquote the doubled escapes systemd uses for $ and %.
+        let token = token.replace("$$", "$").replace("%%", "%");
+        Some(token)
+    })
+}
+
+/// The `--config` path in a launchd plist's `ProgramArguments`, as
+/// [`launchd_plist`] writes it (`--config` string element followed by the
+/// xml-escaped path). Pure for the same reason as the unit parser.
+fn config_from_plist(contents: &str) -> Option<PathBuf> {
+    let mut strings = contents.lines().filter_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("<string>")?.strip_suffix("</string>")
+    });
+    while let Some(value) = strings.next() {
+        if value == "--config" {
+            return strings.next().map(|escaped| {
+                PathBuf::from(
+                    escaped
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&amp;", "&"),
+                )
+            });
+        }
+    }
+    None
+}
+
 /// Where the service definition file lives for this user.
 pub fn definition_path(manager: Manager) -> Result<PathBuf, String> {
     // `dirs::home_dir()` rather than a raw `HOME` read: it is what the rest of
@@ -634,6 +843,81 @@ mod tests {
         assert!(!plist.contains("<string>/home/u/a&b</string>"));
     }
 
+    // ── Instance discovery: parsing what install wrote back ────
+
+    // The discovery parsers must invert the generators exactly; each test
+    // round-trips a generated definition so a future generator change that
+    // the parser cannot read fails here, not silently in doctor.
+
+    #[test]
+    fn systemd_unit_config_round_trips() {
+        let unit = systemd_unit(&plan());
+        assert_eq!(
+            config_from_systemd_unit(&unit),
+            Some(plan().config),
+            "unit was:\n{unit}"
+        );
+    }
+
+    #[test]
+    fn systemd_unit_config_round_trips_quoted_and_escaped_paths() {
+        let mut p = plan();
+        p.config = PathBuf::from("/home/u/my tracker/li\"fic$.toml");
+        let unit = systemd_unit(&p);
+        assert_eq!(
+            config_from_systemd_unit(&unit),
+            Some(p.config),
+            "unit was:\n{unit}"
+        );
+    }
+
+    #[test]
+    fn systemd_unit_without_config_argument_parses_to_none() {
+        assert_eq!(
+            config_from_systemd_unit("[Service]\nExecStart=/usr/bin/lific start\n"),
+            None
+        );
+        assert_eq!(config_from_systemd_unit("[Unit]\nDescription=x\n"), None);
+    }
+
+    #[test]
+    fn launchd_plist_config_round_trips() {
+        let plist = launchd_plist(&plan());
+        assert_eq!(config_from_plist(&plist), Some(plan().config));
+    }
+
+    #[test]
+    fn launchd_plist_config_round_trips_xml_escaped_paths() {
+        let mut p = plan();
+        p.config = PathBuf::from("/home/u/a&b<c>.toml");
+        let plist = launchd_plist(&p);
+        assert_eq!(config_from_plist(&plist), Some(p.config));
+    }
+
+    #[test]
+    fn cmdline_config_parses_both_argument_forms() {
+        let plain: Vec<String> = ["lific", "start", "--config", "/x/y.toml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            config_from_cmdline(&plain),
+            Some(PathBuf::from("/x/y.toml"))
+        );
+
+        let inline: Vec<String> = ["lific", "start", "--config=/x/y.toml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            config_from_cmdline(&inline),
+            Some(PathBuf::from("/x/y.toml"))
+        );
+
+        let none: Vec<String> = ["lific", "doctor"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(config_from_cmdline(&none), None);
+    }
+
     // LIF-292: the plan must anchor to the config file itself, so `--config
     // /elsewhere/lific.toml` produces a unit that points at /elsewhere — not
     // at a lific.toml in whatever directory the command happened to run in.
@@ -724,12 +1008,21 @@ mod tests {
         let msg = missing_manager_message();
         assert!(msg.starts_with("no supported service manager found"));
         if cfg!(target_os = "linux") {
-            assert!(msg.contains("systemd"), "linux copy must name systemd: {msg}");
+            assert!(
+                msg.contains("systemd"),
+                "linux copy must name systemd: {msg}"
+            );
             assert!(msg.contains("lific start"));
         } else if cfg!(target_os = "macos") {
-            assert!(msg.contains("launchd"), "macos copy must name launchd: {msg}");
+            assert!(
+                msg.contains("launchd"),
+                "macos copy must name launchd: {msg}"
+            );
         } else if cfg!(windows) {
-            assert!(!msg.contains("systemd"), "windows copy must not name systemd: {msg}");
+            assert!(
+                !msg.contains("systemd"),
+                "windows copy must not name systemd: {msg}"
+            );
         }
     }
 }
