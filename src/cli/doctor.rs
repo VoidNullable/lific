@@ -310,7 +310,7 @@ fn select_instance_config(
         })
         .collect();
     ConfigSelection {
-        resolution: crate::config::Config::resolve(Some(&path)),
+        resolution: crate::config::Config::resolve(Some(path)),
         provenance: Some(label),
         superseded,
         divergent,
@@ -2436,14 +2436,14 @@ mod tests {
 
     fn builtin_default_resolution(
         db_path: PathBuf,
-    ) -> Result<crate::config::ResolvedConfig, crate::config::ConfigError> {
+    ) -> crate::config::ResolvedConfig {
         let mut config = Config::default();
         config.database.path = db_path;
-        Ok(crate::config::ResolvedConfig {
+        crate::config::ResolvedConfig {
             config,
             path: None,
             source: crate::config::ConfigSource::BuiltInDefault,
-        })
+        }
     }
 
     #[tokio::test]
@@ -2452,7 +2452,7 @@ mod tests {
         let witness_config = witness_config_file(tmp.path(), "lific.toml");
 
         let report = build_report(
-            builtin_default_resolution(tmp.path().join("lific.db")),
+            Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
                 running: Some(&witness_config),
                 installed: None,
@@ -2490,7 +2490,7 @@ mod tests {
         let installed_config = witness_config_file(tmp.path(), "installed.toml");
 
         let report = build_report(
-            builtin_default_resolution(tmp.path().join("lific.db")),
+            Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
                 running: Some(&running_config),
                 installed: Some(&installed_config),
@@ -2522,7 +2522,7 @@ mod tests {
         let missing = tmp.path().join("gone.toml");
 
         let report = build_report(
-            builtin_default_resolution(tmp.path().join("lific.db")),
+            Ok(builtin_default_resolution(tmp.path().join("lific.db"))),
             Witnesses {
                 running: None,
                 installed: Some(&missing),

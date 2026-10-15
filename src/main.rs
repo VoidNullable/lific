@@ -1516,9 +1516,7 @@ async fn cmd_init(
                     Err(e) => service_error = Some(e),
                 }
             }
-            None => {
-                service_error = Some(cli::service::missing_manager_message())
-            }
+            None => service_error = Some(cli::service::missing_manager_message()),
         }
     }
 

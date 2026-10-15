@@ -247,15 +247,12 @@ fn find_own_processes() -> Vec<Vec<String>> {
         // Compare arg0's file name, not the resolved path: the server may
         // run a different build (older release, cargo target dir) of the
         // same program — the basename is the honest common denominator.
-        let is_lific = args
-            .first()
-            .map(|arg0| {
-                Path::new(arg0)
-                    .file_name()
-                    .is_some_and(|name| name == me.file_name().unwrap_or_default())
-                    || std::fs::canonicalize(arg0).is_ok_and(|p| p == me)
-            })
-            .unwrap_or(false);
+        let is_lific = args.first().is_some_and(|arg0| {
+            Path::new(arg0)
+                .file_name()
+                .is_some_and(|name| name == me.file_name().unwrap_or_default())
+                || std::fs::canonicalize(arg0).is_ok_and(|p| p == me)
+        });
         if is_lific && args.len() > 1 {
             found.push(args);
         }
@@ -340,9 +337,7 @@ fn systemd_tokens(line: &str) -> impl Iterator<Item = String> + '_ {
         while chars.peek().is_some_and(|c| c.is_whitespace()) {
             chars.next();
         }
-        if chars.peek().is_none() {
-            return None;
-        }
+        chars.peek()?;
         let quoted = chars.peek() == Some(&'"');
         if quoted {
             chars.next();
