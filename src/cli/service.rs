@@ -324,9 +324,7 @@ fn find_own_processes() -> Vec<Vec<String>> {
     output
         .stdout
         .split(|b| *b == b'\n')
-        .filter_map(|line| {
-            ps_witness_line(&String::from_utf8_lossy(line), &uid, me.as_deref())
-        })
+        .filter_map(|line| ps_witness_line(&String::from_utf8_lossy(line), &uid, me.as_deref()))
         .collect()
 }
 

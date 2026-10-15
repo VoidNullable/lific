@@ -376,8 +376,12 @@ async fn build_report(
     key: Option<&str>,
     database_mode: DatabaseCheckMode,
 ) -> Report {
-    let selection =
-        select_instance_config(resolution, witnesses.explicit, witnesses.running, witnesses.installed);
+    let selection = select_instance_config(
+        resolution,
+        witnesses.explicit,
+        witnesses.running,
+        witnesses.installed,
+    );
     let config_check = check_config(&selection);
     let service_check = check_service();
     let Ok(resolved) = selection.resolution else {
@@ -554,7 +558,10 @@ fn check_config(selection: &ConfigSelection) -> Check {
                         "reinstall with `lific service install`, restore the file, \
                          or remove the service with `lific service uninstall`"
                     };
-                    format!("{label} names {}, which does not exist — {advice}", path.display())
+                    format!(
+                        "{label} names {}, which does not exist — {advice}",
+                        path.display()
+                    )
                 }
                 _ => error.to_string(),
             };
@@ -2521,9 +2528,7 @@ mod tests {
         path
     }
 
-    fn builtin_default_resolution(
-        db_path: PathBuf,
-    ) -> crate::config::ResolvedConfig {
+    fn builtin_default_resolution(db_path: PathBuf) -> crate::config::ResolvedConfig {
         let mut config = Config::default();
         config.database.path = db_path;
         crate::config::ResolvedConfig {
@@ -2698,7 +2703,10 @@ mod tests {
 
         assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
         let detail = detail_of(&report.checks, "config");
-        assert!(detail.contains("the running lific process"), "detail: {detail}");
+        assert!(
+            detail.contains("the running lific process"),
+            "detail: {detail}"
+        );
         assert!(!detail.contains("reinstall"), "detail: {detail}");
         assert!(detail.contains("restore the file"), "detail: {detail}");
     }
