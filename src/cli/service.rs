@@ -157,6 +157,35 @@ pub fn detect() -> Option<Manager> {
     None
 }
 
+/// The message shown when [`detect`] finds no service manager. Stated
+/// per-platform so the copy never lists managers the running platform cannot
+/// have: the Windows per-user startup (whose Run-key entry needs nothing
+/// optional) made the old single "systemd on Linux, or launchd on macOS"
+/// string stale — a Windows user reading it would conclude Lific does not
+/// support them at all. On Windows [`detect`] never returns None, so that
+/// branch is defensive only.
+pub fn missing_manager_message() -> String {
+    if cfg!(windows) {
+        "no supported service manager found on Windows (unexpected: the per-user \
+         startup entry needs nothing optional — please report this)"
+            .to_string()
+    } else if cfg!(target_os = "macos") {
+        "no supported service manager found (macOS manages user services with \
+         launchd, which should always be present — please report this)"
+            .to_string()
+    } else if cfg!(target_os = "linux") {
+        "no supported service manager found (Linux needs a systemd user session: \
+         `systemctl --user` must work). Run the server in the foreground with \
+         `lific start` instead"
+            .to_string()
+    } else {
+        "no supported service manager found on this platform (supported: systemd \
+         user sessions on Linux, launchd on macOS, per-user startup on Windows). \
+         Run the server in the foreground with `lific start` instead"
+            .to_string()
+    }
+}
+
 /// Where the service definition file lives for this user.
 pub fn definition_path(manager: Manager) -> Result<PathBuf, String> {
     // `dirs::home_dir()` rather than a raw `HOME` read: it is what the rest of
@@ -683,6 +712,24 @@ mod tests {
             assert_eq!(detect(), Some(Manager::Launchd));
         } else {
             assert_ne!(detect(), Some(Manager::WindowsUser));
+        }
+    }
+
+    /// The no-manager message names the managers that actually apply to the
+    /// running platform, and never one that cannot (a Windows reader must not
+    /// be told only about systemd and launchd). Also: every variant names the
+    /// foreground fallback where one exists.
+    #[test]
+    fn missing_manager_message_matches_the_platform() {
+        let msg = missing_manager_message();
+        assert!(msg.starts_with("no supported service manager found"));
+        if cfg!(target_os = "linux") {
+            assert!(msg.contains("systemd"), "linux copy must name systemd: {msg}");
+            assert!(msg.contains("lific start"));
+        } else if cfg!(target_os = "macos") {
+            assert!(msg.contains("launchd"), "macos copy must name launchd: {msg}");
+        } else if cfg!(windows) {
+            assert!(!msg.contains("systemd"), "windows copy must not name systemd: {msg}");
         }
     }
 }
