@@ -456,9 +456,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let resolution = Config::resolve(cli.config.as_deref());
     if let Command::Doctor { key, repair } = &cli.command {
         let json = cli::term::wants_json(cli.json);
-        cli::doctor::run(resolution, cli.db.as_deref(), key.as_deref(), *repair, json)
-            .await
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        cli::doctor::run(
+            resolution,
+            cli.config.is_some(),
+            cli.db.as_deref(),
+            key.as_deref(),
+            *repair,
+            json,
+        )
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         return Ok(());
     }
     let resolved_config_path = resolution
