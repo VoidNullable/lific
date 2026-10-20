@@ -24,7 +24,7 @@
   }: {
     mode: "read" | "edit";
     onSelect: (next: "read" | "edit") => void;
-    size?: "sm" | "floating";
+    size?: "sm" | "floating" | "compact";
     disabled?: boolean;
   } = $props();
 
@@ -39,6 +39,7 @@
   class="mt"
   class:mt--floating={size === "floating"}
   class:mt--sm={size === "sm"}
+  class:mt--compact={size === "compact"}
   role="radiogroup"
   aria-label="Content view mode"
 >
@@ -170,6 +171,20 @@
     padding: 0.4375rem 1rem;
     font-size: 0.8125rem;
     letter-spacing: 0.005em;
+  }
+
+  /*
+   * Compact: for chrome rows that hold h-7 (28px) controls — Layout's
+   * topbar cells, the issues toolbar. Keeps the labels but drops the
+   * vertical padding so the pill lands on the same rhythm as every
+   * other topbar control; the fat default variant is what made the
+   * detail topbar's breadcrumb sit lower than its neighbors.
+   */
+  .mt--compact {
+    padding: 1px;
+  }
+  .mt--compact .mt__opt {
+    padding: 0.125rem 0.75rem;
   }
 
   /*

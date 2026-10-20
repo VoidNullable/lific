@@ -1323,7 +1323,7 @@
                  renders even on routes that supply no topbar snippet, which
                  is why the row above is no longer gated on the snippet
                  alone. -->
-            <div class="hidden md:flex items-center shrink-0 pl-2 pr-0.5 py-2">
+            <div class="hidden md:flex items-start shrink-0 pl-2 pr-0.5 pt-2">
               <button
                 class="size-7 grid place-items-center rounded-md
                        text-[var(--text-faint)] hover:text-[var(--text)]

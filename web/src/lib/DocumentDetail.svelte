@@ -560,7 +560,7 @@
         {#if editable && body.trim() && !bodyContent}
           <ModeToggle
             mode={bodyMode}
-            size="sm"
+            size="compact"
             disabled={saving}
             onSelect={(next) => bodyRef?.setMode(next)}
           />
