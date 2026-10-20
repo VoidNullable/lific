@@ -42,6 +42,7 @@
     CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle,
   } from "lucide-svelte";
   import { getContext } from "svelte";
+  import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
 
   // LIF-226: metadata sidebar is an off-canvas panel below md, toggled from
   // the topbar; statically docked at md+.
@@ -80,6 +81,13 @@
   const editable = $derived(editableProp ?? projectRole.canEdit);
 
   let mod = $state<Module | null>(null);
+
+  // Tab title: real module name once loaded; nothing to clear — App resets the slot on route change.
+  const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
+  $effect(() => {
+    if (!mod) return;
+    titleCtx?.set(pageTitle(mod.name, projectIdentifier));
+  });
   let issues = $state<Issue[]>([]);
   let loading = $state(true);
   let error = $state("");

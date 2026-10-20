@@ -59,7 +59,8 @@
     upsertComment,
   } from "../lib/commentState";
   import { ArrowUpRight, ChevronDown, Plus, X } from "lucide-svelte";
-  import { untrack } from "svelte";
+  import { untrack, getContext } from "svelte";
+  import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
 
   let {
@@ -98,6 +99,15 @@
   let issue = $state<Issue | null>(null);
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
+
+  // Tab title: upgrade the route's default (`NEWS-18 · NEWS · Lific`) with
+  // the real title once the issue lands. Nothing to clear — App resets the
+  // slot on route change.
+  const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
+  $effect(() => {
+    if (!issue) return;
+    titleCtx?.set(pageTitle(issue.identifier, issue.title, projectIdentifier));
+  });
   let comments = $state<Comment[]>([]);
   // The thread on screen is a contiguous run ending at the newest comment.
   // The cursor for the page before it comes from `comments[0]`, never from a

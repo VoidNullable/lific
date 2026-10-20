@@ -24,6 +24,8 @@
   import Select from "../lib/Select.svelte";
   import { formatDate } from "../lib/format";
   import { recordRecent } from "../lib/home/recents"; // LIF-237
+  import { getContext } from "svelte";
+  import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { projectRole, loadProjectRole, ensureMeAdmin } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
@@ -78,6 +80,13 @@
   } = $props();
 
   let page = $state<Page | null>(null);
+
+  // Tab title: real page title once loaded; nothing to clear — App resets the slot on route change.
+  const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
+  $effect(() => {
+    if (!page) return;
+    titleCtx?.set(pageTitle(page.identifier, page.title, projectIdentifier));
+  });
 
   // LIF-234: role-aware gating. A page with a project follows that project's
   // role (maintainer+ edits, viewer read-only, viewer may still comment). A

@@ -17,6 +17,8 @@
     type Activity,
     type Issue,
   } from "../lib/api";
+  import { getContext } from "svelte";
+  import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import IssuePickerModal from "../lib/IssuePickerModal.svelte";
   import Markdown from "../lib/Markdown.svelte";
@@ -46,6 +48,13 @@
   } = $props();
 
   let plan = $state<Plan | null>(null);
+
+  // Tab title: real plan title once loaded; nothing to clear — App resets the slot on route change.
+  const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
+  $effect(() => {
+    if (!plan) return;
+    titleCtx?.set(pageTitle(plan.identifier, plan.title, projectIdentifier));
+  });
 
   // LIF-234: plans are content — step edits, title, and delete are
   // maintainer-gated. A viewer sees the plan read-only.

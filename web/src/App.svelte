@@ -47,7 +47,8 @@
   import { motionReduced } from "./lib/theme";
   import { scopedRoute, setPublicProject } from "./lib/publicScope"; // LIF-471
   import { fade } from "svelte/transition";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, setContext } from "svelte";
+  import { routePageTitle, PAGE_TITLE_CONTEXT } from "./lib/pageTitle";
 
   // Path-style deep links (LIF-247): external tools (e.g. the Dashboard)
   // link to plain paths like /LIF/overview or /LIF/issues/LIF-42. The server
@@ -716,6 +717,27 @@
 
   let parsed = $derived(parseRoute(route));
   let onProjectChange = $state<(() => void) | undefined>();
+
+  // ── Document tab title ──────────────────────────────────
+  // One writer: this effect. Routes may register a richer title (an issue's
+  // real title once its data lands) through the `lific:title` context — the
+  // same set-on-load lifecycle as `lific:topbar` — and this effect applies
+  // whatever is registered, falling back to the route-derived default
+  // (routePageTitle, in lib/pageTitle). The override is reset on every
+  // route change here, not by the old route's unmount, so a route never
+  // has to clear and cannot leak its title into the next page.
+  let titleOverride = $state<string | undefined>(undefined);
+  setContext<{ set: (title?: string) => void }>(PAGE_TITLE_CONTEXT, {
+    set: (title) => (titleOverride = title),
+  });
+  let titledRoute = "";
+  $effect(() => {
+    if (route !== titledRoute) {
+      titledRoute = route;
+      titleOverride = undefined;
+    }
+    document.title = titleOverride ?? routePageTitle(parsed);
+  });
 
   // LIF-471: canonicalize the two short public forms in place, so the back
   // button does not land on a route that only ever bounces forward again.
