@@ -16,7 +16,7 @@ export const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
 /** Terminal statuses — work that's left the board (no longer actionable). */
 export const TERMINAL_STATUSES = ["done", "cancelled"];
 
-/** Sentinel `filterStatus` value for the "Unresolved" status-group filter:
+/** Sentinel status filter value for the "Unresolved" status-group filter:
  *  everything that isn't in a terminal state (backlog + todo + active). Uses
  *  an `@`-prefix so it can never collide with a real status string. */
 export const STATUS_UNRESOLVED = "@unresolved";
@@ -80,7 +80,7 @@ export function buildGroups(opts: {
   modules: Module[];
   groupBy: GroupBy;
   searchQuery: string;
-  filterStatus: string;
+  filterStatus: string[];
 }): IssueGroup[] | null {
   const { sortedIssues, modules, groupBy, searchQuery, filterStatus } = opts;
 
@@ -88,8 +88,9 @@ export function buildGroups(opts: {
   if (groupBy === "none") return null;
   // A single literal status filter makes status buckets pointless (one
   // bucket). The "Unresolved" group filter still spans backlog/todo/active,
-  // so status grouping stays meaningful there — don't suppress it.
-  if (groupBy === "status" && filterStatus && filterStatus !== STATUS_UNRESOLVED)
+  // and several selected statuses span several buckets, so status grouping
+  // stays meaningful there. Don't suppress it.
+  if (groupBy === "status" && filterStatus.length === 1 && filterStatus[0] !== STATUS_UNRESOLVED)
     return null;
 
   const out: IssueGroup[] = [];

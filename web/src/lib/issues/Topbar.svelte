@@ -273,14 +273,14 @@
         {#each statusCounts as { status, count } (status)}
           {#if count > 0}
             <Tooltip
-              content={`${count} ${status}${view.filterStatus === status ? "  ·  click to clear" : ""}`}
+              content={`${count} ${status}${view.filterStatus.includes(status) ? "  ·  click to remove from filter" : ""}`}
               placement="bottom"
             >
               <button
                 class="h-6 flex items-center gap-1 px-1.5 rounded
                        text-micro font-medium tabular-nums
                        transition-colors
-                       {view.filterStatus === status
+                       {view.filterStatus.includes(status)
                   ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
                   : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
                 onclick={() => view.toggleStatusFilter(status)}

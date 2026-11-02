@@ -32,9 +32,14 @@ import { updateIssue, type Issue, type Module } from "../api";
 import {
   assignmentNames,
   describeNames,
-  normalizeAssigneeFilter,
   type Person,
 } from "./assignees";
+import {
+  toAssigneeFilterList,
+  toFilterList,
+  toggleFilterValue,
+  type IssueFilters,
+} from "./filters";
 import { toast } from "../toast/toast.svelte";
 
 // LIF-308: issue-list content slices are deliberately separate from the
@@ -250,13 +255,16 @@ export class IssueListState {
   private issueSubTabProjectId = $state<string | null>(null);
 
   // ── Filters ──
-  filterStatus = $state("");
-  filterPriority = $state("");
-  filterLabel = $state("");
-  filterModule = $state("");
-  /** LIF-147: "", "none", "human", "me" or "@username". See
+  // Multi-select: each holds the chosen values, empty for no filter. An
+  // issue matches a dimension when it matches any of its values. See
+  // lib/issues/filters.ts.
+  filterStatus = $state<string[]>([]);
+  filterPriority = $state<string[]>([]);
+  filterLabel = $state<string[]>([]);
+  filterModule = $state<string[]>([]);
+  /** LIF-147: values are "none", "human", "me" or "@username". See
    *  lib/issues/assignees.ts. */
-  filterAssignee = $state("");
+  filterAssignee = $state<string[]>([]);
   searchQuery = $state("");
 
   // ── Sort ──
@@ -343,42 +351,51 @@ export class IssueListState {
 
   // ── Filter helpers ──
   hasActiveFilters(): boolean {
-    return !!(
-      this.filterStatus ||
-      this.filterPriority ||
-      this.filterLabel ||
-      this.filterModule ||
-      this.filterAssignee
-    );
+    return this.activeFilterCount() > 0;
+  }
+
+  /** The filter selections, for applyIssueFilters. */
+  filters(): IssueFilters {
+    return {
+      status: this.filterStatus,
+      priority: this.filterPriority,
+      label: this.filterLabel,
+      module: this.filterModule,
+      assignee: this.filterAssignee,
+    };
   }
 
   clearFilters(): void {
-    this.filterStatus = "";
-    this.filterPriority = "";
-    this.filterLabel = "";
-    this.filterModule = "";
-    this.filterAssignee = "";
+    this.filterStatus = [];
+    this.filterPriority = [];
+    this.filterLabel = [];
+    this.filterModule = [];
+    this.filterAssignee = [];
     this.searchQuery = "";
   }
 
   togglePriorityFilter(p: string): void {
-    this.filterPriority = this.filterPriority === p ? "" : p;
+    this.filterPriority = toggleFilterValue(this.filterPriority, p);
   }
 
   toggleModuleFilter(name: string): void {
-    this.filterModule = this.filterModule === name ? "" : name;
+    this.filterModule = toggleFilterValue(this.filterModule, name);
   }
 
   toggleStatusFilter(status: string): void {
-    this.filterStatus = this.filterStatus === status ? "" : status;
+    this.filterStatus = toggleFilterValue(this.filterStatus, status);
   }
 
   toggleLabelFilter(name: string): void {
-    this.filterLabel = this.filterLabel === name ? "" : name;
+    this.filterLabel = toggleFilterValue(this.filterLabel, name);
   }
 
   toggleAssigneeFilter(value: string): void {
-    this.filterAssignee = this.filterAssignee === value ? "" : value;
+    const lower = value.toLowerCase();
+    const present = this.filterAssignee.find((v) => v.toLowerCase() === lower);
+    this.filterAssignee = present
+      ? this.filterAssignee.filter((v) => v !== present)
+      : [...this.filterAssignee, value];
   }
 
   // ── Sort helper ──
@@ -465,11 +482,11 @@ export class IssueListState {
   /** Count of active filters, for the topbar Filter button badge. */
   activeFilterCount(): number {
     let n = 0;
-    if (this.filterStatus) n++;
-    if (this.filterPriority) n++;
-    if (this.filterLabel) n++;
-    if (this.filterModule) n++;
-    if (this.filterAssignee) n++;
+    if (this.filterStatus.length) n++;
+    if (this.filterPriority.length) n++;
+    if (this.filterLabel.length) n++;
+    if (this.filterModule.length) n++;
+    if (this.filterAssignee.length) n++;
     return n;
   }
 
@@ -500,11 +517,11 @@ export class IssueListState {
    *  localStorage. Sets `hydrated` so the persist effect can start. */
   hydrate(projectId: string): void {
     const s = loadListState(projectId);
-    this.filterStatus = s.filterStatus ?? "";
-    this.filterPriority = s.filterPriority ?? "";
-    this.filterLabel = s.filterLabel ?? "";
-    this.filterModule = s.filterModule ?? "";
-    this.filterAssignee = normalizeAssigneeFilter(s.filterAssignee);
+    this.filterStatus = toFilterList(s.filterStatus);
+    this.filterPriority = toFilterList(s.filterPriority);
+    this.filterLabel = toFilterList(s.filterLabel);
+    this.filterModule = toFilterList(s.filterModule);
+    this.filterAssignee = toAssigneeFilterList(s.filterAssignee);
     this.searchQuery = s.searchQuery ?? "";
     if (s.sortField) this.sortField = s.sortField;
     if (s.sortDir) this.sortDir = s.sortDir;

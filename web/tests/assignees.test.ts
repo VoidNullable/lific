@@ -144,15 +144,26 @@ describe("saved views", async () => {
 
   test("a view saved before assignment existed applies with no assignee filter", () => {
     const old = parseConfig(JSON.stringify({ version: 1, layout: "list", filterStatus: "todo" }));
-    expect(old?.filterAssignee).toBe("");
-    expect(old?.filterStatus).toBe("todo");
+    expect(old?.filterAssignee).toEqual([]);
+    expect(old?.filterStatus).toEqual(["todo"]);
   });
 
   test("the assignee filter round-trips and counts as a change", () => {
     const mine = parseConfig(JSON.stringify({ version: 1, filterAssignee: "me" }))!;
     const none = parseConfig(JSON.stringify({ version: 1 }))!;
-    expect(mine.filterAssignee).toBe("me");
+    expect(mine.filterAssignee).toEqual(["me"]);
     expect(configsDiffer(mine, none)).toBe(true);
-    expect(parseConfig(JSON.stringify({ filterAssignee: "nonsense" }))!.filterAssignee).toBe("");
+    expect(parseConfig(JSON.stringify({ filterAssignee: "nonsense" }))!.filterAssignee).toEqual([]);
+    expect(
+      parseConfig(JSON.stringify({ filterAssignee: ["me", "nonsense", "@bob"] }))!.filterAssignee,
+    ).toEqual(["me", "@bob"]);
+  });
+
+  test("multi-select filters compare without regard to order", () => {
+    const a = parseConfig(JSON.stringify({ filterPriority: ["urgent", "high"] }))!;
+    const b = parseConfig(JSON.stringify({ filterPriority: ["high", "urgent"] }))!;
+    const c = parseConfig(JSON.stringify({ filterPriority: ["urgent"] }))!;
+    expect(configsDiffer(a, b)).toBe(false);
+    expect(configsDiffer(a, c)).toBe(true);
   });
 });

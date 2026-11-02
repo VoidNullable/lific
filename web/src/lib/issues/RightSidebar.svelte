@@ -36,8 +36,8 @@
   }: {
     stats: SidebarStats;
     modules: Module[];
-    filterPriority: string;
-    filterModule: string;
+    filterPriority: string[];
+    filterModule: string[];
     onTogglePriority: (priority: string) => void;
     onToggleModule: (name: string) => void;
   } = $props();
@@ -127,7 +127,7 @@
         <button
           class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-body-sm
                  transition-colors
-                 {filterPriority === p
+                 {filterPriority.includes(p)
             ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
             : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
           onclick={() => onTogglePriority(p)}
@@ -154,7 +154,7 @@
         <button
           class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-body-sm
                  transition-colors
-                 {filterModule === m.name
+                 {filterModule.includes(m.name)
             ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
             : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
           onclick={() => onToggleModule(m.name)}

@@ -19,12 +19,14 @@ import type { SortField, SortDir } from "./sort";
 import type { GroupBy, Density, LaneBy } from "./grouping";
 
 export type PersistedListState = {
-  filterStatus?: string;
-  filterPriority?: string;
-  filterLabel?: string;
-  filterModule?: string;
+  // Lists since multi-select filters; older state holds one string each.
+  // Read through filters.ts `toFilterList`.
+  filterStatus?: string | string[];
+  filterPriority?: string | string[];
+  filterLabel?: string | string[];
+  filterModule?: string | string[];
   /** LIF-147. Absent in state saved before assignment existed. */
-  filterAssignee?: string;
+  filterAssignee?: string | string[];
   searchQuery?: string;
   sortField?: SortField;
   sortDir?: SortDir;

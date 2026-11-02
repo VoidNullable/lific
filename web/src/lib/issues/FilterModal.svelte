@@ -52,6 +52,10 @@
   // LIF-147: "Me" has its own row, so the people list leaves you out. A
   // stored filter naming someone no longer assigned anywhere still gets a
   // row, so it can be seen and cleared.
+  //
+  // Every section is multi-select: an issue matches a section when it
+  // matches any checked row ("urgent" and "high" shows both). "Any" clears
+  // the section.
   const ASSIGNEE_CHOICES = [
     { value: ASSIGNEE_FILTER_ME, label: "Me", hint: "Issues that name you." },
     { value: ASSIGNEE_FILTER_HUMAN, label: "Needs a person", hint: "For any person or for named people." },
@@ -59,9 +63,11 @@
   ];
   let filterPeople = $derived.by(() => {
     const others = assignees.filter((a) => a.user_id !== $currentUser?.id);
-    const stored = filterUsername(view.filterAssignee);
-    if (stored && !others.some((a) => a.username.toLowerCase() === stored.toLowerCase())) {
-      others.push({ user_id: -1, username: stored });
+    for (const value of view.filterAssignee) {
+      const stored = filterUsername(value);
+      if (stored && !others.some((a) => a.username.toLowerCase() === stored.toLowerCase())) {
+        others.push({ user_id: -1, username: stored });
+      }
     }
     return others;
   });
@@ -156,17 +162,17 @@
             <!-- Any -->
             <button
               class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                     {!view.filterStatus
+                     {view.filterStatus.length === 0
                 ? 'bg-[var(--accent-subtle)]'
                 : 'hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => (view.filterStatus = "")}
+              onclick={() => (view.filterStatus = [])}
             >
               <span class="size-4 mt-0.5 shrink-0"></span>
               <span class="flex-1 min-w-0">
                 <span class="block text-body-sm font-medium text-[var(--text)]">Any</span>
                 <span class="block text-caption text-[var(--text-faint)]">No status filter.</span>
               </span>
-              {#if !view.filterStatus}
+              {#if view.filterStatus.length === 0}
                 <Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />
               {/if}
             </button>
@@ -174,7 +180,7 @@
             <!-- Unresolved (status group) -->
             <button
               class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                     {view.filterStatus === STATUS_UNRESOLVED
+                     {view.filterStatus.includes(STATUS_UNRESOLVED)
                 ? 'bg-[var(--accent-subtle)]'
                 : 'hover:bg-[var(--bg-subtle)]'}"
               onclick={() => view.toggleStatusFilter(STATUS_UNRESOLVED)}
@@ -184,13 +190,13 @@
                 <span class="block text-body-sm font-medium text-[var(--text)]">Unresolved</span>
                 <span class="block text-caption text-[var(--text-faint)]">{UNRESOLVED_DESCRIPTION}</span>
               </span>
-              {#if view.filterStatus === STATUS_UNRESOLVED}
+              {#if view.filterStatus.includes(STATUS_UNRESOLVED)}
                 <Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />
               {/if}
             </button>
 
             {#each STATUSES as s (s)}
-              {@const active = view.filterStatus === s}
+              {@const active = view.filterStatus.includes(s)}
               <button
                 class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                        {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -217,23 +223,23 @@
           <div class="flex flex-col gap-0.5">
             <button
               class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                     {!view.filterPriority
+                     {view.filterPriority.length === 0
                 ? 'bg-[var(--accent-subtle)]'
                 : 'hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => (view.filterPriority = "")}
+              onclick={() => (view.filterPriority = [])}
             >
               <span class="size-4 mt-0.5 shrink-0"></span>
               <span class="flex-1 min-w-0">
                 <span class="block text-body-sm font-medium text-[var(--text)]">Any</span>
                 <span class="block text-caption text-[var(--text-faint)]">No priority filter.</span>
               </span>
-              {#if !view.filterPriority}
+              {#if view.filterPriority.length === 0}
                 <Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />
               {/if}
             </button>
 
             {#each PRIORITIES as p (p)}
-              {@const active = view.filterPriority === p}
+              {@const active = view.filterPriority.includes(p)}
               <button
                 class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                        {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -263,18 +269,18 @@
           <div class="flex flex-col gap-0.5">
             <button
               class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                     {!view.filterAssignee ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => (view.filterAssignee = "")}
+                     {view.filterAssignee.length === 0 ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+              onclick={() => (view.filterAssignee = [])}
             >
               <span class="size-4 mt-0.5 shrink-0"></span>
               <span class="flex-1 min-w-0">
                 <span class="block text-body-sm font-medium text-[var(--text)]">Any</span>
                 <span class="block text-caption text-[var(--text-faint)]">No assignee filter.</span>
               </span>
-              {#if !view.filterAssignee}<Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />{/if}
+              {#if view.filterAssignee.length === 0}<Check size={14} class="mt-0.5 shrink-0 text-[var(--accent)]" />{/if}
             </button>
             {#each ASSIGNEE_CHOICES as choice (choice.value)}
-              {@const active = view.filterAssignee === choice.value}
+              {@const active = view.filterAssignee.includes(choice.value)}
               <button
                 class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                        {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -299,7 +305,7 @@
             {/each}
             {#each filterPeople as person (person.username)}
               {@const value = personFilter(person.username)}
-              {@const active = view.filterAssignee.toLowerCase() === value.toLowerCase()}
+              {@const active = view.filterAssignee.some((v) => v.toLowerCase() === value.toLowerCase())}
               <button
                 class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                        {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -325,15 +331,15 @@
             <div class="flex flex-col gap-0.5">
               <button
                 class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                       {!view.filterLabel ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
-                onclick={() => (view.filterLabel = "")}
+                       {view.filterLabel.length === 0 ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+                onclick={() => (view.filterLabel = [])}
               >
                 <span class="size-2.5 shrink-0"></span>
                 <span class="flex-1 text-body-sm font-medium text-[var(--text)]">Any</span>
-                {#if !view.filterLabel}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
+                {#if view.filterLabel.length === 0}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
               </button>
               {#each labels as l (l.id)}
-                {@const active = view.filterLabel === l.name}
+                {@const active = view.filterLabel.includes(l.name)}
                 <button
                   class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                          {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -357,15 +363,15 @@
             <div class="flex flex-col gap-0.5">
               <button
                 class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
-                       {!view.filterModule ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
-                onclick={() => (view.filterModule = "")}
+                       {view.filterModule.length === 0 ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
+                onclick={() => (view.filterModule = [])}
               >
                 <span class="size-4 shrink-0"></span>
                 <span class="flex-1 text-body-sm font-medium text-[var(--text)]">Any</span>
-                {#if !view.filterModule}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
+                {#if view.filterModule.length === 0}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
               </button>
               {#each modules as m (m.id)}
-                {@const active = view.filterModule === m.name}
+                {@const active = view.filterModule.includes(m.name)}
                 <button
                   class="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-md text-left transition-colors
                          {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
@@ -395,6 +401,7 @@
         <span class="inline-flex items-center gap-1">
           <kbd class="font-mono">esc</kbd> close
         </span>
+        <span class="hidden sm:inline">Pick several to match any of them</span>
         <span class="ml-auto">
           {filterCount > 0 ? `${filterCount} active` : "No filters applied"}
         </span>

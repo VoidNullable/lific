@@ -23,7 +23,7 @@ import type { IssueListState } from "./state.svelte";
 import type { SortField, SortDir } from "./sort";
 import type { GroupBy, Density, LaneBy } from "./grouping";
 import { saveListState, saveLayout, saveHiddenStatuses } from "./persistence";
-import { normalizeAssigneeFilter } from "./assignees";
+import { sameFilterList, toAssigneeFilterList, toFilterList } from "./filters";
 import {
   listSavedViews,
   createSavedView,
@@ -40,12 +40,14 @@ export interface ViewConfig {
    *  to apply — this is just a marker for future migrations, unused today. */
   version: 1;
   layout: Layout;
-  filterStatus: string;
-  filterPriority: string;
-  filterLabel: string;
-  filterModule: string;
-  /** LIF-147. Views saved before it existed parse to "" (no filter). */
-  filterAssignee: string;
+  /** Filter selections, empty for none. Views saved before multi-select
+   *  stored one string per filter; `parseConfig` reads both. */
+  filterStatus: string[];
+  filterPriority: string[];
+  filterLabel: string[];
+  filterModule: string[];
+  /** LIF-147. Views saved before it existed parse to [] (no filter). */
+  filterAssignee: string[];
   searchQuery: string;
   sortField: SortField;
   sortDir: SortDir;
@@ -61,12 +63,15 @@ export interface ViewConfig {
   hiddenStatuses: string[];
 }
 
-const FIELDS_COMPARED: (keyof ViewConfig)[] = [
+const FILTER_FIELDS = [
   "filterStatus",
   "filterPriority",
   "filterLabel",
   "filterModule",
   "filterAssignee",
+] as const;
+
+const FIELDS_COMPARED: (keyof ViewConfig)[] = [
   "searchQuery",
   "sortField",
   "sortDir",
@@ -81,11 +86,11 @@ export function buildConfig(view: IssueListState, layout: Layout): ViewConfig {
   return {
     version: 1,
     layout,
-    filterStatus: view.filterStatus,
-    filterPriority: view.filterPriority,
-    filterLabel: view.filterLabel,
-    filterModule: view.filterModule,
-    filterAssignee: view.filterAssignee,
+    filterStatus: [...view.filterStatus],
+    filterPriority: [...view.filterPriority],
+    filterLabel: [...view.filterLabel],
+    filterModule: [...view.filterModule],
+    filterAssignee: [...view.filterAssignee],
     searchQuery: view.searchQuery,
     sortField: view.sortField,
     sortDir: view.sortDir,
@@ -115,11 +120,11 @@ export function parseConfig(raw: string): ViewConfig | null {
   return {
     version: 1,
     layout: p.layout === "board" ? "board" : "list",
-    filterStatus: str(p.filterStatus, ""),
-    filterPriority: str(p.filterPriority, ""),
-    filterLabel: str(p.filterLabel, ""),
-    filterModule: str(p.filterModule, ""),
-    filterAssignee: normalizeAssigneeFilter(p.filterAssignee),
+    filterStatus: toFilterList(p.filterStatus),
+    filterPriority: toFilterList(p.filterPriority),
+    filterLabel: toFilterList(p.filterLabel),
+    filterModule: toFilterList(p.filterModule),
+    filterAssignee: toAssigneeFilterList(p.filterAssignee),
     searchQuery: str(p.searchQuery, ""),
     sortField: (["priority", "age", "number", "updated"] as const).includes(p.sortField as SortField)
       ? (p.sortField as SortField)
@@ -146,11 +151,11 @@ export function applyConfig(
   projectIdentifier: string,
   config: ViewConfig,
 ): Layout {
-  view.filterStatus = config.filterStatus;
-  view.filterPriority = config.filterPriority;
-  view.filterLabel = config.filterLabel;
-  view.filterModule = config.filterModule;
-  view.filterAssignee = config.filterAssignee;
+  view.filterStatus = [...config.filterStatus];
+  view.filterPriority = [...config.filterPriority];
+  view.filterLabel = [...config.filterLabel];
+  view.filterModule = [...config.filterModule];
+  view.filterAssignee = [...config.filterAssignee];
   view.searchQuery = config.searchQuery;
   view.sortField = config.sortField;
   view.sortDir = config.sortDir;
@@ -172,9 +177,8 @@ export function applyConfig(
 export function configsDiffer(a: ViewConfig, b: ViewConfig): boolean {
   if (a.layout !== b.layout) return true;
   if (FIELDS_COMPARED.some((k) => a[k] !== b[k])) return true;
-  const ah = [...a.hiddenStatuses].sort();
-  const bh = [...b.hiddenStatuses].sort();
-  return ah.length !== bh.length || ah.some((s, i) => s !== bh[i]);
+  if (FILTER_FIELDS.some((k) => !sameFilterList(a[k], b[k]))) return true;
+  return !sameFilterList(a.hiddenStatuses, b.hiddenStatuses);
 }
 
 // ── Backend round trips ───────────────────────────────────────────────

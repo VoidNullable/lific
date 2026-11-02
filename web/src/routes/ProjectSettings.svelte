@@ -416,7 +416,7 @@
   // filter there (merging with whatever else is stored) before navigating.
   function openLabelInIssues(name: string) {
     const s = loadListState(projectIdentifier);
-    saveListState(projectIdentifier, { ...s, filterLabel: name });
+    saveListState(projectIdentifier, { ...s, filterLabel: [name] });
     navigate(`/${projectIdentifier}/issues`);
   }
 

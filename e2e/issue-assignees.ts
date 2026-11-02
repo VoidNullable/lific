@@ -176,8 +176,9 @@ async function setFilter(page: Page, value: string) {
   await page.getByRole("button", { name: /^Filter/ }).first().click();
   const section = page.getByTestId("filter-assignee");
   await section.waitFor({ state: "visible" });
-  if (value === "") await section.getByRole("button", { name: /^Any No assignee filter/ }).click();
-  else await section.locator(`[data-assignee-filter="${value}"]`).click();
+  // Filters are multi-select, so clear the section before choosing one.
+  await section.getByRole("button", { name: /^Any No assignee filter/ }).click();
+  if (value !== "") await section.locator(`[data-assignee-filter="${value}"]`).click();
   await page.getByRole("button", { name: "Close filters" }).click();
   await section.waitFor({ state: "detached" });
 }
@@ -286,6 +287,11 @@ async function main(): Promise<number> {
     await expectRows(page, [lead.identifier], [bulkA.identifier], "Needs a person filter");
     await setFilter(page, "none");
     await expectRows(page, [bulkA.identifier, bulkB.identifier], [lead.identifier], "Any agent filter");
+    await setFilter(page, "me");
+    await page.getByRole("button", { name: /^Filter/ }).first().click();
+    await page.getByTestId("filter-assignee").locator('[data-assignee-filter="none"]').click();
+    await page.getByRole("button", { name: "Close filters" }).click();
+    await expectRows(page, [lead.identifier, bulkA.identifier, bulkB.identifier], [], "Me or Any agent filter");
     await setFilter(page, "");
     await expectRows(page, [lead.identifier, bulkA.identifier], [], "no assignee filter");
     console.log("ok   list filters by Me, Needs a person and Any agent");

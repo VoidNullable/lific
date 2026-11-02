@@ -38,9 +38,10 @@
   import { compareIssues as compareIssuesPure } from "../lib/issues/sort";
   import { computeSearchResult, RESULT_CAP } from "../lib/issues/search";
   import {
-    STATUSES, PRIORITIES, buildGroups, STATUS_UNRESOLVED, isUnresolved,
+    STATUSES, PRIORITIES, buildGroups,
     buildLanes, laneKeyForIssue,
   } from "../lib/issues/grouping";
+  import { applyIssueFilters, statusFilterSet } from "../lib/issues/filters";
   import { saveListState, saveLayout } from "../lib/issues/persistence";
   import {
     loadSeen,
@@ -70,7 +71,6 @@
   import {
     assigneesIn,
     assignmentNames,
-    matchesAssigneeFilter,
     sameNames,
     type Person,
   } from "../lib/issues/assignees"; // LIF-147
@@ -481,27 +481,10 @@
   // edits (status/priority cycle, bulk) re-derive without a refetch. Module
   // is matched by name → id via the loaded `modules` so the stored filter
   // value (a name) still works.
-  let controlFilteredIssues = $derived.by(() => {
-    let out = issues;
-    if (view.filterStatus === STATUS_UNRESOLVED) {
-      // "Unresolved" group: everything not in a terminal state.
-      out = out.filter((i) => isUnresolved(i.status));
-    } else if (view.filterStatus) {
-      out = out.filter((i) => i.status === view.filterStatus);
-    }
-    if (view.filterPriority) out = out.filter((i) => i.priority === view.filterPriority);
-    if (view.filterLabel) out = out.filter((i) => i.labels.includes(view.filterLabel));
-    if (view.filterModule) {
-      const mod = modules.find((m) => m.name === view.filterModule);
-      const mid = mod ? mod.id : null;
-      out = out.filter((i) => i.module_id === mid);
-    }
-    if (view.filterAssignee) {
-      const me = $currentUser;
-      out = out.filter((i) => matchesAssigneeFilter(i, view.filterAssignee, me));
-    }
-    return out;
-  });
+  // Each filter is multi-select (lib/issues/filters.ts).
+  let controlFilteredIssues = $derived(
+    applyIssueFilters(issues, view.filters(), modules, $currentUser),
+  );
 
   // LIF-147: everyone named on this project's issues, for the filter's
   // people list.
@@ -631,14 +614,13 @@
     buildLanes({ sortedIssues, modules, laneBy: view.laneBy }),
   );
 
-  // Statuses that render as columns — respects the single-status filter and
-  // the "Columns" visibility pills. Shared by every lane's column row (and
-  // the single implicit lane when swimlanes are off).
-  let visibleStatuses = $derived(
-    STATUSES.filter(
-      (s) => (!view.filterStatus || view.filterStatus === s) && !view.hiddenStatuses.has(s),
-    ),
-  );
+  // Statuses that render as columns: respects the status filter and the
+  // "Columns" visibility pills. Shared by every lane's column row (and the
+  // single implicit lane when swimlanes are off).
+  let visibleStatuses = $derived.by(() => {
+    const allowed = statusFilterSet(view.filterStatus);
+    return STATUSES.filter((s) => (!allowed || allowed.has(s)) && !view.hiddenStatuses.has(s));
+  });
 
   let boardItems = $state<Record<string, Issue[]>>({});
 
