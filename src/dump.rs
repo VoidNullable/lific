@@ -269,15 +269,19 @@ pub(crate) fn staging_is_locked(path: &Path) -> bool {
 /// and gives every page back when it closes; the pooled readers only ever map
 /// what their own queries touch.
 fn snapshot_db(db_path: &Path, dest: &TempFile) -> Result<(), LificError> {
+    let source_path = resolve_parent_dir(db_path)
+        .map_err(|e| LificError::Internal(format!("resolve database directory: {e}")))?;
+    let dest_path = resolve_parent_dir(dest.path())
+        .map_err(|e| LificError::Internal(format!("resolve staging directory: {e}")))?;
     let conn = rusqlite::Connection::open_with_flags(
-        db_path,
+        &source_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|e| LificError::Internal(format!("open snapshot source connection: {e}")))?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))
         .map_err(|e| LificError::Internal(format!("set snapshot busy timeout: {e}")))?;
     let mut destination = rusqlite::Connection::open_with_flags(
-        dest.path(),
+        &dest_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|e| LificError::Internal(format!("open SQLite staging file: {e}")))?;
@@ -287,6 +291,36 @@ fn snapshot_db(db_path: &Path, dest: &TempFile) -> Result<(), LificError> {
         .run_to_completion(100, std::time::Duration::ZERO, None)
         .map_err(|e| LificError::Internal(format!("SQLite backup failed: {e}")))?;
     Ok(())
+}
+
+/// Resolve symlinks in `path`'s directory, keeping its final component as is.
+///
+/// SQLite's `SQLITE_OPEN_NOFOLLOW` refuses a symlink in any component of the
+/// path, not only the last one. A data directory reached through a symlink
+/// (macOS's `/var` and `/tmp`, a relocated home) is ordinary, so the directory
+/// is resolved up front and NOFOLLOW still guards the file itself.
+#[cfg(unix)]
+fn resolve_parent_dir(path: &Path) -> std::io::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Some(name) = path.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} has no file name", path.display()),
+        ));
+    };
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "match the Unix signature; SQLite's NOFOLLOW check is Unix-only"
+)]
+fn resolve_parent_dir(path: &Path) -> std::io::Result<PathBuf> {
+    Ok(path.to_path_buf())
 }
 
 /// Set 0600 permissions on a file (owner-only) on Unix. No-op elsewhere.
@@ -2420,6 +2454,39 @@ mod tests {
         write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
         let mode = fs::metadata(&out).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "archive must be chmod 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_reads_a_database_whose_directory_is_reached_through_a_symlink() {
+        let (dir_tmp, real_db) = seed_data_dir("symlinked_parent");
+        let links = temp_dir("symlinked_parent_link");
+        let linked_dir = links.path().join("data");
+        std::os::unix::fs::symlink(dir_tmp.path(), &linked_dir).unwrap();
+        let db_path = linked_dir.join("lific.db");
+        let out = dir_tmp.path().join("out.tar.gz");
+
+        let manifest = write_dump(&crate::db::open(&real_db).unwrap(), &db_path, &out).unwrap();
+
+        assert!(archive_entries(&out).contains(&ARCHIVE_DB_NAME.to_string()));
+        assert_eq!(manifest.attachment_count, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_still_refuses_a_database_file_that_is_itself_a_symlink() {
+        let (dir_tmp, real_db) = seed_data_dir("symlinked_file");
+        let db_path = dir_tmp.path().join("linked.db");
+        std::os::unix::fs::symlink(&real_db, &db_path).unwrap();
+        let out = dir_tmp.path().join("out.tar.gz");
+
+        let err = write_dump(&crate::db::open(&real_db).unwrap(), &db_path, &out).unwrap_err();
+
+        assert!(
+            err.to_string().contains("open snapshot source connection"),
+            "a symlinked database file must be refused, got {err}"
+        );
+        assert!(!out.exists());
     }
 
     /// Whether any dump staging directory is left in `dir`.
