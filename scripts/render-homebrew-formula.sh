@@ -45,6 +45,7 @@ cat <<EOF
 class Lific < Formula
   desc "Local-first issue tracker for AI agents, with an MCP server and web UI"
   homepage "https://lific.dev"
+  version "${version}"
   license "Apache-2.0"
 
   on_macos do
@@ -71,6 +72,7 @@ class Lific < Formula
 
   def install
     bin.install Dir["lific-*"].fetch(0) => "lific"
+    chmod 0755, bin/"lific"
     generate_completions_from_executable(bin/"lific", "completion")
   end
 

@@ -37,6 +37,10 @@ expect_pair lific-linux-aarch64 "$(hash_for 2)"
 expect_pair lific-macos-x86_64 "$(hash_for 3)"
 expect_pair lific-macos-aarch64 "$(hash_for 4)"
 printf '%s\n' "$formula" | grep -q windows && fail "formula mentions the Windows binary"
+# Homebrew would otherwise guess the version from the asset name ("86.64").
+printf '%s\n' "$formula" | grep -qxF '  version "2.11.1"' || fail "formula does not pin its version"
+# Release assets download without the executable bit.
+printf '%s\n' "$formula" | grep -qF 'chmod 0755, bin/"lific"' || fail "formula does not make the binary executable"
 
 if command -v ruby >/dev/null 2>&1; then
   printf '%s\n' "$formula" | ruby -c >/dev/null || fail "formula is not valid Ruby"
