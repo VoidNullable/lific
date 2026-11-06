@@ -536,23 +536,23 @@ Deletes a comment. Only the author or an administrator can delete.
 
 ### `get_briefing`
 
-Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters. Call it first in a session instead of rebuilding the picture from searches, pages, issue lists and plans.
+Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters. Call it first in a session, as `get_briefing(project='APP', since='last')`, instead of rebuilding the picture from searches, pages, issue lists and plans.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `project` | `string` | No | Project identifier. Falls back to the repository binding; required on an unbound session. |
-| `since` | `string` | No | ISO date or datetime. Adds a section for what changed strictly after it. Read like `get_activity`'s `since`: UTC unless an offset is given. |
+| `since` | `string` | No | `last`, or an ISO date or datetime. Adds a section for what changed since your previous briefing of this project, or strictly after the date. A date is read like `get_activity`'s `since`: UTC unless an offset is given. |
 | `pages` | `string[]` | No | Page identifiers to report on, such as the pages an `AGENTS.md` tells agents to read. At most 10 are reported; duplicates count once. Without it, the three most recently updated pages are shown. |
 
-It takes `viewer` on the project. Everything is read from live records at call time; nothing is stored or summarized by a model.
+It takes `viewer` on the project. Everything is read from live records at call time; nothing is summarized by a model.
 
-The response opens with the current time and a `since` value to pass next time. That cursor is one second before the briefing, because `since` is strict and timestamps have one-second resolution: a change written later in the briefing's own second is reported next time instead of never, and changes from that second may be reported twice.
+The one thing a briefing stores is where it left off: a position in the audit log, kept per caller and project. Every briefing moves it, with or without `since`, and `since='last'` reports the changes after it, so two briefings in a row never repeat or skip a change, even within the same second. Each bot key keeps its own position, separate from its owner's. The first `since='last'` on a project says there is no earlier briefing to resume from and starts the mark there.
 
 Sections follow in this order, and a section with nothing to report is left out:
 
 | Section | What it lists |
 | --- | --- |
-| Since the cursor | Only with `since`. Counts of issues created, closed (`done` or `cancelled`) and otherwise moved, and pages edited, then the most recent of each kind. Status changes are net per issue, so an issue moved and moved back is not listed. When nothing changed, the header says so instead. |
+| Since your last briefing, or since the date | Only with `since`. Counts of issues created, closed (`done` or `cancelled`) and otherwise moved, pages edited, and comments added, then the most recent of each kind with who made it (`by @name`; system writes name no one). A comment shows its first line. Status changes are net per issue, so an issue moved and moved back is not listed. Changes to deleted issues, pages and comments are left out. When nothing changed, the header says so instead. |
 | Active plans | Each with its progress and the next open step: the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named. |
 | Due to check | Open issues with a date wait whose window has arrived, most overdue first, each with its wait line. These no longer block, so this is where the follow-up surfaces; clear the wait with `unlink_issues` when it is done. |
 | Blocked | Open issues with an unresolved blocker or a wait still holding, each naming its blocking issues and their status, and its holding waits (`waiting on @ada-lovelace (note)`, `waiting until 2026-09-28..29`). A blocker in a project you cannot view is counted, not named. |

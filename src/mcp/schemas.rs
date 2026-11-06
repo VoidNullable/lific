@@ -103,7 +103,9 @@ pub struct GetActivityInput {
 pub struct GetBriefingInput {
     #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
     pub project: Option<String>,
-    #[schemars(description = "Also summarize changes after this ISO date or datetime")]
+    #[schemars(
+        description = "last (changes since your previous briefing of this project) or an ISO date or datetime"
+    )]
     pub since: Option<String>,
     #[schemars(description = "Page IDs to report on; default recently updated")]
     pub pages: Option<Vec<String>>,

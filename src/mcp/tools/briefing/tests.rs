@@ -596,60 +596,176 @@ fn a_next_step_linked_into_an_invisible_project_is_not_named() {
     assert!(out.contains("Mirror it [FGN-1]"), "{out}");
 }
 
-/// Review fix: the advertised cursor used to be the briefing's own second,
-/// read back with a strict `>` against one-second timestamps, so a change
-/// written later in that same second was never reported by any briefing.
+// ── since='last' (LIF-490) ──────────────────────────────────────────
+
+fn comment(m: &LificMcp, identifier: &str, content: &str) {
+    let added = m.add_comment(Parameters(AddCommentInput {
+        identifier: identifier.into(),
+        content: content.into(),
+    }));
+    assert!(!added.starts_with("Error"), "got: {added}");
+}
+
+/// Two briefings in a row: the second reports exactly what happened in
+/// between, with who did it, and nothing from before the first. Both run in
+/// the same second, which a timestamp cursor could not tell apart.
 #[test]
-fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
-    let (m, _guard) = mcp();
-    seed_project(&m, "Cursor", "CSR");
-    issue(&m, "CSR", "Before", "todo", "none");
-    m.write(|conn| {
-        conn.execute_batch(
-            "UPDATE audit_log SET ts = '2026-06-01 11:00:00';
-             UPDATE issues SET created_at = '2026-06-01 11:00:00';",
-        )?;
-        Ok(())
-    })
-    .unwrap();
+fn since_last_reports_only_the_changes_after_the_callers_previous_briefing() {
+    let (m, _admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+        setup_membership_mcp();
+    as_user(&lead, || {
+        issue(&m, "MEM", "Before the first briefing", "todo", "high");
+        String::new()
+    });
 
-    // Taken half-way through 12:00:00.
-    let taken_at = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00.500Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let first = m
-        .get_briefing_at(
-            GetBriefingInput {
-                project: Some("CSR".into()),
-                ..Default::default()
-            },
-            taken_at,
-        )
-        .unwrap();
-    let cursor = first
-        .split("Resume later with since='")
-        .nth(1)
-        .and_then(|rest| rest.split('\'').next())
-        .unwrap_or_else(|| panic!("no cursor in {first}"))
-        .to_string();
-
-    // Written after the briefing, in the same second.
-    issue(&m, "CSR", "Same second", "todo", "none");
-    m.write(|conn| {
-        conn.execute(
-            "UPDATE issues SET created_at = '2026-06-01 12:00:00' WHERE title = 'Same second'",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    let next = briefing(&m, Some("CSR"), Some(&cursor), &[]);
+    let first = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
     assert!(
-        next.contains("new CSR-2"),
-        "cursor {cursor} lost it:\n{next}"
+        first.contains("No earlier briefing of MEM for you to resume from"),
+        "{first}"
     );
-    assert!(!next.contains("new CSR-1"), "{next}");
+    assert!(!first.contains("## Since"), "{first}");
+    assert!(first.contains("Resume later with since='last'."), "{first}");
+
+    as_user(&lead, || {
+        issue(&m, "MEM", "Between briefings", "backlog", "low");
+        set_status(&m, "MEM-1", "active");
+        comment(&m, "MEM-1", "Picked this up.\nMore detail below.");
+        String::new()
+    });
+
+    let second = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    let changes = section(&second, "Since your last briefing (");
+    let by = format!(" by @{}", lead.username);
+    assert!(
+        changes
+            .contains("Issues created 1, closed 0, otherwise moved 1. Pages edited 0. Comments 1."),
+        "{changes}"
+    );
+    assert!(
+        changes.contains(&format!(
+            "new MEM-2 | backlog | low | Between briefings{by}"
+        )),
+        "{changes}"
+    );
+    assert!(
+        changes.contains(&format!(
+            "moved MEM-1 todo -> active{by} | Before the first briefing"
+        )),
+        "{changes}"
+    );
+    assert!(
+        changes.contains(&format!("comment on MEM-1{by}: Picked this up.")),
+        "{changes}"
+    );
+    assert!(
+        !changes.contains("More detail"),
+        "first line only: {changes}"
+    );
+    assert!(!changes.contains("new MEM-1"), "{changes}");
+
+    // Nothing happened since the second briefing.
+    let third = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(!third.contains("## Since"), "{third}");
+    assert!(
+        third.contains("No changes since your last briefing ("),
+        "{third}"
+    );
+}
+
+/// The cursor belongs to the caller and the project: one person's briefing
+/// does not use up another's changes, nor one project's another's.
+#[test]
+fn each_caller_and_project_keeps_its_own_cursor() {
+    let (m, admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+        setup_membership_mcp();
+    as_user(&admin, || {
+        seed_project(&m, "Other", "OTH");
+        String::new()
+    });
+    for user in [&viewer, &lead] {
+        as_user(user, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    }
+    as_user(&admin, || briefing(&m, Some("OTH"), Some("last"), &[]));
+
+    as_user(&lead, || {
+        issue(&m, "MEM", "Fresh", "todo", "none");
+        String::new()
+    });
+
+    // The lead looks first; the viewer's cursor is untouched by that.
+    let lead_view = as_user(&lead, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(lead_view.contains("new MEM-1"), "{lead_view}");
+    let viewer_view = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(viewer_view.contains("new MEM-1"), "{viewer_view}");
+
+    // A briefing of another project neither reports nor consumes MEM's.
+    let other = as_user(&admin, || briefing(&m, Some("OTH"), Some("last"), &[]));
+    assert!(!other.contains("MEM-1"), "{other}");
+    let admin_first = as_user(&admin, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(
+        admin_first.contains("No earlier briefing of MEM for you to resume from"),
+        "{admin_first}"
+    );
+}
+
+/// A briefing without `since`, or with a timestamp, still moves the cursor:
+/// `since='last'` means the caller's last briefing of any kind.
+#[test]
+fn any_briefing_moves_the_cursor_and_a_timestamp_since_also_names_actors() {
+    let (m, _admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+        setup_membership_mcp();
+    as_user(&viewer, || briefing(&m, Some("MEM"), None, &[]));
+    as_user(&lead, || {
+        issue(&m, "MEM", "Seen by a timestamp", "todo", "none");
+        comment(&m, "MEM-1", "First note");
+        String::new()
+    });
+
+    let by_time = as_user(&viewer, || {
+        briefing(&m, Some("MEM"), Some("2000-01-01"), &[])
+    });
+    let changes = section(&by_time, "Since 2000-01-01 00:00:00 UTC");
+    assert!(
+        changes.contains(&format!(
+            "comment on MEM-1 by @{}: First note",
+            lead.username
+        )),
+        "{changes}"
+    );
+
+    let resumed = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(!resumed.contains("## Since"), "already reported: {resumed}");
+}
+
+/// Changes to deleted records and to other projects stay out of the section.
+#[test]
+fn since_last_skips_deleted_records_and_other_projects() {
+    let (m, admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+        setup_membership_mcp();
+    as_user(&admin, || {
+        seed_project(&m, "Other", "OTH");
+        String::new()
+    });
+    as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    as_user(&lead, || {
+        issue(&m, "MEM", "Short lived", "todo", "none");
+        String::new()
+    });
+    as_user(&admin, || {
+        issue(&m, "OTH", "Elsewhere", "todo", "none");
+        comment(&m, "OTH-1", "Not yours");
+        let deleted = m.delete(Parameters(DeleteInput {
+            resource_type: "issue".into(),
+            identifier: "MEM-1".into(),
+            project: None,
+        }));
+        assert!(!deleted.starts_with("Error"), "got: {deleted}");
+        String::new()
+    });
+
+    let out = as_user(&viewer, || briefing(&m, Some("MEM"), Some("last"), &[]));
+    assert!(!out.contains("## Since"), "{out}");
+    assert!(!out.contains("OTH-1"), "{out}");
 }
 
 /// Review fix: sections used to read the first 100 rows by priority and only

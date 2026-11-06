@@ -330,7 +330,7 @@ pub(crate) fn issue_link_context_reads() -> usize {
 /// `get_info`. This is unconditional context cost on every session, so the
 /// convention guidance appended after the discovery guidance is kept tight
 /// (imperative, no filler). Extracted as a const so it stays testable.
-const SERVER_INSTRUCTIONS: &str = "Lific is an issue tracker. On resume, call get_briefing(project='X', since='<last cursor>') first; omit since the first time. \
+const SERVER_INSTRUCTIONS: &str = "Lific is an issue tracker. Open every session with get_briefing(project='X', since='last'). \
      list_resources(resource_type='project') lists projects. list_issues filters issues; workable=true gives open issues with no open blocker. \
      search finds text in issues and pages. \
      When you finish an issue, set status='done'. Keep each issue one self-contained change, filed in one of the project's modules. \
@@ -1103,7 +1103,11 @@ mod tests {
         assert!(instructions.contains("modules"));
         assert!(instructions.contains("create_plan"));
         // LIF-483: resuming starts with one briefing instead of a plan listing.
-        assert!(instructions.contains("On resume, call get_briefing(project='X', since="));
+        // LIF-490: the server keeps the cursor, so the call is always the same.
+        assert!(
+            instructions
+                .contains("Open every session with get_briefing(project='X', since='last').")
+        );
         assert!(instructions.contains("get_plan(plan='X-PLAN-1') gives a plan's full tree"));
         assert!(instructions.contains("pages for documentation"));
     }
