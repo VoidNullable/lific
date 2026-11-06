@@ -720,3 +720,179 @@ fn excluded_rows_ahead_of_an_eligible_issue_do_not_hide_it() {
     // A count cut short by the scan says so rather than posing as exact.
     section(&out, "Active (100+)");
 }
+
+// ── Needs triage (LIF-495) ──────────────────────────────────────────
+
+fn module(m: &LificMcp, project: &str, name: &str, status: &str) {
+    let created = m.manage_resource(Parameters(ManageResourceInput {
+        resource_type: "module".into(),
+        action: "create".into(),
+        project: Some(project.into()),
+        name: Some(name.into()),
+        status: Some(status.into()),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+}
+
+fn issue_in_module(m: &LificMcp, project: &str, title: &str, status: &str, module: &str) {
+    let created = m.create_issue(Parameters(CreateIssueInput {
+        project: Some(project.into()),
+        title: title.into(),
+        status: Some(status.into()),
+        module: Some(module.into()),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+}
+
+fn plan(m: &LificMcp, project: &str, title: &str, steps: &[(&str, bool)]) {
+    let created = m.create_plan(Parameters(CreatePlanInput {
+        project: Some(project.into()),
+        title: title.into(),
+        anchor_issue: None,
+        steps: Some(
+            steps
+                .iter()
+                .map(|(title, done)| PlanStepInput {
+                    title: (*title).into(),
+                    done: Some(*done),
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+}
+
+/// A briefing taken `days` from now, so everything recorded so far is that
+/// old without rewriting timestamps the update triggers would restore.
+fn briefing_in_days(m: &LificMcp, project: &str, days: i64) -> String {
+    m.get_briefing_at(
+        GetBriefingInput {
+            project: Some(project.into()),
+            ..Default::default()
+        },
+        Utc::now() + chrono::Duration::days(days),
+    )
+    .unwrap_or_else(|error| panic!("briefing failed: {error}"))
+}
+
+fn bullets(section: &str) -> Vec<&str> {
+    section
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect()
+}
+
+#[test]
+fn the_briefing_ends_with_idle_plans_and_modules_without_open_work_capped_with_counts() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Triage", "TRI");
+    plan(
+        &m,
+        "TRI",
+        "Stalled one",
+        &[("Start", true), ("Finish", false)],
+    ); // TRI-PLAN-1
+    plan(&m, "TRI", "Stalled two", &[("Only", false)]); // TRI-PLAN-2
+    plan(&m, "TRI", "Stalled three", &[]); // TRI-PLAN-3
+    plan(&m, "TRI", "Stalled four", &[("Later", false)]); // TRI-PLAN-4
+    plan(&m, "TRI", "Recently stepped", &[("Touched", false)]); // TRI-PLAN-5
+    plan(&m, "TRI", "Archived long ago", &[]); // TRI-PLAN-6
+    let archived = m.update_plan_step(Parameters(UpdatePlanStepInput {
+        plan: "TRI-PLAN-6".into(),
+        status: Some("archived".into()),
+        ..Default::default()
+    }));
+    assert!(!archived.starts_with("Error"), "got: {archived}");
+    // Step edits leave plans.updated_at alone; they still count as activity.
+    m.write(|conn| {
+        conn.execute(
+            "UPDATE plan_steps SET edited_at = datetime('now', '+50 days')
+              WHERE title = 'Touched'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    module(&m, "TRI", "Alpha", "active");
+    module(&m, "TRI", "Bravo", "active");
+    module(&m, "TRI", "Charlie", "active");
+    module(&m, "TRI", "Delta", "active");
+    module(&m, "TRI", "Busy", "active");
+    module(&m, "TRI", "Parked", "paused");
+    issue_in_module(&m, "TRI", "Shipped", "done", "Alpha");
+    issue_in_module(&m, "TRI", "Dropped", "cancelled", "Alpha");
+    issue_in_module(&m, "TRI", "Still going", "todo", "Busy");
+
+    let out = briefing_in_days(&m, "TRI", 60);
+    assert!(out.chars().count() <= BUDGET_CHARS, "{out}");
+    let triage = section(&out, "Needs triage (8)");
+    assert!(
+        out.trim_end().ends_with(triage.trim_end()),
+        "triage is the last section:\n{out}"
+    );
+    assert!(
+        triage.contains(
+            "Active plans idle 30+ days: 4. Active modules with no open issues: 4. Finish, archive or close each."
+        ),
+        "{triage}"
+    );
+
+    let lines = bullets(triage);
+    assert_eq!(lines.len(), 6, "three of each kind: {triage}");
+    assert!(
+        lines[0].starts_with("- plan TRI-PLAN-1 Stalled one (1/2 done), idle since "),
+        "{triage}"
+    );
+    assert!(
+        lines[1].starts_with("- plan TRI-PLAN-2 Stalled two (0/1 done)"),
+        "{triage}"
+    );
+    assert!(
+        lines[2].starts_with("- plan TRI-PLAN-3 Stalled three (0/0 done)"),
+        "{triage}"
+    );
+    assert_eq!(
+        &lines[3..],
+        [
+            "- module Alpha, 2 closed issues",
+            "- module Bravo, no issues",
+            "- module Charlie, no issues",
+        ],
+        "{triage}"
+    );
+    assert!(
+        triage.contains(
+            "(+2 more: list_resources(resource_type='plan', project='TRI') and list_resources(resource_type='module', project='TRI'))"
+        ),
+        "{triage}"
+    );
+    for absent in ["Recently stepped", "Archived long ago", "Busy", "Parked"] {
+        assert!(!triage.contains(absent), "{absent} listed: {triage}");
+    }
+}
+
+#[test]
+fn a_fresh_plan_is_not_triage_and_an_empty_module_is() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Fresh", "FRS");
+    plan(&m, "FRS", "Just started", &[("Begin", false)]);
+    module(&m, "FRS", "Empty", "active");
+
+    let today = briefing(&m, Some("FRS"), None, &[]);
+    let triage = section(&today, "Needs triage (1)");
+    assert!(triage.contains("plans idle 30+ days: 0."), "{triage}");
+    assert_eq!(bullets(triage), ["- module Empty, no issues"], "{triage}");
+
+    // Twenty-nine days on, the plan is still not idle; thirty-one, it is.
+    let soon = briefing_in_days(&m, "FRS", 29);
+    assert!(!soon.contains("Just started (0/1 done), idle"), "{soon}");
+    let later = briefing_in_days(&m, "FRS", 31);
+    assert!(
+        section(&later, "Needs triage (2)").contains("- plan FRS-PLAN-1 Just started (0/1 done)"),
+        "{later}"
+    );
+}

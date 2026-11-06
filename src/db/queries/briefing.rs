@@ -205,3 +205,83 @@ pub fn issues_with_due_waits(
     let rows = stmt.query_map(rusqlite::params![project_id, today], |row| row.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+
+/// LIF-495: an active plan with no recorded activity since a cutoff.
+#[derive(Debug, Clone)]
+pub struct IdlePlan {
+    pub id: i64,
+    pub identifier: String,
+    pub title: String,
+    /// The latest of the plan's own update and any step's creation or edit.
+    pub last_activity: String,
+    pub step_count: i64,
+    pub done_count: i64,
+}
+
+/// LIF-495: an active module with no open, live issue.
+#[derive(Debug, Clone)]
+pub struct EmptyModule {
+    pub id: i64,
+    pub name: String,
+    /// Live issues in the module, all of them done or cancelled.
+    pub closed_count: i64,
+}
+
+/// Active plans in `project_id` whose last activity is strictly before
+/// `cutoff` (stored UTC form), longest idle first. Step edits do not touch
+/// `plans.updated_at`, so step creation and edit times count as activity too.
+pub fn idle_plans(
+    conn: &Connection,
+    project_id: i64,
+    cutoff: &str,
+) -> Result<Vec<IdlePlan>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT pl.id, p.identifier || '-PLAN-' || pl.sequence, pl.title,
+                MAX(pl.updated_at,
+                    COALESCE((SELECT MAX(MAX(s.created_at, COALESCE(s.edited_at, '')))
+                                FROM plan_steps s WHERE s.plan_id = pl.id), '')) AS last_activity,
+                (SELECT COUNT(*) FROM plan_steps s WHERE s.plan_id = pl.id),
+                (SELECT COUNT(*) FROM plan_steps s WHERE s.plan_id = pl.id AND s.done = 1)
+           FROM plans pl JOIN projects p ON p.id = pl.project_id
+          WHERE pl.project_id = ?1 AND pl.status = 'active' AND last_activity < ?2
+          ORDER BY last_activity, pl.sequence",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id, cutoff], |row| {
+        Ok(IdlePlan {
+            id: row.get(0)?,
+            identifier: row.get(1)?,
+            title: row.get(2)?,
+            last_activity: row.get(3)?,
+            step_count: row.get(4)?,
+            done_count: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Active modules in `project_id` with no open, live issue, by name.
+pub fn modules_without_open_work(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<Vec<EmptyModule>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.name,
+                (SELECT COUNT(*) FROM issues i
+                  WHERE i.module_id = m.id AND i.deleted_at IS NULL)
+           FROM modules m
+          WHERE m.project_id = ?1 AND m.status = 'active'
+            AND NOT EXISTS (
+                SELECT 1 FROM issues i
+                 WHERE i.module_id = m.id AND i.deleted_at IS NULL
+                   AND i.status NOT IN ('done', 'cancelled'))
+          ORDER BY m.name COLLATE NOCASE, m.id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id], |row| {
+        Ok(EmptyModule {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            closed_count: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}

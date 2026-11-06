@@ -559,8 +559,9 @@ Sections follow in this order, and a section with nothing to report is left out:
 | Workable, not yet active | Issues ready to start, highest priority first. Active issues have their own section. |
 | Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. |
 | Active | Active issues, highest priority first. |
+| Needs triage | Active plans with no activity for 30 days or more (the plan itself, or any step created or edited), longest idle first, with progress and the date of the last activity; then active modules with no open issue, by name, each with how many closed issues it holds. Nothing here is changed for you: finish, archive or close each, or plan its next work. |
 
-Issue sections show up to 8 lines, plans up to 5, each kind of change up to 5, and titles are cut at 80 characters. If the whole response is still over 6,000 characters, lines are dropped from the longest section until it fits. A section that shows fewer items than it has ends with how many were left out and the call that lists them all, such as `(+12 more: list_issues(project='APP', blocked=true))`. Issue and plan counts stop at 100; `100+` means at least that many.
+Issue sections show up to 8 lines, plans up to 5, each kind of change up to 5, the triage section up to 3 plans and 3 modules, and titles are cut at 80 characters. If the whole response is still over 6,000 characters, lines are dropped from the longest section until it fits. A section that shows fewer items than it has ends with how many were left out and the call that lists them all, such as `(+12 more: list_issues(project='APP', blocked=true))`. Issue and plan counts stop at 100; `100+` means at least that many.
 
 ### `search`
 

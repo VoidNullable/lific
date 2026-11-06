@@ -70,7 +70,7 @@ Agent harnesses cut long tool output off without telling the agent, near 50 KB i
 | `get_page` with `since_seq` | 30,000 characters of diff | The diff is cut, with a note to read the changed sections instead. |
 | Page writes over MCP | 30,000 characters | The write succeeds and the response notes that readers will get an outline. |
 | `get_briefing` | 6,000 characters in total | Lines are dropped from the longest sections until the response fits. |
-| `get_briefing` sections | 8 issues per issue section, 5 plans, 5 changes of each kind, titles cut at 80 characters | Each cut section says how many it left out and names the call that lists them. Issue and plan counts stop at 100 (`100+`). |
+| `get_briefing` sections | 8 issues per issue section, 5 plans, 5 changes of each kind, 3 idle plans and 3 empty modules for triage, titles cut at 80 characters | Each cut section says how many it left out and names the call that lists them. Issue and plan counts stop at 100 (`100+`). |
 | `get_briefing` `pages` | 10 pages | Further page identifiers are not reported; the section says how many were left out. |
 | `create_issue` duplicate hint | 3 similar open issues per new issue | Only the closest are listed. |
 

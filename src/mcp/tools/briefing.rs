@@ -26,6 +26,10 @@ const MAX_NAMED_PAGES: usize = 10;
 const TITLE_CHARS: usize = 80;
 /// How many rows a section reads to count what it does not show.
 const SCAN_LIMIT: i64 = 100;
+/// LIF-495: lines per kind in the triage section (idle plans, empty modules).
+const TRIAGE_LINES_PER_KIND: usize = 3;
+/// A plan with no activity for this many days is listed for triage.
+const IDLE_PLAN_DAYS: i64 = 30;
 
 /// One bounded block of the briefing.
 struct Section {
@@ -185,11 +189,15 @@ impl LificMcp {
             input.pages.as_deref().unwrap_or_default(),
         )?;
         let active = self.active_section(context, project.id, ident)?;
+        // LIF-495: last, so the judgment calls follow the work itself.
+        let triage = self.triage_section(context, project.id, ident, now)?;
 
-        let mut sections: Vec<Section> = [changes, plans, due, blocked, workable, pages, active]
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut sections: Vec<Section> = [
+            changes, plans, due, blocked, workable, pages, active, triage,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if sections.is_empty() {
             header.push_str("Nothing is planned, active, blocked or workable.\n");
         }
@@ -564,6 +572,72 @@ impl LificMcp {
             total,
             total_is_floor,
             more: format!("list_issues(project='{ident}', status='active')"),
+        }))
+    }
+
+    /// LIF-495: active plans idle [`IDLE_PLAN_DAYS`] or more and active
+    /// modules with no open issue. Neither is broken; each wants a person to
+    /// decide whether to finish, archive or close it, so the section lists
+    /// them and leaves the call to the reader.
+    fn triage_section(
+        &self,
+        context: Option<&IssueLinkContext>,
+        project_id: i64,
+        ident: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Section>, String> {
+        let cutoff = (now - chrono::Duration::days(IDLE_PLAN_DAYS))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let (plans, modules) = self.read(|conn| {
+            Ok((
+                queries::briefing::idle_plans(conn, project_id, &cutoff)?,
+                queries::briefing::modules_without_open_work(conn, project_id)?,
+            ))
+        })?;
+        if plans.is_empty() && modules.is_empty() {
+            return Ok(None);
+        }
+
+        let mut lines = Vec::new();
+        lines.extend(plans.iter().take(TRIAGE_LINES_PER_KIND).map(|plan| {
+            let idle_since = plan.last_activity.get(..10).unwrap_or(&plan.last_activity);
+            format!(
+                "plan {} {} ({}/{} done), idle since {idle_since}",
+                reference_with_context(context, ReferenceKind::Plan(&plan.identifier, plan.id)),
+                title(&plan.title),
+                plan.done_count,
+                plan.step_count,
+            )
+        }));
+        lines.extend(modules.iter().take(TRIAGE_LINES_PER_KIND).map(|module| {
+            let closed = match module.closed_count {
+                0 => "no issues".to_string(),
+                1 => "1 closed issue".to_string(),
+                n => format!("{n} closed issues"),
+            };
+            format!(
+                "module {}, {closed}",
+                reference_with_context(
+                    context,
+                    ReferenceKind::Module(ident, module.id, &module.name)
+                ),
+            )
+        }));
+
+        Ok(Some(Section {
+            heading: format!("Needs triage ({})", plans.len() + modules.len()),
+            summary: Some(format!(
+                "Active plans idle {IDLE_PLAN_DAYS}+ days: {}. Active modules with no open issues: {}. Finish, archive or close each.",
+                plans.len(),
+                modules.len()
+            )),
+            lines,
+            total: plans.len() + modules.len(),
+            total_is_floor: false,
+            more: format!(
+                "list_resources(resource_type='plan', project='{ident}') and list_resources(resource_type='module', project='{ident}')"
+            ),
         }))
     }
 
