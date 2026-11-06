@@ -1205,6 +1205,7 @@ fn canonical_project_identifier(
         .map_err(|e| e.to_string())
 }
 
+mod create_relations;
 mod export_pages;
 mod names;
 mod roles;
@@ -2809,7 +2810,21 @@ No issues found."
             Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
+        let relations = create_relations::plan(
+            &conn,
+            create_relations::Requested {
+                blocks: input.blocks.as_deref(),
+                blocked_by: input.blocked_by.as_deref(),
+                relates_to: input.relates_to.as_deref(),
+            },
+            None,
+        )
+        .map_err(super::sanitize_error)?;
         drop(conn);
+        let linked = create_relations::existing(&relations);
+        for &(project_id, _) in &linked {
+            require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        }
         let caller = self.caller_username(input.assignees.as_deref())?;
         let issue = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
@@ -2841,6 +2856,10 @@ No issues found."
                     attachments,
                 },
             )
+            .and_then(|issue| {
+                create_relations::apply(conn, issue.id, &relations, &[])?;
+                Ok(issue)
+            })
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueCreated {
@@ -2849,18 +2868,21 @@ No issues found."
             },
             issue.seq,
         );
+        for &(project_id, issue_id) in &linked {
+            self.emit(crate::realtime::RealtimeEvent::IssueLinked {
+                project_id,
+                issue_id,
+            });
+        }
         // LIF-477: name likely duplicates so the agent can link or cancel one
         // now. Best effort: the issue already exists, so a failed lookup only
-        // costs the hint.
+        // costs the hint. Issues it was just linked to are not candidates.
+        let exclude: Vec<i64> = std::iter::once(issue.id)
+            .chain(linked.iter().map(|&(_, id)| id))
+            .collect();
         let similar = self
             .read(|conn| {
-                queries::similar_open_issues(
-                    conn,
-                    pid,
-                    &issue.title,
-                    &[issue.id],
-                    SIMILAR_ISSUE_LIMIT,
-                )
+                queries::similar_open_issues(conn, pid, &issue.title, &exclude, SIMILAR_ISSUE_LIMIT)
             })
             .unwrap_or_default();
         let context = current_issue_link_context();
@@ -2871,6 +2893,10 @@ No issues found."
                 issue_reference(context.as_deref(), &issue.identifier),
                 issue.title
             )?;
+            if !relations.is_empty() {
+                write!(output, "\nLinked: ")?;
+                create_relations::render(output, context.as_deref(), &relations, &[])?;
+            }
             write_similar_issues(output, context.as_deref(), &similar)
         }))
     }
@@ -2899,7 +2925,10 @@ No issues found."
             || input.labels.is_some()
             || input.start_date.is_some()
             || input.target_date.is_some()
-            || input.assignees.is_some();
+            || input.assignees.is_some()
+            || input.blocks.is_some()
+            || input.blocked_by.is_some()
+            || input.relates_to.is_some();
         if has_single_fields {
             return Err(
                 "with issues, set title and the other fields on each item; only project applies to the whole batch"
@@ -2915,23 +2944,57 @@ No issues found."
                 items.len()
             ));
         }
-        let pid = {
+        let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
+        let (pid, relations) = {
             let conn = self.read_conn()?;
-            resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?
+            let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
+            let relations = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    create_relations::plan(
+                        &conn,
+                        create_relations::Requested {
+                            blocks: item.blocks.as_deref(),
+                            blocked_by: item.blocked_by.as_deref(),
+                            relates_to: item.relates_to.as_deref(),
+                        },
+                        Some(&create_relations::Batch {
+                            titles: &titles,
+                            own: index,
+                        }),
+                    )
+                    .map_err(|error| super::sanitize_error(at_batch_item(index, error)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (pid, relations)
         };
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        let linked = create_relations::existing(relations.iter().flatten());
+        for &(project_id, _) in &linked {
+            require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        }
         let caller = self.caller_username(Some(&["me".to_string()]))?;
         let created = self.transaction(|conn| {
             // Same actor re-check as the single create, once for the batch.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
-            items
+            let created = items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
                     create_batch_item(conn, pid, item, attachments, caller.as_deref())
                         .map_err(|error| at_batch_item(index, error))
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            // Relations last: an item may name one created after it.
+            let ids: Vec<i64> = created.iter().map(|issue| issue.id).collect();
+            created.iter().zip(&relations).enumerate().try_for_each(
+                |(index, (issue, planned))| {
+                    create_relations::apply(conn, issue.id, planned, &ids)
+                        .map_err(|error| at_batch_item(index, error))
+                },
+            )?;
+            Ok(created)
         })?;
         for issue in &created {
             self.emit_with_seq(
@@ -2942,16 +3005,34 @@ No issues found."
                 issue.seq,
             );
         }
+        for &(project_id, issue_id) in &linked {
+            self.emit(crate::realtime::RealtimeEvent::IssueLinked {
+                project_id,
+                issue_id,
+            });
+        }
         let batch_ids: Vec<i64> = created.iter().map(|issue| issue.id).collect();
+        let batch_identifiers: Vec<String> = created
+            .iter()
+            .map(|issue| issue.identifier.clone())
+            .collect();
         let similar: Vec<Vec<queries::SimilarIssue>> = created
             .iter()
-            .map(|issue| {
+            .zip(&relations)
+            .map(|(issue, planned)| {
+                let exclude: Vec<i64> = (batch_ids.iter().copied())
+                    .chain(
+                        create_relations::existing(planned)
+                            .into_iter()
+                            .map(|(_, id)| id),
+                    )
+                    .collect();
                 self.read(|conn| {
                     queries::similar_open_issues(
                         conn,
                         pid,
                         &issue.title,
-                        &batch_ids,
+                        &exclude,
                         SIMILAR_ISSUE_LIMIT,
                     )
                 })
@@ -2961,16 +3042,24 @@ No issues found."
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(output, "Created {} issues:", created.len())?;
-            created
-                .iter()
-                .zip(&similar)
-                .try_for_each(|(issue, similar)| {
+            created.iter().zip(&similar).zip(&relations).try_for_each(
+                |((issue, similar), planned)| {
                     write!(
                         output,
                         "\n- {}: {}",
                         issue_reference(context.as_deref(), &issue.identifier),
                         issue.title
                     )?;
+                    if !planned.is_empty() {
+                        write!(output, " (")?;
+                        create_relations::render(
+                            output,
+                            context.as_deref(),
+                            planned,
+                            &batch_identifiers,
+                        )?;
+                        write!(output, ")")?;
+                    }
                     if similar.is_empty() {
                         return Ok(());
                     }
@@ -2984,7 +3073,8 @@ No issues found."
                         )
                     })?;
                     write!(output, ")")
-                })
+                },
+            )
         }))
     }
 
@@ -6016,6 +6106,10 @@ mod tests_search_filing;
 #[cfg(test)]
 #[path = "tests_page_reads.rs"]
 mod tests_page_reads;
+
+#[cfg(test)]
+#[path = "tests_create_relations.rs"]
+mod tests_create_relations;
 
 #[cfg(test)]
 #[path = "tests_waits.rs"]

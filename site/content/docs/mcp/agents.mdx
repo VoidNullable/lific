@@ -60,6 +60,8 @@ Say how you know it is done in the same call: `update_issue(identifier='APP-42',
 
 To file several issues at once, pass `create_issue(project='APP', issues=[...])`, up to 50 in one transaction. Each new issue's line names open issues that look like duplicates, so link or cancel them before moving on.
 
+Link an issue as you create it rather than with a separate `link_issues` call: `blocks`, `blocked_by` and `relates_to` take issue identifiers, and inside a batch they can also name another item by index or title, as in `issues=[{title: 'Schema'}, {title: 'Migration', blocked_by: ['0']}]`.
+
 ## Edit instead of rewriting
 
 `update_issue` and `update_page` replace whole fields, so changing one sentence of a long description means resending all of it. `edit_issue`, `edit_page`, `edit_plan_step` and `edit_comment` replace one exact string instead.

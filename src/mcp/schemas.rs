@@ -146,8 +146,14 @@ pub struct CreateIssueInput {
         description = "Who must do it: [\"human\"] for any person, or usernames (\"me\" is you). Omit to leave it to agents"
     )]
     pub assignees: Option<Vec<String>>,
+    #[schemars(description = "Issue IDs this one blocks")]
+    pub blocks: Option<Vec<String>>,
+    #[schemars(description = "Issue IDs that block this one")]
+    pub blocked_by: Option<Vec<String>>,
+    #[schemars(description = "Related issue IDs")]
+    pub relates_to: Option<Vec<String>>,
     #[schemars(
-        description = "Up to 50 issues to create in one transaction, each with the fields above. Only project may accompany it",
+        description = "Up to 50 issues to create in one transaction, each with the fields above; their relations may also name another item by index or title. Only project may accompany it",
         schema_with = "create_issue_items_schema"
     )]
     // Without a serde default, the custom schema made schemars list
@@ -157,8 +163,8 @@ pub struct CreateIssueInput {
 }
 
 /// The published shape of `CreateIssueInput::issues`: objects that need a
-/// title. The derived item schema would repeat all eight fields in `$defs`
-/// (about 100 tokens on every `tools/list`) to say what the description
+/// title. The derived item schema would repeat every field in `$defs`
+/// (100 tokens or more on every `tools/list`) to say what the description
 /// already does. Deserialization is still strict: `CreateIssueItem` denies
 /// unknown keys.
 fn create_issue_items_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -182,6 +188,9 @@ pub struct CreateIssueItem {
     pub start_date: Option<String>,
     pub target_date: Option<String>,
     pub assignees: Option<Vec<String>>,
+    pub blocks: Option<Vec<String>>,
+    pub blocked_by: Option<Vec<String>>,
+    pub relates_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
