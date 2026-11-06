@@ -34,7 +34,7 @@ On an unbound session these calls fail with `project required (this session has 
 
 ### `list_issues`
 
-Lists issues in one project, or across the projects of the people you name with `members`, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then any waits, who must do it, and checklist progress.
+Lists issues in one project, or across the projects of the people you name with `members`, filtered and paged. Each row shows the identifier, status, priority, title, labels and module, then the due date, any waits, who must do it, and checklist progress.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ Every row that has waits carries one token per wait, whatever the filters:
 | `due_since:2026-09-28` | A date wait whose window has started. It no longer blocks. |
 | `overdue_since:2026-09-30` | A date wait whose last day has passed, dated from the day after it. It no longer blocks. |
 
-Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker.
+Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker. An issue with a due date (`target_date`) carries it after the module, such as `due:2026-11-20`; an issue without one carries no token.
 
 #### Your work across projects
 
@@ -213,7 +213,7 @@ Groups a project's issues into columns.
 | `include_closed` | `boolean` | No | Include `done` and `cancelled` issues. Default `false`. |
 | `max_per_column` | `integer` | No | Cap the issues shown per column. A trailing `… +N more (use list_issues)` line reports the rest. |
 
-Grouped by status, closed columns appear as a count with no rows unless `include_closed` is set. Grouped by priority or module, closed issues are left out and a closing line reports how many. The board reads at most 500 issues and prints a warning when a project has more; page through `list_issues` instead. Rows carry the same wait tokens as `list_issues` (`waiting_on:@ada-lovelace`, `due_since:2026-09-28`), but no checklist marker.
+Grouped by status, closed columns appear as a count with no rows unless `include_closed` is set. Grouped by priority or module, closed issues are left out and a closing line reports how many. The board reads at most 500 issues and prints a warning when a project has more; page through `list_issues` instead. Rows carry the same due date and wait tokens as `list_issues` (`due:2026-11-20`, `waiting_on:@ada-lovelace`, `due_since:2026-09-28`), but no checklist marker.
 
 ### `link_issues`
 
