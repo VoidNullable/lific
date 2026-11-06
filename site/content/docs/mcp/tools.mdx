@@ -295,8 +295,9 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | `roles` | `string[]` | No | Projects only: the roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
 | `statuses` | `string[]` | No | Projects only: which per-status issue counts each row prints: `backlog`, `todo`, `active`, `done`, `cancelled` or `all` (default). `[]` prints none. |
 | `show_members` | `string[]` | No | Projects only: roles whose members are all named, uncapped: `lead`, `maintainer`, `viewer` or `all`. `[]` prints only counts per role. |
+| `verbose` | `boolean` | No | Projects only: print each description in full. By default a row shows the description's first line, up to 100 characters, with `…` when anything was left out. |
 
-Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long ago anything happened. It then shows the project's members by role, your own role, and its issue count per status:
+Projects are sorted by recent activity, and each row carries a one-line description, its workable-issue count, active-plan count and how long ago anything happened. It then shows the project's members by role, your own role, and its issue count per status:
 
 ```text
 - APP | App (3 workable, last activity 2h ago) | lead @alice · maintainers @bob, @carol · 12 viewers | you: maintainer | 2 active · 5 todo · 9 backlog · 40 done
