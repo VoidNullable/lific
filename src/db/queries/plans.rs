@@ -575,7 +575,9 @@ pub fn set_step_done(
 
             // Only the done direction propagates to the issue (issue-authoritative
             // close-down; we never reopen an issue from a step un-check).
-            if done && status != "done" {
+            // A cancelled issue is already resolved (LIF-485): checking its
+            // step must not rewrite the cancellation as done.
+            if done && status != "done" && status != "cancelled" {
                 conn.execute(
                     "UPDATE issues SET status = 'done' WHERE id = ?1",
                     params![iid],
@@ -962,6 +964,100 @@ mod tests {
         );
     }
 
+    fn set_issue_status(conn: &Connection, issue_id: i64, status: Status) {
+        issues::update_issue(
+            conn,
+            issue_id,
+            &UpdateIssue {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// LIF-485: cancelling a mirrored issue resolves its step (as done, see
+    /// migration 061), and moving the issue back to open work reopens it.
+    #[test]
+    fn issue_cancel_resolves_step_and_reopen_reverses_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let issue = seed_issue(&conn, pid, "Dropped", Status::Todo);
+        let other = seed_issue(&conn, pid, "Still open", Status::Todo);
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Plan".into(),
+                issue_id: None,
+                steps: vec![
+                    simple_step("mirror", Some(issue.id)),
+                    simple_step("other", Some(other.id)),
+                ],
+            },
+        )
+        .unwrap();
+
+        set_issue_status(&conn, issue.id, Status::Cancelled);
+        let refreshed = get_plan(&conn, plan.id).unwrap();
+        assert!(refreshed.steps[0].done, "cancel must resolve the step");
+        assert_eq!(
+            refreshed.steps[0].issue_status.as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(refreshed.done_count, 1, "the step counts toward progress");
+        let actions: Vec<String> = audit_rows(&conn, "plan_step")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert!(
+            actions.contains(&"auto-complete".to_string()),
+            "cancel cascade is audited: {actions:?}"
+        );
+
+        // done <-> cancelled stays resolved, with no reopen in between.
+        set_issue_status(&conn, issue.id, Status::Done);
+        assert!(get_plan(&conn, plan.id).unwrap().steps[0].done);
+        set_issue_status(&conn, issue.id, Status::Cancelled);
+        let refreshed = get_plan(&conn, plan.id).unwrap();
+        assert!(refreshed.steps[0].done);
+        assert!(refreshed.steps[0].reopened_via_issue_at.is_none());
+
+        set_issue_status(&conn, issue.id, Status::Todo);
+        let refreshed = get_plan(&conn, plan.id).unwrap();
+        assert!(!refreshed.steps[0].done, "reopening un-resolves the step");
+        assert!(refreshed.steps[0].reopened_via_issue_at.is_some());
+        assert_eq!(refreshed.done_count, 0);
+    }
+
+    /// Checking a step whose issue was cancelled keeps the cancellation.
+    #[test]
+    fn checking_a_step_does_not_turn_a_cancelled_issue_done() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let issue = seed_issue(&conn, pid, "Dropped", Status::Cancelled);
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Plan".into(),
+                issue_id: None,
+                steps: vec![simple_step("mirror", Some(issue.id))],
+            },
+        )
+        .unwrap();
+
+        let effect = set_step_done(&conn, plan.steps[0].id, true).unwrap();
+        assert!(!effect.issue_status_changed);
+        assert_eq!(effect.issue_new_status.as_deref(), Some("cancelled"));
+        assert_eq!(
+            issues::get_issue(&conn, issue.id).unwrap().status,
+            Status::Cancelled
+        );
+    }
+
     #[test]
     fn anchor_issue_done_archives_plan() {
         let pool = test_db();
@@ -992,6 +1088,31 @@ mod tests {
 
         let refreshed = get_plan(&conn, plan.id).unwrap();
         assert_eq!(refreshed.status, "archived");
+    }
+
+    /// The anchor archive runs before the step cascade (trigger order, see
+    /// migration 061), so a plan whose step mirrors its own anchor is still
+    /// archived when that issue closes.
+    #[test]
+    fn anchor_issue_done_archives_plan_that_mirrors_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let anchor = seed_issue(&conn, pid, "Epic", Status::Active);
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Plan".into(),
+                issue_id: Some(anchor.id),
+                steps: vec![simple_step("ship the epic", Some(anchor.id))],
+            },
+        )
+        .unwrap();
+
+        set_issue_status(&conn, anchor.id, Status::Done);
+
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "archived");
     }
 
     #[test]

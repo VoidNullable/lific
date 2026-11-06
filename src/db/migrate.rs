@@ -291,6 +291,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "archived projects",
         include_str!("../../migrations/059_archived_projects.sql"),
     ),
+    (
+        61,
+        "plan steps resolve on cancel",
+        include_str!("../../migrations/061_plan_steps_resolve_on_cancel.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -2035,5 +2040,55 @@ mod page_revisions_tests {
         assert_eq!(after[0], (seq, "before".to_string()));
         assert_eq!(after[1].1, "after");
         assert!(seq < after[1].0 && after[1].0 <= now);
+    }
+}
+
+#[cfg(test)]
+mod plan_step_resolution_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+
+    fn step_done(conn: &rusqlite::Connection, id: i64) -> i64 {
+        conn.query_row("SELECT done FROM plan_steps WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    /// LIF-485: steps already mirroring a cancelled issue are resolved by the
+    /// upgrade, but only in active plans, and the backfill is audited.
+    #[test]
+    fn upgrade_resolves_steps_of_cancelled_issues_in_active_plans() {
+        let conn = migrated_up_to(61);
+        conn.execute_batch(
+            "INSERT INTO projects(id,name,identifier) VALUES (1,'P','PSR');
+             INSERT INTO issues(id,project_id,sequence,title,status) VALUES
+                 (1,1,1,'dropped','cancelled'),
+                 (2,1,2,'open','todo');
+             INSERT INTO plans(id,project_id,sequence,title,status) VALUES
+                 (1,1,1,'live','active'),
+                 (2,1,2,'frozen','archived');
+             INSERT INTO plan_steps(id,plan_id,title,issue_id) VALUES
+                 (1,1,'cancelled mirror',1),
+                 (2,1,'open mirror',2),
+                 (3,2,'frozen mirror',1);",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(step_done(&conn, 1), 1, "cancelled mirror is resolved");
+        assert_eq!(step_done(&conn, 2), 0, "open mirror is untouched");
+        assert_eq!(step_done(&conn, 3), 0, "archived plans stay frozen");
+        let audited: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audit_log
+                  WHERE entity_type = 'plan_step' AND entity_id = 1
+                    AND action = 'auto-complete' AND issue_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1);
     }
 }

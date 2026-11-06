@@ -44,13 +44,16 @@ Checking off the last step does not mark the plan `done`. Set that yourself. You
 
 A step can point at an issue, in the same project or another one. The step then mirrors that issue. The rule is that the issue's status is the source of truth: completion can flow from a step to its issue, but reopening only ever flows from the issue to its steps.
 
+An issue is resolved when it is `done` or `cancelled`. Both check its steps off, so a plan whose dropped work was cancelled can still reach 100%. A step resolved by a cancellation is an ordinary checked step; its issue status still reads `cancelled`, which is how `get_plan` and the web UI tell it apart from finished work.
+
 | When | What happens |
 | --- | --- |
-| The issue moves to `done` | Every unchecked step that mirrors it, in every active plan, is checked off. |
-| The issue moves out of `done` | Every checked step that mirrors it, in every active plan, is unchecked and marked as reopened by the issue, so it does not look like someone unticked it by hand. |
+| The issue moves to `done` or `cancelled` | Every unchecked step that mirrors it, in every active plan, is checked off. |
+| The issue moves between `done` and `cancelled` | Nothing happens to the steps. They stay checked. |
+| The issue moves out of `done` or `cancelled` to open work | Every checked step that mirrors it, in every active plan, is unchecked and marked as reopened by the issue, so it does not look like someone unticked it by hand. |
 | You check off a step that mirrors an open issue | The issue moves to `done`. That in turn checks off other steps mirroring it in active plans and archives plans anchored to it, as above. |
+| You check off a step that mirrors a cancelled issue | Only the step changes. The issue stays `cancelled`. |
 | You uncheck a step | Nothing happens to the issue. |
-| The issue moves to `cancelled` | Nothing happens to the steps. Only `done` counts. |
 
 Steps in `done` and `archived` plans are never changed by an issue. Checking off a step in a frozen plan still moves its issue to `done`, because that comes from your action on the step, not from the plan following its issues.
 

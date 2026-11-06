@@ -86,7 +86,7 @@ Writing a page past 30,000 characters works, and the response says readers will 
 
 ## Keep plans for work that outlasts a session
 
-A plan is a nested step tree stored in the project, so multi-session work does not depend on your transcript. `create_plan` takes the whole tree in one call. A step with an `issue` mirrors that issue while the plan is active: moving the issue to `done` checks the step, checking the step moves the issue to `done`, and moving the issue out of `done` unchecks it again. `cancelled` does not count. A plan with an `anchor_issue` is archived when that issue moves to `done`.
+A plan is a nested step tree stored in the project, so multi-session work does not depend on your transcript. `create_plan` takes the whole tree in one call. A step with an `issue` mirrors that issue while the plan is active: moving the issue to `done` or `cancelled` checks the step, checking the step moves an open issue to `done`, and moving the issue back to open work unchecks it again. A plan with an `anchor_issue` is archived when that issue moves to `done`.
 
 On resume, `get_briefing` lists active plans with their next step. For the whole tree, or a plan that is not active, use `list_resources(resource_type='plan', project='APP')`, then `get_plan(plan='APP-PLAN-2')`. The tree shows each step's `#id`, whether it is done and its linked issue. Those ids are what `edit_plan_step` and `update_plan_step` take.
 

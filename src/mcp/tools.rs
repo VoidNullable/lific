@@ -2985,11 +2985,14 @@ No issues found."
                     ..Default::default()
                 },
             )?;
-            let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
-                (previous, "done") if previous != "done" => {
-                    Some(PlanStepCascadeAction::AutoComplete)
-                }
-                ("done", current) if current != "done" => Some(PlanStepCascadeAction::Reopen),
+            // Mirrors migration 061: done and cancelled both resolve a step.
+            let resolved = |status: &str| matches!(status, "done" | "cancelled");
+            let cascade_action = match (
+                resolved(previous_issue.status.as_str()),
+                resolved(issue.status.as_str()),
+            ) {
+                (false, true) => Some(PlanStepCascadeAction::AutoComplete),
+                (true, false) => Some(PlanStepCascadeAction::Reopen),
                 _ => None,
             };
             let cascaded_steps = match (cascade_action, audit_checkpoint) {
@@ -3062,7 +3065,9 @@ No issues found."
                 cascade_action,
                 crate::checklist::checklist(&issue.description),
             ) {
-                (Some(PlanStepCascadeAction::AutoComplete), Some(list)) if list.open() > 0 => {
+                (Some(PlanStepCascadeAction::AutoComplete), Some(list))
+                    if list.open() > 0 && issue.status.as_str() == "done" =>
+                {
                     write!(
                         output,
                         "\nWarning: {} of {} checklist items still unchecked.",
@@ -5143,7 +5148,7 @@ No issues found."
                             let effect = queries::plans::set_step_done(conn, step_id, done)?;
                             enum IssueEffect<'a> {
                                 MarkedDone(&'a str),
-                                AlreadyDone(&'a str),
+                                AlreadyDone(&'a str, &'a str),
                                 None,
                             }
                             let issue_effect = match effect.issue_identifier.as_deref() {
@@ -5156,7 +5161,10 @@ No issues found."
                                     });
                                     IssueEffect::MarkedDone(identifier)
                                 }
-                                Some(identifier) if done => IssueEffect::AlreadyDone(identifier),
+                                Some(identifier) if done => IssueEffect::AlreadyDone(
+                                    identifier,
+                                    effect.issue_new_status.as_deref().unwrap_or("done"),
+                                ),
                                 _ => IssueEffect::None,
                             };
                             let message = try_render(|output| {
@@ -5171,9 +5179,9 @@ No issues found."
                                         " → {} marked done",
                                         issue_reference(context.as_deref(), identifier)
                                     ),
-                                    IssueEffect::AlreadyDone(identifier) => write!(
+                                    IssueEffect::AlreadyDone(identifier, status) => write!(
                                         output,
-                                        " (linked {} already done)",
+                                        " (linked {} already {status})",
                                         issue_reference(context.as_deref(), identifier)
                                     ),
                                     IssueEffect::None => Ok(()),
@@ -12772,6 +12780,50 @@ mod tests {
             ..Default::default()
         }));
         assert!(archived.contains("PLN-PLAN-1"), "got: {archived}");
+    }
+
+    // LIF-485: cancelling a mirrored issue resolves its step, narrated like a
+    // close but without the checklist warning that only applies to done.
+    #[test]
+    fn cancelling_issue_resolves_step_and_shows_cancelled_status() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "CNP");
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("CNP".into()),
+            title: "Dropped work".into(),
+            description: Some("- [ ] never started".into()),
+            ..Default::default()
+        }));
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("CNP".into()),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                issue: Some("CNP-1".into()),
+                ..Default::default()
+            }]),
+        }));
+
+        let updated = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "CNP-1".into(),
+            status: Some("cancelled".into()),
+            ..Default::default()
+        }));
+        assert!(
+            updated.contains("auto-completed plan step"),
+            "cancel must narrate the cascade: {updated}"
+        );
+        assert!(
+            !updated.contains("checklist items still unchecked"),
+            "cancelling is not closing over open checklist items: {updated}"
+        );
+
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "CNP-PLAN-1".into(),
+        }));
+        assert!(got.contains("[x]"), "step should be resolved: {got}");
+        assert!(got.contains("cancelled"), "status should show: {got}");
     }
 
     // LIF-175: end-to-end across surfaces — a plan authored via MCP, then the
