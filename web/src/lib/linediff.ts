@@ -207,3 +207,54 @@ export function foldContext(
   flush();
   return rows;
 }
+
+/** `Activity.field` of a page content edit stored as a diff (LIF-486). */
+export const STORED_DIFF_FIELD = "content_diff";
+
+/**
+ * Rows for a diff stored server-side (LIF-486). Page content edits are kept
+ * in the audit log as a unified diff without file headers, so there is no
+ * old/new pair to diff here. Hunk headers become folds counting the lines
+ * the hunk skipped since the previous one.
+ */
+export function parseStoredDiff(diff: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let nextOld = 1;
+  for (const line of diff.replace(/\r\n?/g, "\n").split("\n")) {
+    if (line.startsWith("@@")) {
+      const match = /^@@ -(\d+)(?:,(\d+))?/.exec(line);
+      if (!match) continue;
+      // An empty range ("-0,0") names the line before the hunk, not the first.
+      const start = match[2] === "0" ? Number(match[1]) + 1 : Number(match[1]);
+      const skipped = start - nextOld;
+      if (skipped > 0) rows.push({ kind: "fold", count: skipped });
+      nextOld = start;
+    } else if (line.startsWith("+")) {
+      rows.push({ kind: "added", text: line.slice(1) });
+    } else if (line.startsWith("-")) {
+      rows.push({ kind: "removed", text: line.slice(1) });
+      nextOld++;
+    } else if (line.startsWith(" ")) {
+      rows.push({ kind: "context", text: line.slice(1) });
+      nextOld++;
+    }
+    // "\ No newline at end of file" and the trailing empty split are noise.
+  }
+  return rows;
+}
+
+/** Lines added and removed by a stored diff, for one-line summaries. */
+export function storedDiffStats(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+")) added++;
+    else if (line.startsWith("-")) removed++;
+  }
+  return { added, removed };
+}
+
+/** The field name to show a reader: a stored diff is still a content edit. */
+export function fieldLabel(field: string | null): string | null {
+  return field === STORED_DIFF_FIELD ? "content" : field;
+}

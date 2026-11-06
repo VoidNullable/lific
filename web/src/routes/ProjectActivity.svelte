@@ -32,6 +32,9 @@
     diffLines,
     foldContext,
     isUnchanged,
+    parseStoredDiff,
+    STORED_DIFF_FIELD,
+    fieldLabel,
     type DiffRow,
   } from "../lib/linediff";
   import { getContext } from "svelte";
@@ -193,7 +196,9 @@
       case "delete":
         return a.entity_type === "comment" ? "deleted a comment on" : `deleted ${a.entity_type}`;
       case "update":
-        return a.entity_type === "comment" ? "edited a comment on" : `changed ${a.field} on`;
+        return a.entity_type === "comment"
+          ? "edited a comment on"
+          : `changed ${fieldLabel(a.field)} on`;
       case "attach":
         return "labeled";
       case "detach":
@@ -267,6 +272,11 @@
     if (expandedId === null) return null;
     const a = items.find((entry) => entry.id === expandedId);
     if (!a) return null;
+    // Page content edits arrive already diffed (LIF-486).
+    if (a.field === STORED_DIFF_FIELD) {
+      const rows = parseStoredDiff(a.new_value ?? "");
+      return { rows, unchanged: rows.every((row) => row.kind === "context") };
+    }
     const oldText = a.old_value ?? "";
     const newText = a.new_value ?? "";
     if (!oldText.includes("\n") && !newText.includes("\n")) return null;
@@ -522,7 +532,7 @@
                         <span class="text-[var(--text-faint)] italic">
                           “{shortValue(a.new_value, 48)}”
                         </span>
-                      {:else if a.action === "update" && a.field !== "description" && a.field !== "content"}
+                      {:else if a.action === "update" && a.field !== "description" && a.field !== "content" && a.field !== STORED_DIFF_FIELD}
                         <span class="text-[var(--text-faint)]">{shortValue(a.old_value, 24)}</span>
                         <span class="text-[var(--text-faint)]">→</span>
                         <span class="text-[var(--text)]">{shortValue(a.new_value, 24)}</span>
@@ -599,7 +609,7 @@
                             <span class="font-mono text-caption text-[var(--text-muted)]">
                               {a.entity_label ?? `#${a.entity_id}`}
                             </span>
-                            <span class="text-[var(--text-muted)]">— {a.action}{a.field ? ` · ${a.field}` : ""}</span>
+                            <span class="text-[var(--text-muted)]">— {a.action}{a.field ? ` · ${fieldLabel(a.field)}` : ""}</span>
                             {#if dest}
                               <button
                                 class="inline-flex items-center gap-0.5 text-caption
