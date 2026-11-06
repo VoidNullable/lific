@@ -258,7 +258,7 @@ Shows and changes instance-wide settings. These live in the database, not in `li
 
 ```shell
 lific instance info
-lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMAINS>] [--session-days <DAYS>] [--login-message <MESSAGE>] [--auto-login <BOOLEAN>] [--authz-enforced <BOOLEAN>]
+lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMAINS>] [--session-days <DAYS>] [--login-message <MESSAGE>] [--auto-login <BOOLEAN>] [--authz-enforced <BOOLEAN>] [--stale-active-days <DAYS>] [--stale-active-reset-days <DAYS>]
 ```
 
 `info` prints the settings, the configured server details and user counts. `set` changes only the settings you pass.
@@ -272,6 +272,8 @@ lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMA
 | `--login-message <MESSAGE>` | A short message on the sign-in screen, up to 280 characters. An empty string clears it. |
 | `--auto-login <BOOLEAN>` | Signs the browser in as the administrator without a login screen. REST and MCP still need credentials. Turning it on is refused when the configuration makes the instance reachable from outside, by the same rule `lific start` applies. Turning it off always works. |
 | `--authz-enforced <BOOLEAN>` | Enforces project membership on every REST and MCP call, reads included. On by default for instances created with 2.1 or later; upgraded instances keep it off until you turn it on. |
+| `--stale-active-days <DAYS>` | How long an active issue may go untouched before the MCP briefing and `list_issues(stale=true)` report it as stale, from 1 to 365 days. Default 3. Not in the web UI yet. |
+| `--stale-active-reset-days <DAYS>` | How long an active issue may go untouched before `lific start` moves it back to `todo`, from 0 to 365 days. Default 14; `0` turns it off. The server checks once a day and leaves a comment from `Lific` on each issue it moves; the change is audited as `system`. Not in the web UI yet. |
 
 ### login and logout
 

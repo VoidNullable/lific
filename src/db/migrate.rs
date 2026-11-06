@@ -321,6 +321,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "briefing cursors",
         include_str!("../../migrations/065_briefing_cursors.sql"),
     ),
+    (
+        66,
+        "stale active days",
+        include_str!("../../migrations/066_stale_active_days.sql"),
+    ),
+    (
+        67,
+        "stale active reset days",
+        include_str!("../../migrations/067_stale_active_reset_days.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

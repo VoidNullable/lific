@@ -99,6 +99,19 @@ fn issue_line(context: Option<&IssueLinkContext>, issue: &models::Issue) -> Stri
     )
 }
 
+/// An issue line with how long it has gone untouched (LIF-492).
+fn idle_line(
+    context: Option<&IssueLinkContext>,
+    issue: &models::Issue,
+    now: DateTime<Utc>,
+) -> String {
+    let mut line = issue_line(context, issue);
+    if let Some(idle) = queries::stale::idle_for(&issue.updated_at, now) {
+        let _ = write!(line, " | idle {}", queries::stale::short_age(idle));
+    }
+    line
+}
+
 /// The first open step in tree order, descending into its first open child,
 /// so the answer is the concrete thing to do next rather than its parent.
 fn next_open_step(steps: &[models::PlanStepNode]) -> Option<&models::PlanStepNode> {
@@ -252,15 +265,21 @@ impl LificMcp {
             since.as_deref(),
             input.pages.as_deref().unwrap_or_default(),
         )?;
-        let active = self.active_section(context, project.id, ident)?;
+        // LIF-492: active issues split at the stale cutoff, so a claim nobody
+        // has touched in days reads as abandoned rather than in progress.
+        let stale_days = self.read(queries::settings::get)?.stale_active_days;
+        let cutoff = queries::stale::cutoff(now, stale_days);
+        let active = self.active_section(context, project.id, ident, now, &cutoff)?;
+        let stale = self.stale_section(context, project.id, ident, now, &cutoff, stale_days)?;
 
         // LIF-491: what only a person can do leads, from every visible project.
         let human_queue = self.human_queue_section(context)?;
 
-        let mut sections: Vec<Section> = [changes, plans, due, blocked, workable, pages, active]
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut sections: Vec<Section> =
+            [changes, plans, due, blocked, workable, pages, active, stale]
+                .into_iter()
+                .flatten()
+                .collect();
         if sections.is_empty() {
             header.push_str("Nothing is planned, active, blocked or workable.\n");
         }
@@ -645,11 +664,14 @@ impl LificMcp {
         context: Option<&IssueLinkContext>,
         project_id: i64,
         ident: &str,
+        now: DateTime<Utc>,
+        cutoff: &str,
     ) -> Result<Option<Section>, String> {
         let (issues, total, total_is_floor) = self.briefing_issues(
             project_id,
             models::ListIssuesQuery {
                 status: Some(models::Status::Active),
+                updated_since: Some(cutoff.to_string()),
                 ..Default::default()
             },
         )?;
@@ -661,11 +683,47 @@ impl LificMcp {
             summary: None,
             lines: issues
                 .iter()
-                .map(|issue| issue_line(context, issue))
+                .map(|issue| idle_line(context, issue, now))
                 .collect(),
             total,
             total_is_floor,
             more: format!("list_issues(project='{ident}', status='active')"),
+        }))
+    }
+
+    /// Active issues nobody has touched since `cutoff` (LIF-492).
+    fn stale_section(
+        &self,
+        context: Option<&IssueLinkContext>,
+        project_id: i64,
+        ident: &str,
+        now: DateTime<Utc>,
+        cutoff: &str,
+        days: i64,
+    ) -> Result<Option<Section>, String> {
+        let (issues, total, total_is_floor) = self.briefing_issues(
+            project_id,
+            models::ListIssuesQuery {
+                status: Some(models::Status::Active),
+                updated_until: Some(cutoff.to_string()),
+                ..Default::default()
+            },
+        )?;
+        if issues.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Section {
+            heading: format!("Stale active ({})", count(total, total_is_floor)),
+            summary: Some(format!(
+                "Active but untouched for {days}+ days. Resume one, or move it back to todo if nobody is on it."
+            )),
+            lines: issues
+                .iter()
+                .map(|issue| idle_line(context, issue, now))
+                .collect(),
+            total,
+            total_is_floor,
+            more: format!("list_issues(project='{ident}', stale=true)"),
         }))
     }
 

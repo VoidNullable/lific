@@ -30,6 +30,8 @@ pub fn run(
             login_message,
             auto_login,
             authz_enforced,
+            stale_active_days,
+            stale_active_reset_days,
         } => {
             if auto_login == Some(true)
                 && let Some(exposure) =
@@ -55,6 +57,8 @@ pub fn run(
                 login_message,
                 web_auto_login: auto_login,
                 authz_enforced,
+                stale_active_days,
+                stale_active_reset_days,
             };
             let conn = pool.write()?;
             db::queries::settings::update(&conn, patch)?;
@@ -97,6 +101,8 @@ pub fn run(
             "signup_email_domains": settings.signup_email_domains,
             "session_lifetime_days": settings.session_lifetime_days,
             "login_message": settings.login_message,
+            "stale_active_days": settings.stale_active_days,
+            "stale_active_reset_days": settings.stale_active_reset_days,
             "users": { "total": total, "admins": admins },
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -123,6 +129,11 @@ pub fn run(
         );
         println!("  signup domains:{domains}");
         println!("  session days:  {}", settings.session_lifetime_days);
+        println!("  stale active:  {} days idle", settings.stale_active_days);
+        match settings.stale_active_reset_days {
+            0 => println!("  stale reset:   off"),
+            days => println!("  stale reset:   to todo after {days} days idle"),
+        }
         println!(
             "  login message: {}",
             settings.login_message.as_deref().unwrap_or("(none)")
@@ -145,6 +156,8 @@ mod tests {
             login_message: None,
             auto_login,
             authz_enforced: None,
+            stale_active_days: None,
+            stale_active_reset_days: None,
         }
     }
 

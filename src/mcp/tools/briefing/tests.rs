@@ -1026,3 +1026,73 @@ fn the_human_queue_leaves_out_projects_the_caller_cannot_view() {
     assert!(!out.contains("FGN"), "{out}");
     assert!(!queue.contains("duplicate"), "{queue}");
 }
+
+/// Pin `updated_at` without the bump triggers undoing it (they skip a row
+/// whose `seq` changes in the same statement).
+fn touch_at(m: &LificMcp, identifier: &str, updated_at: &str) {
+    let sequence: i64 = identifier.rsplit('-').next().unwrap().parse().unwrap();
+    m.write(|conn| {
+        conn.execute(
+            "UPDATE issues SET updated_at = ?1, seq = seq + 1000000 WHERE sequence = ?2",
+            rusqlite::params![updated_at, sequence],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn briefing_at(m: &LificMcp, project: &str, now: &str) -> String {
+    let now = chrono::DateTime::parse_from_rfc3339(now)
+        .unwrap()
+        .with_timezone(&Utc);
+    m.get_briefing_at(
+        GetBriefingInput {
+            project: Some(project.into()),
+            ..Default::default()
+        },
+        now,
+    )
+    .unwrap()
+}
+
+/// LIF-492: an active issue idle past the threshold leaves the Active section
+/// for its own, every active row says how long it has been idle, and the
+/// threshold is the instance setting.
+#[test]
+fn idle_active_issues_are_reported_as_stale() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Stale", "STL");
+    issue(&m, "STL", "Being worked", "active", "high");
+    issue(&m, "STL", "Claimed and left", "active", "medium");
+    issue(&m, "STL", "Old todo", "todo", "low");
+    touch_at(&m, "STL-1", "2026-11-05 07:00:00");
+    touch_at(&m, "STL-2", "2026-10-20 08:00:00");
+    touch_at(&m, "STL-3", "2026-01-01 00:00:00");
+
+    let out = briefing_at(&m, "STL", "2026-11-06T12:00:00Z");
+    let active = section(&out, "Active (1)");
+    assert!(active.contains("STL-1"), "{active}");
+    assert!(active.contains("| idle 1d"), "{active}");
+    assert!(!active.contains("STL-2"), "{active}");
+
+    let stale = section(&out, "Stale active (1)");
+    assert!(stale.contains("untouched for 3+ days"), "{stale}");
+    assert!(stale.contains("STL-2"), "{stale}");
+    assert!(stale.contains("| idle 17d"), "{stale}");
+    assert!(!stale.contains("STL-3"), "a todo is never stale: {stale}");
+
+    // A longer threshold makes the same issue current again.
+    m.write(|conn| {
+        queries::settings::update(
+            conn,
+            queries::settings::InstanceSettingsPatch {
+                stale_active_days: Some(30),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let out = briefing_at(&m, "STL", "2026-11-06T12:00:00Z");
+    assert!(section(&out, "Active (2)").contains("STL-2"), "{out}");
+    assert!(!out.contains("Stale active"), "{out}");
+}
