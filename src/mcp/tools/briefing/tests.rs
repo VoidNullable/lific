@@ -720,3 +720,193 @@ fn excluded_rows_ahead_of_an_eligible_issue_do_not_hide_it() {
     // A count cut short by the scan says so rather than posing as exact.
     section(&out, "Active (100+)");
 }
+
+// ── LIF-491: the human queue ─────────────────────────────────────────
+
+fn human_issue(m: &LificMcp, project: &str, title: &str, status: &str, due: Option<&str>) {
+    let created = m.create_issue(Parameters(CreateIssueInput {
+        project: Some(project.into()),
+        title: title.into(),
+        status: Some(status.into()),
+        target_date: due.map(Into::into),
+        assignees: Some(vec!["human".into()]),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+}
+
+fn blocks(m: &LificMcp, source: &str, target: &str) {
+    let linked = m.link_issues(Parameters(LinkIssuesInput {
+        source: source.into(),
+        target: target.into(),
+        relation_type: "blocks".into(),
+        ..Default::default()
+    }));
+    assert!(!linked.starts_with("Error"), "got: {linked}");
+}
+
+#[test]
+fn the_briefing_opens_with_the_human_queue_ranked_by_blocking_then_due_then_age() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Queue A", "HQA");
+    seed_project(&m, "Queue B", "HQB");
+    human_issue(&m, "HQA", "Sign the lease", "todo", None); // HQA-1
+    human_issue(&m, "HQA", "Renew domain", "todo", None); // HQA-2
+    human_issue(&m, "HQA", "Pick a logo", "backlog", Some("2026-11-20")); // HQA-3
+    issue(&m, "HQA", "Agent work", "todo", "high"); // HQA-4
+    human_issue(&m, "HQA", "Call the bank", "todo", None); // HQA-5
+    human_issue(&m, "HQA", "Already handled", "done", None); // HQA-6
+    issue(&m, "HQA", "Agent blocker", "todo", "low"); // HQA-7
+    human_issue(&m, "HQB", "Renew  Domain", "todo", Some("2026-12-01")); // HQB-1
+    human_issue(&m, "HQB", "Approve budget", "active", None); // HQB-2
+    issue(&m, "HQB", "Spend it", "todo", "medium"); // HQB-3
+    issue(&m, "HQB", "Report it", "backlog", "medium"); // HQB-4
+    issue(&m, "HQB", "Shipped", "done", "medium"); // HQB-5
+    blocks(&m, "HQB-2", "HQB-3");
+    blocks(&m, "HQB-2", "HQB-4");
+    // A closed issue is no longer held up, so it does not count.
+    blocks(&m, "HQB-2", "HQB-5");
+    blocks(&m, "HQA-2", "HQA-4");
+    // An agent's blocker is not in the queue at all.
+    blocks(&m, "HQA-7", "HQA-1");
+    // Older than HQA-1 despite the later sequence.
+    m.write(|conn| {
+        conn.execute(
+            "UPDATE issues SET created_at = datetime('now', '-3 days'), seq = seq + 1000000
+              WHERE sequence = 5 AND project_id = (SELECT id FROM projects WHERE identifier = 'HQA')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let out = briefing(&m, Some("HQA"), None, &[]);
+    let first = out.find("\n## ").expect("a section");
+    assert!(
+        out[first..].starts_with("\n## Human queue (6), every project"),
+        "the queue leads: {out}"
+    );
+    let queue = section(&out, "Human queue");
+    assert!(queue.contains("By project: HQA 4, HQB 2."), "{queue}");
+    let order: Vec<&str> = queue
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(|line| line.split(" | ").next().unwrap())
+        .collect();
+    assert_eq!(
+        order,
+        ["HQB-2", "HQA-2", "HQA-3", "HQB-1", "HQA-5", "HQA-1"],
+        "{queue}"
+    );
+    assert!(
+        queue.contains("- HQB-2 | active | none | Approve budget | for human | blocks 2 | opened "),
+        "{queue}"
+    );
+    assert!(
+        queue.contains(
+            "- HQA-3 | backlog | none | Pick a logo | for human | due 2026-11-20 | opened "
+        ),
+        "{queue}"
+    );
+    let line = |id: &str| {
+        queue
+            .lines()
+            .find(|line| line.starts_with(&format!("- {id} ")))
+            .unwrap()
+    };
+    assert!(
+        line("HQA-2").starts_with("- HQA-2 | todo | none | Renew domain | for human | blocks 1 |")
+            && line("HQA-2").ends_with(" | possible duplicate of HQB-1"),
+        "{queue}"
+    );
+    assert!(
+        line("HQB-1").contains(" | due 2026-12-01 | ")
+            && line("HQB-1").ends_with(" | possible duplicate of HQA-2"),
+        "{queue}"
+    );
+    let plain = queue
+        .lines()
+        .find(|line| line.starts_with("- HQA-1 "))
+        .unwrap();
+    assert!(
+        plain.starts_with("- HQA-1 | todo | none | Sign the lease | for human | opened ")
+            && plain.matches(" | ").count() == 5,
+        "a non-blocking undated item carries only its opened day: {plain}"
+    );
+    assert!(
+        queue.contains("- HQA-5 | todo | none | Call the bank | for human | opened "),
+        "{queue}"
+    );
+    assert!(!queue.contains("Already handled"), "{queue}");
+    assert!(!queue.contains("Agent"), "{queue}");
+}
+
+#[test]
+fn the_human_queue_names_people_and_is_omitted_when_empty() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Quiet", "QUI");
+    issue(&m, "QUI", "Agent work", "todo", "high");
+    let out = briefing(&m, Some("QUI"), None, &[]);
+    assert!(!out.contains("Human queue"), "{out}");
+
+    let created = m.create_issue(Parameters(CreateIssueInput {
+        project: Some("QUI".into()),
+        title: "Only the admin can".into(),
+        assignees: Some(vec!["me".into()]),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+    let out = briefing(&m, Some("QUI"), None, &[]);
+    let queue = section(&out, "Human queue (1)");
+    assert!(queue.contains("Only the admin can | for @"), "{queue}");
+}
+
+#[test]
+fn the_human_queue_leaves_out_projects_the_caller_cannot_view() {
+    let (m, _admin, lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+        setup_membership_mcp();
+    let created = as_user(&lead, || {
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("MEM".into()),
+            title: "Shared chore".into(),
+            assignees: Some(vec!["human".into()]),
+            ..Default::default()
+        }))
+    });
+    assert!(created.starts_with("Created"), "got: {created}");
+    {
+        let conn = m.db.write().unwrap();
+        let foreign = queries::create_project(
+            &conn,
+            &models::CreateProject {
+                name: "Foreign".into(),
+                identifier: "FGN".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hidden = queries::create_issue(
+            &conn,
+            &models::CreateIssue {
+                project_id: foreign.id,
+                title: "Shared chore".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issue_assignees (issue_id, user_id) VALUES (?1, NULL)",
+            [hidden.id],
+        )
+        .unwrap();
+    }
+
+    let out = as_user(&viewer, || briefing(&m, Some("MEM"), None, &[]));
+    let queue = section(&out, "Human queue (1)");
+    assert!(
+        queue.contains("MEM-1 | backlog | none | Shared chore | for human | opened "),
+        "{queue}"
+    );
+    assert!(!out.contains("FGN"), "{out}");
+    assert!(!queue.contains("duplicate"), "{queue}");
+}

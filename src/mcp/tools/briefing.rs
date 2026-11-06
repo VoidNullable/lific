@@ -14,6 +14,8 @@ use std::collections::HashSet;
 
 use super::*;
 
+mod human_queue;
+
 /// The whole response stays under this many characters, notes included.
 pub(super) const BUDGET_CHARS: usize = 6_000;
 /// Lines per issue section before budgeting.
@@ -186,12 +188,18 @@ impl LificMcp {
         )?;
         let active = self.active_section(context, project.id, ident)?;
 
+        // LIF-491: what only a person can do leads, from every visible project.
+        let human_queue = self.human_queue_section(context)?;
+
         let mut sections: Vec<Section> = [changes, plans, due, blocked, workable, pages, active]
             .into_iter()
             .flatten()
             .collect();
         if sections.is_empty() {
             header.push_str("Nothing is planned, active, blocked or workable.\n");
+        }
+        if let Some(queue) = human_queue {
+            sections.insert(0, queue);
         }
         fit_to_budget(&header, &mut sections)
     }
