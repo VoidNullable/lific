@@ -1,3 +1,16 @@
+<script module lang="ts">
+  import type { Icon } from "lucide-svelte";
+
+  /** LIF-488: an extra action listed above Delete, e.g. "Move to project".
+   *  `icon` is typed like ContextMenuItem's: lucide-svelte v1 icons are
+   *  legacy class components. */
+  export interface MenuItem {
+    label: string;
+    icon?: typeof Icon;
+    run: () => void;
+  }
+</script>
+
 <script lang="ts">
   // LIF-123 — shared delete affordance: a kebab button that opens a
   // single "Delete {noun}" menu item, which in turn opens an inline
@@ -17,6 +30,7 @@
     onDelete,
     confirmBody = "This can't be undone.",
     align = "right",
+    items = [],
   }: {
     /** Object kind shown in the menu item, e.g. "issue" / "page". */
     noun: string;
@@ -25,6 +39,7 @@
     onDelete: () => Promise<boolean>;
     confirmBody?: string;
     align?: "left" | "right";
+    items?: MenuItem[];
   } = $props();
 
   let menuOpen = $state(false);
@@ -72,6 +87,22 @@
              rounded-md shadow-lg py-1"
       onclick={(e) => e.stopPropagation()}
     >
+      {#each items as item (item.label)}
+        <button
+          class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                 text-body-sm text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors"
+          onclick={() => {
+            menuOpen = false;
+            item.run();
+          }}
+        >
+          {#if item.icon}
+            <item.icon size={14} />
+          {/if}
+          {item.label}
+        </button>
+      {/each}
       <button
         class="w-full flex items-center gap-2 px-3 py-1.5 text-left
                text-body-sm text-[var(--error)]
