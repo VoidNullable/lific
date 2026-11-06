@@ -293,6 +293,14 @@ impl Display for IssueLine<'_> {
         })?;
         self.module
             .map_or(Ok(()), |name| write!(formatter, " (module: {name})"))?;
+        // LIF-480: deadline-driven sessions read the due date off the row
+        // instead of opening every issue.
+        issue
+            .target_date
+            .as_deref()
+            .map(str::trim)
+            .filter(|date| !date.is_empty())
+            .map_or(Ok(()), |date| write!(formatter, " due:{date}"))?;
         [
             (" blocks:", issue.blocks.as_slice()),
             (" blocked_by:", issue.blocked_by.as_slice()),
@@ -5902,6 +5910,9 @@ mod tests_verification;
 
 #[cfg(test)]
 mod tests_checklist;
+
+#[cfg(test)]
+mod tests_due_date;
 
 #[cfg(test)]
 #[path = "tests_search_filing.rs"]
