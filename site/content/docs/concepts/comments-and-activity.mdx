@@ -84,7 +84,7 @@ Writes by a connected agent are attributed to the agent, not to its owner, and t
 - Membership: members added and removed, and role changes.
 - Modules, labels and folders.
 - Issues, including every field change, label changes and relations.
-- Pages and comments, including mentions.
+- Pages and comments, including mentions. A page content edit is stored as a line diff of what changed rather than two copies of the page, so a long page edited many times does not grow the log by its full size each time. The web UI shows the diff, and `get_activity` summarizes it as the number of lines added and removed.
 - Plans and plan steps, including the automatic changes described in [Plans](/docs/concepts/plans#mirrored-issues), which are recorded as `auto-complete`, `auto-reopen` and `auto-archive`.
 - Deletions and restores.
 

@@ -209,7 +209,7 @@ Returns `items` and `has_more`. Each item has:
 - `transport`: `web`, `mcp`, `api`, `cli` or `system`
 - `entity_type`, `entity_id`, `entity_label`, and `project_id`, `issue_id`, `page_id` where they apply
 - `action`: such as `create`, `update`, `delete`, `attach`, `detach`, `link` or `unlink`
-- `field`, `old_value` and `new_value` for a field change
+- `field`, `old_value` and `new_value` for a field change. A page content edit has `field` set to `content_diff`, `old_value` null and `new_value` holding a unified diff of the change (hunks with three lines of context, no file header) instead of both full bodies. Entries written before this format, or by a direct database update, carry `field: "content"` with the full old and new content.
 
 ### GET `/api/projects/{id}/activity/actors`
 
