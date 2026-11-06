@@ -1323,6 +1323,11 @@ pub enum InstanceAction {
         /// `list_issues(stale=true)` report it as stale (1-365, default 3)
         #[arg(long = "stale-active-days")]
         stale_active_days: Option<i64>,
+
+        /// Days an active issue may go untouched before the server's nightly
+        /// job moves it back to todo with a comment (0-365, default 14; 0 is off)
+        #[arg(long = "stale-active-reset-days")]
+        stale_active_reset_days: Option<i64>,
     },
 }
 
@@ -2234,6 +2239,8 @@ mod tests {
             "true",
             "--stale-active-days",
             "5",
+            "--stale-active-reset-days",
+            "0",
         ])
         .unwrap();
         match cli.command {
@@ -2248,6 +2255,7 @@ mod tests {
                         auto_login,
                         authz_enforced,
                         stale_active_days,
+                        stale_active_reset_days,
                     },
             } => {
                 assert_eq!(name, Some("Acme Eng".into()));
@@ -2258,6 +2266,7 @@ mod tests {
                 assert_eq!(auto_login, Some(true));
                 assert_eq!(authz_enforced, Some(true));
                 assert_eq!(stale_active_days, Some(5));
+                assert_eq!(stale_active_reset_days, Some(0));
             }
             _ => panic!("expected Instance Set"),
         }

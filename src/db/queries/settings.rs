@@ -18,6 +18,8 @@ const MAX_SESSION_DAYS: i64 = 365;
 /// span that is not ordinary overnight work in progress.
 const MIN_STALE_ACTIVE_DAYS: i64 = 1;
 const MAX_STALE_ACTIVE_DAYS: i64 = 365;
+/// LIF-494: `0` turns the nightly reset off.
+const MAX_STALE_ACTIVE_RESET_DAYS: i64 = 365;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InstanceSettings {
@@ -47,6 +49,9 @@ pub struct InstanceSettings {
     /// old is "stale": claimed, then left. The briefing lists such issues on
     /// their own and `list_issues(stale=true)` finds them.
     pub stale_active_days: i64,
+    /// LIF-494: the nightly job moves an active issue untouched for this many
+    /// days back to todo. `0` disables it.
+    pub stale_active_reset_days: i64,
 }
 
 /// Partial update. `None` = leave unchanged. For the nullable string fields
@@ -61,6 +66,7 @@ pub struct InstanceSettingsPatch {
     pub web_auto_login: Option<bool>,
     pub authz_enforced: Option<bool>,
     pub stale_active_days: Option<i64>,
+    pub stale_active_reset_days: Option<i64>,
 }
 
 /// Seed the settings row if it does not exist yet, using `allow_signup` as the
@@ -96,6 +102,7 @@ fn defaults() -> InstanceSettings {
         web_auto_login: false,
         authz_enforced: false,
         stale_active_days: 3,
+        stale_active_reset_days: 14,
     }
 }
 
@@ -106,7 +113,7 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
     match conn.query_row(
         "SELECT allow_signup, instance_name, signup_email_domains,
                     session_lifetime_days, login_message, web_auto_login,
-                    authz_enforced, stale_active_days
+                    authz_enforced, stale_active_days, stale_active_reset_days
              FROM instance_settings WHERE id = 1",
         [],
         |row| {
@@ -120,6 +127,7 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
                 web_auto_login: row.get::<_, i64>(5)? != 0,
                 authz_enforced: row.get::<_, i64>(6)? != 0,
                 stale_active_days: row.get(7)?,
+                stale_active_reset_days: row.get(8)?,
             })
         },
     ) {
@@ -186,11 +194,23 @@ pub fn update(
         None => cur.stale_active_days,
     };
 
+    let stale_active_reset_days = match patch.stale_active_reset_days {
+        Some(d) => {
+            if !(0..=MAX_STALE_ACTIVE_RESET_DAYS).contains(&d) {
+                return Err(LificError::BadRequest(format!(
+                    "stale active reset days must be between 0 (off) and {MAX_STALE_ACTIVE_RESET_DAYS}"
+                )));
+            }
+            d
+        }
+        None => cur.stale_active_reset_days,
+    };
+
     conn.execute(
         "UPDATE instance_settings
          SET allow_signup = ?1, instance_name = ?2, signup_email_domains = ?3,
              session_lifetime_days = ?4, login_message = ?5, web_auto_login = ?6,
-             authz_enforced = ?7, stale_active_days = ?8,
+             authz_enforced = ?7, stale_active_days = ?8, stale_active_reset_days = ?9,
              updated_at = datetime('now')
          WHERE id = 1",
         params![
@@ -202,6 +222,7 @@ pub fn update(
             web_auto_login,
             authz_enforced,
             stale_active_days,
+            stale_active_reset_days,
         ],
     )?;
 
@@ -532,6 +553,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.stale_active_days, 7);
+    }
+
+    #[test]
+    fn stale_active_reset_days_defaults_to_fourteen_and_zero_turns_it_off() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        assert_eq!(get(&c).unwrap().stale_active_reset_days, 14);
+        for bad in [-1, 366] {
+            assert!(
+                update(
+                    &c,
+                    InstanceSettingsPatch {
+                        stale_active_reset_days: Some(bad),
+                        ..Default::default()
+                    },
+                )
+                .is_err(),
+                "{bad} days must be rejected"
+            );
+        }
+        let s = update(
+            &c,
+            InstanceSettingsPatch {
+                stale_active_reset_days: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.stale_active_reset_days, 0);
     }
 
     // LIF-215: the single-user auto-login flag round-trips and defaults off.

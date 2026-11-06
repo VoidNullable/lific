@@ -31,7 +31,7 @@ Returns `allow_signup` (boolean), `has_users` (whether any human account exists 
 
 The full instance settings. **Administrator.**
 
-Returns `allow_signup`, `instance_name`, `signup_email_domains` (string array; empty allows any domain), `session_lifetime_days`, `login_message`, `web_auto_login`, `authz_enforced` and `stale_active_days` (1 to 365, default 3: how many days an active issue may go untouched before the briefing and `list_issues(stale=true)` call it stale). This reports the stored `web_auto_login` flag, not the combined value `/api/instance` shows.
+Returns `allow_signup`, `instance_name`, `signup_email_domains` (string array; empty allows any domain), `session_lifetime_days`, `login_message`, `web_auto_login`, `authz_enforced` and `stale_active_days` (1 to 365, default 3: how many days an active issue may go untouched before the briefing and `list_issues(stale=true)` call it stale) and `stale_active_reset_days` (0 to 365, default 14: how many days an active issue may go untouched before the server moves it back to `todo` once a day, with a comment from `Lific` saying why; `0` turns this off). This reports the stored `web_auto_login` flag, not the combined value `/api/instance` shows.
 
 ### PATCH `/api/instance/settings`
 

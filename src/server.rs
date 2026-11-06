@@ -645,6 +645,10 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     // something has to collect them once they are past the recovery window.
     crate::retention::start_trash_purge_task(pool.clone(), cfg.retention.trash_days);
 
+    // Return long-idle active issues to todo once a day (LIF-494). The
+    // threshold is an instance setting read on each run; 0 turns it off.
+    crate::stale_active::start_task(pool.clone());
+
     // Sweep abandoned (unlinked) attachments hourly. Share the store with the
     // request router so its operation lock covers both upload and GC paths.
     let attachment_store = storage::AttachmentStore::from_db_path(&cfg.database.path);

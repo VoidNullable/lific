@@ -484,6 +484,7 @@ fn settings_json(s: &crate::db::queries::settings::InstanceSettings) -> serde_js
         // doc comment for the full legacy-vs-enforced mode split.
         "authz_enforced": s.authz_enforced,
         "stale_active_days": s.stale_active_days,
+        "stale_active_reset_days": s.stale_active_reset_days,
     })
 }
 
@@ -511,6 +512,9 @@ pub(super) struct InstanceSettingsPatchReq {
     authz_enforced: Option<bool>,
     /// LIF-492: days an active issue may sit untouched before it is stale.
     stale_active_days: Option<i64>,
+    /// LIF-494: days before the nightly job returns an idle active issue to
+    /// todo; 0 turns the job off.
+    stale_active_reset_days: Option<i64>,
 }
 
 /// PATCH /api/instance/settings: partial update, admin only, and only from a
@@ -562,6 +566,7 @@ pub(super) async fn instance_settings_patch(
         web_auto_login: input.web_auto_login,
         authz_enforced: input.authz_enforced,
         stale_active_days: input.stale_active_days,
+        stale_active_reset_days: input.stale_active_reset_days,
     };
     let authz_enforced = input.authz_enforced;
     // The reachability guard above is a precheck on the request; the
@@ -3338,6 +3343,7 @@ mod tests {
         assert_eq!(data["allow_signup"], true);
         assert_eq!(data["session_lifetime_days"], 30);
         assert_eq!(data["stale_active_days"], 3);
+        assert_eq!(data["stale_active_reset_days"], 14);
 
         let patch = serde_json::json!({
             "instance_name": "Acme Eng",
@@ -3345,6 +3351,7 @@ mod tests {
             "session_lifetime_days": 14,
             "signup_email_domains": ["acme.com"],
             "stale_active_days": 5,
+            "stale_active_reset_days": 0,
         });
         let resp = json_patch(&app, "/api/instance/settings", patch).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3354,6 +3361,7 @@ mod tests {
         assert_eq!(data["session_lifetime_days"], 14);
         assert_eq!(data["signup_email_domains"][0], "acme.com");
         assert_eq!(data["stale_active_days"], 5);
+        assert_eq!(data["stale_active_reset_days"], 0);
 
         // The public endpoint reflects the live change.
         let pub_data = parse_json(json_get(&app, "/api/instance").await).await;

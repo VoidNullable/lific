@@ -296,6 +296,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "stale active days",
         include_str!("../../migrations/069_stale_active_days.sql"),
     ),
+    (
+        70,
+        "stale active reset days",
+        include_str!("../../migrations/070_stale_active_reset_days.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

@@ -262,6 +262,35 @@ pub fn create_imported_comment(
     insert_comment_row(conn, parent, bot_id, content, CommentKind::Comment)
 }
 
+/// The author label on comments Lific writes itself (LIF-494).
+pub const SYSTEM_AUTHOR: &str = "Lific";
+
+/// A comment written by the server rather than a person, such as the note the
+/// stale-active reset leaves on an issue it moved (LIF-494).
+///
+/// No account is behind it, so it has no `user_id` and carries the inert
+/// author label migration 050 added for imported comments, shown as
+/// [`SYSTEM_AUTHOR`]. Its text is the server's own: there are no mentions or
+/// attachment references to reconcile, which is why it may skip
+/// [`create_comment_with_mentions`]. The audit log still attributes the write,
+/// to whatever actor the connection was stamped with.
+pub fn create_system_comment(
+    conn: &Connection,
+    issue_id: i64,
+    content: &str,
+) -> Result<Comment, LificError> {
+    validate_comment_content(content)?;
+    let inserted = conn.execute(
+        "INSERT INTO comments (issue_id, user_id, content, imported_author, kind)
+         SELECT id, NULL, ?2, ?3, ?4 FROM issues WHERE id = ?1 AND deleted_at IS NULL",
+        params![issue_id, content, SYSTEM_AUTHOR, CommentKind::Comment],
+    )?;
+    if inserted == 0 {
+        return Err(LificError::NotFound(format!("issue {issue_id} not found")));
+    }
+    get_comment(conn, conn.last_insert_rowid())
+}
+
 /// LIF-409: test-only handles on the unreconciled primitives, so a test can
 /// seed a comment row without exercising mention and attachment
 /// reconciliation. Absent from every non-test build, which is what keeps
