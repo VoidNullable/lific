@@ -137,13 +137,20 @@ Creates an issue, or up to 50 at once, and returns the new identifiers.
 | `start_date` | `string` | No | ISO 8601 date, e.g. `2026-06-01`. |
 | `target_date` | `string` | No | ISO 8601 date, e.g. `2026-06-15`. |
 | `assignees` | `string[]` | No | Who must do it: `["human"]` for any person, or usernames (`"me"` is you, or the person who connected you). Omit to leave it free for agents. See [Assignment](/docs/concepts/issues#assignment). |
+| `blocks` | `string[]` | No | Issue identifiers the new issue blocks. |
+| `blocked_by` | `string[]` | No | Issue identifiers that block the new issue. |
+| `relates_to` | `string[]` | No | Issue identifiers the new issue relates to. |
 | `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project`. |
 
 Attachment links (`/api/attachments/12`) in the description are linked to the new issue.
 
+Relations are written in the same transaction as the issue, so an unknown identifier creates nothing and the error names the reference, such as `blocks[1]: issue APP-99 not found`. As with `link_issues`, you need Maintainer on the other issue's project as well. The confirmation adds a `Linked:` line, such as `Linked: blocks APP-3; relates_to APP-5`, and an issue you just linked is not offered as a duplicate.
+
 After the confirmation, the response lists up to three open issues in the same project that look like duplicates, under `Similar open issues:`, so you can link or cancel one right away. An issue qualifies when it shares at least two significant title words with the new one (one, if the new title has only one), and at least one of them appears in its own title. Significant means three or more characters and not a filler word such as "add", "fix" or "the". Done and cancelled issues are never listed, and the section is left out when nothing qualifies.
 
 To file a burst of issues, pass `issues` instead of `title`. Only `project` may accompany it; any other top-level field is an error, not a default for the items. The batch is one transaction: if any item is invalid (an empty title, an unknown module, a bad status), nothing is created and the error names the item, such as `issues[1]: module 'Nonexistent' not found in project`. The response lists each new issue on its own line, in item order. The duplicate hint shrinks to identifiers on the item's line, as in `- APP-8: Title (similar open: APP-3)`, and issues from the same batch are never listed as each other's duplicates.
+
+In a batch, an item's `blocks`, `blocked_by` and `relates_to` may also name another item of the same batch: by index (`"2"` or `"issues[2]"`) or by its title, matched exactly apart from letter case. An item may name one that comes after it. A title shared by two items must be named by index instead. The item's line shows what it was linked to, as in `- APP-8: Schema (blocks APP-9, APP-3)`.
 
 ### `update_issue`
 
