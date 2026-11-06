@@ -918,6 +918,30 @@ fn issue_status_cascaded_plan_steps(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Plans the same cascade completed or reopened (migration 062), as
+/// `(plan id, PROJ-PLAN-n)`.
+fn issue_status_cascaded_plans(
+    conn: &rusqlite::Connection,
+    audit_checkpoint: i64,
+    issue_id: i64,
+    action: PlanStepCascadeAction,
+) -> Result<Vec<(i64, String)>, crate::error::LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT al.entity_id, al.entity_label
+           FROM audit_log al
+          WHERE al.id > ?1
+            AND al.issue_id = ?2
+            AND al.entity_type = 'plan'
+            AND al.action = ?3
+          ORDER BY al.id ASC",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![audit_checkpoint, issue_id, action.audit_action()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 struct IssuePlanStepCascade<'a> {
     action: PlanStepCascadeAction,
     steps: &'a [CascadedPlanStep],
@@ -3139,11 +3163,12 @@ No issues found."
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let caller = self.caller_username(input.assignees.as_deref())?;
-        let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
-            // Migration 020's cascades key exclusively on transitions to or
-            // from `done`, not on the broader cancelled/open distinction.
-            // Keep an audit checkpoint before the direct issue update so the
-            // response can name only steps the trigger actually changed.
+        let (issue, cascade_action, cascaded_steps, cascaded_plans, verification) = self
+            .transaction(|conn| {
+            // The plan cascades (migrations 020, 061, 062) key on an issue
+            // entering or leaving done/cancelled. Keep an audit checkpoint
+            // before the direct issue update so the response can name only
+            // the steps and plans the triggers actually changed.
             let previous_issue = queries::get_issue(conn, id)?;
             let audit_checkpoint = input
                 .status
@@ -3205,18 +3230,22 @@ No issues found."
                     ..Default::default()
                 },
             )?;
-            let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
-                (previous, "done") if previous != "done" => {
-                    Some(PlanStepCascadeAction::AutoComplete)
-                }
-                ("done", current) if current != "done" => Some(PlanStepCascadeAction::Reopen),
+            // Mirrors migration 061: done and cancelled both resolve a step.
+            let resolved = |status: &str| matches!(status, "done" | "cancelled");
+            let cascade_action = match (
+                resolved(previous_issue.status.as_str()),
+                resolved(issue.status.as_str()),
+            ) {
+                (false, true) => Some(PlanStepCascadeAction::AutoComplete),
+                (true, false) => Some(PlanStepCascadeAction::Reopen),
                 _ => None,
             };
-            let cascaded_steps = match (cascade_action, audit_checkpoint) {
-                (Some(action), Some(checkpoint)) => {
-                    issue_status_cascaded_plan_steps(conn, checkpoint, id, action)?
-                }
-                _ => Vec::new(),
+            let (cascaded_steps, cascaded_plans) = match (cascade_action, audit_checkpoint) {
+                (Some(action), Some(checkpoint)) => (
+                    issue_status_cascaded_plan_steps(conn, checkpoint, id, action)?,
+                    issue_status_cascaded_plans(conn, checkpoint, id, action)?,
+                ),
+                _ => (Vec::new(), Vec::new()),
             };
             let (issue, verification) = match evidence {
                 Some(evidence) => {
@@ -3236,7 +3265,13 @@ No issues found."
                 }
                 None => (issue, None),
             };
-            Ok((issue, cascade_action, cascaded_steps, verification))
+            Ok((
+                issue,
+                cascade_action,
+                cascaded_steps,
+                cascaded_plans,
+                verification,
+            ))
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
@@ -3273,6 +3308,19 @@ No issues found."
                     }
                 )
             })?;
+            cascaded_plans
+                .iter()
+                .try_for_each(|(plan_id, identifier)| {
+                    write!(
+                        output,
+                        "\n{} {}.",
+                        plan_reference_value(context.as_deref(), identifier, *plan_id),
+                        match cascade_action {
+                            Some(PlanStepCascadeAction::Reopen) => "reopened: a step is open again",
+                            _ => "completed: every step is resolved",
+                        }
+                    )
+                })?;
             verification.map_or(Ok(()), |comment_id| {
                 write!(output, "\nVerification recorded as comment #{comment_id}.")
             })?;
@@ -3282,7 +3330,9 @@ No issues found."
                 cascade_action,
                 crate::checklist::checklist(&issue.description),
             ) {
-                (Some(PlanStepCascadeAction::AutoComplete), Some(list)) if list.open() > 0 => {
+                (Some(PlanStepCascadeAction::AutoComplete), Some(list))
+                    if list.open() > 0 && issue.status.as_str() == "done" =>
+                {
                     write!(
                         output,
                         "\nWarning: {} of {} checklist items still unchecked.",
@@ -5367,7 +5417,7 @@ No issues found."
                             let effect = queries::plans::set_step_done(conn, step_id, done)?;
                             enum IssueEffect<'a> {
                                 MarkedDone(&'a str),
-                                AlreadyDone(&'a str),
+                                AlreadyDone(&'a str, &'a str),
                                 None,
                             }
                             let issue_effect = match effect.issue_identifier.as_deref() {
@@ -5380,7 +5430,10 @@ No issues found."
                                     });
                                     IssueEffect::MarkedDone(identifier)
                                 }
-                                Some(identifier) if done => IssueEffect::AlreadyDone(identifier),
+                                Some(identifier) if done => IssueEffect::AlreadyDone(
+                                    identifier,
+                                    effect.issue_new_status.as_deref().unwrap_or("done"),
+                                ),
                                 _ => IssueEffect::None,
                             };
                             let message = try_render(|output| {
@@ -5395,9 +5448,9 @@ No issues found."
                                         " → {} marked done",
                                         issue_reference(context.as_deref(), identifier)
                                     ),
-                                    IssueEffect::AlreadyDone(identifier) => write!(
+                                    IssueEffect::AlreadyDone(identifier, status) => write!(
                                         output,
-                                        " (linked {} already done)",
+                                        " (linked {} already {status})",
                                         issue_reference(context.as_deref(), identifier)
                                     ),
                                     IssueEffect::None => Ok(()),
@@ -12918,8 +12971,9 @@ mod tests {
         );
         // LIF-302: default output is a compact receipt — notes plus a one-line
         // progress summary, and NO step tree lines.
+        // LIF-493: resolving the last step completes the plan.
         assert!(
-            out.contains("PLN-PLAN-1 [active]: 1/1 done"),
+            out.contains("PLN-PLAN-1 [done]: 1/1 done"),
             "receipt must carry progress counts: {out}"
         );
         // No step-tree lines (the "- [x] #N" render fmt_plan would emit).
@@ -13211,6 +13265,50 @@ mod tests {
         assert!(archived.contains("PLN-PLAN-1"), "got: {archived}");
     }
 
+    // LIF-485: cancelling a mirrored issue resolves its step, narrated like a
+    // close but without the checklist warning that only applies to done.
+    #[test]
+    fn cancelling_issue_resolves_step_and_shows_cancelled_status() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "CNP");
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("CNP".into()),
+            title: "Dropped work".into(),
+            description: Some("- [ ] never started".into()),
+            ..Default::default()
+        }));
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("CNP".into()),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                issue: Some("CNP-1".into()),
+                ..Default::default()
+            }]),
+        }));
+
+        let updated = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "CNP-1".into(),
+            status: Some("cancelled".into()),
+            ..Default::default()
+        }));
+        assert!(
+            updated.contains("auto-completed plan step"),
+            "cancel must narrate the cascade: {updated}"
+        );
+        assert!(
+            !updated.contains("checklist items still unchecked"),
+            "cancelling is not closing over open checklist items: {updated}"
+        );
+
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "CNP-PLAN-1".into(),
+        }));
+        assert!(got.contains("[x]"), "step should be resolved: {got}");
+        assert!(got.contains("cancelled"), "status should show: {got}");
+    }
+
     // LIF-175: end-to-end across surfaces — a plan authored via MCP, then the
     // linked issue closed via the issue tool, must show the step auto-completed
     // with provenance when the plan is rehydrated.
@@ -13278,11 +13376,16 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .expect("step id in output");
 
-        m.update_issue(Parameters(UpdateIssueInput {
+        let closed = m.update_issue(Parameters(UpdateIssueInput {
             identifier: "RPN-1".into(),
             status: Some("done".into()),
             ..Default::default()
         }));
+        // LIF-493: the only step resolved, so the plan completed itself.
+        assert!(
+            closed.contains("RPN-PLAN-1 completed: every step is resolved."),
+            "issue close must narrate the plan completing: {closed}"
+        );
         let reopened = m.update_issue(Parameters(UpdateIssueInput {
             identifier: "RPN-1".into(),
             status: Some("todo".into()),
@@ -13292,6 +13395,10 @@ mod tests {
         assert!(
             reopened.contains(&format!("reopened plan step #{step_id} in RPN-PLAN-1")),
             "issue reopen must narrate the cascade: {reopened}"
+        );
+        assert!(
+            reopened.contains("RPN-PLAN-1 reopened: a step is open again."),
+            "issue reopen must narrate the plan reopening: {reopened}"
         );
     }
 

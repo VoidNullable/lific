@@ -356,12 +356,15 @@ mod tests {
         assert_eq!(out["effect"]["issue_status_changed"], true);
         assert_eq!(out["plan"]["steps"][0]["done"], true);
 
+        // The only step is resolved, so the plan completed itself (LIF-493).
+        assert_eq!(out["plan"]["status"], "done");
+
         // List filtered by status.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/plans?project_id={project_id}&status=active"))
+                    .uri(format!("/api/plans?project_id={project_id}&status=done"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

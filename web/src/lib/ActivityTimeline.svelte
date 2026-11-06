@@ -87,6 +87,10 @@
           return "deleted the plan";
         case "auto-archive":
           return "archived the plan (anchor issue closed)";
+        case "auto-complete":
+          return "completed the plan (every step resolved)";
+        case "auto-reopen":
+          return "reopened the plan (a step reopened)";
         case "update":
           if (a.field === "status") return "set status to";
           if (a.field === "title") return "renamed the plan";

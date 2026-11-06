@@ -34,25 +34,30 @@ You can move a step under another parent in the same plan, or to the root, and s
 
 | Status | Meaning |
 | --- | --- |
-| `active` | In progress. Only active plans follow their issues; see [Mirrored issues](#mirrored-issues). |
-| `done` | Finished. The plan is frozen: its steps no longer change when their issues do. |
-| `archived` | Put away, for instance because its anchor issue was completed. Also frozen. |
+| `active` | In progress. Active plans follow their issues fully; see [Mirrored issues](#mirrored-issues). |
+| `done` | Finished. Its steps are no longer checked off by their issues, but an issue that reopens still unchecks its step, which reopens the plan. |
+| `archived` | Put away, for instance because its anchor issue was completed. Frozen: its steps never change when their issues do. |
 
-Checking off the last step does not mark the plan `done`. Set that yourself. You can set a plan back to `active` at any time, and it follows its issues again from that point on; changes made while it was frozen are not replayed.
+An active plan completes itself: when its last unchecked step is checked off, by you or by its issue, the plan moves to `done`. When a step of a `done` plan is unchecked, by you or because its issue reopened, the plan moves back to `active`. A plan with no steps never completes on its own. Both changes are written to the [activity log](/docs/concepts/comments-and-activity#activity-log) as `auto-complete` and `auto-reopen` on the plan.
+
+You can also set the status yourself. A plan set back to `active` follows its issues again from that point on; changes made while it was `done` or `archived` are not replayed.
 
 ## Mirrored issues
 
 A step can point at an issue, in the same project or another one. The step then mirrors that issue. The rule is that the issue's status is the source of truth: completion can flow from a step to its issue, but reopening only ever flows from the issue to its steps.
 
+An issue is resolved when it is `done` or `cancelled`. Both check its steps off, so a plan whose dropped work was cancelled can still reach 100%. A step resolved by a cancellation is an ordinary checked step; its issue status still reads `cancelled`, which is how `get_plan` and the web UI tell it apart from finished work.
+
 | When | What happens |
 | --- | --- |
-| The issue moves to `done` | Every unchecked step that mirrors it, in every active plan, is checked off. |
-| The issue moves out of `done` | Every checked step that mirrors it, in every active plan, is unchecked and marked as reopened by the issue, so it does not look like someone unticked it by hand. |
+| The issue moves to `done` or `cancelled` | Every unchecked step that mirrors it, in every active plan, is checked off. |
+| The issue moves between `done` and `cancelled` | Nothing happens to the steps. They stay checked. |
+| The issue moves out of `done` or `cancelled` to open work | Every checked step that mirrors it, in every active or done plan, is unchecked and marked as reopened by the issue, so it does not look like someone unticked it by hand. A done plan moves back to `active`. |
 | You check off a step that mirrors an open issue | The issue moves to `done`. That in turn checks off other steps mirroring it in active plans and archives plans anchored to it, as above. |
+| You check off a step that mirrors a cancelled issue | Only the step changes. The issue stays `cancelled`. |
 | You uncheck a step | Nothing happens to the issue. |
-| The issue moves to `cancelled` | Nothing happens to the steps. Only `done` counts. |
 
-Steps in `done` and `archived` plans are never changed by an issue. Checking off a step in a frozen plan still moves its issue to `done`, because that comes from your action on the step, not from the plan following its issues.
+Steps in `archived` plans are never changed by an issue, and steps in `done` plans only by a reopen. Checking off a step in a done or archived plan still moves its issue to `done`, because that comes from your action on the step, not from the plan following its issues.
 
 The mirror reacts to status changes, not to links. Pointing a step at an issue that is already `done` does not check the step off, and pre-marking a step done in `create_plan` does not close its issue.
 
