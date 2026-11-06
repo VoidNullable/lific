@@ -103,13 +103,15 @@ With `members`, the listing matches the web home page's "My active issues": `act
 
 ### `get_issue`
 
-Returns one issue, or up to 50: title, status, priority, module, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
+Returns one issue, or up to 50: title, status, priority, module, `seq`, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Unless `identifiers` | Issue identifier, e.g. `PRO-42`. |
 | `identifiers` | `string[]` | No | Up to 50 issue identifiers to read in one call, instead of `identifier`. |
 | `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. Applies to every issue in a batch. |
+
+The status line ends with the issue's `seq`, for example `Status: active | Priority: high | Module: API | seq: 118`. Pass it to [`update_issue`](#update_issue) as `expected_seq` to refuse the write if the issue changes in the meantime.
 
 Relation lines include each related issue's current status, for example `Blocked by: APP-42 (done)`.
 
@@ -353,7 +355,7 @@ A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring
 
 ### `get_page`
 
-Returns one page: its status, folder, labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
+Returns one page: its status, folder, `seq` (what [`update_page`](#update_page) checks `expected_seq` against), labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |

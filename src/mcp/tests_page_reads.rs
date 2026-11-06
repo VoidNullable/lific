@@ -54,8 +54,8 @@ fn a_page_within_the_budget_reads_exactly_as_before() {
         .unwrap();
 
     let expected = format!(
-        "SML-DOC-1 — Working notes\nStatus: draft | Folder: none\nCreated: {} | Updated: {}\n\n{content}\n",
-        page.created_at, page.updated_at
+        "SML-DOC-1 — Working notes\nStatus: draft | Folder: none | seq: {}\nCreated: {} | Updated: {}\n\n{content}\n",
+        page.seq, page.created_at, page.updated_at
     );
     assert_eq!(read(&m, &identifier, None, false), expected);
 }

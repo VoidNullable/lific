@@ -76,7 +76,7 @@ The edit tools share one contract. `old_string` must appear exactly once, or the
 
 By default the last write wins. `update_issue` and `update_page` accept `expected_seq`, a record's change counter, and refuse the update if the record has changed since. The refusal names the current `seq` and summarizes the current state in one line, so you can decide how to merge without another read.
 
-`get_issue` and a plain `get_page` read do not print `seq`. For a page, `get_page` with `outline=true`, `section` or `offset` prints it, and so does `get_briefing` for the pages it lists. The REST API's issue and page responses carry it, and a refusal names it. When you have no `seq`, prefer an exact-string edit: it cannot clobber text it did not match.
+`get_issue` and `get_page` print the record's `seq` on their status line, for example `Status: active | Priority: high | Module: Core | seq: 118`; pass that number as `expected_seq`. `get_briefing` shows it for the pages it lists, the REST API's issue and page responses carry it, and a refusal names it. When you have no `seq`, prefer an exact-string edit: it cannot clobber text it did not match.
 
 ## Read long pages a piece at a time
 

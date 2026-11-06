@@ -2560,12 +2560,13 @@ No issues found."
         let preamble = try_render(|output| {
             writeln!(
                 output,
-                "{} — {}\nStatus: {} | Priority: {} | Module: {}",
+                "{} — {}\nStatus: {} | Priority: {} | Module: {} | seq: {}",
                 issue_reference(context.as_deref(), &issue.identifier),
                 issue.title,
                 issue.status,
                 issue.priority,
-                module_name
+                module_name,
+                issue.seq
             )?;
             issue.labels.split_first().map_or(Ok(()), |_| {
                 writeln!(
@@ -3773,12 +3774,13 @@ No issues found."
         Ok(render_response(|output| {
             writeln!(
                 output,
-                "{}{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}",
+                "{}{} — {}\nStatus: {} | Folder: {} | seq: {}\nCreated: {} | Updated: {}",
                 if page.pinned { "📌 " } else { "" },
                 page_reference(context.as_deref(), &page),
                 page.title,
                 page.status,
                 folder_name.as_deref().unwrap_or("none"),
+                page.seq,
                 page.created_at,
                 page.updated_at
             )?;
@@ -6977,6 +6979,83 @@ mod tests {
 
         assert!(result.contains("Edited doc"), "got: {result}");
         assert!(page_seq_of(&m, "OPF-DOC-1") > seq);
+    }
+
+    // ── LIF-484: reads show the seq that `expected_seq` checks against ──
+
+    /// The `seq: N` value on a read's second line, the header's status line.
+    fn header_seq(read: &str) -> i64 {
+        let status_line = read.lines().nth(1).expect("a status line");
+        status_line
+            .split(" | ")
+            .find_map(|field| field.strip_prefix("seq: "))
+            .unwrap_or_else(|| panic!("no seq in the header: {read}"))
+            .parse()
+            .expect("a numeric seq")
+    }
+
+    #[test]
+    fn get_issue_header_shows_the_seq_an_update_can_be_checked_against() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Test", "SQI");
+        seed_issue(&m, "SQI", "Read before write");
+
+        let read = m.get_issue(Parameters(GetIssueInput {
+            identifier: "SQI-1".into(),
+            ..Default::default()
+        }));
+        let seq = header_seq(&read);
+        assert_eq!(seq, issue_seq_of(&m, "SQI-1"), "got: {read}");
+
+        let result = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "SQI-1".into(),
+            title: Some("Checked write".into()),
+            expected_seq: Some(seq),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Updated SQI-1"), "got: {result}");
+
+        let reread = m.get_issue(Parameters(GetIssueInput {
+            identifier: "SQI-1".into(),
+            include_comments: Some("none".into()),
+            identifiers: None,
+        }));
+        assert_eq!(header_seq(&reread), issue_seq_of(&m, "SQI-1"));
+        assert!(header_seq(&reread) > seq, "got: {reread}");
+    }
+
+    #[test]
+    fn get_page_header_shows_the_seq_in_full_and_outline_reads() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Test", "SQP");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("SQP".into()),
+            title: "Read before write".into(),
+            content: Some("## One\nbody\n".into()),
+            ..Default::default()
+        }));
+        let seq = page_seq_of(&m, "SQP-DOC-1");
+
+        let full = m.get_page(Parameters(GetPageInput {
+            identifier: "SQP-DOC-1".into(),
+            ..Default::default()
+        }));
+        assert_eq!(header_seq(&full), seq, "got: {full}");
+
+        let outline = m.get_page(Parameters(GetPageInput {
+            identifier: "SQP-DOC-1".into(),
+            outline: Some(true),
+            ..Default::default()
+        }));
+        assert_eq!(header_seq(&outline), seq, "got: {outline}");
+
+        let result = m.update_page(Parameters(UpdatePageInput {
+            identifier: "SQP-DOC-1".into(),
+            content: Some("## One\nedited\n".into()),
+            expected_seq: Some(header_seq(&full)),
+            ..Default::default()
+        }));
+        assert!(!result.starts_with("Error: "), "got: {result}");
     }
 
     /// Without preconditions, two writers touching different fields must both
