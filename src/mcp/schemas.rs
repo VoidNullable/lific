@@ -79,8 +79,15 @@ pub struct ListIssuesInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetIssueInput {
-    #[schemars(description = "Issue ID, e.g. PRO-42")]
+    // LIF-481: optional so a batch can omit it; the tool requires it
+    // whenever `identifiers` is absent.
+    #[serde(default)]
+    #[schemars(description = "Issue ID, e.g. PRO-42 (required unless identifiers is given)")]
     pub identifier: String,
+    #[schemars(
+        description = "Up to 50 issue IDs to read in one call instead of identifier. An unknown one is reported inline"
+    )]
+    pub identifiers: Option<Vec<String>>,
     #[schemars(description = "recent (default, last 3), all (newest 500), or none (count only)")]
     pub include_comments: Option<String>,
 }

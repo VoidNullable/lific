@@ -8,7 +8,7 @@ Lific exposes 31 MCP tools. This page lists every parameter each one accepts, as
 Arguments are checked against the schema before a tool runs. A missing required parameter, a value of the wrong type, or a parameter the tool does not declare is rejected as a JSON-RPC `-32602 invalid params` error, and the tool never runs. Unknown parameters are refused on every tool, so a misspelled optional parameter cannot be dropped while the tool answers a different question. The message names the unknown key, suggests the closest valid name when one is close, and lists the valid ones:
 
 ```text
-Unknown parameter `comments` in get_issue. Did you mean `include_comments`? Valid parameters: `identifier`, `include_comments`.
+Unknown parameter `comments` in get_issue. Did you mean `include_comments`? Valid parameters: `identifier`, `identifiers`, `include_comments`.
 ```
 
 The same check applies inside nested objects, such as plan steps and `create_issue` batch items, where the message says `Unknown field` and names the nested object. Everything a tool itself refuses comes back as a result whose text starts with `Error:`.
@@ -103,12 +103,13 @@ With `members`, the listing matches the web home page's "My active issues": `act
 
 ### `get_issue`
 
-Returns one issue: title, status, priority, module, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
+Returns one issue, or up to 50: title, status, priority, module, labels, checklist progress, who must do it, relations, waits, description and a window of its comments.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier, e.g. `PRO-42`. |
-| `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. |
+| `identifier` | `string` | Unless `identifiers` | Issue identifier, e.g. `PRO-42`. |
+| `identifiers` | `string[]` | No | Up to 50 issue identifiers to read in one call, instead of `identifier`. |
+| `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. Applies to every issue in a batch. |
 
 Relation lines include each related issue's current status, for example `Blocked by: APP-42 (done)`.
 
@@ -126,6 +127,8 @@ Each wait prints on its own line after the relations, with its note in parenthes
 A comment that recorded closing evidence (see `update_issue`) is marked `[verification]` after its timestamp, here and in `list_comments`.
 
 Comments print oldest first in every mode, and each mode reads only the rows it prints. When the thread is longer than the window, the comment header says how many it is showing and points at `list_comments`. The whole response is held to a 2 MiB budget, description included. If the comments would exceed it, fewer are shown and the header says the size budget cut them. An issue whose description alone leaves no room for its newest comment returns an error that sends you to `list_comments`.
+
+With `identifiers`, each issue prints exactly as a single read would, in the order given, separated by a `=====` line. An identifier that cannot be read (unknown, malformed, or in a project you cannot see) becomes its own line, such as `APP-99: Error: Not found: issue APP-99 not found`, and the rest of the batch still returns. Pass `identifier` or `identifiers`, not both. The 2 MiB budget covers the whole batch: when the next issue would not fit, the response ends with `Not shown, past the response size budget:` and the identifiers left to read.
 
 ### `create_issue`
 

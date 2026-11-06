@@ -179,6 +179,19 @@ fn error_response(error: String) -> String {
     format!("Error: {error}")
 }
 
+/// `get_issue`'s comment-trail mode, refused by name when it is not one of
+/// the three so a typo errors instead of silently defaulting.
+fn get_issue_comment_mode(mode: Option<&str>) -> Result<&str, String> {
+    let mode = mode.unwrap_or("recent");
+    if matches!(mode, "recent" | "all" | "none") {
+        Ok(mode)
+    } else {
+        Err(format!(
+            "invalid include_comments '{mode}'. Use recent, all, or none."
+        ))
+    }
+}
+
 /// `list_resources` publishes a bigger default page than the queries behind it
 /// (their default is 50): its rows are one line each and it is the discovery
 /// call an agent makes first. The cap is the shared one.
@@ -2359,20 +2372,99 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Get an issue with its details and last 3 comments.")]
-    fn get_issue(&self, Parameters(input): Parameters<GetIssueInput>) -> String {
-        self.get_issue_inner(input).unwrap_or_else(error_response)
+    #[tool(
+        description = "Get an issue with its details and last 3 comments, or up to 50 with identifiers."
+    )]
+    fn get_issue(&self, Parameters(mut input): Parameters<GetIssueInput>) -> String {
+        match input.identifiers.take() {
+            Some(identifiers) => self.get_issue_batch(input, identifiers),
+            None if input.identifier.trim().is_empty() => {
+                Err("identifier is required (or pass identifiers to read several)".into())
+            }
+            None => self.get_issue_inner(input),
+        }
+        .unwrap_or_else(error_response)
+    }
+
+    /// LIF-481: agents read issues in runs, one call each. A batch renders
+    /// every issue exactly as a single read would, in the order asked, and a
+    /// failed read (unknown, malformed, not visible) becomes that item's own
+    /// `Error:` line instead of failing the rest.
+    ///
+    /// The 2 MiB response budget covers the whole batch, not each issue: once
+    /// the next issue would not fit, it and everything after it are named as
+    /// not shown, so the caller knows exactly what to read again.
+    fn get_issue_batch(
+        &self,
+        input: GetIssueInput,
+        identifiers: Vec<String>,
+    ) -> Result<String, String> {
+        const MAX_GET_BATCH: usize = 50;
+        const SEPARATOR: &str = "\n\n=====\n\n";
+        if !input.identifier.is_empty() {
+            return Err("pass identifier or identifiers, not both".into());
+        }
+        if identifiers.is_empty() {
+            return Err("identifiers is empty; pass at least one issue ID".into());
+        }
+        if identifiers.len() > MAX_GET_BATCH {
+            return Err(format!(
+                "identifiers takes at most {MAX_GET_BATCH} issues per call, got {}; split the read",
+                identifiers.len()
+            ));
+        }
+        get_issue_comment_mode(input.include_comments.as_deref())?;
+
+        let budget = queries::comments::MAX_COMMENT_RESPONSE_BYTES - 1024;
+        let envelope = encoded_tool_result_bytes("")?;
+        let text_bytes = |text: &str| encoded_tool_result_bytes(text).map(|n| n - envelope);
+        let not_shown = |rest: &[String]| {
+            format!(
+                "{SEPARATOR}Not shown, past the response size budget: {}. Read them in another call.",
+                rest.join(", ")
+            )
+        };
+        let mut output = String::new();
+        let mut spent = envelope;
+        for (index, identifier) in identifiers.iter().enumerate() {
+            let block = self
+                .get_issue_inner(GetIssueInput {
+                    identifier: identifier.clone(),
+                    identifiers: None,
+                    include_comments: input.include_comments.clone(),
+                })
+                .unwrap_or_else(|error| format!("{identifier}: Error: {error}"));
+            let piece = if index == 0 {
+                block.trim_end().to_string()
+            } else {
+                format!("{SEPARATOR}{}", block.trim_end())
+            };
+            let rest = &identifiers[index + 1..];
+            let reserve = if rest.is_empty() {
+                0
+            } else {
+                text_bytes(&not_shown(rest))?
+            };
+            let cost = text_bytes(&piece)?;
+            if spent + cost + reserve > budget {
+                let note = not_shown(&identifiers[index..]);
+                output.push_str(if output.is_empty() {
+                    note.trim_start()
+                } else {
+                    &note
+                });
+                break;
+            }
+            spent += cost;
+            output.push_str(&piece);
+        }
+        Ok(output)
     }
 
     fn get_issue_inner(&self, input: GetIssueInput) -> Result<String, String> {
         // Validate the comment-trail mode up front so a typo errors instead of
         // silently defaulting.
-        let comment_mode = input.include_comments.as_deref().unwrap_or("recent");
-        if !matches!(comment_mode, "recent" | "all" | "none") {
-            return Err(format!(
-                "invalid include_comments '{comment_mode}'. Use recent, all, or none."
-            ));
-        }
+        let comment_mode = get_issue_comment_mode(input.include_comments.as_deref())?;
         let visible = visible_project_ids_mcp(&self.db)?;
         let (issue, module_name, rels) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
@@ -5915,6 +6007,9 @@ mod tests_checklist;
 mod tests_due_date;
 
 #[cfg(test)]
+mod tests_get_issue_batch;
+
+#[cfg(test)]
 #[path = "tests_search_filing.rs"]
 mod tests_search_filing;
 
@@ -9099,6 +9194,7 @@ mod tests {
         // for, then again once its description has taken most of the budget.
         let lean = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
 
@@ -9109,6 +9205,7 @@ mod tests {
         }));
         let heavy = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
 
@@ -9154,6 +9251,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
         assert!(result.starts_with("Error: "), "{}", &result[..80]);
@@ -9174,6 +9272,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
         assert!(
@@ -9238,6 +9337,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
         assert!(result.contains("--- Comments (5) ---"), "got: {result}");
@@ -9284,6 +9384,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
         assert!(
@@ -9320,6 +9421,7 @@ mod tests {
 
         let suppressed = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("none".into()),
         }));
         assert!(
@@ -9371,6 +9473,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("none".into()),
         }));
         assert!(
@@ -9392,6 +9495,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("none".into()),
         }));
         assert!(
@@ -9411,6 +9515,7 @@ mod tests {
         for mode in [None, Some("recent".to_string()), Some("all".to_string())] {
             let result = m.get_issue(Parameters(GetIssueInput {
                 identifier: "PRJ-1".into(),
+                identifiers: None,
                 include_comments: mode.clone(),
             }));
             assert!(!result.contains("Comments"), "{mode:?} got: {result}");
@@ -9425,6 +9530,7 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            identifiers: None,
             include_comments: Some("last5".into()),
         }));
         assert_eq!(
@@ -13068,6 +13174,7 @@ mod tests {
         // via get_issue
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "ESC-1".into(),
+            identifiers: None,
             include_comments: Some("all".into()),
         }));
         assert_no_html_escape(&detail, &[raw_comment]);
