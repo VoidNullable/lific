@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -263,18 +263,22 @@ pub fn resolve_identifier(conn: &Connection, identifier: &str) -> Result<i64, Li
         .parse()
         .map_err(|_| LificError::BadRequest(format!("invalid sequence number in: {identifier}")))?;
 
-    conn.prepare_cached(
-        "SELECT i.id FROM issues i
-         JOIN projects p ON p.id = i.project_id
-         WHERE p.identifier = ?1 AND i.sequence = ?2 AND i.deleted_at IS NULL",
-    )?
-    .query_row(params![project_ident, sequence], |row| row.get(0))
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => {
-            LificError::NotFound(format!("issue {identifier} not found"))
-        }
-        _ => e.into(),
-    })
+    let live = conn
+        .prepare_cached(
+            "SELECT i.id FROM issues i
+             JOIN projects p ON p.id = i.project_id
+             WHERE p.identifier = ?1 AND i.sequence = ?2 AND i.deleted_at IS NULL",
+        )?
+        .query_row(params![project_ident, sequence], |row| row.get(0))
+        .optional()?;
+    // LIF-487: an identifier the issue gave up when it moved still names it.
+    // Sequences are never reused (`next_issue_sequence`), so a live match and
+    // an alias match cannot both exist; the live lookup simply runs first.
+    let found = match live {
+        Some(id) => Some(id),
+        None => super::issue_move::resolve_alias(conn, project_ident, sequence)?,
+    };
+    found.ok_or_else(|| LificError::NotFound(format!("issue {identifier} not found")))
 }
 
 /// List issues with optional filters, discarding the `has_more` signal.
@@ -646,7 +650,7 @@ pub fn count_issues_by_status(
 /// Reject assigning a module owned by a different project. An unknown module is
 /// deliberately left to the issue write so its existing foreign-key error is
 /// preserved.
-fn validate_module_project(
+pub(super) fn validate_module_project(
     conn: &Connection,
     project_id: i64,
     module_id: i64,
@@ -673,13 +677,7 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
     // Deliberately counts tombstones too (LIF-438): sequence numbers are the
     // user-visible identifier, and reusing one that a soft-deleted issue still
     // holds would collide the moment that issue is restored.
-    let next_seq: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM issues WHERE project_id = ?1",
-            params![input.project_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(1);
+    let next_seq = super::issue_move::next_issue_sequence(conn, input.project_id)?;
 
     // LIF-130: wrap the issue INSERT + label inserts in a savepoint so a
     // failed label attach can't leave a half-created issue behind. The id is

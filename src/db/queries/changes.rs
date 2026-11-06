@@ -156,6 +156,23 @@ const COMMENT_PROJECT_SCOPE: &str = "COALESCE(
         (SELECT project_id FROM pages  WHERE id = c.page_id)
     ) = ?1";
 
+/// LIF-487: an issue that moved to another project left this one. Its row now
+/// answers to the other project, so this project's stream would never mention
+/// it again; the alias the move wrote stands in, as an issue tombstone at the
+/// seq the move drew for it. A replica of the old project drops the issue,
+/// exactly as if it had been deleted here.
+const DEPARTURE_COLUMNS: &str = "'issue', a.seq, 1,
+            a.issue_id, NULL, NULL,
+            NULL, NULL, NULL,
+            NULL, NULL,
+            NULL, NULL,
+            NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL,
+            NULL, NULL";
+
+const DEPARTURE_FROM: &str = "FROM issue_aliases a";
+
 fn issue_change(row: &Row) -> rusqlite::Result<IssueChange> {
     let project_identifier: String = row.get(PROJECT_IDENTIFIER)?;
     let sequence: i64 = row.get(SEQUENCE)?;
@@ -330,6 +347,9 @@ pub fn list_changes(
              UNION ALL
              SELECT {COMMENT_COLUMNS} {COMMENT_FROM}
               WHERE c.seq > ?2 AND {COMMENT_PROJECT_SCOPE}
+             UNION ALL
+             SELECT {DEPARTURE_COLUMNS} {DEPARTURE_FROM}
+              WHERE a.project_id = ?1 AND a.seq > ?2
          )
          ORDER BY seq ASC
          LIMIT ?3"
