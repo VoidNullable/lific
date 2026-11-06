@@ -291,6 +291,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "archived projects",
         include_str!("../../migrations/059_archived_projects.sql"),
     ),
+    (
+        60,
+        "unescape legacy entities",
+        include_str!("../../migrations/060_unescape_legacy_entities.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -2035,5 +2040,124 @@ mod page_revisions_tests {
         assert_eq!(after[0], (seq, "before".to_string()));
         assert_eq!(after[1].1, "after");
         assert!(seq < after[1].0 && after[1].0 <= now);
+    }
+}
+
+#[cfg(test)]
+mod unescape_entities_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+    use rusqlite::Connection;
+
+    fn names(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = conn.prepare(sql).unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn seeded() -> Connection {
+        let conn = migrated_up_to(60);
+        conn.execute_batch(
+            "INSERT INTO projects(id,name,identifier) VALUES (1,'P','UNE'), (2,'Q','UNQ');
+             INSERT INTO modules(id,project_id,name) VALUES
+                 (1,1,'Wallpaper &amp; Polish'),
+                 (2,1,'Plain'),
+                 (3,1,'Infra &amp; Ops'),
+                 (4,1,'infra & ops'),
+                 (5,2,'Infra &amp; Ops');
+             INSERT INTO folders(id,project_id,name) VALUES (1,1,'Specs &amp; Notes');
+             INSERT INTO labels(id,project_id,name) VALUES
+                 (1,1,'Q&amp;A'), (2,1,'R&amp;D'), (3,1,'r&d');
+             INSERT INTO issues(id,project_id,sequence,title,module_id) VALUES
+                 (1,1,1,'Fix &quot;quotes&quot; &amp; it&#39;s &lt;b&gt;',1),
+                 (2,1,2,'Leaks &amp;amp; and &amp;lt; in output',NULL),
+                 (3,1,3,'Sprite & Position; untouched',NULL);
+             INSERT INTO pages(id,project_id,sequence,title,content) VALUES
+                 (1,1,1,'Each&lt;T&gt; it&#x27;s','body');",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// LIF-476: names and titles stored escaped by old clients decode once,
+    /// so a lookup by the real name finds them.
+    #[test]
+    fn unescape_migration_decodes_names_and_titles_one_level() {
+        let conn = seeded();
+        run(&conn).unwrap();
+
+        assert_eq!(
+            names(&conn, "SELECT name FROM modules ORDER BY id"),
+            [
+                "Wallpaper & Polish",
+                "Plain",
+                "Infra &amp; Ops",
+                "infra & ops",
+                "Infra & Ops"
+            ],
+            "a decoded name that collides in its project keeps the stored spelling"
+        );
+        assert_eq!(names(&conn, "SELECT name FROM folders"), ["Specs & Notes"]);
+        assert_eq!(
+            names(&conn, "SELECT name FROM labels ORDER BY id"),
+            ["Q&A", "R&amp;D", "r&d"]
+        );
+        assert_eq!(
+            names(&conn, "SELECT title FROM issues ORDER BY id"),
+            [
+                "Fix \"quotes\" & it's <b>",
+                "Leaks &amp; and &lt; in output",
+                "Sprite & Position; untouched"
+            ]
+        );
+        assert_eq!(names(&conn, "SELECT title FROM pages"), ["Each<T> it's"]);
+
+        let module =
+            crate::db::queries::resolve_module_name(&conn, 1, "Wallpaper & Polish").unwrap();
+        assert_eq!(module, 1);
+        assert_eq!(
+            names(
+                &conn,
+                "SELECT title FROM search_index WHERE entity_type = 'page'"
+            ),
+            ["Each<T> it's"],
+            "search indexes the decoded title"
+        );
+    }
+
+    #[test]
+    fn unescape_migration_leaves_unchanged_rows_unwritten() {
+        let conn = seeded();
+        // Inserted with an explicit timestamp: an UPDATE would be overwritten
+        // by the updated_at triggers.
+        conn.execute_batch(
+            "INSERT INTO modules(id,project_id,name,updated_at) VALUES
+                 (6,1,'Tom & Jerry; Co','2000-01-01 00:00:00'),
+                 (7,1,'Infra &amp; Ops two','2000-01-01 00:00:00');",
+        )
+        .unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        let untouched_seq = count("SELECT seq FROM issues WHERE id = 3");
+        let audit_before = count("SELECT count(*) FROM audit_log");
+
+        run(&conn).unwrap();
+
+        assert_eq!(
+            names(&conn, "SELECT updated_at FROM modules WHERE id = 6"),
+            ["2000-01-01 00:00:00"],
+            "a name with no entity is not rewritten"
+        );
+        assert_ne!(
+            names(&conn, "SELECT updated_at FROM modules WHERE id = 7"),
+            ["2000-01-01 00:00:00"],
+            "a decoded name is"
+        );
+        assert_eq!(count("SELECT seq FROM issues WHERE id = 3"), untouched_seq);
+        // Three modules, one folder, two issue titles and one page title
+        // record an update; labels have no update audit trigger.
+        assert_eq!(count("SELECT count(*) FROM audit_log") - audit_before, 7);
     }
 }
