@@ -17,6 +17,12 @@ The same check applies inside nested objects, such as plan steps and `create_iss
 
 Module, label and folder names are matched as sent first. When nothing matches, a name that a client HTML-escaped on the way in (`Infra &amp; Ops`) is tried once more with `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;` and `&#x27;` decoded. A name that really contains one of those sequences still matches itself, and a second miss reports the name as you sent it.
 
+Those names also match regardless of case, so `backend` finds `Backend`. An exact match always wins: a project holding both `Web` and `web` gets the one you spelled, and a spelling that matches neither exactly but both by case is refused with both names listed. A name that matches nothing lists the project's names, closest first, up to ten:
+
+```text
+Error: Not found: module 'Frontend' not found in project; valid modules: 'Backend', 'Docs', 'Web UI'
+```
+
 When MCP is reached over HTTP and the server knows its public origin, the output renders issue, project, page, plan, module and comment references as Markdown links to the web UI. A comment link carries an anchor that scrolls its thread to that comment. Configure [`server.public_url`](/docs/configuration) for a deployment behind a proxy; without it, a direct request's `Host` is used only when it is on the allowlist. Local stdio has no external hostname, so references stay plain identifiers.
 
 ## Which tools use a repository binding

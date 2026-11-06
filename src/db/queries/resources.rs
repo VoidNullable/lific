@@ -28,6 +28,15 @@ impl ResourceTable {
             ResourceTable::Folders => "folders",
         }
     }
+
+    /// The word for one row, as error messages name it.
+    pub fn singular(&self) -> &'static str {
+        match self {
+            ResourceTable::Modules => "module",
+            ResourceTable::Labels => "label",
+            ResourceTable::Folders => "folder",
+        }
+    }
 }
 
 /// Look up the project_id for a module, label, or folder by its id.
@@ -47,22 +56,173 @@ pub fn get_resource_project_id(
         })
 }
 
+/// How [`find_resource_by_name`] compares a name with the stored ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameMatch {
+    /// Byte for byte.
+    Exact,
+    /// Ignoring case (Unicode lowercase on both sides).
+    AnyCase,
+}
+
+/// Find a module, label, or folder in a project by name.
+///
+/// LIF-477: names are not unique by case (`Web` and `web` can both exist),
+/// so callers try [`NameMatch::Exact`] first and fall back to
+/// [`NameMatch::AnyCase`]. A caseless match that lands on two different
+/// stored names is a `BadRequest` naming both, never a guess. Rows sharing
+/// one exact name resolve to the oldest, as an exact lookup always has.
+pub fn find_resource_by_name(
+    conn: &Connection,
+    table: ResourceTable,
+    project_id: i64,
+    name: &str,
+    matching: NameMatch,
+) -> Result<Option<i64>, LificError> {
+    let sql_table = table.as_table();
+    if matching == NameMatch::Exact {
+        let sql =
+            format!("SELECT id FROM {sql_table} WHERE project_id = ?1 AND name = ?2 ORDER BY id");
+        return Ok(conn
+            .prepare_cached(&sql)?
+            .query_row(params![project_id, name], |row| row.get(0))
+            .optional()?);
+    }
+    let wanted = name.to_lowercase();
+    let matches: Vec<(i64, String)> = resource_names(conn, table, project_id)?
+        .into_iter()
+        .filter(|(_, stored)| stored.to_lowercase() == wanted)
+        .collect();
+    let Some((first_id, _)) = matches.first() else {
+        return Ok(None);
+    };
+    let mut distinct: Vec<&str> = matches.iter().map(|(_, stored)| stored.as_str()).collect();
+    distinct.dedup();
+    if distinct.len() > 1 {
+        return Err(LificError::BadRequest(format!(
+            "{} '{name}' matches more than one {} by case ({}); use the exact name",
+            table.singular(),
+            table.singular(),
+            quoted_list(&distinct),
+        )));
+    }
+    Ok(Some(*first_id))
+}
+
+/// Every `(id, name)` in the project's table, ordered by name then id.
+fn resource_names(
+    conn: &Connection,
+    table: ResourceTable,
+    project_id: i64,
+) -> Result<Vec<(i64, String)>, LificError> {
+    let sql = format!(
+        "SELECT id, name FROM {} WHERE project_id = ?1 ORDER BY name, id",
+        table.as_table()
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// How many valid names a not-found error lists before summarizing the rest.
+const SUGGESTED_NAMES: usize = 10;
+
+/// LIF-477: the error for a name that matched nothing. It lists the
+/// project's names, closest first, so a caller can retry without first
+/// spending a call on listing them.
+pub fn resource_name_not_found(
+    conn: &Connection,
+    table: ResourceTable,
+    project_id: i64,
+    name: &str,
+) -> LificError {
+    let singular = table.singular();
+    let names = match resource_names(conn, table, project_id) {
+        Ok(rows) => rows.into_iter().map(|(_, stored)| stored).collect(),
+        Err(error) => return error,
+    };
+    let ranked = closest_names_first(name, names);
+    let hint = match ranked.len() {
+        0 => format!("the project has no {}", table.as_table()),
+        total => {
+            let shown: Vec<&str> = ranked
+                .iter()
+                .take(SUGGESTED_NAMES)
+                .map(String::as_str)
+                .collect();
+            let more = total - shown.len();
+            let tail = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            format!("valid {}: {}{tail}", table.as_table(), quoted_list(&shown))
+        }
+    };
+    LificError::NotFound(format!("{singular} '{name}' not found in project; {hint}"))
+}
+
+/// Distinct names ordered by likeness to `wanted`: names that contain it or
+/// that it contains first, then by edit distance, then alphabetically.
+fn closest_names_first(wanted: &str, mut names: Vec<String>) -> Vec<String> {
+    let key = wanted.to_lowercase();
+    names.sort();
+    names.dedup();
+    let mut ranked: Vec<(bool, usize, String, String)> = names
+        .into_iter()
+        .map(|stored| {
+            let lower = stored.to_lowercase();
+            let unrelated = !(lower.contains(&key) || key.contains(&lower));
+            (unrelated, levenshtein(&key, &lower), lower, stored)
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().map(|(_, _, _, stored)| stored).collect()
+}
+
+fn quoted_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|stored| format!("'{stored}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != *cb);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
+/// Resolve a name exactly, then ignoring case; a miss lists the valid names.
+fn resolve_resource_name(
+    conn: &Connection,
+    table: ResourceTable,
+    project_id: i64,
+    name: &str,
+) -> Result<i64, LificError> {
+    for matching in [NameMatch::Exact, NameMatch::AnyCase] {
+        if let Some(id) = find_resource_by_name(conn, table, project_id, name, matching)? {
+            return Ok(id);
+        }
+    }
+    Err(resource_name_not_found(conn, table, project_id, name))
+}
+
 pub fn resolve_module_name(
     conn: &Connection,
     project_id: i64,
     name: &str,
 ) -> Result<i64, LificError> {
-    conn.query_row(
-        "SELECT id FROM modules WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",
-        params![project_id, name],
-        |row| row.get(0),
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => {
-            LificError::NotFound(format!("module '{name}' not found in project"))
-        }
-        _ => e.into(),
-    })
+    resolve_resource_name(conn, ResourceTable::Modules, project_id, name)
 }
 
 pub fn resolve_folder_name(
@@ -70,17 +230,7 @@ pub fn resolve_folder_name(
     project_id: i64,
     name: &str,
 ) -> Result<i64, LificError> {
-    conn.query_row(
-        "SELECT id FROM folders WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",
-        params![project_id, name],
-        |row| row.get(0),
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => {
-            LificError::NotFound(format!("folder '{name}' not found in project"))
-        }
-        _ => e.into(),
-    })
+    resolve_resource_name(conn, ResourceTable::Folders, project_id, name)
 }
 
 pub fn resolve_label_name(
@@ -88,17 +238,7 @@ pub fn resolve_label_name(
     project_id: i64,
     name: &str,
 ) -> Result<i64, LificError> {
-    conn.query_row(
-        "SELECT id FROM labels WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",
-        params![project_id, name],
-        |row| row.get(0),
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => {
-            LificError::NotFound(format!("label '{name}' not found in project"))
-        }
-        _ => e.into(),
-    })
+    resolve_resource_name(conn, ResourceTable::Labels, project_id, name)
 }
 
 pub fn get_module_name(conn: &Connection, id: i64) -> Result<String, LificError> {
@@ -998,6 +1138,166 @@ mod tests {
             folder.id
         );
         assert!(resolve_folder_name(&conn, pid, "nope").is_err());
+    }
+
+    fn module_named(conn: &Connection, project_id: i64, name: &str) -> i64 {
+        create_module(
+            conn,
+            &CreateModule {
+                project_id,
+                name: name.into(),
+                description: String::new(),
+                status: "active".into(),
+                emoji: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn names_differing_only_by_case_resolve_to_the_exact_spelling_first() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let upper = module_named(&conn, pid, "Web");
+        let lower = module_named(&conn, pid, "web");
+
+        assert_eq!(resolve_module_name(&conn, pid, "Web").unwrap(), upper);
+        assert_eq!(resolve_module_name(&conn, pid, "web").unwrap(), lower);
+        match resolve_module_name(&conn, pid, "WEB").unwrap_err() {
+            LificError::BadRequest(message) => assert_eq!(
+                message,
+                "module 'WEB' matches more than one module by case ('Web', 'web'); use the exact name"
+            ),
+            other => panic!("expected an ambiguity error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caseless_lookup_folds_non_ascii_letters() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let id = module_named(&conn, pid, "Ébauche");
+
+        assert_eq!(resolve_module_name(&conn, pid, "ébauche").unwrap(), id);
+        assert_eq!(resolve_module_name(&conn, pid, "ÉBAUCHE").unwrap(), id);
+    }
+
+    #[test]
+    fn duplicate_exact_names_resolve_to_the_oldest_by_either_case() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let oldest = module_named(&conn, pid, "Core");
+        module_named(&conn, pid, "Core");
+
+        assert_eq!(resolve_module_name(&conn, pid, "Core").unwrap(), oldest);
+        assert_eq!(resolve_module_name(&conn, pid, "core").unwrap(), oldest);
+    }
+
+    fn not_found_message(error: LificError) -> String {
+        match error {
+            LificError::NotFound(message) => message,
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_module_lists_the_valid_names_closest_first() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        for name in ["Docs", "Web UI", "Backend"] {
+            module_named(&conn, pid, name);
+        }
+
+        assert_eq!(
+            not_found_message(resolve_module_name(&conn, pid, "Web").unwrap_err()),
+            "module 'Web' not found in project; valid modules: 'Web UI', 'Docs', 'Backend'"
+        );
+        assert_eq!(
+            not_found_message(resolve_module_name(&conn, pid, "Frontend").unwrap_err()),
+            "module 'Frontend' not found in project; valid modules: 'Backend', 'Docs', 'Web UI'"
+        );
+    }
+
+    #[test]
+    fn a_missing_name_lists_at_most_ten_and_counts_the_rest() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        for n in 0..12 {
+            module_named(&conn, pid, &format!("Area {n:02}"));
+        }
+
+        let message = not_found_message(resolve_module_name(&conn, pid, "Area 11x").unwrap_err());
+        assert!(
+            message
+                .starts_with("module 'Area 11x' not found in project; valid modules: 'Area 11', "),
+            "got: {message}"
+        );
+        assert!(message.ends_with(" and 2 more"), "got: {message}");
+        let (_, listed) = message.split_once("valid modules: ").unwrap();
+        assert_eq!(listed.matches("'Area ").count(), 10, "got: {message}");
+    }
+
+    #[test]
+    fn a_missing_name_in_an_empty_project_says_there_are_none() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+
+        assert_eq!(
+            not_found_message(resolve_label_name(&conn, pid, "bug").unwrap_err()),
+            "label 'bug' not found in project; the project has no labels"
+        );
+    }
+
+    #[test]
+    fn missing_labels_and_folders_list_their_own_names_once() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        create_label(
+            &conn,
+            &CreateLabel {
+                project_id: pid,
+                name: "bug".into(),
+                color: "#EF4444".into(),
+            },
+        )
+        .unwrap();
+        let parent = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id: pid,
+                parent_id: None,
+                name: "Specs".into(),
+            },
+        )
+        .unwrap();
+        for parent_id in [None, Some(parent.id)] {
+            create_folder(
+                &conn,
+                &CreateFolder {
+                    project_id: pid,
+                    parent_id,
+                    name: "Notes".into(),
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            not_found_message(resolve_label_name(&conn, pid, "bugs").unwrap_err()),
+            "label 'bugs' not found in project; valid labels: 'bug'"
+        );
+        assert_eq!(
+            not_found_message(resolve_folder_name(&conn, pid, "Note").unwrap_err()),
+            "folder 'Note' not found in project; valid folders: 'Notes', 'Specs'"
+        );
     }
 
     #[test]

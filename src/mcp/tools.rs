@@ -5889,6 +5889,9 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 mod input_hardening_tests;
 
 #[cfg(test)]
+mod name_lookup_tests;
+
+#[cfg(test)]
 mod relation_visibility_tests;
 
 #[cfg(test)]

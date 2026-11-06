@@ -7,9 +7,9 @@
 //! literally contains an entity still matches itself, and only a miss retries
 //! with the common entities decoded.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
-use crate::db::queries;
+use crate::db::queries::{self, NameMatch, ResourceTable};
 use crate::error::LificError;
 
 /// Entity suffixes following `&` that an HTML-escaping client produces for text.
@@ -70,51 +70,61 @@ fn with_decoded_retry<T>(
         .unwrap_or_else(|| Err(LificError::NotFound(original_message)))
 }
 
+/// LIF-477: every candidate spelling exactly, then every one ignoring case,
+/// so `Web` beside `web` is never shadowed by a caseless match. A final miss
+/// lists the project's names, closest to the name as sent first.
+fn resource_id(
+    conn: &Connection,
+    table: ResourceTable,
+    project_id: i64,
+    name: &str,
+) -> Result<i64, LificError> {
+    for matching in [NameMatch::Exact, NameMatch::AnyCase] {
+        let found = with_decoded_retry(name, |candidate| {
+            queries::find_resource_by_name(conn, table, project_id, candidate, matching)?
+                .ok_or_else(|| LificError::NotFound(candidate.to_owned()))
+        });
+        match found {
+            Err(LificError::NotFound(_)) => {}
+            other => return other,
+        }
+    }
+    Err(queries::resource_name_not_found(
+        conn, table, project_id, name,
+    ))
+}
+
 pub(super) fn module_id(conn: &Connection, project_id: i64, name: &str) -> Result<i64, LificError> {
-    with_decoded_retry(name, |name| {
-        queries::resolve_module_name(conn, project_id, name)
-    })
+    resource_id(conn, ResourceTable::Modules, project_id, name)
 }
 
 pub(super) fn folder_id(conn: &Connection, project_id: i64, name: &str) -> Result<i64, LificError> {
-    with_decoded_retry(name, |name| {
-        queries::resolve_folder_name(conn, project_id, name)
-    })
+    resource_id(conn, ResourceTable::Folders, project_id, name)
 }
 
 pub(super) fn label_id(conn: &Connection, project_id: i64, name: &str) -> Result<i64, LificError> {
-    with_decoded_retry(name, |name| {
-        queries::resolve_label_name(conn, project_id, name)
-    })
+    resource_id(conn, ResourceTable::Labels, project_id, name)
 }
 
 /// The label name to hand to the queries that attach or filter by name.
 ///
 /// Those match `name = ?` exactly and treat an unknown name as no match, so
-/// this keeps their comparison and only swaps in the decoded form when it
-/// names a label and the name as sent does not.
+/// this swaps in the stored spelling of the label the name resolves to (by
+/// case or HTML decoding) and passes an unknown name through unchanged.
 pub(super) fn stored_label_name(
     conn: &Connection,
     project_id: i64,
     name: &str,
 ) -> Result<String, LificError> {
-    let exists = |name: &str| -> Result<bool, LificError> {
-        Ok(conn
-            .query_row(
-                "SELECT 1 FROM labels WHERE project_id = ?1 AND name = ?2",
-                params![project_id, name],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    };
-    if !exists(name)?
-        && let Some(decoded) = decode_html_entities(name)
-        && exists(&decoded)?
-    {
-        return Ok(decoded);
+    match label_id(conn, project_id, name) {
+        Ok(id) => Ok(conn.query_row(
+            "SELECT name FROM labels WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?),
+        Err(LificError::NotFound(_)) => Ok(name.to_owned()),
+        Err(error) => Err(error),
     }
-    Ok(name.to_owned())
 }
 
 pub(super) fn stored_label_names(
