@@ -552,6 +552,7 @@ Sections follow in this order, and a section with nothing to report is left out:
 
 | Section | What it lists |
 | --- | --- |
+| Human queue | Open issues assigned to a person (`human` or named people) in every project you can view, not only this one. Ranked by how many open issues each blocks, then due date (undated last), then age, oldest first. Each line shows who it is for, how many it blocks, its due date, the day it was opened, and other queue items with the same title as possible duplicates. Counts stop at 500. |
 | Since the cursor | Only with `since`. Counts of issues created, closed (`done` or `cancelled`) and otherwise moved, and pages edited, then the most recent of each kind. Status changes are net per issue, so an issue moved and moved back is not listed. When nothing changed, the header says so instead. |
 | Active plans | Each with its progress and the next open step: the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named. |
 | Due to check | Open issues with a date wait whose window has arrived, most overdue first, each with its wait line. These no longer block, so this is where the follow-up surfaces; clear the wait with `unlink_issues` when it is done. |

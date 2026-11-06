@@ -26,7 +26,7 @@ Pass comment, step and attachment ids as integers: for step `#18`, send `step_id
 
 ## Resume with a briefing
 
-Your first call in a session on a known project is `get_briefing(project='APP')`. One response of at most 6,000 characters gives active plans with their next step, date waits that have come due, blocked issues and what blocks them, the top workable and active issues, and the pages you name in `pages` (identifier, `seq` and size, never their bodies). It ends each cut section with the call that lists the rest.
+Your first call in a session on a known project is `get_briefing(project='APP')`. One response of at most 6,000 characters opens with the human queue (open issues assigned to a person in every project you can view, most blocking first), then gives active plans with their next step, date waits that have come due, blocked issues and what blocks them, the top workable and active issues, and the pages you name in `pages` (identifier, `seq` and size, never their bodies). It ends each cut section with the call that lists the rest.
 
 The briefing opens with a `since` cursor. Keep it, and pass it next time: `get_briefing(project='APP', since='2026-09-25T14:02:11Z')` adds a section on what was created, closed, moved and edited since then. For the full record of changes, `get_activity(identifier='APP', since=...)` reads the audit log forward from the same kind of cursor, oldest first.
 

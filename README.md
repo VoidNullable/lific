@@ -53,7 +53,7 @@ More: [Installation](https://lific.dev/docs/installation) · [Quickstart](https:
 
 | Call | What it does |
 | --- | --- |
-| `get_briefing(project="APP")` | Resume a project: plans and next steps, blocked and workable issues, and with `since`, what changed |
+| `get_briefing(project="APP")` | Resume a project: the human queue across projects, plans and next steps, blocked and workable issues, and with `since`, what changed |
 | `list_issues(project="APP", workable=true)` | Open issues whose blockers are all resolved |
 | `list_issues(members=["me"])` | Your active work across the projects you belong to |
 | `create_plan` / `get_plan` | Nested step plans that survive the session; a step and its issue close together |
