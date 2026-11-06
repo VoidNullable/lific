@@ -732,6 +732,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_orders_by_target_date_with_undated_last() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for (title, target_date) in [
+            ("Undated", None),
+            ("Later", Some("2026-09-01")),
+            ("Sooner", Some("2026-03-01")),
+        ] {
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": title, "target_date": target_date}),
+            )
+            .await;
+        }
+
+        for (order, expected) in [
+            ("asc", ["Sooner", "Later", "Undated"]),
+            ("desc", ["Later", "Sooner", "Undated"]),
+        ] {
+            let list: Vec<serde_json::Value> = serde_json::from_value(
+                body_of(
+                    json_get(
+                        &app,
+                        &format!(
+                            "/api/issues?project_id={project_id}&order_by=target_date&order={order}"
+                        ),
+                    )
+                    .await,
+                )
+                .await,
+            )
+            .unwrap();
+            let titles: Vec<&str> = list
+                .iter()
+                .map(|issue| issue["title"].as_str().unwrap())
+                .collect();
+            assert_eq!(titles, expected, "{order}");
+        }
+    }
+
+    #[tokio::test]
     async fn restoring_something_that_is_not_in_the_trash_is_a_404() {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;

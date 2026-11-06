@@ -499,7 +499,8 @@ pub struct ListIssuesQuery {
     pub updated_since: Option<String>,
     /// Exclusive upper bound on `updated_at`.
     pub updated_until: Option<String>,
-    /// Sort column: sort_order (default), sequence, created, updated, priority.
+    /// Sort column: sort_order (default), sequence, created, updated, priority,
+    /// target_date.
     /// Whitelisted in `list_issues` — never interpolated raw.
     pub order_by: Option<String>,
     /// Sort direction: asc (default) or desc.

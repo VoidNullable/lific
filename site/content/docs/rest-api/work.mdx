@@ -24,7 +24,7 @@ Every query parameter is optional:
 | `blocked` | `true`: issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. |
 | `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
 | `created_until`, `updated_until` | Exclusive upper bound. |
-| `order_by` | `sort_order` (default), `sequence`, `created`, `updated` or `priority`. `created_at` and `updated_at` also work. |
+| `order_by` | `sort_order` (default), `sequence`, `created`, `updated`, `priority` or `target_date`. `created_at` and `updated_at` also work. With `target_date`, issues without one come last in either direction. |
 | `order` | `asc` (default) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 

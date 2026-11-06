@@ -56,7 +56,7 @@ Lists issues in one project, or across the projects of the people you name with 
 | `created_until` | `string` | No | ISO date or datetime, exclusive. |
 | `updated_since` | `string` | No | ISO date or datetime, inclusive. |
 | `updated_until` | `string` | No | ISO date or datetime, exclusive. |
-| `order_by` | `string` | No | `sort_order` (default), `sequence`, `created`, `updated` or `priority`. |
+| `order_by` | `string` | No | `sort_order` (default), `sequence`, `created`, `updated`, `priority` or `target_date`. With `target_date`, issues without one come last in either direction. |
 | `order` | `string` | No | `asc` (default) or `desc`. |
 | `limit` | `integer` | No | Default 50, capped at 500. |
 | `offset` | `integer` | No | Zero-based. |

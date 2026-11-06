@@ -11799,6 +11799,41 @@ mod tests {
         assert!(bad.contains("Error"), "got: {bad}");
     }
 
+    #[test]
+    fn mcp_list_issues_order_by_target_date_puts_undated_last() {
+        let (m, _guard) = mcp();
+        let ident = seed_project(&m, "Due", "DUE");
+        for (title, target_date) in [
+            ("Undated", None),
+            ("Later", Some("2026-09-01")),
+            ("Sooner", Some("2026-03-01")),
+        ] {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: Some(ident.clone()),
+                title: title.into(),
+                target_date: target_date.map(Into::into),
+                ..Default::default()
+            }));
+        }
+
+        for (order, expected) in [
+            ("asc", ["Sooner", "Later", "Undated"]),
+            ("desc", ["Later", "Sooner", "Undated"]),
+        ] {
+            let listing = m.list_issues(Parameters(ListIssuesInput {
+                project: Some(ident.clone()),
+                order_by: Some("target_date".into()),
+                order: Some(order.into()),
+                ..Default::default()
+            }));
+            let positions: Vec<usize> = expected
+                .iter()
+                .map(|title| listing.find(title).unwrap())
+                .collect();
+            assert!(positions.is_sorted(), "{order}: {listing}");
+        }
+    }
+
     // ── get_activity (LIF-156) ──
 
     #[test]
