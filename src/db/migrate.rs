@@ -311,6 +311,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "page audit diffs",
         include_str!("../../migrations/063_page_audit_diffs.sql"),
     ),
+    (
+        64,
+        "issue aliases",
+        include_str!("../../migrations/064_issue_aliases.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

@@ -3,7 +3,7 @@ title: MCP tools
 description: Every MCP tool Lific exposes, with each parameter, its default and its limits.
 ---
 
-Lific exposes 31 MCP tools. This page lists every parameter each one accepts, as published in its input schema. "Yes" in the Required column means the call fails without it; everything else can be omitted. [MCP](/docs/mcp) covers transports, errors and paging, and [Working with Lific as an agent](/docs/mcp/agents) covers how the tools fit together.
+Lific exposes 32 MCP tools. This page lists every parameter each one accepts, as published in its input schema. "Yes" in the Required column means the call fails without it; everything else can be omitted. [MCP](/docs/mcp) covers transports, errors and paging, and [Working with Lific as an agent](/docs/mcp/agents) covers how the tools fit together.
 
 Arguments are checked against the schema before a tool runs. A missing required parameter, a value of the wrong type, or a parameter the tool does not declare is rejected as a JSON-RPC `-32602 invalid params` error, and the tool never runs. Unknown parameters are refused on every tool, so a misspelled optional parameter cannot be dropped while the tool answers a different question. The message names the unknown key, suggests the closest valid name when one is close, and lists the valid ones:
 
@@ -187,6 +187,18 @@ A refused `expected_seq` returns an error naming the current `seq` and a one-lin
 `evidence` records what was checked (the test command that passed, its counts, what a person looked at) as a comment of kind `verification`, written in the same transaction as the close. The response names the new comment, and `get_issue` and `list_comments` mark it `[verification]`. It is refused when empty, with any status other than `done` (including `cancelled`, since cancelled work has nothing to verify), and on an issue that is already done; use `add_comment` for those. A refusal changes nothing, including the other fields in the call. The comment is authored by the caller, who can edit or delete it like any other.
 
 Closing an issue whose description still has unchecked task items succeeds, and the response ends with a warning such as `Warning: 2 of 5 checklist items still unchecked.`
+
+### `move_issue`
+
+Moves an issue to another project. Needs maintainer rights on both projects.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `identifier` | `string` | Yes | Issue identifier, e.g. `PRO-42`. |
+| `project` | `string` | Yes | Target project identifier. Never taken from a binding. |
+| `module` | `string` | No | Module in the target project. Omitted: a module with the same name as the current one is kept, otherwise the module is cleared. |
+
+The issue takes the next number in the target project, and its old identifier keeps resolving: `get_issue`, links and `search` all find the issue by either. Comments, relations, waits, history, attachments and plan steps stay attached. Labels are matched by name in the target project. The response starts with `Moved APP-12 to OPS-4:`, and names any label the target has no label of that name for, a module it cleared, and any assignee who cannot see the target project and was unassigned. `get_issue` lists the identifiers an issue had before under `Formerly:`. Moving an issue to the project it is already in is an error.
 
 ### `bulk_update`
 

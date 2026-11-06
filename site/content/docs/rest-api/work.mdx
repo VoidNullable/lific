@@ -61,7 +61,7 @@ The same, by identifier such as `APP-42`. Case does not matter. **Viewer.**
 
 ### PUT `/api/issues/{id}`
 
-Changes an issue. **Maintainer.** Every field is optional: `title`, `description`, `status`, `priority`, `module_id` (null unassigns), `sort_order`, `start_date`, `target_date`, `labels`, `assignees` and `expected_seq`. An issue cannot move between projects. `assignees`, when present, replaces the assignment: `[]` frees the issue for agents. Naming a bot, someone who cannot see the project, or `human` together with names is `400`.
+Changes an issue. **Maintainer.** Every field is optional: `title`, `description`, `status`, `priority`, `module_id` (null unassigns), `sort_order`, `start_date`, `target_date`, `labels`, `assignees` and `expected_seq`. To move an issue between projects, use [`POST /api/issues/{id}/move`](#post-apiissuesidmove). `assignees`, when present, replaces the assignment: `[]` frees the issue for agents. Naming a bot, someone who cannot see the project, or `human` together with names is `400`.
 
 `labels`, when present, becomes the complete label set; leave it out to keep the current labels. Send `expected_seq` to refuse the update with `409` if somebody else changed the issue since you read it; see [Concurrent edits](/docs/rest-api#concurrent-edits-and-expected_seq).
 
@@ -85,6 +85,21 @@ Trashed issues are removed for good after 30 days, or whatever `trash_days` in t
 Brings an issue back from the trash, with the comments that went with it. **Maintainer.** No body. Returns the restored `Issue`. An id that is not in the trash, including one already purged, is `404`.
 
 There is no endpoint that lists the trash. Keep the id from the delete if you might want to restore it.
+
+### POST `/api/issues/{id}/move`
+
+Moves an issue to another project. **Maintainer** on both projects. Body: `project_id` or `project` (the target's identifier), and optionally `module_id`, which must be a module of the target project. Without `module_id`, a module with the same name as the current one is kept, otherwise the module is cleared.
+
+The issue keeps its id, comments, relations, history and plan steps, and takes the next number in the target project. Its old identifier stays an alias, so `GET /api/issues/resolve/{identifier}` and search still find it. Labels are matched by name in the target project; assignees who cannot see the target project are unassigned. Moving to the project the issue is already in is `400`.
+
+Returns the `Issue` under `issue`, with `previous_identifier`, `previous_project_id`, and, when something could not come along, `dropped_labels`, `dropped_module` and `dropped_assignees`.
+
+```bash
+curl -X POST "$LIFIC/api/issues/42/move" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"OPS"}'
+```
 
 ## Relations
 

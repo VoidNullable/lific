@@ -24,6 +24,8 @@
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import IssuePickerModal from "../lib/IssuePickerModal.svelte";
+  import MoveIssueModal from "../lib/issues/MoveIssueModal.svelte"; // LIF-488
+  import { moveNotice } from "../lib/issues/move";
   import { projectCodeOf } from "../lib/references";
   import {
     RELATION_KINDS,
@@ -58,7 +60,7 @@
     removeComment,
     upsertComment,
   } from "../lib/commentState";
-  import { ArrowUpRight, ChevronDown, Plus, X } from "lucide-svelte";
+  import { ArrowUpRight, ChevronDown, FolderInput, Plus, X } from "lucide-svelte";
   import { untrack, getContext } from "svelte";
   import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
@@ -180,6 +182,9 @@
   // Export
   let exportError = $state("");
   let exporting = $state(false);
+  // LIF-488: "Move to project" modal, opened from the kebab menu or palette.
+  let moveOpen = $state(false);
+  let canMove = $derived(editable && !inPublicScope());
 
   const STATUSES = [
     { value: "backlog", label: "Backlog" },
@@ -801,8 +806,18 @@
             },
           ]
         : []),
+      ...(canMove
+        ? [{ id: "move-project", title: "Move to project…", run: () => (moveOpen = true) }]
+        : []),
     ];
   });
+
+  /** LIF-488: the issue now lives under another identifier; follow it. */
+  function handleMoved(moved: import("../lib/api").MovedIssue) {
+    toast(moveNotice(moved));
+    const next = moved.issue.identifier;
+    navigate(`/${projectCodeOf(next)}/issues/${next}`);
+  }
 
   function moduleEmoji(id: number | null): string | null {
     if (!id) return null;
@@ -852,6 +867,7 @@
   deleteNoun="issue"
   deleteLabel={issue?.identifier ?? ""}
   onDelete={handleDelete}
+  menuItems={canMove ? [{ label: "Move to project…", icon: FolderInput, run: () => (moveOpen = true) }] : []}
   {comments}
   onNewComment={handleNewComment}
   {currentUser}
@@ -1244,6 +1260,7 @@
     title={addingRelation ? `Add “${addingRelation.kind.label}” relation` : "Link an issue"}
     onSelect={addRelation}
   />
+  <MoveIssueModal bind:open={moveOpen} {issue} onMoved={handleMoved} />
 {/if}
 
 {#snippet sidebarField(label: string)}

@@ -1077,6 +1077,26 @@ export async function updateIssue(id: number, input: UpdateIssueInput) {
   });
 }
 
+/** LIF-487: what `POST /issues/{id}/move` answers. The dropped fields are
+ *  absent when nothing was dropped. */
+export interface MovedIssue {
+  issue: Issue;
+  previous_identifier: string;
+  previous_project_id: number;
+  dropped_labels?: string[];
+  dropped_module?: string;
+  dropped_assignees?: string[];
+}
+
+/** LIF-488: move an issue to another project. It gets a new identifier;
+ *  the old one keeps resolving. Needs maintainer on both projects. */
+export async function moveIssue(id: number, input: { project_id: number; module_id?: number }) {
+  return request<MovedIssue>(`/issues/${id}/move`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function deleteIssue(id: number) {
   return request<{ deleted: boolean }>(`/issues/${id}`, {
     method: "DELETE",

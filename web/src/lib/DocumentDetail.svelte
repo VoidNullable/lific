@@ -23,7 +23,7 @@
   import AttachmentSection from "./AttachmentSection.svelte";
   import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
-  import DeleteMenu from "./DeleteMenu.svelte";
+  import DeleteMenu, { type MenuItem } from "./DeleteMenu.svelte";
   import ActivityTimeline from "./ActivityTimeline.svelte";
   import ErrorState from "./ErrorState.svelte";
   import Skeleton from "./Skeleton.svelte";
@@ -86,6 +86,8 @@
     deleteLabel = "",
     deleteConfirmBody,
     onDelete,
+    // LIF-488: extra kebab-menu actions, listed above Delete.
+    menuItems = [],
     // Comments (optional)
     comments,
     onNewComment,
@@ -168,6 +170,7 @@
     deleteLabel?: string;
     deleteConfirmBody?: string;
     onDelete?: () => Promise<boolean>;
+    menuItems?: MenuItem[];
     comments?: Comment[];
     onNewComment?: (content: string) => Promise<Comment | null>;
     currentUser?: AuthUser | null;
@@ -594,6 +597,7 @@
             label={deleteLabel}
             confirmBody={deleteConfirmBody}
             {onDelete}
+            items={menuItems}
             align="right"
           />
         {/if}

@@ -113,6 +113,27 @@ fn can_see_project(conn: &Connection, user_id: i64, project_id: i64) -> Result<b
     )?)
 }
 
+/// LIF-487: unassign every named person who cannot see `project_id`, the
+/// project an issue is moving into, and return their usernames. A "human"
+/// marker names no one and stays.
+pub fn drop_non_members(
+    conn: &Connection,
+    issue_id: i64,
+    project_id: i64,
+) -> Result<Vec<String>, LificError> {
+    let mut dropped = Vec::new();
+    for person in assignment(conn, issue_id)?.assignees {
+        if !can_see_project(conn, person.user_id, project_id)? {
+            conn.execute(
+                "DELETE FROM issue_assignees WHERE issue_id = ?1 AND user_id = ?2",
+                params![issue_id, person.user_id],
+            )?;
+            dropped.push(person.username);
+        }
+    }
+    Ok(dropped)
+}
+
 /// An active human account that can see the project, by username.
 fn resolve_person(conn: &Connection, name: &str, project_id: i64) -> Result<i64, LificError> {
     let name = name.trim().trim_start_matches('@');

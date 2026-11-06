@@ -230,6 +230,19 @@ pub struct UpdateIssueInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct MoveIssueInput {
+    #[schemars(description = "Issue ID like PRO-42")]
+    pub identifier: String,
+    #[schemars(description = "Target project ID (e.g. LIF)")]
+    pub project: String,
+    #[schemars(
+        description = "Module in the target project. Omitted: a module of the same name is kept, else cleared"
+    )]
+    pub module: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkUpdateInput {
     #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,

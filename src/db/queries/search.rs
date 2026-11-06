@@ -56,14 +56,62 @@ pub fn search_page(
         )));
     }
 
-    let hits = match q.mode.as_deref() {
+    let mut hits = match q.mode.as_deref() {
         None | Some("fts") => search_fts_with_fallback(conn, q, fetch, offset, visible_project_ids),
         Some("literal") => search_literal(conn, q, fetch, offset, visible_project_ids),
         Some(other) => Err(LificError::BadRequest(format!(
             "invalid mode '{other}'. Use fts or literal."
         ))),
     }?;
+    if offset == 0
+        && let Some(moved) = moved_issue_hit(conn, q, visible_project_ids)?
+    {
+        hits.retain(|hit| !(hit.result_type == "issue" && hit.id == moved.id));
+        hits.insert(0, moved);
+        hits.truncate(usize::try_from(fetch).unwrap_or(usize::MAX));
+    }
     Ok(super::Page::from_over_fetch(hits, limit))
+}
+
+/// LIF-487: a query that is exactly an identifier an issue gave up when it
+/// moved (`LIF-42`, now `OPS-7`) finds that issue first. Text search cannot:
+/// the old identifier is in no document. Live identifiers are left to the
+/// normal ranking, which already matches their mentions. Only the first page
+/// carries the hit; the scope filters (project, type, visibility) apply to
+/// it like to any other row.
+fn moved_issue_hit(
+    conn: &Connection,
+    q: &SearchQuery,
+    visible_project_ids: Option<&HashSet<i64>>,
+) -> Result<Option<SearchResult>, LificError> {
+    if q.result_type.as_deref().is_some_and(|rt| rt != "issue") {
+        return Ok(None);
+    }
+    let Some((project, sequence)) = q.query.trim().split_once('-') else {
+        return Ok(None);
+    };
+    let Ok(sequence) = sequence.parse::<i64>() else {
+        return Ok(None);
+    };
+    let Some(issue_id) = super::issue_move::resolve_alias(conn, project, sequence)? else {
+        return Ok(None);
+    };
+    let issue = super::get_issue(conn, issue_id)?;
+    if q.project_id.is_some_and(|scope| scope != issue.project_id)
+        || visible_project_ids.is_some_and(|visible| !visible.contains(&issue.project_id))
+    {
+        return Ok(None);
+    }
+    Ok(Some(SearchResult {
+        result_type: "issue".into(),
+        id: issue.id,
+        snippet: format!("Moved: {} is now {}", q.query.trim(), issue.identifier),
+        identifier: Some(issue.identifier),
+        title: issue.title,
+        project_id: Some(issue.project_id),
+        parent_page_id: None,
+        partial_match: false,
+    }))
 }
 
 /// How the words of an FTS query combine.
