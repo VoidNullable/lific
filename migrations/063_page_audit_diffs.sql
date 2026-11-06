@@ -1,0 +1,15 @@
+-- LIF-486: page content edits in audit_log become line diffs.
+--
+-- Every page edit used to store the page's whole old and new content, which
+-- made audit_log most of the database file. From this version each such row
+-- is stored as field = 'content_diff': a unified diff (three lines of
+-- context, no file header) in new_value, with old_value NULL. See
+-- src/db/page_audit.rs for the reasoning.
+--
+-- SQLite cannot compute a line diff, so the work is done in Rust: the runner
+-- calls page_audit::compact over every existing 'content' row right after
+-- this file, inside the same savepoint (see PAGE_AUDIT_DIFF_MIGRATION in
+-- src/db/migrate.rs). This file only marks the version.
+--
+-- The freed pages stay in the file until the next VACUUM; SQLite reuses them
+-- for new writes in the meantime.

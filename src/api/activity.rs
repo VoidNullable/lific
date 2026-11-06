@@ -255,9 +255,10 @@ mod tests {
         let items = feed["items"].as_array().unwrap();
         let edit = items
             .iter()
-            .find(|a| a["field"] == "content")
+            .find(|a| a["field"] == "content_diff")
             .expect("content edit audited");
-        assert_eq!(edit["new_value"], "# hello");
+        assert!(edit["old_value"].is_null());
+        assert!(edit["new_value"].as_str().unwrap().contains("+# hello"));
         assert_eq!(edit["entity_label"], "TST-DOC-1");
     }
 

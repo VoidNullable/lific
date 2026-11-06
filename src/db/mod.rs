@@ -1,5 +1,6 @@
 pub mod migrate;
 pub mod models;
+pub mod page_audit;
 pub mod queries;
 
 use crossbeam_queue::ArrayQueue;

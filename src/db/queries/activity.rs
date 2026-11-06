@@ -615,10 +615,116 @@ mod tests {
             .items;
         let edit = feed
             .iter()
-            .find(|a| a.field.as_deref() == Some("content"))
+            .find(|a| a.field.as_deref() == Some("content_diff"))
             .unwrap();
         assert_eq!(edit.entity_label.as_deref(), Some("AUD-DOC-1"));
-        assert_eq!(edit.new_value.as_deref(), Some("# new content"));
+        assert_eq!(edit.old_value, None);
+        assert_eq!(
+            edit.new_value.as_deref(),
+            Some("@@ -0,0 +1 @@\n+# new content\n\\ No newline at end of file\n")
+        );
+    }
+
+    /// LIF-486: an edit to a long page stores the changed hunk, not both
+    /// bodies, and leaves no full-content row behind.
+    #[test]
+    fn page_content_edits_are_stored_as_line_diffs() {
+        let (pool, pid) = seeded();
+        let conn = pool.write().unwrap();
+        let body: String = (1..=500)
+            .map(|n| format!("paragraph {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let page = queries::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                title: "Long".into(),
+                content: body,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (round, line) in [(1, "paragraph 10\n"), (2, "paragraph 400\n")] {
+            let current = queries::get_page(&conn, page.id).unwrap().content;
+            queries::update_page(
+                &conn,
+                page.id,
+                &UpdatePage {
+                    content: Some(current.replace(line, &format!("edited {round}\n"))),
+                    title: Some(format!("Long {round}")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let full: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM audit_log WHERE entity_type = 'page' AND field = 'content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(full, 0);
+        drop(conn);
+
+        let conn = pool.read().unwrap();
+        let feed = list_activity(&conn, ActivityScope::Page(page.id), None, None)
+            .unwrap()
+            .items;
+        let diffs: Vec<&str> = feed
+            .iter()
+            .filter(|a| a.field.as_deref() == Some("content_diff"))
+            .map(|a| a.new_value.as_deref().unwrap())
+            .collect();
+        assert_eq!(diffs.len(), 2);
+        // Newest first.
+        assert!(diffs[0].contains("-paragraph 400\n+edited 2\n"));
+        assert!(diffs[1].contains("-paragraph 10\n+edited 1\n"));
+        assert!(diffs.iter().all(|diff| diff.len() < 300), "{diffs:?}");
+        // Other fields in the same write keep their plain old/new shape.
+        let title = feed
+            .iter()
+            .find(|a| a.field.as_deref() == Some("title"))
+            .unwrap();
+        assert_eq!(title.old_value.as_deref(), Some("Long 1"));
+        assert_eq!(title.new_value.as_deref(), Some("Long 2"));
+    }
+
+    /// A writer that bypasses `update_page` (raw SQL) is still audited, in
+    /// the full-content shape the readers keep supporting.
+    #[test]
+    fn a_raw_sql_content_update_keeps_the_full_values() {
+        let (pool, pid) = seeded();
+        let conn = pool.write().unwrap();
+        let page = queries::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                title: "Raw".into(),
+                content: "before".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE pages SET content = 'after' WHERE id = ?1",
+            [page.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = pool.read().unwrap();
+        let feed = list_activity(&conn, ActivityScope::Page(page.id), None, None)
+            .unwrap()
+            .items;
+        let edit = feed
+            .iter()
+            .find(|a| a.field.as_deref() == Some("content"))
+            .unwrap();
+        assert_eq!(edit.old_value.as_deref(), Some("before"));
+        assert_eq!(edit.new_value.as_deref(), Some("after"));
     }
 
     // ── Attribution ──────────────────────────────────────

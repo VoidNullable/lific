@@ -306,7 +306,17 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "plans auto complete",
         include_str!("../../migrations/062_plans_auto_complete.sql"),
     ),
+    (
+        63,
+        "page audit diffs",
+        include_str!("../../migrations/063_page_audit_diffs.sql"),
+    ),
 ];
+
+/// The migration whose data step runs in Rust: it rewrites stored page
+/// content edits into line diffs (`page_audit::compact`), which SQL alone
+/// cannot compute.
+const PAGE_AUDIT_DIFF_MIGRATION: i64 = 63;
 
 /// Migrations that rebuild a table other tables reference by foreign key.
 ///
@@ -497,6 +507,10 @@ fn run_inner(conn: &Connection, fk_off: bool) -> Result<(), crate::error::LificE
                 for sql in triggers {
                     conn.execute_batch(&sql)?;
                 }
+                if version == PAGE_AUDIT_DIFF_MIGRATION {
+                    let rewritten = crate::db::page_audit::compact(conn, None, 0)?;
+                    info!(rewritten, "page content audit rows stored as diffs");
+                }
                 // A rebuild migration ran with enforcement off (see `run`);
                 // check it here so an orphaning bug rolls back just this
                 // savepoint with an error naming the migration.
@@ -664,6 +678,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("migration {version} ({name}): {e}"));
             for sql in triggers {
                 conn.execute_batch(&sql).unwrap();
+            }
+            if version == PAGE_AUDIT_DIFF_MIGRATION {
+                crate::db::page_audit::compact(&conn, None, 0).unwrap();
             }
             conn.execute(
                 "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
@@ -2270,5 +2287,77 @@ mod plan_auto_complete_tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(audited, [1]);
+    }
+}
+
+#[cfg(test)]
+mod page_audit_diff_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+
+    /// LIF-486: existing full-content page edits are rewritten into diffs on
+    /// upgrade; every other audit row, title edits on the same page included,
+    /// is left exactly as it was.
+    #[test]
+    fn upgrade_rewrites_stored_page_content_edits_into_diffs() {
+        let conn = migrated_up_to(super::PAGE_AUDIT_DIFF_MIGRATION);
+        let body: String = (1..=200)
+            .map(|n| format!("line {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        conn.execute_batch("INSERT INTO projects(id,name,identifier) VALUES (1,'P','PAD');")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO pages(id,project_id,sequence,title,content) VALUES (1,1,1,'Doc',?1)",
+            [&body],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE pages SET content = ?1, title = 'Doc 2' WHERE id = 1",
+            [body.replace("line 100\n", "line one hundred\n")],
+        )
+        .unwrap();
+        let full_size: i64 = conn
+            .query_row(
+                "SELECT length(old_value) + length(new_value) FROM audit_log WHERE field = 'content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(full_size > 2 * 1500);
+        let untouched =
+            |conn: &rusqlite::Connection| -> Vec<(i64, String, Option<String>, Option<String>)> {
+                conn.prepare(
+                    "SELECT id, action || ':' || COALESCE(field, ''), old_value, new_value
+                 FROM audit_log WHERE COALESCE(field, '') NOT IN ('content', 'content_diff')
+                 ORDER BY id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+            };
+        let others = untouched(&conn);
+        assert!(others.iter().any(|(_, kind, _, _)| kind == "update:title"));
+
+        run(&conn).unwrap();
+
+        let (field, old, new): (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT field, old_value, new_value FROM audit_log
+                 WHERE entity_type = 'page' AND action = 'update'
+                   AND field IN ('content', 'content_diff')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(field, "content_diff");
+        assert_eq!(old, None);
+        assert!(new.contains("-line 100\n+line one hundred\n"), "{new}");
+        assert!((new.len() as i64) < full_size / 10, "{new}");
+        assert_eq!(untouched(&conn), others);
     }
 }

@@ -16,6 +16,7 @@
   import PriorityIcon from "./PriorityIcon.svelte";
   import { History, ChevronDown } from "lucide-svelte";
   import { assignActivity } from "./issues/assignees";
+  import { fieldLabel, parseStoredDiff, STORED_DIFF_FIELD } from "./linediff";
 
   let {
     items,
@@ -45,7 +46,7 @@
 
   /** Long-form fields get the expandable old/new treatment. */
   function isLongField(a: Activity): boolean {
-    return a.field === "description" || a.field === "content";
+    return a.field === "description" || a.field === "content" || a.field === STORED_DIFF_FIELD;
   }
 
   function shortValue(v: string | null, max = 80): string {
@@ -106,7 +107,9 @@
       case "delete":
         return a.entity_type === "comment" ? "deleted a comment" : `deleted ${a.entity_type}`;
       case "update":
-        return a.entity_type === "comment" ? "edited a comment" : `changed ${a.field}`;
+        return a.entity_type === "comment"
+          ? "edited a comment"
+          : `changed ${fieldLabel(a.field)}`;
       case "attach":
         return "added label";
       case "detach":
@@ -268,7 +271,30 @@
           </div>
 
           <!-- Expanded old/new blocks for description/content edits -->
-          {#if a.action === "update" && isLongField(a) && openValues.has(a.id)}
+          {#if a.action === "update" && a.field === STORED_DIFF_FIELD && openValues.has(a.id)}
+            <!-- Page content edits are stored as a diff (LIF-486) -->
+            <div
+              class="mt-2 mb-1 max-w-[640px] text-caption leading-relaxed rounded-md
+                     border border-[var(--border)] overflow-hidden max-h-[200px] overflow-y-auto"
+            >
+              {#each parseStoredDiff(a.new_value ?? "") as row, i (i)}
+                {#if row.kind === "fold"}
+                  <div class="px-3 py-0.5 bg-[var(--bg-subtle)] text-micro text-[var(--text-faint)] select-none">
+                    {row.count} unchanged line{row.count === 1 ? "" : "s"}
+                  </div>
+                {:else}
+                  <div
+                    class="px-3 whitespace-pre-wrap break-words min-h-[1.5em]
+                           {row.kind === 'removed'
+                      ? 'bg-[var(--error-bg)] text-[var(--text-muted)]'
+                      : row.kind === 'added'
+                        ? 'bg-[var(--success-bg)] text-[var(--text)]'
+                        : 'text-[var(--text-muted)]'}"
+                  >{row.text}</div>
+                {/if}
+              {/each}
+            </div>
+          {:else if a.action === "update" && isLongField(a) && openValues.has(a.id)}
             <div class="mt-2 mb-1 flex flex-col gap-1.5 max-w-[640px]">
               <div
                 class="text-caption leading-relaxed px-3 py-2 rounded-md
