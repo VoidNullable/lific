@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+Work that came out of studying how agents actually use Lific. The briefing becomes the place to start a session: it remembers where you left off, leads with what only a person can do, and points out stale claims and forgotten plans. Issues can move between projects, plans finish themselves, and page history stops dominating the database. Eight migrations run on first start.
+
+### Briefing
+
+- `get_briefing(since='last')` resumes from your previous briefing of the project. The server keeps that mark per user, so agents no longer carry a timestamp between sessions. The change section now lists new comments and who made each change.
+- Briefings open with a human queue: open issues assigned to a person in every project you can view, ranked by how much work each blocks, then due date, then age, with possible duplicates flagged.
+- Active issues show how long they have been idle, and a Stale active section lists the ones nobody has touched for three days (`--stale-active-days`). `list_issues` accepts `stale=true`.
+- The briefing ends with a short Needs triage list: active plans idle for 30 days or more, and active modules with no open issues, three of each with full counts.
+
+### Issues and plans
+
+- Move an issue to another project with the MCP `move_issue` tool, `POST /api/issues/{id}/move`, or Move to project in the issue view's menu and the command palette. It gets a new identifier there, and the old one keeps resolving in `get_issue`, links and search. Moving needs write access to both projects.
+- The server returns active issues untouched for 14 days to `todo` once a day, with a comment saying why. Set the period with `lific instance set --stale-active-reset-days`; 0 turns it off.
+- Cancelling an issue checks off the plan steps that mirror it, and reopening it unchecks them, so a plan with dropped work can reach 100 percent.
+- Active plans complete themselves when their last step is resolved, and reopen when a step is unchecked or its issue reopens.
+
+### MCP
+
+- `get_issue` reads up to 50 issues in one call with `identifiers`. An unknown or inaccessible identifier is reported inline without failing the rest.
+- `create_issue` accepts `blocks`, `blocked_by` and `relates_to`, on a single issue or on each batch item, written in the same transaction. Batch items can name each other by index or title.
+- `get_issue` and `get_page` show the record's `seq` in their header, so an agent can send `expected_seq` without first hitting a failed write.
+- `list_issues` (MCP and REST) sorts by `order_by=target_date`, with undated issues last in either direction.
+- `list_issues` and `get_board` rows show `due:YYYY-MM-DD` when an issue has a target date.
+- Project listings show the first line of each description, up to 100 characters. Pass `verbose: true` for the full text.
+- Module, label and folder names match regardless of case, and an exact spelling still wins. A name that matches nothing lists the project's valid names, closest first.
+- 32 tools now cost an agent 6,159 tokens of context.
+
+### Storage
+
+- Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.
+- Module, label and folder names and issue and page titles that older clients saved with HTML entities (for example `Window &amp; Panel`) are decoded on upgrade, so looking them up by their real name works again.
+
+### Upgrading
+
+- Eight migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
+- `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
+
 ## v2.11.1 (2026-10-13)
 
 A web UI fix for issue previews.
