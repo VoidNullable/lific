@@ -59,6 +59,7 @@ fn list(m: &LificMcp, workable: bool, blocked: bool) -> String {
 fn get(m: &LificMcp) -> String {
     m.get_issue(Parameters(GetIssueInput {
         identifier: "WT-1".into(),
+        identifiers: None,
         include_comments: Some("none".into()),
     }))
 }
@@ -361,6 +362,7 @@ fn adding_or_clearing_a_wait_requires_maintainer_on_the_waiting_issue() {
     let read = as_user(&viewer, &|| {
         m.get_issue(Parameters(GetIssueInput {
             identifier: "MEM-1".into(),
+            identifiers: None,
             include_comments: Some("none".into()),
         }))
     });

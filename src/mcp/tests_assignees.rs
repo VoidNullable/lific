@@ -87,6 +87,7 @@ fn get(s: &Setup, identifier: &str) -> String {
     as_user(&s.maintainer, || {
         s.m.get_issue(Parameters(GetIssueInput {
             identifier: identifier.into(),
+            identifiers: None,
             include_comments: Some("none".into()),
         }))
     })
