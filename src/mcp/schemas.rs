@@ -44,6 +44,10 @@ pub struct ListIssuesInput {
     pub workable: Option<bool>,
     #[schemars(description = "Only issues with an open blocker or holding wait")]
     pub blocked: Option<bool>,
+    #[schemars(
+        description = "Only active issues untouched for the instance's stale threshold (default 3 days)"
+    )]
+    pub stale: Option<bool>,
     #[schemars(description = "Created at or after this ISO date or datetime")]
     pub created_since: Option<String>,
     #[schemars(description = "Created before this (exclusive)")]

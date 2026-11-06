@@ -46,6 +46,7 @@ Lists issues in one project, or across the projects of the people you name with 
 | `label` | `string` | No | Label name. |
 | `workable` | `boolean` | No | `true` returns open issues (not `done` or `cancelled`) whose blockers are all `done` and that have no wait still holding. |
 | `blocked` | `boolean` | No | `true` returns issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. Each row lists its open blockers as `blocked_by:APP-3,APP-7`. |
+| `stale` | `boolean` | No | `true` returns active issues nobody has touched for the instance's stale threshold (default 3 days): no edit, comment or label change since. Not with `statuses` or a `status` other than `active`. |
 | `created_since` | `string` | No | ISO date or datetime, inclusive, e.g. `2026-06-01`. |
 | `created_until` | `string` | No | ISO date or datetime, exclusive. |
 | `updated_since` | `string` | No | ISO date or datetime, inclusive. |
@@ -558,7 +559,8 @@ Sections follow in this order, and a section with nothing to report is left out:
 | Blocked | Open issues with an unresolved blocker or a wait still holding, each naming its blocking issues and their status, and its holding waits (`waiting on @ada-lovelace (note)`, `waiting until 2026-09-28..29`). A blocker in a project you cannot view is counted, not named. |
 | Workable, not yet active | Issues ready to start, highest priority first. Active issues have their own section. |
 | Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. |
-| Active | Active issues, highest priority first. |
+| Active | Active issues touched within the stale threshold, highest priority first, each with how long it has been idle (`idle 2d`, `idle 5h`, `idle <1h`). |
+| Stale active | Active issues nobody has touched for the instance's stale threshold (default 3 days), each with its idle age. An active issue claims work in progress; these are claims whose sessions likely ended. Resume one, or move it back to `todo`. `list_issues(stale=true)` lists them all. |
 
 Issue sections show up to 8 lines, plans up to 5, each kind of change up to 5, and titles are cut at 80 characters. If the whole response is still over 6,000 characters, lines are dropped from the longest section until it fits. A section that shows fewer items than it has ends with how many were left out and the call that lists them all, such as `(+12 more: list_issues(project='APP', blocked=true))`. Issue and plan counts stop at 100; `100+` means at least that many.
 

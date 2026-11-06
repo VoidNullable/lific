@@ -1318,6 +1318,11 @@ pub enum InstanceAction {
         /// trusted and bypass this by design — audit them with `lific key list`.
         #[arg(long = "authz-enforced")]
         authz_enforced: Option<bool>,
+
+        /// Days an active issue may go untouched before the briefing and
+        /// `list_issues(stale=true)` report it as stale (1-365, default 3)
+        #[arg(long = "stale-active-days")]
+        stale_active_days: Option<i64>,
     },
 }
 
@@ -2227,6 +2232,8 @@ mod tests {
             "true",
             "--authz-enforced",
             "true",
+            "--stale-active-days",
+            "5",
         ])
         .unwrap();
         match cli.command {
@@ -2240,6 +2247,7 @@ mod tests {
                         login_message,
                         auto_login,
                         authz_enforced,
+                        stale_active_days,
                     },
             } => {
                 assert_eq!(name, Some("Acme Eng".into()));
@@ -2249,6 +2257,7 @@ mod tests {
                 assert_eq!(login_message, Some("Ask #it for access".into()));
                 assert_eq!(auto_login, Some(true));
                 assert_eq!(authz_enforced, Some(true));
+                assert_eq!(stale_active_days, Some(5));
             }
             _ => panic!("expected Instance Set"),
         }

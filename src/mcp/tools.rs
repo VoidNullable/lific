@@ -2125,6 +2125,22 @@ impl LificMcp {
         if statuses.as_ref().is_some_and(Vec::is_empty) {
             return Err("statuses must name at least one status, or all".into());
         }
+        // LIF-492: stale means active and idle past the instance threshold,
+        // which is the `updated_until` filter at a computed cutoff.
+        let stale_cutoff = if input.stale == Some(true) {
+            if input.statuses.is_some()
+                || input
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status != "active")
+            {
+                return Err("stale lists active issues only; drop status/statuses".into());
+            }
+            let days = self.read(queries::settings::get)?.stale_active_days;
+            Some(queries::stale::cutoff(Utc::now(), days))
+        } else {
+            None
+        };
         let identity = super::current_identity(&self.db).map(|identity| identity.user);
         let filter = self.read(|conn| {
             // The gates' view of the caller: a bot's "me" is its owner.
@@ -2197,8 +2213,12 @@ impl LificMcp {
                     project_ids,
                     exclude_statuses,
                     triage_order: filter.is_some(),
-                    status: models::Status::parse_opt(input.status.as_deref())
-                        .map_err(crate::error::LificError::BadRequest)?,
+                    status: if stale_cutoff.is_some() {
+                        Some(models::Status::Active)
+                    } else {
+                        models::Status::parse_opt(input.status.as_deref())
+                            .map_err(crate::error::LificError::BadRequest)?
+                    },
                     priority: models::Priority::parse_opt(input.priority.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
@@ -2211,7 +2231,13 @@ impl LificMcp {
                     created_since: input.created_since.clone(),
                     created_until: input.created_until.clone(),
                     updated_since: input.updated_since.clone(),
-                    updated_until: input.updated_until.clone(),
+                    // The tighter of the caller's bound and the stale cutoff.
+                    updated_until: match (input.updated_until.as_deref(), &stale_cutoff) {
+                        (Some(given), Some(cutoff)) => {
+                            Some(given.replace('T', " ").min(cutoff.clone()))
+                        }
+                        (given, cutoff) => given.map(str::to_string).or_else(|| cutoff.clone()),
+                    },
                     order_by: input.order_by.clone(),
                     order: input.order.clone(),
                     limit: Some(limit),
@@ -5899,6 +5925,9 @@ mod tests_verification;
 
 #[cfg(test)]
 mod tests_checklist;
+
+#[cfg(test)]
+mod tests_stale;
 
 #[cfg(test)]
 #[path = "tests_search_filing.rs"]

@@ -291,6 +291,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "archived projects",
         include_str!("../../migrations/059_archived_projects.sql"),
     ),
+    (
+        69,
+        "stale active days",
+        include_str!("../../migrations/069_stale_active_days.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

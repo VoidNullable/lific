@@ -18,6 +18,7 @@ pub(crate) mod repo_bindings;
 mod resources;
 mod search;
 pub(crate) mod settings;
+pub(crate) mod stale;
 pub(crate) mod trash;
 pub(crate) mod users;
 pub(crate) mod views;
