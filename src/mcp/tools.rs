@@ -1313,6 +1313,35 @@ fn truncate_value(value: &str, max: usize) -> TruncatedValue<'_> {
     TruncatedValue { value, max }
 }
 
+/// Characters of a project description the project list prints by default.
+const PROJECT_DESCRIPTION_SUMMARY_CHARS: usize = 100;
+
+/// The first line of a trimmed text, cut to
+/// `PROJECT_DESCRIPTION_SUMMARY_CHARS`, with `…` when anything was left out.
+struct FirstLineSummary<'a>(&'a str);
+
+impl Display for FirstLineSummary<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (first, rest) = self
+            .0
+            .split_once('\n')
+            .map_or((self.0, ""), |(first, rest)| (first.trim_end(), rest));
+        let cut = first
+            .char_indices()
+            .nth(PROJECT_DESCRIPTION_SUMMARY_CHARS)
+            .map(|(index, _)| index);
+        match cut {
+            Some(index) => write!(formatter, "{}…", first[..index].trim_end()),
+            None if !rest.trim().is_empty() => write!(formatter, "{first}…"),
+            None => formatter.write_str(first),
+        }
+    }
+}
+
+fn first_line_summary(text: &str) -> FirstLineSummary<'_> {
+    FirstLineSummary(text)
+}
+
 /// Render one audit entry as a compact line:
 /// `[ts] actor via transport — LABEL action detail`
 fn resolves_to(result: Result<i64, crate::error::LificError>, expected: i64) -> bool {
@@ -3895,7 +3924,7 @@ No issues found."
     }
 
     #[tool(
-        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show members, your role, and counts per status."
+        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show a one-line description, members, your role, and counts per status."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
         self.list_resources_inner(input)
@@ -4016,6 +4045,7 @@ No issues found."
                     }
                 }
                 ps.sort_by(|left, right| cmp_projects_by_activity(left, right, &stats));
+                let verbose = input.verbose.unwrap_or(false);
                 let now = Utc::now();
                 Ok(render_response(|output| {
                     writeln!(output, "{} projects:", ps.len())?;
@@ -4026,9 +4056,11 @@ No issues found."
                             project_reference(context.as_deref(), &project.identifier,),
                             project.name
                         )?;
-                        (!project.description.is_empty())
-                            .then(|| write!(output, " — {}", project.description))
-                            .transpose()?;
+                        match project.description.trim() {
+                            "" => Ok(()),
+                            full if verbose => write!(output, " — {full}"),
+                            summary => write!(output, " — {}", first_line_summary(summary)),
+                        }?;
                         stats.get(&project.id).map_or(Ok(()), |stats| {
                             write!(output, "{}", ProjectAgentStats { stats, now })
                         })?;
@@ -8155,6 +8187,83 @@ mod tests {
             result.find("- REC | Recent").unwrap() < result.find("- STA | Stale").unwrap(),
             "recent work must sort before stale work: {result}"
         );
+    }
+
+    fn seed_described_project(m: &LificMcp, name: &str, ident: &str, description: &str) {
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "create".into(),
+            name: Some(name.into()),
+            identifier: Some(ident.into()),
+            description: Some(description.into()),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Created project"), "got: {result}");
+    }
+
+    fn project_row(listing: &str, ident: &str) -> String {
+        listing
+            .lines()
+            .find(|line| line.starts_with(&format!("- {ident} | ")))
+            .unwrap_or_else(|| panic!("no {ident} row in: {listing}"))
+            .to_string()
+    }
+
+    #[test]
+    fn list_resources_projects_cut_descriptions_to_one_short_line() {
+        let (m, _guard) = mcp();
+        let long_line = "word ".repeat(40);
+        seed_described_project(&m, "Long", "LNG", long_line.trim());
+        seed_described_project(
+            &m,
+            "Multi",
+            "MUL",
+            "First line.\n\nSecond paragraph, hidden.",
+        );
+        seed_described_project(&m, "Short", "SHO", "Fits on one line.");
+
+        let listing = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            ..Default::default()
+        }));
+
+        let long = project_row(&listing, "LNG");
+        let expected: String = long_line.chars().take(100).collect();
+        assert!(
+            long.starts_with(&format!("- LNG | Long — {}… | ", expected.trim_end())),
+            "a long first line stops at 100 characters: {long}"
+        );
+        assert_eq!(
+            project_row(&listing, "MUL"),
+            "- MUL | Multi — First line.… | no issues",
+            "later lines are left out and marked: {listing}"
+        );
+        assert!(!listing.contains("Second paragraph"), "got: {listing}");
+        assert_eq!(
+            project_row(&listing, "SHO"),
+            "- SHO | Short — Fits on one line. | no issues",
+            "a short one-line description prints whole, unmarked"
+        );
+    }
+
+    #[test]
+    fn list_resources_projects_verbose_prints_full_descriptions() {
+        let (m, _guard) = mcp();
+        let long_line = "word ".repeat(40);
+        let description = format!("{}\n\nSecond paragraph.", long_line.trim());
+        seed_described_project(&m, "Long", "LNG", &description);
+
+        let listing = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            verbose: Some(true),
+            ..Default::default()
+        }));
+
+        assert!(
+            listing.contains(&format!("- LNG | Long — {description}")),
+            "verbose keeps the whole description: {listing}"
+        );
+        assert!(!listing.contains('…'), "got: {listing}");
     }
 
     // ── LIF-257: zero-projects onboarding nudge ──

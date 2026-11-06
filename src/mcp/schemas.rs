@@ -420,6 +420,10 @@ pub struct ListResourcesInput {
         description = "Projects only: roles to name every member of (lead, maintainer, viewer, all); [] prints counts only"
     )]
     pub show_members: Option<Vec<String>>,
+    #[schemars(
+        description = "Projects only: full descriptions (default: first line, up to 100 characters)"
+    )]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
