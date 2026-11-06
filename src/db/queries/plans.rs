@@ -1031,6 +1031,125 @@ mod tests {
         assert_eq!(refreshed.done_count, 0);
     }
 
+    fn plan_audit_actions(conn: &Connection) -> Vec<String> {
+        audit_rows(conn, "plan")
+            .into_iter()
+            .filter(|(action, _, _)| action.starts_with("auto-"))
+            .map(|(action, _, _)| action)
+            .collect()
+    }
+
+    /// LIF-493: checking the last open step completes the plan; unchecking
+    /// any step of the completed plan reopens it. Both are audited.
+    #[test]
+    fn resolving_the_last_step_completes_the_plan_and_unchecking_reopens_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Plan".into(),
+                issue_id: None,
+                steps: vec![simple_step("a", None), simple_step("b", None)],
+            },
+        )
+        .unwrap();
+
+        set_step_done(&conn, plan.steps[0].id, true).unwrap();
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "active");
+
+        set_step_done(&conn, plan.steps[1].id, true).unwrap();
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "done");
+        assert_eq!(plan_audit_actions(&conn), ["auto-complete"]);
+
+        set_step_done(&conn, plan.steps[0].id, false).unwrap();
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "active");
+        assert_eq!(plan_audit_actions(&conn), ["auto-complete", "auto-reopen"]);
+    }
+
+    /// LIF-493: the issue cascade completes the plan too, and an issue that
+    /// reopens reaches into the completed plan to reopen its step and itself.
+    #[test]
+    fn issue_cascade_completes_the_plan_and_issue_reopen_reopens_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let shipped = seed_issue(&conn, pid, "Shipped", Status::Todo);
+        let dropped = seed_issue(&conn, pid, "Dropped", Status::Todo);
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Plan".into(),
+                issue_id: None,
+                steps: vec![
+                    simple_step("ship", Some(shipped.id)),
+                    simple_step("drop", Some(dropped.id)),
+                ],
+            },
+        )
+        .unwrap();
+
+        set_issue_status(&conn, shipped.id, Status::Done);
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "active");
+        set_issue_status(&conn, dropped.id, Status::Cancelled);
+        assert_eq!(get_plan(&conn, plan.id).unwrap().status, "done");
+
+        set_issue_status(&conn, shipped.id, Status::Active);
+        let refreshed = get_plan(&conn, plan.id).unwrap();
+        assert_eq!(refreshed.status, "active");
+        assert!(!refreshed.steps[0].done);
+        assert!(refreshed.steps[0].reopened_via_issue_at.is_some());
+        assert_eq!(plan_audit_actions(&conn), ["auto-complete", "auto-reopen"]);
+    }
+
+    /// Archived plans stay frozen and stepless plans never complete on their
+    /// own.
+    #[test]
+    fn auto_completion_leaves_archived_and_stepless_plans_alone() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let archived = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Archived".into(),
+                issue_id: None,
+                steps: vec![simple_step("a", None)],
+            },
+        )
+        .unwrap();
+        update_plan(
+            &conn,
+            archived.id,
+            &UpdatePlan {
+                status: Some("archived".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        set_step_done(&conn, archived.steps[0].id, true).unwrap();
+        assert_eq!(get_plan(&conn, archived.id).unwrap().status, "archived");
+        set_step_done(&conn, archived.steps[0].id, false).unwrap();
+        assert_eq!(get_plan(&conn, archived.id).unwrap().status, "archived");
+
+        let stepless = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Empty".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(get_plan(&conn, stepless.id).unwrap().status, "active");
+        assert!(plan_audit_actions(&conn).is_empty());
+    }
+
     /// Checking a step whose issue was cancelled keeps the cancellation.
     #[test]
     fn checking_a_step_does_not_turn_a_cancelled_issue_done() {

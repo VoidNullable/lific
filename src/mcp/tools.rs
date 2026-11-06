@@ -897,6 +897,30 @@ fn issue_status_cascaded_plan_steps(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Plans the same cascade completed or reopened (migration 062), as
+/// `(plan id, PROJ-PLAN-n)`.
+fn issue_status_cascaded_plans(
+    conn: &rusqlite::Connection,
+    audit_checkpoint: i64,
+    issue_id: i64,
+    action: PlanStepCascadeAction,
+) -> Result<Vec<(i64, String)>, crate::error::LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT al.entity_id, al.entity_label
+           FROM audit_log al
+          WHERE al.id > ?1
+            AND al.issue_id = ?2
+            AND al.entity_type = 'plan'
+            AND al.action = ?3
+          ORDER BY al.id ASC",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![audit_checkpoint, issue_id, action.audit_action()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 struct IssuePlanStepCascade<'a> {
     action: PlanStepCascadeAction,
     steps: &'a [CascadedPlanStep],
@@ -2919,11 +2943,12 @@ No issues found."
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let caller = self.caller_username(input.assignees.as_deref())?;
-        let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
-            // Migration 020's cascades key exclusively on transitions to or
-            // from `done`, not on the broader cancelled/open distinction.
-            // Keep an audit checkpoint before the direct issue update so the
-            // response can name only steps the trigger actually changed.
+        let (issue, cascade_action, cascaded_steps, cascaded_plans, verification) = self
+            .transaction(|conn| {
+            // The plan cascades (migrations 020, 061, 062) key on an issue
+            // entering or leaving done/cancelled. Keep an audit checkpoint
+            // before the direct issue update so the response can name only
+            // the steps and plans the triggers actually changed.
             let previous_issue = queries::get_issue(conn, id)?;
             let audit_checkpoint = input
                 .status
@@ -2995,11 +3020,12 @@ No issues found."
                 (true, false) => Some(PlanStepCascadeAction::Reopen),
                 _ => None,
             };
-            let cascaded_steps = match (cascade_action, audit_checkpoint) {
-                (Some(action), Some(checkpoint)) => {
-                    issue_status_cascaded_plan_steps(conn, checkpoint, id, action)?
-                }
-                _ => Vec::new(),
+            let (cascaded_steps, cascaded_plans) = match (cascade_action, audit_checkpoint) {
+                (Some(action), Some(checkpoint)) => (
+                    issue_status_cascaded_plan_steps(conn, checkpoint, id, action)?,
+                    issue_status_cascaded_plans(conn, checkpoint, id, action)?,
+                ),
+                _ => (Vec::new(), Vec::new()),
             };
             let (issue, verification) = match evidence {
                 Some(evidence) => {
@@ -3019,7 +3045,13 @@ No issues found."
                 }
                 None => (issue, None),
             };
-            Ok((issue, cascade_action, cascaded_steps, verification))
+            Ok((
+                issue,
+                cascade_action,
+                cascaded_steps,
+                cascaded_plans,
+                verification,
+            ))
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
@@ -3056,6 +3088,19 @@ No issues found."
                     }
                 )
             })?;
+            cascaded_plans
+                .iter()
+                .try_for_each(|(plan_id, identifier)| {
+                    write!(
+                        output,
+                        "\n{} {}.",
+                        plan_reference_value(context.as_deref(), identifier, *plan_id),
+                        match cascade_action {
+                            Some(PlanStepCascadeAction::Reopen) => "reopened: a step is open again",
+                            _ => "completed: every step is resolved",
+                        }
+                    )
+                })?;
             verification.map_or(Ok(()), |comment_id| {
                 write!(output, "\nVerification recorded as comment #{comment_id}.")
             })?;
@@ -12489,8 +12534,9 @@ mod tests {
         );
         // LIF-302: default output is a compact receipt — notes plus a one-line
         // progress summary, and NO step tree lines.
+        // LIF-493: resolving the last step completes the plan.
         assert!(
-            out.contains("PLN-PLAN-1 [active]: 1/1 done"),
+            out.contains("PLN-PLAN-1 [done]: 1/1 done"),
             "receipt must carry progress counts: {out}"
         );
         // No step-tree lines (the "- [x] #N" render fmt_plan would emit).
@@ -12893,11 +12939,16 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .expect("step id in output");
 
-        m.update_issue(Parameters(UpdateIssueInput {
+        let closed = m.update_issue(Parameters(UpdateIssueInput {
             identifier: "RPN-1".into(),
             status: Some("done".into()),
             ..Default::default()
         }));
+        // LIF-493: the only step resolved, so the plan completed itself.
+        assert!(
+            closed.contains("RPN-PLAN-1 completed: every step is resolved."),
+            "issue close must narrate the plan completing: {closed}"
+        );
         let reopened = m.update_issue(Parameters(UpdateIssueInput {
             identifier: "RPN-1".into(),
             status: Some("todo".into()),
@@ -12907,6 +12958,10 @@ mod tests {
         assert!(
             reopened.contains(&format!("reopened plan step #{step_id} in RPN-PLAN-1")),
             "issue reopen must narrate the cascade: {reopened}"
+        );
+        assert!(
+            reopened.contains("RPN-PLAN-1 reopened: a step is open again."),
+            "issue reopen must narrate the plan reopening: {reopened}"
         );
     }
 

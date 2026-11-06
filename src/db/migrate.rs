@@ -296,6 +296,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "plan steps resolve on cancel",
         include_str!("../../migrations/061_plan_steps_resolve_on_cancel.sql"),
     ),
+    (
+        62,
+        "plans auto complete",
+        include_str!("../../migrations/062_plans_auto_complete.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -2090,5 +2095,56 @@ mod plan_step_resolution_tests {
             )
             .unwrap();
         assert_eq!(audited, 1);
+    }
+}
+
+#[cfg(test)]
+mod plan_auto_complete_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+
+    /// LIF-493: active plans that are already fully resolved complete on
+    /// upgrade, audited; plans with an open step, no steps, or a frozen
+    /// status keep their status.
+    #[test]
+    fn upgrade_completes_fully_resolved_active_plans() {
+        let conn = migrated_up_to(62);
+        conn.execute_batch(
+            "INSERT INTO projects(id,name,identifier) VALUES (1,'P','PAC');
+             INSERT INTO plans(id,project_id,sequence,title,status) VALUES
+                 (1,1,1,'finished','active'),
+                 (2,1,2,'open step','active'),
+                 (3,1,3,'stepless','active'),
+                 (4,1,4,'archived','archived');
+             INSERT INTO plan_steps(plan_id,title,done) VALUES
+                 (1,'a',1), (1,'b',1),
+                 (2,'a',1), (2,'b',0),
+                 (4,'a',1);",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let status = |id: i64| -> String {
+            conn.query_row("SELECT status FROM plans WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status(1), "done");
+        assert_eq!(status(2), "active");
+        assert_eq!(status(3), "active");
+        assert_eq!(status(4), "archived");
+        let audited: Vec<i64> = conn
+            .prepare(
+                "SELECT entity_id FROM audit_log
+                  WHERE entity_type = 'plan' AND action = 'auto-complete'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(audited, [1]);
     }
 }
