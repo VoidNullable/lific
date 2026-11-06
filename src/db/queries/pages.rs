@@ -409,10 +409,12 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
             )?;
         }
         if let Some(ref content) = input.content {
+            let before = crate::db::page_audit::last_audit_id(conn)?;
             conn.execute(
                 "UPDATE pages SET content = ?1 WHERE id = ?2",
                 params![unescape_text(content), id],
             )?;
+            crate::db::page_audit::compact(conn, Some(id), before)?;
         }
         if let Some(ref folder_id) = input.folder_id {
             conn.execute(

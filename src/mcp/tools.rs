@@ -1519,6 +1519,14 @@ impl Display for ActivityLine<'_> {
                 label,
                 truncate_value(activity.old_value.as_deref().unwrap_or(""), 60)
             ),
+            "update" if activity.field.as_deref() == Some(crate::db::page_audit::DIFF_FIELD) => {
+                let (added, removed) =
+                    crate::db::page_audit::diff_stats(activity.new_value.as_deref().unwrap_or(""));
+                write!(
+                    formatter,
+                    "{label} content edited: +{added} -{removed} lines"
+                )
+            }
             "update" => write!(
                 formatter,
                 "{} {}: {} → {}",
@@ -11817,6 +11825,37 @@ mod tests {
         }));
         assert!(out.contains("status: backlog → active"), "got: {out}");
         assert!(out.contains("created issue TST-1"), "got: {out}");
+    }
+
+    /// LIF-486: a page content edit is stored as a diff and reads as a line
+    /// count, not a truncated diff header.
+    #[test]
+    fn get_activity_summarizes_page_content_edits() {
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
+        seed_project(&m, "Audit", "TST");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("TST".into()),
+            title: "Doc".into(),
+            content: Some("# Heading\nold body\ntail".into()),
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+        m.edit_page(Parameters(EditPageInput {
+            identifier: "TST-DOC-1".into(),
+            old_string: "old body".into(),
+            new_string: "new body\nmore".into(),
+            field: None,
+            replace_all: None,
+        }));
+
+        let out = m.get_activity(Parameters(GetActivityInput {
+            identifier: "TST-DOC-1".into(),
+            ..Default::default()
+        }));
+        assert!(out.contains("content edited: +2 -1 lines"), "got: {out}");
+        assert!(!out.contains("@@"), "got: {out}");
     }
 
     #[test]
