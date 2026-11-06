@@ -450,9 +450,13 @@ pub fn list_issues_page(
         Some("priority") => format!(
             "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END {dir}, i.sequence {dir}"
         ),
+        // Undated issues sort last in both directions.
+        Some("target_date") => {
+            format!("COALESCE(i.target_date, '') = '', i.target_date {dir}, i.sequence {dir}")
+        }
         Some(other) => {
             return Err(LificError::BadRequest(format!(
-                "invalid order_by '{other}'. Use sort_order, sequence, created, updated, or priority."
+                "invalid order_by '{other}'. Use sort_order, sequence, created, updated, priority, or target_date."
             )));
         }
     };
@@ -2432,6 +2436,55 @@ mod tests {
     }
 
     #[test]
+    fn list_orders_by_target_date_with_undated_last_both_ways() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for (title, target_date) in [
+            ("Undated", None),
+            ("Late", Some("2026-12-01")),
+            ("Cleared", Some("")),
+            ("Early", Some("2026-01-15")),
+            ("Middle", Some("2026-06-30")),
+        ] {
+            create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id: pid,
+                    title: title.into(),
+                    target_date: target_date.map(Into::into),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let titles = |order: &str| -> Vec<String> {
+            list_issues(
+                &conn,
+                &ListIssuesQuery {
+                    project_id: Some(pid),
+                    order_by: Some("target_date".into()),
+                    order: Some(order.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|issue| issue.title)
+            .collect()
+        };
+        assert_eq!(
+            titles("asc"),
+            vec!["Early", "Middle", "Late", "Undated", "Cleared"]
+        );
+        assert_eq!(
+            titles("desc"),
+            vec!["Late", "Middle", "Early", "Cleared", "Undated"]
+        );
+    }
+
+    #[test]
     fn list_rejects_invalid_order_params() {
         let pool = test_db();
         let conn = pool.write().unwrap();
@@ -2448,7 +2501,7 @@ mod tests {
         assert!(matches!(
             bad_col,
             Err(LificError::BadRequest(message))
-                if message == "invalid order_by 'priority; DROP TABLE issues'. Use sort_order, sequence, created, updated, or priority."
+                if message == "invalid order_by 'priority; DROP TABLE issues'. Use sort_order, sequence, created, updated, priority, or target_date."
         ));
 
         let bad_dir = list_issues(

@@ -52,7 +52,9 @@ pub struct ListIssuesInput {
     pub updated_since: Option<String>,
     #[schemars(description = "Updated before this (exclusive)")]
     pub updated_until: Option<String>,
-    #[schemars(description = "sort_order (default), sequence, created, updated, or priority")]
+    #[schemars(
+        description = "sort_order (default), sequence, created, updated, priority, or target_date (undated last)"
+    )]
     pub order_by: Option<String>,
     #[schemars(description = "asc (default) or desc")]
     pub order: Option<String>,
