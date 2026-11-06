@@ -2387,6 +2387,7 @@ fn the_allowlist_is_reads_only_and_every_writing_tool_is_outside_it() {
         "edit_plan_step",
         "link_issues",
         "manage_resource",
+        "move_issue",
         "unlink_issues",
         "update_issue",
         "update_page",

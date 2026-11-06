@@ -388,6 +388,8 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // LIF-438: undoing a soft delete is the same authority as performing
         // one, on the same project (read past the tombstone filter to find it).
         (("POST", "/api/issues/{id}/restore"), Gated(Maintainer)),
+        // LIF-487: Maintainer on the source and on the target project.
+        (("POST", "/api/issues/{id}/move"), Gated(Maintainer)),
         (("GET", "/api/issues/resolve/{identifier}"), Gated(Viewer)),
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),
@@ -612,6 +614,7 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
         ("export", Gated(Viewer)),
         ("create_issue", Gated(Maintainer)),
         ("update_issue", Gated(Maintainer)),
+        ("move_issue", Gated(Maintainer)),
         ("bulk_update", Gated(Maintainer)),
         ("edit_issue", Gated(Maintainer)),
         ("get_board", Gated(Viewer)),

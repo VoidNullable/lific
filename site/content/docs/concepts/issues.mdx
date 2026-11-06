@@ -111,6 +111,12 @@ Two filters answer "what can be worked on now" without walking the relation grap
 
 A blocker that was `cancelled` still blocks. That is deliberate: cancelling the prerequisite does not make the dependent work possible. When the dependency no longer matters, remove the `blocks` relation.
 
+## Moving to another project
+
+An issue can move to another project with MCP `move_issue` or `POST /api/issues/{id}/move`, which need maintainer rights on both projects. It takes the next number in its new project, so `APP-12` might become `OPS-4`. The old identifier is never handed out again and keeps pointing at the issue: links, `get_issue`, the REST resolve endpoint and search all find it by either name. Comments, relations, waits, history, attachments and plan steps come along unchanged.
+
+Labels and modules belong to a project. A label is kept when the new project has one with the same name, and dropped otherwise. The module is the one you name, or one with the same name as before, or none. People assigned to the issue who cannot see the new project are unassigned. The response lists everything that was dropped.
+
 ## Deleting and restoring
 
 Deleting an issue moves it to the trash, along with its comments. It disappears from lists, search, boards and [public projects](/docs/public-projects) straight away. For the next 30 days, a maintainer can restore it with `POST /api/issues/{id}/restore`, and its comments come back with it. After that the retention sweep removes it permanently. Change the window with `trash_days` in the [`[retention]`](/docs/configuration#retention) section of the configuration.

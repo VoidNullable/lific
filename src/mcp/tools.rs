@@ -2366,7 +2366,7 @@ No issues found."
             ));
         }
         let visible = visible_project_ids_mcp(&self.db)?;
-        let (issue, module_name, rels) = self.read(|conn| {
+        let (issue, module_name, rels, aliases) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let mut issue = queries::get_issue(conn, id)?;
             // LIF-488: before annotation, so no status of a hidden issue is read.
@@ -2405,7 +2405,9 @@ No issues found."
                 duplicates: annotate(&issue.duplicates),
                 duplicated_by: annotate(&issue.duplicated_by),
             };
-            Ok((issue, module_name, rels))
+            // LIF-487: identifiers it had before a move, which still resolve.
+            let aliases = queries::issue_move::issue_aliases(conn, issue.id)?;
+            Ok((issue, module_name, rels, aliases))
         })?;
         require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
         let context = current_issue_link_context();
@@ -2449,6 +2451,16 @@ No issues found."
             })?;
             crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
                 writeln!(output, "Checklist: {}/{} done", list.done, list.total)
+            })?;
+            aliases.split_first().map_or(Ok(()), |_| {
+                writeln!(
+                    output,
+                    "Formerly: {}",
+                    JoinedStrings {
+                        values: &aliases,
+                        separator: ", ",
+                    }
+                )
             })?;
             match queries::assignees::describe(issue.needs_human, &issue.assignees) {
                 Some(who) => writeln!(output, "Assigned: {who} (a person must do this)"),
@@ -3072,6 +3084,103 @@ No issues found."
                 }
                 _ => Ok(()),
             }
+        }))
+    }
+
+    #[tool(
+        description = "Move an issue to another project. It gets a new ID there; the old ID keeps resolving. Comments, relations, history and plan steps come along."
+    )]
+    fn move_issue(&self, Parameters(input): Parameters<MoveIssueInput>) -> String {
+        self.move_issue_inner(input).unwrap_or_else(error_response)
+    }
+
+    fn move_issue_inner(&self, input: MoveIssueInput) -> Result<String, String> {
+        let (id, source, target) = self.read(|conn| {
+            let id = queries::resolve_identifier(conn, &input.identifier)?;
+            let source = queries::get_issue(conn, id)?.project_id;
+            let target = queries::resolve_project_identifier(conn, &input.project)?;
+            Ok((id, source, target))
+        })?;
+        require_role_mcp(&self.db, source, models::Role::Maintainer)?;
+        require_role_mcp(&self.db, target, models::Role::Maintainer)?;
+        let moved = self.transaction(|conn| {
+            // Re-assert both gates on the writing connection, against the
+            // issue's project as it stands inside this transaction.
+            let source = queries::get_issue(conn, id)?.project_id;
+            sync_link_actor_conn(conn, Some(source), models::Role::Maintainer)?;
+            sync_link_actor_conn(conn, Some(target), models::Role::Maintainer)?;
+            let module_id = input
+                .module
+                .as_deref()
+                .map(|name| names::module_id(conn, target, name))
+                .transpose()?;
+            queries::issue_move::move_issue(
+                conn,
+                id,
+                target,
+                &queries::issue_move::MoveIssue { module_id },
+            )
+        })?;
+        self.emit_with_seq(
+            crate::realtime::RealtimeEvent::IssueDeleted {
+                project_id: moved.previous_project_id,
+                issue_id: moved.issue.id,
+            },
+            moved.issue.seq,
+        );
+        self.emit_with_seq(
+            crate::realtime::RealtimeEvent::IssueCreated {
+                project_id: moved.issue.project_id,
+                issue_id: moved.issue.id,
+            },
+            moved.issue.seq,
+        );
+        let mut moved = moved;
+        self.retain_visible_relations(std::slice::from_mut(&mut moved.issue))?;
+        let context = current_issue_link_context();
+        let issue = &moved.issue;
+        Ok(render_response(|output| {
+            write!(
+                output,
+                "Moved {} to {}: {}\n{} still resolves to it.",
+                moved.previous_identifier,
+                IssueReference {
+                    context: context.as_deref(),
+                    identifier: &issue.identifier,
+                },
+                IssueLine {
+                    issue,
+                    module: None,
+                    context: context.as_deref(),
+                },
+                moved.previous_identifier,
+            )?;
+            moved.dropped_labels.split_first().map_or(Ok(()), |_| {
+                write!(
+                    output,
+                    "\nDropped labels (no label of that name here): {}",
+                    JoinedStrings {
+                        values: &moved.dropped_labels,
+                        separator: ", ",
+                    }
+                )
+            })?;
+            moved.dropped_module.as_deref().map_or(Ok(()), |module| {
+                write!(
+                    output,
+                    "\nCleared module {module} (no module of that name here)."
+                )
+            })?;
+            moved.dropped_assignees.split_first().map_or(Ok(()), |_| {
+                write!(
+                    output,
+                    "\nUnassigned (cannot see this project): {}",
+                    JoinedStrings {
+                        values: &moved.dropped_assignees,
+                        separator: ", ",
+                    }
+                )
+            })
         }))
     }
 
@@ -5915,6 +6024,10 @@ mod tests_waits;
 #[cfg(test)]
 #[path = "tests_assignees.rs"]
 mod tests_assignees;
+
+#[cfg(test)]
+#[path = "tests_move_issue.rs"]
+mod tests_move_issue;
 
 #[cfg(test)]
 mod tests {

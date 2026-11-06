@@ -181,6 +181,8 @@ fn router_impl(
             "/api/issues/{id}/restore",
             post(issues::restore_issue_handler),
         )
+        // Move to another project (LIF-487): Maintainer on both ends.
+        .route("/api/issues/{id}/move", post(issues::move_issue_handler))
         // Activity (audit log read surface — LIF-156)
         .route("/api/issues/{id}/activity", get(activity::issue_activity))
         .route("/api/pages/{id}/activity", get(activity::page_activity))

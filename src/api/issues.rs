@@ -189,6 +189,79 @@ pub(super) fn commit_issue_update(
     Ok(issue)
 }
 
+/// Body of `POST /api/issues/{id}/move` (LIF-487). The target is named by id
+/// or by identifier; `module_id` must belong to the target.
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct MoveIssueRequest {
+    pub project_id: Option<i64>,
+    pub project: Option<String>,
+    pub module_id: Option<i64>,
+}
+
+/// LIF-487: move an issue to another project. It takes a new identifier and
+/// the old one becomes an alias that keeps resolving. Writing to both projects
+/// needs Maintainer on each.
+pub(super) async fn move_issue_handler(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Path(id): Path<i64>,
+    Json(input): Json<MoveIssueRequest>,
+) -> Result<Json<crate::db::queries::issue_move::MovedIssue>, LificError> {
+    super::require_user(&identity)?;
+    let (source, target) = with_read(&db, |conn| {
+        let source = crate::db::queries::get_issue(conn, id)?.project_id;
+        let target = match (input.project_id, input.project.as_deref()) {
+            (Some(pid), _) => pid,
+            (None, Some(identifier)) => {
+                crate::db::queries::resolve_project_identifier(conn, identifier)?
+            }
+            (None, None) => {
+                return Err(LificError::BadRequest(
+                    "project_id or project is required".into(),
+                ));
+            }
+        };
+        Ok((source, target))
+    })?;
+    authz::require_role(&db, &identity, source, Role::Maintainer)?;
+    authz::require_role(&db, &identity, target, Role::Maintainer)?;
+    let moved = db.transaction(|conn| {
+        // Recheck both gates on the writing connection, against the issue's
+        // project as it stands inside this transaction.
+        let source = crate::db::queries::get_issue(conn, id)?.project_id;
+        authz::require_role_conn(conn, &identity, source, Role::Maintainer)?;
+        authz::require_role_conn(conn, &identity, target, Role::Maintainer)?;
+        crate::db::queries::issue_move::move_issue(
+            conn,
+            id,
+            target,
+            &crate::db::queries::issue_move::MoveIssue {
+                module_id: input.module_id,
+            },
+        )
+    })?;
+    // Subscribers of the old project see the issue leave; subscribers of the
+    // new one see it arrive.
+    realtime.send_with_seq(
+        RealtimeEvent::IssueDeleted {
+            project_id: moved.previous_project_id,
+            issue_id: moved.issue.id,
+        },
+        moved.issue.seq,
+    );
+    realtime.send_with_seq(
+        RealtimeEvent::IssueCreated {
+            project_id: moved.issue.project_id,
+            issue_id: moved.issue.id,
+        },
+        moved.issue.seq,
+    );
+    let mut moved = moved;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut moved.issue))?;
+    Ok(Json(moved))
+}
+
 pub(super) async fn delete_issue_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
@@ -459,6 +532,129 @@ mod tests {
         let deleted = next_event(&mut events).await;
         assert_eq!(deleted["type"], "issue.deleted");
         assert!(deleted["seq"].as_i64().unwrap() > updated["seq"].as_i64().unwrap());
+    }
+
+    // ── LIF-487: move to another project ────
+
+    #[tokio::test]
+    async fn moved_issue_resolves_by_its_old_identifier() {
+        let test = test_app_with_realtime();
+        let (source, _) = seed_project(&test.app).await;
+        let target = body_of(
+            json_post(
+                &test.app,
+                "/api/projects",
+                serde_json::json!({"name": "Other", "identifier": "OTH"}),
+            )
+            .await,
+        )
+        .await["id"]
+            .as_i64()
+            .unwrap();
+        let created = body_of(
+            json_post(
+                &test.app,
+                "/api/issues",
+                serde_json::json!({"project_id": source, "title": "Wandering"}),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_i64().unwrap();
+        let mut events = test.realtime.subscribe();
+
+        let resp = json_post(
+            &test.app,
+            &format!("/api/issues/{id}/move"),
+            serde_json::json!({"project": "OTH"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let moved = body_of(resp).await;
+        assert_eq!(moved["previous_identifier"], "TST-1");
+        assert_eq!(moved["issue"]["identifier"], "OTH-1");
+        assert_eq!(moved["issue"]["project_id"], target);
+
+        let left = next_event(&mut events).await;
+        assert_eq!(left["type"], "issue.deleted");
+        assert_eq!(left["project_id"], source);
+        let arrived = next_event(&mut events).await;
+        assert_eq!(arrived["type"], "issue.created");
+        assert_eq!(arrived["project_id"], target);
+
+        let resolved = json_get(&test.app, "/api/issues/resolve/TST-1").await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved = body_of(resolved).await;
+        assert_eq!(resolved["id"], id);
+        assert_eq!(resolved["identifier"], "OTH-1");
+    }
+
+    #[tokio::test]
+    async fn move_needs_a_target_and_a_different_project() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let (id, _) = seed_issue_with_seq(&app, project_id, "Staying").await;
+
+        let resp = json_post(
+            &app,
+            &format!("/api/issues/{id}/move"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = json_post(
+            &app,
+            &format!("/api/issues/{id}/move"),
+            serde_json::json!({"project_id": project_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn move_needs_maintainer_on_both_projects() {
+        use crate::db::models::{CreateProject, Role};
+
+        let (db, _admin, _lead, maintainer, _viewer, _non_member, source) = setup_membership_test();
+        let target = {
+            let conn = db.write().unwrap();
+            let target = crate::db::queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "Destination".into(),
+                    identifier: "DST".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+            crate::db::queries::members::upsert_member(&conn, target, maintainer.id, Role::Viewer)
+                .unwrap();
+            target
+        };
+        let app = app_as_user(db.clone(), &maintainer);
+        let (id, _) = seed_issue_with_seq(&app, source, "Gated").await;
+        let uri = format!("/api/issues/{id}/move");
+
+        let resp = json_post(&app, &uri, serde_json::json!({"project_id": target})).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let still = body_of(json_get(&app, &format!("/api/issues/{id}")).await).await;
+        assert_eq!(still["identifier"], "MEM-1");
+
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::upsert_member(
+                &conn,
+                target,
+                maintainer.id,
+                Role::Maintainer,
+            )
+            .unwrap();
+        }
+        let resp = json_post(&app, &uri, serde_json::json!({"project_id": target})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_of(resp).await["issue"]["identifier"], "DST-1");
     }
 
     async fn next_event(
