@@ -5,6 +5,7 @@ pub(crate) mod briefing;
 pub(crate) mod changes;
 pub(crate) mod comments;
 pub(crate) mod home;
+pub(crate) mod human_queue;
 pub(crate) mod insights;
 pub(crate) mod issue_move;
 mod issues;

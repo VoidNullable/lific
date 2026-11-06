@@ -2183,7 +2183,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Call first when resuming a project, with since='last': what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages. About 6,000 characters."
+        description = "Call first when resuming a project, with since='last': the human queue across projects, what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages. About 6,000 characters."
     )]
     fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
         self.get_briefing_inner(input)
