@@ -117,6 +117,36 @@ fn is_closed(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
 
+/// What a change section is measured from, for its heading and the
+/// `get_activity` call that lists everything.
+#[derive(Clone, Copy)]
+enum ChangeSpan<'a> {
+    /// An explicit `since`, stored UTC form.
+    Timestamp(&'a str),
+    /// `since='last'`: the caller's previous briefing, taken at this time.
+    LastBriefing(&'a str),
+}
+
+impl<'a> ChangeSpan<'a> {
+    fn describe(self) -> String {
+        match self {
+            Self::Timestamp(since) => format!("{since} UTC"),
+            Self::LastBriefing(at) => format!("your last briefing ({at} UTC)"),
+        }
+    }
+
+    fn timestamp(self) -> &'a str {
+        match self {
+            Self::Timestamp(at) | Self::LastBriefing(at) => at,
+        }
+    }
+}
+
+/// ` by @name` for a change with a known author, empty for system writes.
+fn by(actor: Option<&str>) -> String {
+    actor.map(|name| format!(" by @{name}")).unwrap_or_default()
+}
+
 impl LificMcp {
     pub(super) fn get_briefing_inner(&self, input: GetBriefingInput) -> Result<String, String> {
         self.get_briefing_at(input, Utc::now())
@@ -132,9 +162,14 @@ impl LificMcp {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
+        let resume = input
+            .since
+            .as_deref()
+            .is_some_and(|since| since.trim().eq_ignore_ascii_case("last"));
         let since = input
             .since
             .as_deref()
+            .filter(|_| !resume)
             .map(queries::activity::normalize_since)
             .transpose()
             .map_err(|error| error.to_string())?;
@@ -148,28 +183,59 @@ impl LificMcp {
         let context = context.as_deref();
         let ident = project.identifier.as_str();
 
-        // `since` is strict against one-second timestamps, so the cursor is
-        // one second before this briefing: a change written later in the
-        // briefing's own second is reported next time instead of never. The
-        // price is that this second's changes may be reported twice.
-        let cursor = now - chrono::Duration::seconds(1);
+        // LIF-490: the caller's cursor is their own (a bot key's is separate
+        // from its owner's), read before this briefing replaces it. Changes
+        // are reported up to `upto`, the position stored for next time, so
+        // nothing is reported twice or skipped between two briefings.
+        let caller = crate::mcp::current_identity(&self.db).map(|identity| identity.user.id);
+        let (upto, previous) = self.read(|conn| {
+            let upto = queries::briefing::latest_audit_id(conn)?;
+            let previous = match (resume, caller) {
+                (true, Some(user)) => queries::briefing::get_cursor(conn, user, project.id)?,
+                _ => None,
+            };
+            Ok((upto, previous))
+        })?;
         let mut header = format!(
-            "{} briefing at {} UTC. Resume later with since='{}' (repeats this briefing's last second).\n",
+            "{} briefing at {} UTC. Resume later with since='last'.\n",
             project_reference(context, ident),
             now.format("%Y-%m-%d %H:%M:%S"),
-            cursor.format("%Y-%m-%dT%H:%M:%SZ"),
         );
 
-        let changes = match &since {
-            Some(since) => {
-                let section = self.changes_section(context, project.id, ident, since)?;
+        let window = match (&since, &previous) {
+            (Some(since), _) => Some((
+                ChangeSpan::Timestamp(since),
+                self.read(|conn| queries::briefing::window_since_timestamp(conn, since, upto))?,
+            )),
+            (None, Some(cursor)) => Some((
+                ChangeSpan::LastBriefing(&cursor.briefed_at),
+                queries::briefing::ChangeWindow {
+                    after: cursor.audit_id,
+                    upto,
+                },
+            )),
+            (None, None) => {
+                if resume {
+                    let _ = writeln!(
+                        header,
+                        "No earlier briefing of {ident} for you to resume from; the next since='last' starts here."
+                    );
+                }
+                None
+            }
+        };
+        let changes = match window {
+            Some((span, window)) => {
+                let section = self.changes_section(context, project.id, ident, span, window)?;
                 if section.is_none() {
-                    let _ = writeln!(header, "No changes since {since} UTC.");
+                    let _ = writeln!(header, "No changes since {}.", span.describe());
                 }
                 section
             }
             None => None,
         };
+        // Pages say whether they changed since the cursor, read by timestamp.
+        let since = since.or_else(|| previous.map(|cursor| cursor.briefed_at));
         let plans = self.plans_section(context, project.id, ident)?;
         let blocked = self.blocked_section(context, project.id, ident)?;
         // LIF-484: waits that still hold are named in `blocked`. A date wait
@@ -193,7 +259,13 @@ impl LificMcp {
         if sections.is_empty() {
             header.push_str("Nothing is planned, active, blocked or workable.\n");
         }
-        fit_to_budget(&header, &mut sections)
+        let output = fit_to_budget(&header, &mut sections)?;
+        // Saved only once the briefing is built, so a failed one leaves the
+        // previous cursor and its changes are reported next time.
+        if let Some(user) = caller {
+            self.write(|conn| queries::briefing::save_cursor(conn, user, project.id, upto))?;
+        }
+        Ok(output)
     }
 
     fn changes_section(
@@ -201,18 +273,20 @@ impl LificMcp {
         context: Option<&IssueLinkContext>,
         project_id: i64,
         ident: &str,
-        since: &str,
+        span: ChangeSpan<'_>,
+        window: queries::briefing::ChangeWindow,
     ) -> Result<Option<Section>, String> {
-        let (created, moves, pages) = self.read(|conn| {
+        let (created, moves, pages, comments) = self.read(|conn| {
             Ok((
-                queries::briefing::issues_created_since(conn, project_id, since)?,
-                queries::briefing::status_moves_since(conn, project_id, since)?,
-                queries::briefing::pages_edited_since(conn, project_id, since)?,
+                queries::briefing::issues_created_in(conn, project_id, window)?,
+                queries::briefing::status_moves_in(conn, project_id, window)?,
+                queries::briefing::pages_edited_in(conn, project_id, window)?,
+                queries::briefing::comments_added_in(conn, project_id, window)?,
             ))
         })?;
         let (closed, moved): (Vec<_>, Vec<_>) =
             moves.into_iter().partition(|change| is_closed(&change.to));
-        let total = created.len() + closed.len() + moved.len() + pages.len();
+        let total = created.len() + closed.len() + moved.len() + pages.len() + comments.len();
         if total == 0 {
             return Ok(None);
         }
@@ -220,47 +294,67 @@ impl LificMcp {
         let mut lines = Vec::new();
         lines.extend(closed.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
             format!(
-                "closed {} ({}) | {}",
+                "closed {} ({}){} | {}",
                 issue_reference(context, &change.identifier),
                 change.to,
+                by(change.actor.as_deref()),
                 title(&change.title)
             )
         }));
         lines.extend(created.iter().take(CHANGE_LINES_PER_KIND).map(|issue| {
             format!(
-                "new {} | {} | {} | {}",
+                "new {} | {} | {} | {}{}",
                 issue_reference(context, &issue.identifier),
                 issue.status,
                 issue.priority,
-                title(&issue.title)
+                title(&issue.title),
+                by(issue.actor.as_deref()),
             )
         }));
         lines.extend(moved.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
             format!(
-                "moved {} {} -> {} | {}",
+                "moved {} {} -> {}{} | {}",
                 issue_reference(context, &change.identifier),
                 change.from,
                 change.to,
+                by(change.actor.as_deref()),
                 title(&change.title)
             )
         }));
         lines.extend(pages.iter().take(CHANGE_LINES_PER_KIND).map(|page| {
             format!(
-                "page {} {}{}",
+                "page {} {}{}{}",
                 reference_with_context(context, ReferenceKind::Page(&page.identifier, page.id)),
                 title(&page.title),
-                if page.new { " (new)" } else { "" }
+                if page.new { " (new)" } else { "" },
+                by(page.actor.as_deref()),
+            )
+        }));
+        lines.extend(comments.iter().take(CHANGE_LINES_PER_KIND).map(|comment| {
+            let parent = match comment.page_id {
+                Some(page_id) => {
+                    reference_with_context(context, ReferenceKind::Page(&comment.parent, page_id))
+                        .to_string()
+                }
+                None => issue_reference(context, &comment.parent).to_string(),
+            };
+            format!(
+                "comment on {parent}{}: {}",
+                by(comment.actor.as_deref()),
+                title(&comment.preview)
             )
         }));
 
+        let since = span.timestamp();
         Ok(Some(Section {
-            heading: format!("Since {since} UTC"),
+            heading: format!("Since {}", span.describe()),
             summary: Some(format!(
-                "Issues created {}, closed {}, otherwise moved {}. Pages edited {}.",
+                "Issues created {}, closed {}, otherwise moved {}. Pages edited {}. Comments {}.",
                 created.len(),
                 closed.len(),
                 moved.len(),
-                pages.len()
+                pages.len(),
+                comments.len()
             )),
             lines,
             total,
