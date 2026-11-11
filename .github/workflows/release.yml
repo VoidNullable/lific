@@ -384,6 +384,57 @@ jobs:
         if: env.HAS_TAP_KEY == 'true'
         run: git -C tap push origin HEAD
 
+  # Open a microsoft/winget-pkgs pull request that adds this version of
+  # VoidNullable.lific, so `winget upgrade` picks it up once Microsoft merges
+  # it. Komac copies every field from the previous manifest (portable installer,
+  # VC++ runtime dependency, descriptions) and only swaps the installer URL,
+  # hash, release date and notes. See docs/winget.md.
+  #
+  # Non-fatal like the homebrew job: the release has shipped by now. Without the
+  # WINGET_TOKEN secret the job skips with a notice.
+  winget:
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      HAS_WINGET_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      # Pinned with its checksum for the same reasons as mcp-publisher below.
+      # Re-pin VERSION and SHA256 together; the SHA is the digest of
+      # komac-<version>-x86_64-unknown-linux-gnu.tar.gz in that release's
+      # SHA256SUMS.
+      KOMAC_VERSION: 2.17.2
+      KOMAC_SHA256: b03b020eec98acfb0b53e284a6e21815b884be33de6785b97e7a120f0e748966
+    steps:
+      - name: Skip without a winget token
+        if: env.HAS_WINGET_TOKEN != 'true'
+        run: echo "::notice::WINGET_TOKEN is not set; skipping the winget-pkgs update (see docs/winget.md)."
+
+      - name: Install komac (pinned + checksum-verified)
+        if: env.HAS_WINGET_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          archive="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/${archive}" -o "$archive"
+          echo "${KOMAC_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" komac
+          ./komac --version
+
+      - name: Submit the new version to winget-pkgs
+        if: env.HAS_WINGET_TOKEN == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_CREATED_WITH: lific release workflow
+          KOMAC_CREATED_WITH_URL: https://github.com/${{ github.repository }}/blob/master/.github/workflows/release.yml
+        run: |
+          ./komac update VoidNullable.lific \
+            --version "${VERSION}" \
+            --urls "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/lific-windows-x86_64.exe" \
+            --release-notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --submit
+
   publish:
     needs: [verify, release]
     runs-on: ubuntu-latest
