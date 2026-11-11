@@ -9,6 +9,16 @@ Lific runs natively on Windows. The server, web UI, CLI, REST API, MCP server an
 
 ## Install
 
+The quickest way is the Windows Package Manager:
+
+```powershell
+winget install VoidNullable.lific
+```
+
+winget puts `lific` on your `PATH`, installs the Visual C++ runtime it needs, and `winget upgrade VoidNullable.lific` moves you to a new release once Microsoft's repository has it, usually a day or two after the release. Open a new terminal afterwards so the updated `PATH` applies.
+
+### Or download the release binary
+
 Download `lific-windows-x86_64.exe` and `sha256sums.txt` from the [releases page](https://github.com/VoidNullable/lific/releases), then verify the download in PowerShell:
 
 ```powershell
@@ -95,7 +105,7 @@ Things to know:
 - **Console window.** On Windows 11 24H2 and Windows Server 2025 and later, nothing appears at sign-in. Older versions show a console window for a moment while the supervisor starts.
 - **Sign-in, not boot.** The server starts when you sign in and stops when you sign out. Lific does not install a Windows service that runs before anyone signs in, because that needs administrator rights.
 - **Task Manager.** The entry appears under Startup apps in Task Manager. Disabling it there stops the server from starting at sign-in; `lific service status` still reports it as installed. Some managed machines ignore the Run list entirely through Group Policy. On those, the entry is written but never starts, and `lific start` in a terminal is the way to run the server.
-- **Upgrading.** Windows cannot replace a program file while it runs. Run `lific service stop` before you replace `lific.exe` or run `cargo install lific`, then `lific service restart`. If the new binary is at a different path, run `lific service install` instead.
+- **Upgrading.** Windows cannot replace a program file while it runs. Run `lific service stop` before you replace `lific.exe`, run `winget upgrade VoidNullable.lific` or run `cargo install lific`, then `lific service restart`. If the new binary is at a different path, run `lific service install` instead.
 - **One per sign-in session.** If the same account is signed in twice at once, for example at the console and over Remote Desktop, each session starts its own service, and the second one's server cannot bind the port.
 - **Path length.** Windows runs at most 260 characters of a Run entry. If the paths of `lific.exe` and your configuration are longer than that together, `install` refuses and asks for a shorter location.
 

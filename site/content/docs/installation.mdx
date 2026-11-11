@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Get the lific binary from Homebrew, a GitHub release, crates.io with Cargo, or by building the source tree.
+description: Get the lific binary from Homebrew, winget, a GitHub release, crates.io with Cargo, or by building the source tree.
 ---
 
 Lific is one executable. Install it with Homebrew or download a prebuilt binary if you want it running in under a minute, or install it with Cargo if you already have a Rust toolchain. Every way gives you the same program with the web UI built in.
@@ -8,6 +8,7 @@ Lific is one executable. Install it with Homebrew or download a prebuilt binary 
 | Way in | What you need | Good when |
 | --- | --- | --- |
 | Homebrew | [Homebrew](https://brew.sh) on macOS or Linux. | You already use `brew` and want upgrades to come with `brew upgrade`. |
+| winget | Windows 10 or 11 with winget (built in on current versions). | You are on Windows and want upgrades to come with `winget upgrade`. |
 | Release binary | Nothing. The download runs as it is. | You want the fastest path, or the machine has no Rust toolchain. |
 | `cargo install lific` | Rust 1.88 or later, and a few minutes to compile. | You already use Cargo, or your platform has no release binary. |
 | Source build | A checkout, plus [devenv](https://devenv.sh/), or [Bun](https://bun.sh) and Cargo. | You are changing Lific itself, or you want to build the exact tree you are reading. |
@@ -23,6 +24,14 @@ brew install voidnullable/tap/lific
 The formula lives in the [VoidNullable/homebrew-tap](https://github.com/VoidNullable/homebrew-tap) tap and installs the release binary for your Mac or Linux machine, checked against the release's published SHA-256. It also installs shell completions for bash, zsh and fish. `brew upgrade lific` moves you to a new release once it is published.
 
 On Linux, the background service that `lific init` sets up runs the exact Homebrew version you had at the time, and `brew upgrade` removes that version. After upgrading, run `lific service install` (with the same `--config`, if you used one) so the service runs the new binary. macOS is not affected.
+
+## Install with winget
+
+```powershell
+winget install VoidNullable.lific
+```
+
+The package installs the Windows release binary as the `lific` command, along with the Visual C++ runtime it depends on. New releases reach winget through a pull request to Microsoft's community repository, so `winget upgrade` sees them a day or two after the GitHub release. [Windows](/docs/windows) covers the background service and upgrading.
 
 ## Download a release binary
 
