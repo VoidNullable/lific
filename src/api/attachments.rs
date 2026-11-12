@@ -208,24 +208,7 @@ pub(super) async fn upload_attachment(
         )));
     }
 
-    let size = bytes.len() as i64;
-    let sha = AttachmentStore::hash_bytes(&bytes);
-    let dimensions = if storage::is_raster_mime(&mime) {
-        storage::image_dimensions(&bytes)
-    } else {
-        None
-    };
-    let thumbnail = if dimensions.is_some() {
-        match storage::generate_thumbnail(&bytes) {
-            Ok(thumb) => thumb,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to generate attachment thumbnail");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let prepared = PreparedUpload::new(&bytes, &mime);
     // Serialize the blob write with metadata insertion and orphan cleanup.
     // Otherwise GC can delete a newly written blob in the gap before its row
     // is inserted.
@@ -233,32 +216,17 @@ pub(super) async fn upload_attachment(
     // length of a dump. Busy means "retry", not "failed".
     let (attachment, event) = store
         .try_with_lock(|store| {
-            // Same definition of "already there" the writer uses, so a path that
-            // is present but not a usable regular file fails here rather than
-            // being read as "this upload created it" during cleanup.
-            let blob_existed = store.blob_exists(&sha)?;
-            let thumb_existed = match thumbnail.as_ref() {
-                Some(_) => store.thumb_exists(&sha)?,
-                None => false,
-            };
+            let probe = prepared.probe(store)?;
             let result = db.transaction(|conn| {
-                let mut att =
-                    q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
-                store.write_unlocked(&bytes)?;
-                if let Some(thumb) = thumbnail.as_deref()
-                    && let Err(e) = store.write_thumb(&sha, thumb)
-                {
-                    tracing::warn!(error = %e, "failed to cache attachment thumbnail");
-                }
-                if let Some((w, h)) = dimensions {
-                    q::set_dimensions(conn, att.id, i64::from(w), i64::from(h))?;
-                    att = q::get_attachment(conn, att.id)?;
-                }
-                if q::is_extractable(&mime, size)
-                    && let Ok(text) = std::str::from_utf8(&bytes)
-                {
-                    q::set_extracted_text(conn, att.id, text)?;
-                }
+                let att = q::create_attachment(
+                    conn,
+                    &prepared.sha,
+                    &filename,
+                    &mime,
+                    prepared.size,
+                    Some(user.id),
+                )?;
+                let att = prepared.store(conn, store, att, &bytes)?;
                 let event = match link {
                     Some((entity, eid)) => {
                         authorize_link_conn(conn, &identity, entity, eid)?;
@@ -270,14 +238,7 @@ pub(super) async fn upload_attachment(
                 Ok((att, event))
             });
             if result.is_err() {
-                discard_failed_upload(
-                    &db,
-                    store,
-                    &sha,
-                    blob_existed,
-                    thumb_existed,
-                    thumbnail.is_some(),
-                );
+                prepared.discard(&db, store, probe);
             }
             result
         })?
@@ -298,6 +259,111 @@ pub(super) async fn upload_attachment(
         has_thumbnail: attachment.has_thumbnail,
     };
     Ok((StatusCode::OK, axum::Json(resp)).into_response())
+}
+
+/// Everything an upload derives from its bytes, computed once before the store
+/// lock and applied inside the upload transaction. Every upload path (REST,
+/// MCP) goes through this, so an image uploaded by an agent gets the same
+/// dimensions, thumbnail and extracted text as one uploaded in the browser.
+pub(crate) struct PreparedUpload {
+    pub(crate) sha: String,
+    pub(crate) size: i64,
+    mime: String,
+    dimensions: Option<(u32, u32)>,
+    thumbnail: Option<Vec<u8>>,
+}
+
+/// What was already on disk before an upload wrote anything, so a failed
+/// upload removes only what it created.
+#[derive(Clone, Copy)]
+pub(crate) struct UploadProbe {
+    blob_existed: bool,
+    thumb_existed: bool,
+}
+
+impl PreparedUpload {
+    /// Hash the bytes and, for a raster image, decode its dimensions and
+    /// build its thumbnail. Decoding is the slow part, so it runs before the
+    /// store lock is taken.
+    pub(crate) fn new(bytes: &[u8], mime: &str) -> Self {
+        let dimensions = if storage::is_raster_mime(mime) {
+            storage::image_dimensions(bytes)
+        } else {
+            None
+        };
+        let thumbnail = if dimensions.is_some() {
+            match storage::generate_thumbnail(bytes) {
+                Ok(thumb) => thumb,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to generate attachment thumbnail");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            sha: AttachmentStore::hash_bytes(bytes),
+            size: bytes.len() as i64,
+            mime: mime.to_owned(),
+            dimensions,
+            thumbnail,
+        }
+    }
+
+    /// Under the store lock: record what exists before this upload writes.
+    /// Same definition of "already there" the writer uses, so a path that is
+    /// present but not a usable regular file fails here rather than being
+    /// read as "this upload created it" during cleanup.
+    pub(crate) fn probe(&self, store: &AttachmentStore) -> Result<UploadProbe, LificError> {
+        Ok(UploadProbe {
+            blob_existed: store.blob_exists(&self.sha)?,
+            thumb_existed: match self.thumbnail {
+                Some(_) => store.thumb_exists(&self.sha)?,
+                None => false,
+            },
+        })
+    }
+
+    /// Inside the upload transaction, after the row is inserted: write the
+    /// bytes, cache the thumbnail, and record dimensions and extracted text.
+    /// Returns the row as stored.
+    pub(crate) fn store(
+        &self,
+        conn: &rusqlite::Connection,
+        store: &AttachmentStore,
+        mut attachment: Attachment,
+        bytes: &[u8],
+    ) -> Result<Attachment, LificError> {
+        store.write_unlocked(bytes)?;
+        if let Some(thumb) = self.thumbnail.as_deref()
+            && let Err(e) = store.write_thumb(&self.sha, thumb)
+        {
+            tracing::warn!(error = %e, "failed to cache attachment thumbnail");
+        }
+        if let Some((w, h)) = self.dimensions {
+            q::set_dimensions(conn, attachment.id, i64::from(w), i64::from(h))?;
+            attachment = q::get_attachment(conn, attachment.id)?;
+        }
+        if q::is_extractable(&self.mime, self.size)
+            && let Ok(text) = std::str::from_utf8(bytes)
+        {
+            q::set_extracted_text(conn, attachment.id, text)?;
+        }
+        Ok(attachment)
+    }
+
+    /// After a rolled-back upload transaction, still under the store lock.
+    pub(crate) fn discard(&self, db: &DbPool, store: &AttachmentStore, probe: UploadProbe) {
+        discard_failed_upload(
+            db,
+            store,
+            &self.sha,
+            probe.blob_existed,
+            probe.thumb_existed,
+            self.thumbnail.is_some(),
+        );
+    }
 }
 
 /// Undo the on-disk side effects of an upload whose transaction rolled back.

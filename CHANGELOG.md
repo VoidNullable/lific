@@ -34,6 +34,10 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
 - 32 tools now cost an agent 6,758 tokens of context.
 
+### Images and attachments
+
+- Images uploaded through MCP now record their pixel dimensions and get a thumbnail, as browser uploads always did, so the web UI no longer loads the full original where it shows a preview. Text files uploaded through MCP are searchable like browser uploads.
+
 ### Agent activity
 
 - A new Agent activity page (`/agents`) shows what connected tools have been doing over the last hour, day or week: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The data comes from `GET /api/agents/activity`.

@@ -5982,22 +5982,24 @@ No issues found."
                 .map_err(sanitize_error)?;
         }
 
-        let size = bytes.len() as i64;
-        let sha = crate::storage::AttachmentStore::hash_bytes(&bytes);
+        // REST's derivation step: dimensions, thumbnail and extracted text
+        // come from the same code on both transports.
+        let prepared = crate::api::attachments::PreparedUpload::new(&bytes, &mime);
         let (attachment, event) = self
             .store
             .try_with_string_lock(|store| {
-                self.transaction(|conn| {
+                let probe = prepared.probe(store).map_err(sanitize_error)?;
+                let result = self.transaction(|conn| {
                     let uploader = resolve_attachment_uploader_conn(conn)?;
                     let attachment = queries::attachments::create_attachment(
                         conn,
-                        &sha,
+                        &prepared.sha,
                         &filename,
                         &mime,
-                        size,
+                        prepared.size,
                         Some(uploader),
                     )?;
-                    store.write_unlocked(&bytes)?;
+                    let attachment = prepared.store(conn, store, attachment, &bytes)?;
                     let event = match link {
                         Some((entity, entity_id)) => {
                             // The gate above ran on a read connection before the blob
@@ -6018,7 +6020,11 @@ No issues found."
                         None => None,
                     };
                     Ok((attachment, event))
-                })
+                });
+                if result.is_err() {
+                    prepared.discard(&self.db, store, probe);
+                }
+                result
             })?
             .ok_or_else(|| {
                 "attachment storage is busy (a backup or restore is running); retry shortly"
@@ -14166,6 +14172,29 @@ mod tests {
             "{listed}"
         );
         assert!(listed.trim_end().ends_with("| ATT-1"), "{listed}");
+    }
+
+    /// An image uploaded by an agent gets the dimensions and thumbnail a
+    /// browser upload gets, through the same shared upload step.
+    #[test]
+    fn upload_attachment_records_dimensions_and_a_thumbnail_like_rest() {
+        use base64::Engine as _;
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let png = crate::storage::fixtures::png_image(1600, 900);
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "wide.png".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            entity: None,
+            comment_id: None,
+        }));
+        let id = attachment_id_from(&receipt);
+        let attachment = m
+            .read(|conn| queries::attachments::get_attachment(conn, id))
+            .unwrap();
+        assert_eq!(attachment.width, Some(1600));
+        assert_eq!(attachment.height, Some(900));
+        assert!(attachment.has_thumbnail, "{attachment:?}");
+        assert!(m.store.thumb_exists(&attachment.sha256).unwrap());
     }
 
     /// REST accepts a legacy HWP file when its name ends in `.hwp`; MCP has no
