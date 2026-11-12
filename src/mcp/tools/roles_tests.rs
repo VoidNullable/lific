@@ -365,6 +365,58 @@ fn me_is_the_callers_effective_user() {
 }
 
 #[test]
+fn a_project_a_bot_creates_is_led_by_its_owner() {
+    // GitHub #108: a bot holds no roles of its own, so making it the lead
+    // left a project nobody but an admin could see.
+    let (m, _admin, lead, .., _guard) = setup_membership_mcp();
+    let bot = m
+        .write(|conn| queries::users::create_bot_user(conn, lead.id, "lead-bot", "Lead bot", None))
+        .unwrap();
+    let bot = models::AuthUser {
+        id: bot.id,
+        username: bot.username,
+        display_name: bot.display_name,
+        is_admin: false,
+    };
+
+    let created = as_user(Some(&bot), || {
+        m.manage_resource(Parameters(tool_input(json!({
+            "resource_type": "project",
+            "action": "create",
+            "name": "Mandarina",
+            "identifier": "MAND",
+        }))))
+    });
+    assert_has(&created, "Created project");
+
+    let pid = super::tests::project_id_for(&m, "MAND");
+    let (owner_role, bot_role) = m
+        .read(|conn| {
+            Ok((
+                queries::members::get_member_role(conn, pid, lead.id)?,
+                queries::members::get_member_role(conn, pid, bot.id)?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(owner_role, Some(models::Role::Lead));
+    assert_eq!(bot_role, None);
+
+    assert_has(
+        row(&projects(&m, Some(&bot), json!({})), "MAND"),
+        "you: lead",
+    );
+    let module = as_user(Some(&bot), || {
+        m.manage_resource(Parameters(tool_input(json!({
+            "resource_type": "module",
+            "action": "create",
+            "project": "MAND",
+            "name": "Core",
+        }))))
+    });
+    assert_has(&module, "Core");
+}
+
+#[test]
 fn legacy_mode_non_member_sees_rosters_but_holds_no_role() {
     let (m, _admin, _lead, _maintainer, _viewer, non_member, .., _guard) = setup_membership_mcp();
     m.write(|conn| {

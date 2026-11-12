@@ -4690,25 +4690,17 @@ No issues found."
                 let Some(ref ident) = input.identifier else {
                     return Err("identifier required".into());
                 };
-                // LIF-102: default the project lead to the MCP caller so the
-                // project isn't left unowned. Validate the user actually exists
-                // in this DB before assigning — MCP_REQUEST_USER is a process-
-                // global static and can hold stale state from prior sessions.
-                let lead_user_id = super::current_auth_user().and_then(|u| {
-                    self.read(|conn| {
-                        Ok(conn
-                            .query_row(
-                                "SELECT 1 FROM users WHERE id = ?1",
-                                rusqlite::params![u.id],
-                                |_| Ok(()),
-                            )
-                            .is_ok())
-                    })
-                    .ok()
-                    .filter(|exists| *exists)
-                    .map(|_| u.id)
-                });
+                let caller = super::current_auth_user();
                 let p = self.write(|conn| {
+                    // LIF-102: default the project lead to the MCP caller so the
+                    // project isn't left unowned. A bot holds no roles of its
+                    // own (GitHub #108), so its owner leads, as over REST.
+                    // Validate the user actually exists in this DB before
+                    // assigning — MCP_REQUEST_USER is a process-global static
+                    // and can hold stale state from prior sessions.
+                    let lead_user_id = crate::authz::effective_user(conn, &caller)
+                        .map(|user| user.id)
+                        .filter(|id| queries::users::get_user_by_id(conn, *id).is_ok());
                     queries::create_project(
                         conn,
                         &models::CreateProject {
