@@ -1691,6 +1691,14 @@ export async function deleteAttachment(id: number) {
   });
 }
 
+/** Set an attachment's alt text, or clear it with null. Gated like delete. */
+export async function updateAttachmentAlt(id: number, altText: string | null) {
+  return request<Attachment>(`/attachments/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ alt_text: altText }),
+  });
+}
+
 // ── Project files manager (LIF-418) ──────────────────────────
 
 /** An entity that references a file, resolved enough to render a chip and

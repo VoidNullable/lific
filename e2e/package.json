@@ -16,7 +16,7 @@
     "cross-project-relations": "bun cross-project-relations.ts",
     "issue-assignees": "bun issue-assignees.ts",
     "image-layout": "bun image-layout.ts",
-    "attachment-insert": "bun attachment-insert.ts"
+    "attachment-panel": "bun attachment-panel.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"

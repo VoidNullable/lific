@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
-// Insert from the Attachments panel: from read mode, Insert on an image opens
-// the body editor with the image's Markdown (alt text included) at the end and
-// the caret after it, and saving renders the image in the body.
+// The Attachments panel. Insert: from read mode, Insert on an image opens the
+// body editor with the image's Markdown (alt text included) at the end and the
+// caret after it, and saving renders the image in the body. Details: the alt
+// text can be edited and persists across a reload, and "Used in" links every
+// issue that references the file.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium } from "playwright";
@@ -55,7 +57,7 @@ const server = await createServer({
   ],
 });
 const deadline = setTimeout(() => {
-  console.error("Attachment insert test deadline exceeded");
+  console.error("Attachment panel test deadline exceeded");
   process.exit(1);
 }, 90_000);
 
@@ -64,7 +66,7 @@ const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
   "base64",
 );
-const attachment = {
+const attachment: Record<string, unknown> = {
   id: 7,
   filename: "login.png",
   mime: "image/png",
@@ -93,11 +95,30 @@ try {
     if (path === "/api/attachments") return route.fulfill({ json: [attachment] });
     return route.fulfill({ json: [] });
   });
-  await page.route(/\/api\/attachments\/7/, (route) =>
-    new URL(route.request().url()).pathname.endsWith("/thumbnail")
-      ? route.fulfill({ status: 404, body: "" })
-      : route.fulfill({ contentType: "image/png", body: PNG }),
-  );
+  const patches: unknown[] = [];
+  await page.route(/\/api\/attachments\/7/, (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "PATCH") {
+      const body = request.postDataJSON();
+      patches.push(body);
+      attachment.alt_text = body.alt_text;
+      return route.fulfill({ json: attachment });
+    }
+    if (path.endsWith("/links")) {
+      return route.fulfill({
+        json: {
+          entities: [
+            { entity_type: "issue", entity_id: 1, identifier: "APP-1", title: "Login fails", page_id: null },
+            { entity_type: "issue", entity_id: 2, identifier: "OPS-9", title: "Audit screens", page_id: null },
+          ],
+          duplicates: [],
+        },
+      });
+    }
+    if (path.endsWith("/thumbnail")) return route.fulfill({ status: 404, body: "" });
+    return route.fulfill({ contentType: "image/png", body: PNG });
+  });
 
   await page.goto(server.resolvedUrls!.local[0]);
   await page.getByText("Intro paragraph.").waitFor();
@@ -136,8 +157,40 @@ try {
   await page.waitForFunction(() => (window as any).saved.length === 1);
   await page.locator(".prose img[alt='The login dialog']").first().waitFor();
   assert.equal(await page.locator(".prose .md-image-row img").count(), 2);
-  assert.deepEqual(errors, []);
   console.log("attachment insert: ok");
+
+  // Details: edit the alt text, then reload and find it persisted.
+  const details = page.getByRole("button", { name: "Details for login.png" });
+  await details.hover();
+  await details.click();
+  const region = page.getByRole("region", { name: "Details for login.png" });
+  const altInput = region.getByRole("textbox", { name: "Alt text for login.png" });
+  assert.equal(await altInput.inputValue(), "The login dialog");
+  await altInput.fill("Login dialog showing the lockout error");
+  await region.getByRole("button", { name: "Save" }).click();
+  // Saved: the field now matches what is stored, so Save turns itself off.
+  await region.getByRole("button", { name: "Save" }).and(page.locator(":disabled")).waitFor();
+  assert.deepEqual(patches, [{ alt_text: "Login dialog showing the lockout error" }]);
+
+  const uses = region.locator(".att__detail-uses a");
+  await uses.first().waitFor();
+  assert.deepEqual(
+    await uses.evaluateAll((links) => links.map((a) => [a.textContent, a.getAttribute("href")])),
+    [
+      ["APP-1", "#/APP/issues/APP-1"],
+      ["OPS-9", "#/OPS/issues/OPS-9"],
+    ],
+  );
+
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT, fullPage: true });
+  await page.reload();
+  await page.locator(".att__thumb img").waitFor();
+  assert.equal(
+    await page.locator(".att__thumb img").getAttribute("alt"),
+    "Login dialog showing the lockout error",
+  );
+  assert.deepEqual(errors, []);
+  console.log("attachment details: ok");
 } finally {
   clearTimeout(deadline);
   await browser?.close();
