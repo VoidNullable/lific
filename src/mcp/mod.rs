@@ -1692,4 +1692,50 @@ mod surface_tests {
             "these MCP tools are registered but never named in README.md: {undocumented:?}"
         );
     }
+
+    /// Every tool declares whether it reads, and every write declares whether
+    /// it destroys and whether repeating it is harmless. A tool shipped
+    /// without annotations fails here instead of letting hosts guess. The
+    /// read-only set must be exactly the multi-instance proxy's, which routes
+    /// reads to the default instance, so a write cannot quietly claim to be a
+    /// read.
+    #[test]
+    fn every_tool_declares_its_annotations() {
+        let db = crate::db::open_memory().expect("test db");
+        let tools = LificMcp::new(db).tool_router.list_all();
+        assert!(tools.len() > 15);
+        for tool in tools {
+            let name = tool.name.as_ref();
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no annotations"));
+            assert_eq!(annotations.open_world_hint, Some(false), "{name}");
+            let read_only = annotations
+                .read_only_hint
+                .unwrap_or_else(|| panic!("{name} does not declare read_only_hint"));
+            assert_eq!(
+                read_only,
+                crate::cli::mcp_instances::is_readonly_tool(name),
+                "{name}"
+            );
+            if !read_only {
+                assert!(
+                    annotations.destructive_hint.is_some(),
+                    "{name} does not declare destructive_hint"
+                );
+                assert!(
+                    annotations.idempotent_hint.is_some(),
+                    "{name} does not declare idempotent_hint"
+                );
+            }
+        }
+        let db = crate::db::open_memory().expect("test db");
+        let delete = LificMcp::new(db)
+            .tool_router
+            .get("delete")
+            .and_then(|tool| tool.annotations.clone())
+            .expect("delete is annotated");
+        assert_eq!(delete.destructive_hint, Some(true));
+    }
 }

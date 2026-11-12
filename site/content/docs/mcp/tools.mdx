@@ -25,6 +25,19 @@ Error: Not found: module 'Frontend' not found in project; valid modules: 'Backen
 
 When MCP is reached over HTTP and the server knows its public origin, the output renders issue, project, page, plan, module and comment references as Markdown links to the web UI. A comment link carries an anchor that scrolls its thread to that comment. Configure [`server.public_url`](/docs/configuration) for a deployment behind a proxy; without it, a direct request's `Host` is used only when it is on the allowlist. Local stdio has no external hostname, so references stay plain identifiers.
 
+## Tool annotations
+
+Every tool carries MCP annotations, so a client can decide which calls to run without asking. All tools set `openWorldHint: false`: they touch only this Lific instance.
+
+| Annotation | Tools |
+| --- | --- |
+| `readOnlyHint: true` | `export`, `get_activity`, `get_attachment`, `get_board`, `get_briefing`, `get_issue`, `get_page`, `get_plan`, `list_attachments`, `list_comments`, `list_issues`, `list_resources`, `search` |
+| `destructiveHint: false` (additive writes) | `add_comment`, `create_issue`, `create_page`, `create_plan`, `link_issues`, `upload_attachment` |
+| `destructiveHint: true` | every other tool, including `delete`, the `edit_*` and `update_*` tools, `bulk_update`, `manage_resource`, `move_issue` and `unlink_issues` |
+| `idempotentHint: true` | `bulk_update`, `delete`, `delete_comment`, `link_issues`, `unlink_issues` |
+
+`get_briefing(since='last')` stores where you left off, and every read is counted on the Agent activity page; neither changes your issues or pages, so the reads stay read-only.
+
 ## Which tools use a repository binding
 
 In a session [bound to a repository](/docs/repository-bindings), an omitted `project` resolves to the bound project on these tools only:

@@ -873,6 +873,7 @@ pub(crate) fn advertise(
             "properties": {},
             "additionalProperties": false,
         },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false },
     }));
     advertised
 }

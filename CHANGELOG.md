@@ -31,7 +31,8 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A misspelled or missing tool parameter now comes back as a failed tool result (`isError: true`) instead of a JSON-RPC `-32602` error, so clients show the "Did you mean" hint to the model rather than treating it as a broken server.
 - A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
-- 32 tools now cost an agent 6,031 tokens of context.
+- Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
+- 32 tools now cost an agent 6,758 tokens of context.
 
 ### Agent activity
 

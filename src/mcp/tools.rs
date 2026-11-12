@@ -1891,7 +1891,10 @@ mod briefing;
 
 #[tool_router]
 impl LificMcp {
-    #[tool(description = "Search across all issues, pages, and comments by text")]
+    #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "Search across all issues, pages, and comments by text"
+    )]
     fn search(&self, Parameters(input): Parameters<SearchInput>) -> String {
         let mut log = ReadLog::new("search");
         let result = self.search_inner(input, &mut log);
@@ -2031,6 +2034,7 @@ impl LificMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Read who changed what and when, and through which interface, for an issue, page, or project. Newest first; since reads forward."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
@@ -2205,6 +2209,7 @@ impl LificMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Call first when resuming a project, with since='last': the human queue across projects, what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages, idle plans and empty modules. About 6,000 characters."
     )]
     fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
@@ -2214,6 +2219,7 @@ impl LificMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
@@ -2494,6 +2500,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get an issue with its details and last 3 comments, or up to 50 with identifiers."
     )]
     fn get_issue(&self, Parameters(mut input): Parameters<GetIssueInput>) -> String {
@@ -2836,6 +2843,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Export Markdown for an issue, a page, or a whole project. A project comes back in pages; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
@@ -2925,7 +2933,15 @@ No issues found."
         }
     }
 
-    #[tool(description = "Create an issue, or up to 50 with issues.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        description = "Create an issue, or up to 50 with issues."
+    )]
     fn create_issue(&self, Parameters(input): Parameters<CreateIssueInput>) -> String {
         self.create_issue_inner(input)
             .unwrap_or_else(error_response)
@@ -3234,7 +3250,15 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Update an issue. Only the fields you pass change.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        description = "Update an issue. Only the fields you pass change."
+    )]
     fn update_issue(&self, Parameters(input): Parameters<UpdateIssueInput>) -> String {
         self.update_issue_inner(input)
             .unwrap_or_else(error_response)
@@ -3448,6 +3472,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Move an issue to another project. It gets a new ID there; the old ID keeps resolving. Comments, relations, history and plan steps come along."
     )]
     fn move_issue(&self, Parameters(input): Parameters<MoveIssueInput>) -> String {
@@ -3545,6 +3575,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Change every matching issue in one call, at most 500; narrow the filters for more. Returns the count."
     )]
     fn bulk_update(&self, Parameters(input): Parameters<BulkUpdateInput>) -> String {
@@ -3630,6 +3666,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Replace one exact string in an issue's description, or title with field='title'. Cheaper than update_issue for small edits."
     )]
     fn edit_issue(&self, Parameters(input): Parameters<EditIssueInput>) -> String {
@@ -3719,6 +3761,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Issues grouped by status (default), priority, or module. Closed columns show only counts unless include_closed=true."
     )]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
@@ -3884,6 +3927,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Link two issues: blocks, relates_to, or duplicate. For blocks, source blocks target; pass user or from/until instead of source to make target wait on a person or dates."
     )]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
@@ -3931,6 +3980,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Remove a relation between two issues, or clear target's wait by user or from."
     )]
     fn unlink_issues(&self, Parameters(input): Parameters<UnlinkIssuesInput>) -> String {
@@ -3976,6 +4031,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a page. Over 30,000 characters you get its outline and opening; read the rest by section."
     )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
@@ -4054,7 +4110,15 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Create a page in a project, or omit project for a workspace page")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        description = "Create a page in a project, or omit project for a workspace page"
+    )]
     fn create_page(&self, Parameters(input): Parameters<CreatePageInput>) -> String {
         self.create_page_inner(input).unwrap_or_else(error_response)
     }
@@ -4115,7 +4179,15 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Update a page. Only the fields you pass change.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        description = "Update a page. Only the fields you pass change."
+    )]
     fn update_page(&self, Parameters(input): Parameters<UpdatePageInput>) -> String {
         self.update_page_inner(input).unwrap_or_else(error_response)
     }
@@ -4189,6 +4261,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Replace one exact string in a page's content, or title with field='title'."
     )]
     fn edit_page(&self, Parameters(input): Parameters<EditPageInput>) -> String {
@@ -4267,7 +4345,15 @@ No issues found."
         }))
     }
 
-    #[tool(description = "Delete an issue, page, plan, project, module, label, or folder.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        description = "Delete an issue, page, plan, project, module, label, or folder."
+    )]
     fn delete(&self, Parameters(input): Parameters<DeleteInput>) -> String {
         self.delete_inner(input).unwrap_or_else(error_response)
     }
@@ -4371,6 +4457,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show a one-line description, members, your role, and counts per status."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
@@ -4747,6 +4834,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Create or update a project, module, label, or folder. Project: name and identifier to create, project to update. Others: project, plus name to create or current_name to update."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
@@ -4990,7 +5083,15 @@ No issues found."
         }
     }
 
-    #[tool(description = "Add a comment to an issue or page. The author is the caller.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
+        description = "Add a comment to an issue or page. The author is the caller."
+    )]
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
         self.add_comment_inner(input).unwrap_or_else(error_response)
     }
@@ -5053,6 +5154,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List comments on an issue or page: the 50 newest by default. Page with offset, or order=asc for oldest first."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
@@ -5217,6 +5319,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Edit a comment: old_string/new_string replaces one exact string, content replaces the body. Author or admin only."
     )]
     fn edit_comment(&self, Parameters(input): Parameters<EditCommentInput>) -> String {
@@ -5295,7 +5403,15 @@ No issues found."
         })
     }
 
-    #[tool(description = "Delete a comment by id. Author or admin only.")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
+        description = "Delete a comment by id. Author or admin only."
+    )]
     fn delete_comment(&self, Parameters(input): Parameters<DeleteCommentInput>) -> String {
         self.delete_comment_inner(input)
             .unwrap_or_else(error_response)
@@ -5346,6 +5462,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a nested step plan that outlives the session. A step with issue mirrors it: closing either closes both."
     )]
     fn create_plan(&self, Parameters(input): Parameters<CreatePlanInput>) -> String {
@@ -5411,6 +5533,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a plan's full step tree. Each step shows its #id (the step_id), done state, and linked issue."
     )]
     fn get_plan(&self, Parameters(input): Parameters<GetPlanInput>) -> String {
@@ -5435,6 +5558,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Replace one exact string in a plan step's description, or title with field='title'."
     )]
     fn edit_plan_step(&self, Parameters(input): Parameters<EditPlanStepInput>) -> String {
@@ -5494,6 +5623,12 @@ No issues found."
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Change one step (step_id): done, rename, attach or detach an issue, add a child, move, delete. Without step_id: change the plan or add a top-level step. Plan status never closes the anchor issue."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
@@ -5780,6 +5915,12 @@ No issues found."
     // ── Attachments (LIF-418) ────────────────────────────────
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Upload a base64 file (max 10 MiB; images, PDF, zip, SVG, plain text) and get Markdown to embed. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
@@ -5909,6 +6050,7 @@ No issues found."
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Read attachment text, images, or binary content; HTTP may return a download URL."
     )]
     fn get_attachment(
@@ -6026,7 +6168,10 @@ No issues found."
         }
     }
 
-    #[tool(description = "List attachments on an issue or page, or in a project.")]
+    #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
+        description = "List attachments on an issue or page, or in a project."
+    )]
     fn list_attachments(&self, Parameters(input): Parameters<ListAttachmentsInput>) -> String {
         let mut log = ReadLog::new("list_attachments");
         let result = self.list_attachments_inner(input, &mut log);
