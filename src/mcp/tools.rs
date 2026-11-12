@@ -5956,6 +5956,8 @@ No issues found."
             ));
         }
 
+        let alt_text =
+            crate::api::attachments::normalize_alt_text(input.alt_text).map_err(sanitize_error)?;
         let filename = crate::api::attachments::sanitize_filename(&input.filename);
         // MCP carries no content-type header, so the extension stands in as
         // the "declared" type for the signature-less formats. Everything with
@@ -5999,7 +6001,14 @@ No issues found."
                         prepared.size,
                         Some(uploader),
                     )?;
-                    let attachment = prepared.store(conn, store, attachment, &bytes)?;
+                    let mut attachment = prepared.store(conn, store, attachment, &bytes)?;
+                    if let Some(alt_text) = alt_text.as_deref() {
+                        attachment = queries::attachments::update_alt_text(
+                            conn,
+                            attachment.id,
+                            Some(alt_text),
+                        )?;
+                    }
                     let event = match link {
                         Some((entity, entity_id)) => {
                             // The gate above ran on a read connection before the blob
@@ -6032,7 +6041,14 @@ No issues found."
             })?;
         event.into_iter().for_each(|event| self.emit(event));
 
-        let snippet = attachment_markdown(&attachment.filename, &attachment.mime, attachment.id);
+        let snippet = attachment_markdown(
+            attachment
+                .alt_text
+                .as_deref()
+                .unwrap_or(&attachment.filename),
+            &attachment.mime,
+            attachment.id,
+        );
         Ok(render_response(|output| {
             write!(
                 output,
@@ -6109,6 +6125,9 @@ No issues found."
             header.push_str(&format!(", {w}x{h}"));
         }
         header.push(')');
+        if let Some(alt) = &attachment.alt_text {
+            header.push_str(&format!(" alt: \"{}\"", alt.replace(['\n', '\r'], " ")));
+        }
 
         if full {
             let long_edge = dimensions.map_or(0, |(w, h)| w.max(h));
@@ -6221,7 +6240,7 @@ No issues found."
             .as_deref()
             .and_then(|context| context.attachment_url(attachment.id))
             .map(|url| url.to_string());
-        let metadata = format!(
+        let mut metadata = format!(
             "attachment {}: {} ({}, {}, sha {})",
             attachment.id,
             attachment.filename,
@@ -6229,6 +6248,9 @@ No issues found."
             HumanSize(attachment.size_bytes),
             &attachment.sha256[..attachment.sha256.len().min(12)]
         );
+        if let Some(alt) = &attachment.alt_text {
+            metadata.push_str(&format!(" alt: \"{}\"", alt.replace(['\n', '\r'], " ")));
+        }
         match download_url {
             Some(url) => Ok(vec![Content::text(format!(
                 "{metadata}. Binary, download at {url}"
@@ -6400,6 +6422,8 @@ No issues found."
                         filename: attachment.filename.clone(),
                         mime: attachment.mime.clone(),
                         size_bytes: attachment.size_bytes,
+                        dimensions: attachment.width.zip(attachment.height),
+                        alt_text: attachment.alt_text.clone(),
                         uploader: uploader.unwrap_or_else(|| "unknown".into()),
                         created_at: attachment.created_at.clone(),
                         links,
@@ -6469,9 +6493,23 @@ impl Display for HumanSize {
 /// The markdown an agent pastes into an issue, page or comment body to use an
 /// attachment. Images embed, everything else links, matching what the web
 /// composer inserts (and what `parse_referenced_ids` scans back out on save).
-fn attachment_markdown(filename: &str, mime: &str, id: i64) -> String {
+/// The Markdown that embeds an attachment, with `label` (its alt text, else
+/// its filename) as the link text. Brackets and backslashes are escaped and
+/// line breaks folded so any label stays one well-formed link.
+fn attachment_markdown(label: &str, mime: &str, id: i64) -> String {
     let embed = if mime.starts_with("image/") { "!" } else { "" };
-    format!("{embed}[{filename}](/api/attachments/{id})")
+    let mut text = String::with_capacity(label.len());
+    for c in label.chars() {
+        match c {
+            '[' | ']' | '\\' => {
+                text.push('\\');
+                text.push(c);
+            }
+            '\n' | '\r' => text.push(' '),
+            c => text.push(c),
+        }
+    }
+    format!("{embed}[{text}](/api/attachments/{id})")
 }
 
 /// The content type an MCP upload "declares". There is no header to read, so
@@ -6570,6 +6608,8 @@ struct AttachmentRow {
     filename: String,
     mime: String,
     size_bytes: i64,
+    dimensions: Option<(i64, i64)>,
+    alt_text: Option<String>,
     uploader: String,
     created_at: String,
     links: Vec<String>,
@@ -6580,20 +6620,31 @@ struct AttachmentLines<'a>(&'a [AttachmentRow]);
 impl Display for AttachmentLines<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|row| {
-            writeln!(
+            write!(
                 formatter,
-                "{} | {} | {} | {} | {} | {} | {}",
+                "{} | {} | {} | {}",
                 row.id,
                 row.filename,
                 row.mime,
                 HumanSize(row.size_bytes),
+            )?;
+            if let Some((w, h)) = row.dimensions {
+                write!(formatter, ", {w}x{h}")?;
+            }
+            write!(
+                formatter,
+                " | {} | {} | {}",
                 row.uploader,
                 row.created_at,
                 match row.links.is_empty() {
                     true => "unlinked".to_string(),
                     false => row.links.join(","),
                 }
-            )
+            )?;
+            if let Some(alt) = &row.alt_text {
+                write!(formatter, " | alt: {}", alt.replace(['\n', '\r'], " "))?;
+            }
+            writeln!(formatter)
         })
     }
 }
@@ -14238,6 +14289,7 @@ mod tests {
             content_base64: png_base64(),
             entity: Some("ATT-1".into()),
             comment_id: None,
+            alt_text: None,
         }));
         let id = attachment_id_from(&receipt);
         assert!(receipt.contains("shot.png (image/png, 14 B)"), "{receipt}");
@@ -14272,6 +14324,7 @@ mod tests {
             content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         let id = attachment_id_from(&receipt);
         let attachment = m
@@ -14281,6 +14334,62 @@ mod tests {
         assert_eq!(attachment.height, Some(900));
         assert!(attachment.has_thumbnail, "{attachment:?}");
         assert!(m.store.thumb_exists(&attachment.sha256).unwrap());
+    }
+
+    /// Alt text set at upload is stored, labels the snippet, and is shown by
+    /// both read tools beside the image's dimensions.
+    #[test]
+    fn upload_attachment_alt_text_is_stored_and_shown_by_both_read_tools() {
+        use base64::Engine as _;
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        seed_project(&m, "Alt", "ALT");
+        seed_issue(&m, "ALT", "Has a chart");
+        let png = crate::storage::fixtures::png_image(64, 32);
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "chart.png".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            entity: Some("ALT-1".into()),
+            comment_id: None,
+            alt_text: Some("  Weekly signups [draft]  ".into()),
+        }));
+        let id = attachment_id_from(&receipt);
+        assert!(
+            receipt.ends_with(&format!(
+                "![Weekly signups \\[draft\\]](/api/attachments/{id})"
+            )),
+            "{receipt}"
+        );
+        let stored = m
+            .read(|conn| queries::attachments::get_attachment(conn, id))
+            .unwrap();
+        assert_eq!(stored.alt_text.as_deref(), Some("Weekly signups [draft]"));
+
+        let read = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+            full: None,
+        })));
+        assert!(read.contains("64x32"), "{read}");
+        assert!(read.contains("alt: \"Weekly signups [draft]\""), "{read}");
+        let listed = m.list_attachments(Parameters(ListAttachmentsInput {
+            entity: Some("ALT-1".into()),
+            project: None,
+        }));
+        assert!(
+            listed.contains("| 64x32") || listed.contains(", 64x32 |"),
+            "{listed}"
+        );
+        assert!(listed.contains("| alt: Weekly signups [draft]"), "{listed}");
+
+        let refused = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "long.png".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            entity: None,
+            comment_id: None,
+            alt_text: Some("x".repeat(1001)),
+        }));
+        assert!(refused.starts_with("Error: "), "{refused}");
     }
 
     /// REST accepts a legacy HWP file when its name ends in `.hwp`; MCP has no
@@ -14298,6 +14407,7 @@ mod tests {
             content_base64: ole.clone(),
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert!(
             receipt.contains("report.hwp (application/x-hwp"),
@@ -14309,6 +14419,7 @@ mod tests {
             content_base64: ole,
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert!(refused.starts_with("Error:"), "{refused}");
     }
@@ -14333,6 +14444,7 @@ mod tests {
             content_base64: text_base64("hello"),
             entity: Some("ATT-DOC-1".into()),
             comment_id: None,
+            alt_text: None,
         }));
         assert!(page_receipt.contains("linked."), "{page_receipt}");
         assert!(
@@ -14349,6 +14461,7 @@ mod tests {
             content_base64: text_base64("boom"),
             entity: None,
             comment_id: Some(comment_id),
+            alt_text: None,
         }));
         assert!(comment_receipt.contains("linked."), "{comment_receipt}");
 
@@ -14388,6 +14501,7 @@ mod tests {
             content_base64: text_base64("nope"),
             entity: Some("ATX-1".into()),
             comment_id: None,
+            alt_text: None,
         }));
         assert!(receipt.starts_with("Error"), "got: {receipt}");
 
@@ -14409,6 +14523,7 @@ mod tests {
             content_base64: text_base64("unattached"),
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert!(receipt.contains("Not linked yet"), "{receipt}");
         assert!(receipt.contains("24h"), "{receipt}");
@@ -14425,6 +14540,7 @@ mod tests {
             content_base64: oversized,
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert_eq!(
             result,
@@ -14441,6 +14557,7 @@ mod tests {
             content_base64: "not base64 !!!".into(),
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert!(
             malformed.starts_with("Error: content_base64 is not valid base64:"),
@@ -14452,6 +14569,7 @@ mod tests {
             content_base64: String::new(),
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert_eq!(empty, "Error: empty file");
     }
@@ -14466,6 +14584,7 @@ mod tests {
             content_base64: elf,
             entity: None,
             comment_id: None,
+            alt_text: None,
         }));
         assert_eq!(
             result,
@@ -14481,6 +14600,7 @@ mod tests {
             content_base64: text_base64("x"),
             entity: Some("ATT-1".into()),
             comment_id: Some(1),
+            alt_text: None,
         }));
         assert_eq!(result, "Error: pass entity or comment_id, not both");
     }
@@ -14497,6 +14617,7 @@ mod tests {
             content_base64: text_base64(&body),
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
 
         // Default window: 200 lines, with the continuation hint.
@@ -14571,6 +14692,7 @@ mod tests {
             content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
         let image_of = |result: &rmcp::model::CallToolResult| {
             let image = result
@@ -14625,6 +14747,7 @@ mod tests {
             content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
         let result = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
             attachment_id: id,
@@ -14645,6 +14768,7 @@ mod tests {
             content_base64: data.clone(),
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14712,6 +14836,7 @@ mod tests {
             content_base64: pdf,
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14765,6 +14890,7 @@ mod tests {
             content_base64: svg,
             entity: None,
             comment_id: None,
+            alt_text: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14809,6 +14935,7 @@ mod tests {
                         content_base64: pdf,
                         entity: None,
                         comment_id: None,
+                        alt_text: None,
                     })));
                 (
                     id,
@@ -16795,6 +16922,7 @@ mod authz_gating_tests {
                     .encode(b"classified line one\nclassified line two"),
                 entity: entity.map(str::to_string),
                 comment_id: None,
+                alt_text: None,
             }))
         })
     }

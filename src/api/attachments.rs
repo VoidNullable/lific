@@ -797,6 +797,22 @@ pub(super) struct UpdateAttachmentBody {
 /// this; the cap exists so the column cannot be used as free-form storage.
 const MAX_ALT_TEXT: usize = 1000;
 
+/// The one representation of alt text every write path stores: trimmed, the
+/// empty string folded onto `None`, and at most [`MAX_ALT_TEXT`] characters.
+pub(crate) fn normalize_alt_text(alt_text: Option<String>) -> Result<Option<String>, LificError> {
+    let normalized = alt_text
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(text) = normalized.as_deref()
+        && text.chars().count() > MAX_ALT_TEXT
+    {
+        return Err(LificError::BadRequest(format!(
+            "alt_text too long: max {MAX_ALT_TEXT} characters"
+        )));
+    }
+    Ok(normalized)
+}
+
 /// `PATCH /api/attachments/{id}`: set or clear the accessibility description.
 ///
 /// Gated exactly like `DELETE`: the uploader, an admin, or a Maintainer on a
@@ -819,19 +835,7 @@ pub(super) async fn update_attachment(
         return Ok(axum::Json(attachment));
     };
 
-    // Normalize so there is one representation of "no alt text": trim, and
-    // fold the empty string onto NULL.
-    let normalized = alt_text
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    if let Some(text) = normalized.as_deref()
-        && text.chars().count() > MAX_ALT_TEXT
-    {
-        return Err(LificError::BadRequest(format!(
-            "alt_text too long: max {MAX_ALT_TEXT} characters"
-        )));
-    }
-
+    let normalized = normalize_alt_text(alt_text)?;
     let updated = with_write(&db, |conn| {
         q::update_alt_text(conn, id, normalized.as_deref())
     })?;

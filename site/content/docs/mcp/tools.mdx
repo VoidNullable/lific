@@ -667,7 +667,7 @@ Uploads share the REST limits: 10 MiB per file, and a type allowlist decided fro
 
 ### `upload_attachment`
 
-Uploads a file from base64 and returns its id and a Markdown snippet to embed: `![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise.
+Uploads a file from base64 and returns its id and a Markdown snippet to embed: `![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise, where `name` is the alt text when you give one and the filename otherwise. Image uploads record their pixel dimensions and a thumbnail, as web uploads do.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -675,6 +675,7 @@ Uploads a file from base64 and returns its id and a Markdown snippet to embed: `
 | `content_base64` | `string` | Yes | The file, base64-encoded. At most 10 MiB decoded. |
 | `entity` | `string` | No | Link the upload to this issue (`APP-42`) or page (`APP-DOC-3`, `DOC-3`). |
 | `comment_id` | `integer` | No | Link the upload to this comment instead. |
+| `alt_text` | `string` | No | What the file shows. Trimmed, at most 1000 characters. It becomes the snippet's link text instead of the filename. |
 
 Pass at most one of `entity` and `comment_id`. Linking to an issue or page takes `maintainer` in its project; linking to a comment takes `viewer`. An upload with no link stays unlinked, and a sweep deletes unlinked files after 24 hours, so embed the snippet in an issue, page or comment before then. Embedding it links it.
 
@@ -689,13 +690,13 @@ Reads one attachment.
 | `limit` | `integer` | No | Text only: lines to return. Default 200, capped at 500. |
 | `full` | `boolean` | No | Images only: send the original instead of a scaled copy. |
 
-Text files are returned in line ranges. Use the returned offset to read the next range. PNG, JPEG, GIF and WebP are returned as MCP image content. An image larger than 1600 px on its long edge or 1 MB comes back as a scaled copy no larger than either, WebP or JPEG, and the first line names both the original's size and dimensions and the copy's. Model providers downscale large images anyway, so the copy loses nothing the model would see. `full: true` sends the original, and is refused for an original over 3.75 MB or 8000 px, the most a provider accepts inline. Other files arrive as base64 resources over stdio, including remote and multi-instance proxies; clients can decode the blob to save the file. Direct HTTP MCP requests with a validated origin return an absolute download URL, using the configured public URL or an allowlisted `Host`. Without an origin, HTTP also returns the embedded resource. The download endpoint checks the caller's permission to read the attachment.
+Text files are returned in line ranges. Use the returned offset to read the next range. PNG, JPEG, GIF and WebP are returned as MCP image content. An image larger than 1600 px on its long edge or 1 MB comes back as a scaled copy no larger than either, WebP or JPEG, and the first line names both the original's size and dimensions and the copy's. The first line also carries the alt text when the image has one, so you can often decide from it whether you need to look. Model providers downscale large images anyway, so the copy loses nothing the model would see. `full: true` sends the original, and is refused for an original over 3.75 MB or 8000 px, the most a provider accepts inline. Other files arrive as base64 resources over stdio, including remote and multi-instance proxies; clients can decode the blob to save the file. Direct HTTP MCP requests with a validated origin return an absolute download URL, using the configured public URL or an allowlisted `Host`. Without an origin, HTTP also returns the embedded resource. The download endpoint checks the caller's permission to read the attachment.
 
 Reading takes `viewer` in any project the attachment is linked into. An attachment linked nowhere has no project to check, so only its uploader or an administrator can read it.
 
 ### `list_attachments`
 
-Lists the attachments on one issue or page, or across a whole project. Each row gives the id, filename, type, size, uploader, creation time and the entities it is linked to. Links into projects you cannot see are left out.
+Lists the attachments on one issue or page, or across a whole project. Each row gives the id, filename, type, size (with pixel dimensions for images), uploader, creation time and the entities it is linked to, then `alt:` and the alt text when the file has one. Links into projects you cannot see are left out.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |

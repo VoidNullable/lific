@@ -680,6 +680,10 @@ pub struct UploadAttachmentInput {
     pub entity: Option<String>,
     #[schemars(description = "Link to this comment instead")]
     pub comment_id: Option<i64>,
+    #[schemars(
+        description = "What the image shows, for screen readers and agents (max 1000 chars)"
+    )]
+    pub alt_text: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
