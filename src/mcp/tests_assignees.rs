@@ -80,6 +80,7 @@ fn list(s: &Setup, who: &models::AuthUser, filter: &str) -> String {
             assignee: Some(filter.into()),
             ..Default::default()
         }))
+        .text
     })
 }
 

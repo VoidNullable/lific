@@ -38,6 +38,10 @@ Every tool carries MCP annotations, so a client can decide which calls to run wi
 
 `get_briefing(since='last')` stores where you left off, and every read is counted on the Agent activity page; neither changes your issues or pages, so the reads stay read-only.
 
+## Structured results
+
+`list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
+
 ## Which tools use a repository binding
 
 In a session [bound to a repository](/docs/repository-bindings), an omitted `project` resolves to the bound project on these tools only:

@@ -35,9 +35,13 @@ const IDLE_PLAN_DAYS: i64 = 30;
 
 /// One bounded block of the briefing.
 struct Section {
+    /// The section's stable name in the structured result (LIF-563).
+    key: &'static str,
     heading: String,
     summary: Option<String>,
     lines: Vec<String>,
+    /// What each line names, in line order: the structured form of `lines`.
+    items: Vec<outputs::BriefingItem>,
     /// Items that exist, shown or not. Budgeting pops lines, never this.
     total: usize,
     /// `total` is a floor: the scan stopped at [`SCAN_LIMIT`].
@@ -86,7 +90,65 @@ fn fit_to_budget(header: &str, sections: &mut [Section]) -> Result<String, Strin
             return Ok(output);
         };
         longest.lines.pop();
+        longest.items.truncate(longest.lines.len());
     }
+}
+
+/// The structured briefing: each section's items for the lines it kept.
+fn structured_briefing(project: &str, sections: &[Section]) -> outputs::Briefing {
+    outputs::Briefing {
+        project: Some(project.to_string()),
+        sections: sections
+            .iter()
+            .map(|section| outputs::BriefingSection {
+                section: section.key.to_string(),
+                total: i64::try_from(section.total).unwrap_or(i64::MAX),
+                items: section
+                    .items
+                    .iter()
+                    .take(section.lines.len())
+                    .cloned()
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// A briefing item naming `identifier`, linked as its line links it.
+fn item(
+    kind: &str,
+    reference: Option<Reference<'_>>,
+    identifier: &str,
+    title: Option<&str>,
+    status: Option<&str>,
+) -> outputs::BriefingItem {
+    outputs::BriefingItem {
+        kind: kind.to_string(),
+        identifier: Some(identifier.to_string()),
+        title: title.map(str::to_string),
+        status: status.map(str::to_string),
+        url: reference.and_then(|reference| reference.url()),
+    }
+}
+
+fn issue_items(
+    context: Option<&IssueLinkContext>,
+    issues: &[models::Issue],
+) -> Vec<outputs::BriefingItem> {
+    issues
+        .iter()
+        .map(|issue| issue_item(context, issue))
+        .collect()
+}
+
+fn issue_item(context: Option<&IssueLinkContext>, issue: &models::Issue) -> outputs::BriefingItem {
+    item(
+        "issue",
+        Some(issue_reference(context, &issue.identifier)),
+        &issue.identifier,
+        Some(&issue.title),
+        Some(&issue.status.to_string()),
+    )
 }
 
 fn title(value: &str) -> TruncatedValue<'_> {
@@ -171,7 +233,7 @@ impl LificMcp {
         &self,
         input: GetBriefingInput,
         log: &mut ReadLog,
-    ) -> Result<String, String> {
+    ) -> Result<(String, outputs::Briefing), String> {
         self.get_briefing_at(input, Utc::now(), log)
     }
 
@@ -182,9 +244,9 @@ impl LificMcp {
         input: GetBriefingInput,
         now: DateTime<Utc>,
         log: &mut ReadLog,
-    ) -> Result<String, String> {
+    ) -> Result<(String, outputs::Briefing), String> {
         if let Some(nudge) = self.no_projects_nudge() {
-            return Ok(nudge);
+            return Ok((nudge, outputs::Briefing::default()));
         }
         let resume = input
             .since
@@ -301,12 +363,13 @@ impl LificMcp {
             sections.insert(0, queue);
         }
         let output = fit_to_budget(&header, &mut sections)?;
+        let structured = structured_briefing(ident, &sections);
         // Saved only once the briefing is built, so a failed one leaves the
         // previous cursor and its changes are reported next time.
         if let Some(user) = caller {
             self.write(|conn| queries::briefing::save_cursor(conn, user, project.id, upto))?;
         }
-        Ok(output)
+        Ok((output, structured))
     }
 
     fn changes_section(
@@ -332,62 +395,108 @@ impl LificMcp {
             return Ok(None);
         }
 
-        let mut lines = Vec::new();
-        lines.extend(closed.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
-            format!(
-                "closed {} ({}){} | {}",
-                issue_reference(context, &change.identifier),
-                change.to,
-                by(change.actor.as_deref()),
-                title(&change.title)
+        let mut entries = Vec::new();
+        entries.extend(closed.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
+            let reference = issue_reference(context, &change.identifier);
+            (
+                format!(
+                    "closed {} ({}){} | {}",
+                    reference,
+                    change.to,
+                    by(change.actor.as_deref()),
+                    title(&change.title)
+                ),
+                item(
+                    "issue",
+                    Some(reference),
+                    &change.identifier,
+                    Some(&change.title),
+                    Some(&change.to),
+                ),
             )
         }));
-        lines.extend(created.iter().take(CHANGE_LINES_PER_KIND).map(|issue| {
-            format!(
-                "new {} | {} | {} | {}{}",
-                issue_reference(context, &issue.identifier),
-                issue.status,
-                issue.priority,
-                title(&issue.title),
-                by(issue.actor.as_deref()),
+        entries.extend(created.iter().take(CHANGE_LINES_PER_KIND).map(|issue| {
+            let reference = issue_reference(context, &issue.identifier);
+            (
+                format!(
+                    "new {} | {} | {} | {}{}",
+                    reference,
+                    issue.status,
+                    issue.priority,
+                    title(&issue.title),
+                    by(issue.actor.as_deref()),
+                ),
+                item(
+                    "issue",
+                    Some(reference),
+                    &issue.identifier,
+                    Some(&issue.title),
+                    Some(&issue.status.to_string()),
+                ),
             )
         }));
-        lines.extend(moved.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
-            format!(
-                "moved {} {} -> {}{} | {}",
-                issue_reference(context, &change.identifier),
-                change.from,
-                change.to,
-                by(change.actor.as_deref()),
-                title(&change.title)
+        entries.extend(moved.iter().take(CHANGE_LINES_PER_KIND).map(|change| {
+            let reference = issue_reference(context, &change.identifier);
+            (
+                format!(
+                    "moved {} {} -> {}{} | {}",
+                    reference,
+                    change.from,
+                    change.to,
+                    by(change.actor.as_deref()),
+                    title(&change.title)
+                ),
+                item(
+                    "issue",
+                    Some(reference),
+                    &change.identifier,
+                    Some(&change.title),
+                    Some(&change.to),
+                ),
             )
         }));
-        lines.extend(pages.iter().take(CHANGE_LINES_PER_KIND).map(|page| {
-            format!(
-                "page {} {}{}{}",
-                reference_with_context(context, ReferenceKind::Page(&page.identifier, page.id)),
-                title(&page.title),
-                if page.new { " (new)" } else { "" },
-                by(page.actor.as_deref()),
+        entries.extend(pages.iter().take(CHANGE_LINES_PER_KIND).map(|page| {
+            let reference =
+                reference_with_context(context, ReferenceKind::Page(&page.identifier, page.id));
+            (
+                format!(
+                    "page {} {}{}{}",
+                    reference,
+                    title(&page.title),
+                    if page.new { " (new)" } else { "" },
+                    by(page.actor.as_deref()),
+                ),
+                item(
+                    "page",
+                    Some(reference),
+                    &page.identifier,
+                    Some(&page.title),
+                    None,
+                ),
             )
         }));
-        lines.extend(comments.iter().take(CHANGE_LINES_PER_KIND).map(|comment| {
-            let parent = match comment.page_id {
+        entries.extend(comments.iter().take(CHANGE_LINES_PER_KIND).map(|comment| {
+            let reference = match comment.page_id {
                 Some(page_id) => {
                     reference_with_context(context, ReferenceKind::Page(&comment.parent, page_id))
-                        .to_string()
                 }
-                None => issue_reference(context, &comment.parent).to_string(),
+                None => issue_reference(context, &comment.parent),
             };
-            format!(
-                "comment on {parent}{}: {}",
-                by(comment.actor.as_deref()),
-                title(&comment.preview)
+            (
+                format!(
+                    "comment on {reference}{}: {}",
+                    by(comment.actor.as_deref()),
+                    title(&comment.preview)
+                ),
+                item("comment", Some(reference), &comment.parent, None, None),
             )
         }));
+        let (lines, items) = entries.into_iter().unzip();
 
         let since = span.timestamp();
         Ok(Some(Section {
+            key: "changes",
+            items,
             heading: format!("Since {}", span.describe()),
             summary: Some(format!(
                 "Issues created {}, closed {}, otherwise moved {}. Pages edited {}. Comments {}.",
@@ -447,12 +556,13 @@ impl LificMcp {
             return Ok(None);
         }
         let visible: Option<HashSet<i64>> = visible_project_ids_mcp(&self.db)?;
-        let lines = shown
+        let (lines, items) = shown
             .iter()
             .map(|(plan, linked_project)| {
+                let reference = plan_reference(context, plan);
                 let mut line = format!(
                     "{} {} ({}/{} done)",
-                    plan_reference(context, plan),
+                    reference,
                     title(&plan.title),
                     plan.done_count,
                     plan.step_count
@@ -476,10 +586,19 @@ impl LificMcp {
                     None if plan.step_count > 0 => line.push_str(", all steps done"),
                     None => line.push_str(", no steps yet"),
                 }
-                line
+                let plan_item = item(
+                    "plan",
+                    Some(reference),
+                    &plan.identifier,
+                    Some(&plan.title),
+                    None,
+                );
+                (line, plan_item)
             })
-            .collect();
+            .unzip();
         Ok(Some(Section {
+            key: "plans",
+            items,
             heading: format!(
                 "Active plans ({})",
                 count(plans.len(), plans.len() as i64 >= SCAN_LIMIT)
@@ -541,7 +660,7 @@ impl LificMcp {
         let blockers = self.read(|conn| queries::briefing::open_blockers(conn, &ids))?;
         // A blocker in a project the caller cannot see is counted, never named.
         let visible: Option<HashSet<i64>> = visible_project_ids_mcp(&self.db)?;
-        let lines = issues
+        let (lines, items) = issues
             .iter()
             .map(|issue| {
                 let mut named = Vec::new();
@@ -582,10 +701,12 @@ impl LificMcp {
                         .unwrap_or_default();
                     let _ = write!(line, "; {lowered}");
                 }
-                line
+                (line, issue_item(context, issue))
             })
-            .collect();
+            .unzip();
         Ok(Some(Section {
+            key: "blocked",
+            items,
             heading: format!("Blocked ({})", count(total, total_is_floor)),
             summary: None,
             lines,
@@ -613,7 +734,7 @@ impl LificMcp {
                 .map(|&id| queries::get_issue(conn, id))
                 .collect::<Result<Vec<_>, _>>()
         })?;
-        let lines = issues
+        let (lines, items) = issues
             .iter()
             .map(|issue| {
                 let mut line = issue_line(context, issue);
@@ -624,10 +745,12 @@ impl LificMcp {
                 {
                     let _ = write!(line, "; {}", crate::mcp::waits::WaitLine(wait));
                 }
-                line
+                (line, issue_item(context, issue))
             })
-            .collect();
+            .unzip();
         Ok(Some(Section {
+            key: "due",
+            items,
             heading: format!("Due to check ({})", ids.len()),
             summary: Some(
                 "Date waits whose window has arrived. Follow up, then clear the wait with unlink_issues.".into(),
@@ -658,6 +781,8 @@ impl LificMcp {
             return Ok(None);
         }
         Ok(Some(Section {
+            key: "workable",
+            items: issue_items(context, &issues),
             heading: format!(
                 "Workable, not yet active ({}), by priority",
                 count(total, total_is_floor)
@@ -693,6 +818,8 @@ impl LificMcp {
             return Ok(None);
         }
         Ok(Some(Section {
+            key: "active",
+            items: issue_items(context, &issues),
             heading: format!("Active ({})", count(total, total_is_floor)),
             summary: None,
             lines: issues
@@ -727,6 +854,8 @@ impl LificMcp {
             return Ok(None);
         }
         Ok(Some(Section {
+            key: "stale",
+            items: issue_items(context, &issues),
             heading: format!("Stale active ({})", count(total, total_is_floor)),
             summary: Some(format!(
                 "Active but untouched for {days}+ days. Resume one, or move it back to todo if nobody is on it."
@@ -765,33 +894,53 @@ impl LificMcp {
             return Ok(None);
         }
 
-        let mut lines = Vec::new();
-        lines.extend(plans.iter().take(TRIAGE_LINES_PER_KIND).map(|plan| {
+        let mut entries = Vec::new();
+        entries.extend(plans.iter().take(TRIAGE_LINES_PER_KIND).map(|plan| {
             let idle_since = plan.last_activity.get(..10).unwrap_or(&plan.last_activity);
-            format!(
-                "plan {} {} ({}/{} done), idle since {idle_since}",
-                reference_with_context(context, ReferenceKind::Plan(&plan.identifier, plan.id)),
-                title(&plan.title),
-                plan.done_count,
-                plan.step_count,
+            let reference =
+                reference_with_context(context, ReferenceKind::Plan(&plan.identifier, plan.id));
+            (
+                format!(
+                    "plan {} {} ({}/{} done), idle since {idle_since}",
+                    reference,
+                    title(&plan.title),
+                    plan.done_count,
+                    plan.step_count,
+                ),
+                item(
+                    "plan",
+                    Some(reference),
+                    &plan.identifier,
+                    Some(&plan.title),
+                    None,
+                ),
             )
         }));
-        lines.extend(modules.iter().take(TRIAGE_LINES_PER_KIND).map(|module| {
+        entries.extend(modules.iter().take(TRIAGE_LINES_PER_KIND).map(|module| {
             let closed = match module.closed_count {
                 0 => "no issues".to_string(),
                 1 => "1 closed issue".to_string(),
                 n => format!("{n} closed issues"),
             };
-            format!(
-                "module {}, {closed}",
-                reference_with_context(
-                    context,
-                    ReferenceKind::Module(ident, module.id, &module.name)
-                ),
+            let reference = reference_with_context(
+                context,
+                ReferenceKind::Module(ident, module.id, &module.name),
+            );
+            (
+                format!("module {reference}, {closed}"),
+                outputs::BriefingItem {
+                    kind: "module".into(),
+                    title: Some(module.name.clone()),
+                    url: reference.url(),
+                    ..Default::default()
+                },
             )
         }));
+        let (lines, items) = entries.into_iter().unzip();
 
         Ok(Some(Section {
+            key: "triage",
+            items,
             heading: format!("Needs triage ({})", plans.len() + modules.len()),
             summary: Some(format!(
                 "Active plans idle {IDLE_PLAN_DAYS}+ days: {}. Active modules with no open issues: {}. Finish, archive or close each.",
@@ -818,6 +967,15 @@ impl LificMcp {
         since: Option<&str>,
         named: &[String],
     ) -> Result<Option<Section>, String> {
+        let page_item = |page: &models::Page| {
+            item(
+                "page",
+                Some(page_reference(context, page)),
+                &page.identifier,
+                Some(&page.title),
+                None,
+            )
+        };
         let describe = |page: &models::Page| {
             let mut line = format!(
                 "{} {} | seq {} | {} chars",
@@ -856,6 +1014,8 @@ impl LificMcp {
                 return Ok(None);
             }
             return Ok(Some(Section {
+                key: "pages",
+                items: pages.items.iter().map(page_item).collect(),
                 heading: "Recently updated pages".into(),
                 summary: None,
                 lines: pages.items.iter().map(describe).collect(),
@@ -871,7 +1031,7 @@ impl LificMcp {
             .map(|identifier| identifier.trim())
             .filter(|identifier| !identifier.is_empty() && seen.insert(identifier.to_uppercase()))
             .collect();
-        let lines = requested
+        let (lines, items) = requested
             .iter()
             .take(MAX_NAMED_PAGES)
             .map(|identifier| {
@@ -888,12 +1048,17 @@ impl LificMcp {
                             .is_ok()
                     });
                 match page {
-                    Some(page) => describe(&page),
-                    None => format!("{identifier}: not found"),
+                    Some(page) => (describe(&page), page_item(&page)),
+                    None => (
+                        format!("{identifier}: not found"),
+                        item("page", None, identifier, None, None),
+                    ),
                 }
             })
-            .collect();
+            .unzip();
         Ok(Some(Section {
+            key: "pages",
+            items,
             heading: "Key pages".into(),
             summary: None,
             lines,

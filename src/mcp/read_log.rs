@@ -88,4 +88,15 @@ impl LificMcp {
         self.finish_read(log, result.is_ok());
         result.unwrap_or_else(|error| format!("Error: {error}"))
     }
+
+    /// [`Self::logged_read`] for a tool that also returns structured content
+    /// (LIF-563).
+    pub(crate) fn logged_structured<T: serde::Serialize>(
+        &self,
+        log: ReadLog,
+        result: Result<(String, T), String>,
+    ) -> super::outputs::StructuredReply {
+        self.finish_read(log, result.is_ok());
+        super::outputs::StructuredReply::new(result)
+    }
 }

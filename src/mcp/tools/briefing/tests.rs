@@ -40,6 +40,7 @@ fn briefing(m: &LificMcp, project: Option<&str>, since: Option<&str>, pages: &[&
         since: since.map(Into::into),
         pages: (!pages.is_empty()).then(|| pages.iter().map(|page| page.to_string()).collect()),
     }))
+    .text
 }
 
 /// Everything recorded so far moves two hours back, and the returned cursor
@@ -418,6 +419,8 @@ fn a_briefing_is_gated_like_list_issues_and_never_names_invisible_records() {
 #[test]
 fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
     let make = |heading: &str, lines: usize| Section {
+        key: "test",
+        items: vec![outputs::BriefingItem::default(); lines],
         heading: heading.into(),
         summary: None,
         lines: (0..lines)
@@ -442,6 +445,15 @@ fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
         sections[1].lines.len(),
         sections[2].lines.len()
     );
+    // LIF-563: the structured items are cut with the lines they describe.
+    for section in &sections {
+        assert_eq!(
+            section.items.len(),
+            section.lines.len(),
+            "{}",
+            section.heading
+        );
+    }
     assert!(!out.contains("more_short"), "{out}");
     assert!(
         out.contains(&format!(
@@ -1054,6 +1066,7 @@ fn briefing_at(m: &LificMcp, project: &str, now: &str) -> String {
         &mut ReadLog::new("get_briefing"),
     )
     .unwrap()
+    .0
 }
 
 /// LIF-492: an active issue idle past the threshold leaves the Active section
@@ -1154,6 +1167,7 @@ fn briefing_in_days(m: &LificMcp, project: &str, days: i64) -> String {
         &mut ReadLog::new("get_briefing"),
     )
     .unwrap_or_else(|error| panic!("briefing failed: {error}"))
+    .0
 }
 
 fn bullets(section: &str) -> Vec<&str> {

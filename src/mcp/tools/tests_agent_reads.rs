@@ -142,6 +142,7 @@ fn a_list_read_records_its_project_without_an_entity() {
             project: Some("RDS".into()),
             ..Default::default()
         }))
+        .text
     });
     assert!(output.contains("Listed"), "got: {output}");
 
@@ -170,6 +171,7 @@ fn a_workspace_search_records_no_project() {
             query: "Findable".into(),
             ..Default::default()
         }))
+        .text
     });
 
     let rows = flushed_rows(&m);

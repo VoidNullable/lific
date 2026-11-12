@@ -33,7 +33,8 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
 - Issues and pages are MCP resources: `lific://APP/issues/APP-42` and `lific://APP/pages/APP-DOC-3` read as the same text `get_issue` and `get_page` return, with the same role checks, so hosts that attach resources by @-mention can pull them into context. `resources/list` stays empty so a picker never lists a whole tracker.
-- 32 tools now cost an agent 6,913 tokens of context.
+- `list_issues`, `search`, `list_resources` and `get_briefing` return structured results alongside their text. Each declares an MCP `outputSchema` and returns `structuredContent` with the identifiers, ids, titles, status and links its text shows, plus `next_offset` when more results follow, so clients that call tools from code can read fields instead of parsing lines. The text replies are unchanged.
+- 32 tools now cost an agent 7,290 tokens of context.
 
 ### OAuth
 

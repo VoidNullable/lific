@@ -17,6 +17,7 @@ use crate::{
     links::{IssueLinkContext, MarkdownReference},
 };
 
+use super::outputs::{self, StructuredReply};
 use super::read_log::ReadLog;
 use super::schemas::*;
 use super::{LificMcp, current_issue_link_context, sanitize_error};
@@ -40,6 +41,13 @@ impl LificMcp {
                 compact_schema(&mut schema, true);
                 if let serde_json::Value::Object(schema) = schema {
                     route.attr.input_schema = Arc::new(schema);
+                }
+                if let Some(output) = &route.attr.output_schema {
+                    let mut schema = serde_json::Value::Object((**output).clone());
+                    compact_schema(&mut schema, true);
+                    if let serde_json::Value::Object(schema) = schema {
+                        route.attr.output_schema = Some(Arc::new(schema));
+                    }
                 }
             }
             router
@@ -438,6 +446,41 @@ fn reference_with_context<'a>(
     kind: ReferenceKind<'a>,
 ) -> Reference<'a> {
     Reference { context, kind }
+}
+
+/// One `search` hit's structured row, linked as its text line links it.
+fn search_hit(result: &models::SearchResult, url: Option<String>) -> outputs::SearchHit {
+    outputs::SearchHit {
+        kind: result.result_type.clone(),
+        id: result.id,
+        identifier: result.identifier.clone(),
+        title: result.title.clone(),
+        url,
+    }
+}
+
+impl Reference<'_> {
+    /// The URL this reference links to when rendered, `None` when it renders
+    /// as plain text. Structured results (LIF-563) carry it as `url`.
+    fn url(&self) -> Option<String> {
+        let context = self.context?;
+        let url = match self.kind {
+            ReferenceKind::Issue(identifier) => context.issue_url(identifier),
+            ReferenceKind::Project(identifier) => context.project_url(identifier),
+            ReferenceKind::Page(identifier, page_id) => context.page_url(identifier, page_id),
+            ReferenceKind::Plan(identifier, plan_id) => context.plan_url(identifier, plan_id),
+            ReferenceKind::Module(project, module_id, _) => context.module_url(project, module_id),
+            ReferenceKind::IssueComment(identifier, comment_id)
+            | ReferenceKind::IssueSearchComment(identifier, comment_id) => {
+                context.issue_comment_url(identifier, comment_id)
+            }
+            ReferenceKind::PageComment(identifier, page_id, comment_id)
+            | ReferenceKind::PageSearchComment(identifier, page_id, comment_id) => {
+                context.page_comment_url(identifier, page_id, comment_id)
+            }
+        };
+        url.map(|url| url.to_string())
+    }
 }
 
 fn comment_reference_kind(
@@ -1893,15 +1936,21 @@ mod briefing;
 impl LificMcp {
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Search across all issues, pages, and comments by text"
+        description = "Search across all issues, pages, and comments by text",
+        output_schema = outputs::schema::<outputs::SearchResults>()
     )]
-    fn search(&self, Parameters(input): Parameters<SearchInput>) -> String {
+    fn search(&self, Parameters(input): Parameters<SearchInput>) -> StructuredReply {
         let mut log = ReadLog::new("search");
         let result = self.search_inner(input, &mut log);
-        self.logged_read(log, result)
+        self.logged_structured(log, result)
     }
 
-    fn search_inner(&self, input: SearchInput, log: &mut ReadLog) -> Result<String, String> {
+    fn search_inner(
+        &self,
+        input: SearchInput,
+        log: &mut ReadLog,
+    ) -> Result<(String, outputs::SearchResults), String> {
+        let empty = |text: String| (text, outputs::SearchResults::default());
         let visible = visible_project_ids_mcp(&self.db)?;
         let project_id = match &input.project {
             Some(p) => {
@@ -1912,15 +1961,15 @@ impl LificMcp {
                     {
                         Some(project_id)
                     }
-                    Ok(_) if visible.is_some() => return Ok(self.empty_search_result()),
+                    Ok(_) if visible.is_some() => return Ok(empty(self.empty_search_result())),
                     Err(crate::error::LificError::NotFound(_error)) if visible.is_some() => {
-                        return Ok(self.empty_search_result());
+                        return Ok(empty(self.empty_search_result()));
                     }
                     Err(crate::error::LificError::NotFound(error)) => {
                         return Err(error);
                     }
                     Ok(_) => {
-                        return Ok(self.empty_search_result());
+                        return Ok(empty(self.empty_search_result()));
                     }
                     Err(error) => return Err(error.to_string()),
                 }
@@ -1958,12 +2007,16 @@ impl LificMcp {
         let results = hits.items;
         if results.is_empty() {
             if let Some(nudge) = self.no_projects_nudge() {
-                return Ok(nudge);
+                return Ok(empty(nudge));
             }
-            return Ok(self.empty_search_result());
+            return Ok(empty(self.empty_search_result()));
         }
         let link_context = current_issue_link_context();
-        Ok(render_response(|output| {
+        let mut structured = outputs::SearchResults {
+            results: Vec::with_capacity(results.len()),
+            next_offset: has_more.then(|| offset.saturating_add(limit)),
+        };
+        let text = render_response(|output| {
             if results[0].partial_match {
                 writeln!(
                     output,
@@ -1994,6 +2047,7 @@ impl LificMcp {
                             },
                         ),
                     );
+                    structured.results.push(search_hit(result, comment.url()));
                     writeln!(output, "- {comment} on {parent} — {}", result.snippet)
                 } else if result.result_type == "attachment" {
                     // LIF-418: an attachment hit is a file, not an entity. It
@@ -2008,6 +2062,7 @@ impl LificMcp {
                                 ReferenceKind::Page(identifier, page_id)
                             }),
                     );
+                    structured.results.push(search_hit(result, parent.url()));
                     writeln!(
                         output,
                         "- [attachment] {} (#{}) on {parent}: {}",
@@ -2019,18 +2074,18 @@ impl LificMcp {
                         "plan" => ReferenceKind::Plan(identifier, result.id),
                         _ => ReferenceKind::Issue(identifier),
                     };
+                    let reference = reference_with_context(link_context.as_deref(), kind);
+                    structured.results.push(search_hit(result, reference.url()));
                     writeln!(
                         output,
                         "- [{}] {} {} — {}",
-                        result.result_type,
-                        reference_with_context(link_context.as_deref(), kind),
-                        result.title,
-                        result.snippet
+                        result.result_type, reference, result.title, result.snippet
                     )
                 }
             })?;
             append_pagination_hint(output, has_more, offset.saturating_add(limit))
-        }))
+        });
+        Ok((text, structured))
     }
 
     #[tool(
@@ -2210,31 +2265,34 @@ impl LificMcp {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Call first when resuming a project, with since='last': the human queue across projects, what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages, idle plans and empty modules. About 6,000 characters."
+        description = "Call first when resuming a project, with since='last': the human queue across projects, what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages, idle plans and empty modules. About 6,000 characters.",
+        output_schema = outputs::schema::<outputs::Briefing>()
     )]
-    fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
+    fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> StructuredReply {
         let mut log = ReadLog::new("get_briefing");
         let result = self.get_briefing_inner(input, &mut log);
-        self.logged_read(log, result)
+        self.logged_structured(log, result)
     }
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it."
+        description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it.",
+        output_schema = outputs::schema::<outputs::IssueList>()
     )]
-    fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
+    fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> StructuredReply {
         let mut log = ReadLog::new("list_issues");
         let result = self.list_issues_inner(input, &mut log);
-        self.logged_read(log, result)
+        self.logged_structured(log, result)
     }
 
     fn list_issues_inner(
         &self,
         input: ListIssuesInput,
         log: &mut ReadLog,
-    ) -> Result<String, String> {
+    ) -> Result<(String, outputs::IssueList), String> {
+        let empty = |text: String| (text, outputs::IssueList::default());
         if let Some(nudge) = self.no_projects_nudge() {
-            return Ok(nudge);
+            return Ok(empty(nudge));
         }
         if input.status.is_some() && input.statuses.is_some() {
             return Err("pass status or statuses, not both".into());
@@ -2291,9 +2349,9 @@ impl LificMcp {
             }
             Some(filter) => match self.member_issue_scope(filter, &input)? {
                 Ok(scope) => scope,
-                Err(empty) => {
+                Err(reply) => {
                     log.scope(None);
-                    return Ok(empty);
+                    return Ok(empty(reply));
                 }
             },
         };
@@ -2372,13 +2430,13 @@ impl LificMcp {
         if issues.items.is_empty() {
             // Keep the roles header: "on three projects, nothing open" is an
             // answer, where a bare "No issues found." is not.
-            return Ok(match &header {
+            return Ok(empty(match &header {
                 Some(header) => format!(
                     "{header}
 No issues found."
                 ),
                 None => "No issues found.".into(),
-            });
+            }));
         }
         let has_more = issues.has_more;
         let mut issues = issues.items;
@@ -2404,7 +2462,20 @@ No issues found."
             Ok(names)
         })?;
         let context = current_issue_link_context();
-        Ok(render_response(|output| {
+        let structured = outputs::IssueList {
+            issues: issues
+                .iter()
+                .map(|issue| outputs::IssueRow {
+                    identifier: issue.identifier.clone(),
+                    title: issue.title.clone(),
+                    status: issue.status.to_string(),
+                    priority: issue.priority.to_string(),
+                    url: issue_reference(context.as_deref(), &issue.identifier).url(),
+                })
+                .collect(),
+            next_offset: has_more.then_some(offset + limit),
+        };
+        let text = render_response(|output| {
             if let Some(header) = &header {
                 writeln!(output, "{header}")?;
             }
@@ -2428,7 +2499,8 @@ No issues found."
                 writeln!(output)
             })?;
             append_pagination_hint(output, has_more, offset + limit)
-        }))
+        });
+        Ok((text, structured))
     }
 
     /// The projects a `members`-filtered `list_issues` spans: the caller's
@@ -4458,20 +4530,28 @@ No issues found."
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show a one-line description, members, your role, and counts per status."
+        description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show a one-line description, members, your role, and counts per status.",
+        output_schema = outputs::schema::<outputs::ResourceList>()
     )]
-    fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
+    fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> StructuredReply {
         let mut log = ReadLog::new("list_resources");
         let result = self.list_resources_inner(input, &mut log);
-        self.logged_read(log, result)
+        self.logged_structured(log, result)
     }
 
     fn list_resources_inner(
         &self,
         input: ListResourcesInput,
         log: &mut ReadLog,
-    ) -> Result<String, String> {
+    ) -> Result<(String, outputs::ResourceList), String> {
         let context = current_issue_link_context();
+        let listed =
+            |items: Vec<outputs::ResourceRow>, next_offset: Option<i64>| outputs::ResourceList {
+                resource_type: input.resource_type.clone(),
+                items,
+                next_offset,
+            };
+        let empty = |text: String| (text, listed(Vec::new(), None));
         match input.resource_type.as_str() {
             "plan" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
@@ -4493,9 +4573,20 @@ No issues found."
                     )
                 })?;
                 if plans.is_empty() {
-                    return Ok("No plans found.".into());
+                    return Ok(empty("No plans found.".into()));
                 }
-                Ok(render_response(|output| {
+                let items = plans
+                    .iter()
+                    .map(|plan| outputs::ResourceRow {
+                        id: Some(plan.id),
+                        identifier: Some(plan.identifier.clone()),
+                        title: Some(plan.title.clone()),
+                        status: Some(plan.status.clone()),
+                        url: plan_reference(context.as_deref(), plan).url(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} plans:", plans.len())?;
                     plans.iter().try_for_each(|plan| {
                         write!(
@@ -4516,7 +4607,8 @@ No issues found."
                         })?;
                         output.write_char('\n')
                     })
-                }))
+                });
+                Ok((text, listed(items, None)))
             }
             // Cross-project list (LIF-198 scope item 2): filter, don't deny.
             "project" => {
@@ -4524,7 +4616,7 @@ No issues found."
                 // Checked before the visibility filter so "projects exist but
                 // none visible to this user" keeps its "0 projects" output.
                 if let Some(nudge) = self.no_projects_nudge() {
-                    return Ok(nudge);
+                    return Ok(empty(nudge));
                 }
                 let statuses =
                     roles::parse_list(input.statuses.as_deref(), &roles::COUNT_ORDER, "status")?
@@ -4582,13 +4674,23 @@ No issues found."
                         filter.matches(rosters.get(&project.id).map_or(&[], Vec::as_slice))
                     });
                     if ps.is_empty() {
-                        return Ok(filter.no_projects());
+                        return Ok(empty(filter.no_projects()));
                     }
                 }
                 ps.sort_by(|left, right| cmp_projects_by_activity(left, right, &stats));
                 let verbose = input.verbose.unwrap_or(false);
                 let now = Utc::now();
-                Ok(render_response(|output| {
+                let items = ps
+                    .iter()
+                    .map(|project| outputs::ResourceRow {
+                        id: Some(project.id),
+                        identifier: Some(project.identifier.clone()),
+                        name: Some(project.name.clone()),
+                        url: project_reference(context.as_deref(), &project.identifier).url(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} projects:", ps.len())?;
                     ps.iter().try_for_each(|project| {
                         write!(
@@ -4626,7 +4728,8 @@ No issues found."
                         )?;
                         output.write_char('\n')
                     })
-                }))
+                });
+                Ok((text, listed(items, None)))
             }
             "issue" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
@@ -4654,7 +4757,18 @@ No issues found."
                 })?;
                 let has_more = issues.has_more;
                 let issues = issues.items;
-                Ok(render_response(|output| {
+                let items = issues
+                    .iter()
+                    .map(|issue| outputs::ResourceRow {
+                        id: Some(issue.id),
+                        identifier: Some(issue.identifier.clone()),
+                        title: Some(issue.title.clone()),
+                        status: Some(issue.status.to_string()),
+                        url: issue_reference(context.as_deref(), &issue.identifier).url(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(
                         output,
                         "{} issues (use list_issues for filtering):",
@@ -4670,7 +4784,8 @@ No issues found."
                         )
                     })?;
                     append_pagination_hint(output, has_more, offset + limit)
-                }))
+                });
+                Ok((text, listed(items, has_more.then_some(offset + limit))))
             }
             "page" => {
                 let resolver = self.read_conn()?;
@@ -4738,9 +4853,20 @@ No issues found."
                 let has_more = pages.has_more;
                 let pages = filter_visible(pages.items, &visible, |p| p.project_id);
                 if pages.is_empty() {
-                    return Ok("No pages found.".into());
+                    return Ok(empty("No pages found.".into()));
                 }
-                Ok(render_response(|output| {
+                let items = pages
+                    .iter()
+                    .map(|page| outputs::ResourceRow {
+                        id: Some(page.id),
+                        identifier: Some(page.identifier.clone()),
+                        title: Some(page.title.clone()),
+                        status: Some(page.status.clone()),
+                        url: page_reference(context.as_deref(), page).url(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} pages:", pages.len())?;
                     pages.iter().try_for_each(|page| {
                         // Timestamps are "YYYY-MM-DD HH:MM:SS"; the date
@@ -4775,7 +4901,8 @@ No issues found."
                         writeln!(output, " — updated {updated}")
                     })?;
                     append_pagination_hint(output, has_more, offset + limit)
-                }))
+                });
+                Ok((text, listed(items, has_more.then_some(offset + limit))))
             }
             "module" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
@@ -4785,7 +4912,17 @@ No issues found."
                 log.scope(Some(pid));
                 let canonical_project = canonical_project_identifier(&resolver, pid)?;
                 let modules = queries::list_modules(&resolver, pid).map_err(|e| e.to_string())?;
-                Ok(render_response(|output| {
+                let items = modules
+                    .iter()
+                    .map(|module| outputs::ResourceRow {
+                        id: Some(module.id),
+                        name: Some(module.name.clone()),
+                        status: Some(module.status.to_string()),
+                        url: module_reference(context.as_deref(), &canonical_project, module).url(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} modules:", modules.len())?;
                     modules.iter().try_for_each(|module| {
                         write!(
@@ -4799,7 +4936,8 @@ No issues found."
                             .transpose()?;
                         output.write_char('\n')
                     })
-                }))
+                });
+                Ok((text, listed(items, None)))
             }
             "label" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
@@ -4807,12 +4945,21 @@ No issues found."
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 log.scope(Some(pid));
                 let labels = self.read(|conn| queries::list_labels(conn, pid))?;
-                Ok(render_response(|output| {
+                let items = labels
+                    .iter()
+                    .map(|label| outputs::ResourceRow {
+                        id: Some(label.id),
+                        name: Some(label.name.clone()),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} labels:", labels.len())?;
                     labels.iter().try_for_each(|label| {
                         writeln!(output, "- {} ({})", label.name, label.color)
                     })
-                }))
+                });
+                Ok((text, listed(items, None)))
             }
             "folder" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
@@ -4820,16 +4967,25 @@ No issues found."
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 log.scope(Some(pid));
                 let folders = self.read(|conn| queries::list_folders(conn, pid))?;
-                Ok(render_response(|output| {
+                let items = folders
+                    .iter()
+                    .map(|folder| outputs::ResourceRow {
+                        id: Some(folder.id),
+                        name: Some(folder.name.clone()),
+                        ..Default::default()
+                    })
+                    .collect();
+                let text = render_response(|output| {
                     writeln!(output, "{} folders:", folders.len())?;
                     folders.iter().try_for_each(|folder| {
                         writeln!(output, "- [{}] {}", folder.id, folder.name)
                     })
-                }))
+                });
+                Ok((text, listed(items, None)))
             }
-            other => Ok(format!(
+            other => Ok(empty(format!(
                 "Unknown type '{other}'. Use project, module, label, folder, page, issue, or plan."
-            )),
+            ))),
         }
     }
 
@@ -6863,6 +7019,9 @@ mod tests_get_issue_batch;
 
 #[cfg(test)]
 mod tests_stale;
+
+#[cfg(test)]
+mod tests_structured;
 
 #[cfg(test)]
 mod tests_agent_reads;
@@ -15363,7 +15522,7 @@ mod tests {
         seed_project(&m, "Unbound", "UNB");
 
         for result in [
-            m.list_issues(Parameters(ListIssuesInput::default())),
+            m.list_issues(Parameters(ListIssuesInput::default())).text,
             m.get_board(Parameters(GetBoardInput::default())),
             m.create_issue(Parameters(CreateIssueInput {
                 title: "No project".into(),
@@ -15376,7 +15535,8 @@ mod tests {
             m.list_resources(Parameters(ListResourcesInput {
                 resource_type: "issue".into(),
                 ..Default::default()
-            })),
+            }))
+            .text,
         ] {
             assert!(result.contains("project required"), "got: {result}");
             assert!(
@@ -15700,6 +15860,7 @@ mod authz_gating_tests {
                 project: Some("MEM".into()),
                 ..Default::default()
             }))
+            .text
         });
         assert!(
             !plans.contains("Leaky"),
@@ -15854,6 +16015,7 @@ mod authz_gating_tests {
                 project: Some("MEM".into()),
                 ..Default::default()
             }))
+            .text
         });
         let nonexistent = as_user(&non_member, || {
             m.search(Parameters(SearchInput {
@@ -15861,6 +16023,7 @@ mod authz_gating_tests {
                 project: Some("NOPE".into()),
                 ..Default::default()
             }))
+            .text
         });
         assert_eq!(
             hidden, nonexistent,
@@ -15875,6 +16038,7 @@ mod authz_gating_tests {
                 project: Some("MEM".into()),
                 ..Default::default()
             }))
+            .text
         });
         assert!(visible.contains("Findable"), "got: {visible}");
         // And an unrestricted caller keeps the helpful resolution error.
@@ -15884,6 +16048,7 @@ mod authz_gating_tests {
                 project: Some("NOPE".into()),
                 ..Default::default()
             }))
+            .text
         });
         assert!(
             admin_miss.contains("not found"),
@@ -15971,6 +16136,7 @@ mod authz_gating_tests {
                 query: "xyzzy".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(!is_forbidden(&denied), "search must not error: {denied}");
         assert!(denied.contains("No results"), "got: {denied}");
@@ -15980,6 +16146,7 @@ mod authz_gating_tests {
                 query: "xyzzy".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(found.contains("1 results"), "got: {found}");
 
@@ -15989,6 +16156,7 @@ mod authz_gating_tests {
                 resource_type: "project".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(
             none_visible.starts_with("0 projects"),
@@ -16000,6 +16168,7 @@ mod authz_gating_tests {
                 resource_type: "project".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(one_visible.starts_with("1 projects"), "got: {one_visible}");
     }
@@ -16049,6 +16218,7 @@ mod authz_gating_tests {
                 limit: Some(1),
                 ..Default::default()
             }))
+            .text
         });
 
         assert!(result.contains("MEM-1"), "got: {result}");
@@ -16080,6 +16250,7 @@ mod authz_gating_tests {
                 project: Some("HID".into()),
                 ..Default::default()
             }))
+            .text
         });
         let unknown = as_user(&viewer, || {
             m.search(Parameters(SearchInput {
@@ -16087,6 +16258,7 @@ mod authz_gating_tests {
                 project: Some("MISSING".into()),
                 ..Default::default()
             }))
+            .text
         });
 
         assert_eq!(hidden, "No results found.");
@@ -16107,6 +16279,7 @@ mod authz_gating_tests {
                 resource_type: "project".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(
             !projects.contains(NO_PROJECTS_NUDGE),
@@ -16119,6 +16292,7 @@ mod authz_gating_tests {
                 query: "anything".into(),
                 ..Default::default()
             }))
+            .text
         });
         assert!(
             !searched.contains(NO_PROJECTS_NUDGE),

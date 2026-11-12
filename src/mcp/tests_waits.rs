@@ -54,6 +54,7 @@ fn list(m: &LificMcp, workable: bool, blocked: bool) -> String {
         blocked: blocked.then_some(true),
         ..Default::default()
     }))
+    .text
 }
 
 fn get(m: &LificMcp) -> String {

@@ -33,14 +33,15 @@ impl LificMcp {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let lines = queue
+        let (lines, items) = queue
             .items
             .iter()
             .take(ISSUE_LINES)
             .map(|item| {
+                let reference = issue_reference(context, &item.identifier);
                 let mut line = format!(
                     "{} | {} | {} | {} | for {}",
-                    issue_reference(context, &item.identifier),
+                    reference,
                     item.status,
                     item.priority,
                     title(&item.title),
@@ -63,12 +64,21 @@ impl LificMcp {
                         .join(", ");
                     let _ = write!(line, " | possible duplicate of {others}");
                 }
-                line
+                let structured = super::item(
+                    "issue",
+                    Some(reference),
+                    &item.identifier,
+                    Some(&item.title),
+                    Some(&item.status.to_string()),
+                );
+                (line, structured)
             })
-            .collect();
+            .unzip();
 
         let total = queue.items.len();
         Ok(Some(Section {
+            key: "human_queue",
+            items,
             heading: format!(
                 "Human queue ({}), every project",
                 count(total, queue.truncated)

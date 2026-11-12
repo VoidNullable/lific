@@ -1,5 +1,6 @@
 mod arguments;
 pub(crate) mod local_file;
+pub(crate) mod outputs;
 pub(crate) mod page_reads;
 #[cfg(test)]
 pub(crate) mod protocol_tests;
@@ -669,6 +670,17 @@ impl LificMcp {
                 (t.name.to_string(), schema)
             })
             .collect()
+    }
+
+    /// The output schema a tool declares on the live surface, if any: the
+    /// twin of [`Self::list_tool_schemas`] for `outputSchema` (LIF-563).
+    pub(crate) fn tool_output_schema(&self, name: &str) -> Option<serde_json::Value> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.output_schema)
+            .map(|schema| serde_json::Value::Object((*schema).clone()))
     }
 }
 

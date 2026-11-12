@@ -45,7 +45,8 @@ async fn reads_as(
                 m.list_issues(Parameters(ListIssuesInput {
                     project: Some("MEM".into()),
                     ..Default::default()
-                })),
+                }))
+                .text,
             ),
             (
                 "get_board",

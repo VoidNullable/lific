@@ -27,7 +27,7 @@ fn tool_input<T: serde::de::DeserializeOwned>(args: Value) -> T {
 /// `list_resources(resource_type="project", ..args)` as `user`.
 fn projects(m: &LificMcp, user: Option<&models::AuthUser>, mut args: Value) -> String {
     args["resource_type"] = json!("project");
-    as_user(user, || m.list_resources(Parameters(tool_input(args))))
+    as_user(user, || m.list_resources(Parameters(tool_input(args))).text)
 }
 
 /// The row for `identifier` in a project listing.
@@ -129,6 +129,7 @@ fn a_single_person_instance_hides_the_roster_and_owns_every_project() {
     let my_issues = || {
         as_user(None, || {
             m.list_issues(Parameters(tool_input(json!({"members": ["me"]}))))
+                .text
         })
     };
 
@@ -530,7 +531,9 @@ fn triage_fixture() -> (
 }
 
 fn issues(m: &LificMcp, user: &models::AuthUser, args: Value) -> String {
-    as_user(Some(user), || m.list_issues(Parameters(tool_input(args))))
+    as_user(Some(user), || {
+        m.list_issues(Parameters(tool_input(args))).text
+    })
 }
 
 /// Issue identifiers in the order a listing prints them.

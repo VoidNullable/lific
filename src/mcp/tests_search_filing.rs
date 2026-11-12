@@ -9,6 +9,7 @@ fn search(m: &LificMcp, query: &str) -> String {
         query: query.into(),
         ..Default::default()
     }))
+    .text
 }
 
 #[test]

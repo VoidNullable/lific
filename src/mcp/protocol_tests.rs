@@ -248,6 +248,50 @@ async fn tool_failures_set_is_error_and_successes_do_not() {
     session.finish().await;
 }
 
+/// LIF-563: the scripted tools declare an `outputSchema` on `tools/list`,
+/// and a call returns `structuredContent` that matches it next to the text.
+/// A failed call carries the error text alone.
+#[tokio::test]
+async fn structured_tools_declare_and_return_structured_content() {
+    let mut session = Session::start();
+    initialized(&mut session).await;
+    let list = session.request(2, "tools/list", json!({})).await;
+    let tools = list["result"]["tools"].as_array().expect("tool list");
+    let schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "list_resources")
+        .and_then(|tool| tool.get("outputSchema"))
+        .cloned()
+        .expect("list_resources declares an output schema");
+
+    let call = session
+        .request(
+            3,
+            "tools/call",
+            json!({"name": "list_resources", "arguments": {"resource_type": "project"}}),
+        )
+        .await;
+    assert_lists_project(&call);
+    let structured = &call["result"]["structuredContent"];
+    crate::mcp::outputs::validate(&schema, structured, "list_resources");
+    assert_eq!(structured["items"][0]["identifier"], "PRO", "{call}");
+    assert_eq!(call["result"]["content"].as_array().unwrap().len(), 1);
+
+    let failed = session
+        .request(
+            4,
+            "tools/call",
+            json!({"name": "list_issues", "arguments": {"project": "NOPE"}}),
+        )
+        .await;
+    assert_eq!(failed["result"]["isError"], true, "{failed}");
+    assert!(
+        failed["result"].get("structuredContent").is_none(),
+        "{failed}"
+    );
+    session.finish().await;
+}
+
 async fn initialized(session: &mut Session) -> Value {
     let init = session
         .request(

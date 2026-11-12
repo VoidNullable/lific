@@ -34,6 +34,7 @@ fn stale(m: &LificMcp, input: ListIssuesInput) -> String {
         stale: Some(true),
         ..input
     }))
+    .text
 }
 
 #[test]
