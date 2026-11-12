@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Work that came out of studying how agents actually use Lific. The briefing becomes the place to start a session: it remembers where you left off, leads with what only a person can do, and points out stale claims and forgotten plans. Issues can move between projects, plans finish themselves, and page history stops dominating the database. Eight migrations run on first start.
+Work that came out of studying how agents actually use Lific. The briefing becomes the place to start a session: it remembers where you left off, leads with what only a person can do, and points out stale claims and forgotten plans. Issues can move between projects, plans finish themselves, page history stops dominating the database, and a new page shows what your agents have been doing. Nine migrations run on first start.
 
 ### Briefing
 
@@ -29,6 +29,11 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Module, label and folder names match regardless of case, and an exact spelling still wins. A name that matches nothing lists the project's valid names, closest first.
 - 32 tools now cost an agent 6,159 tokens of context.
 
+### Agent activity
+
+- A new Agent activity page (`/agents`) shows what connected tools have been doing over the last hour, day or week: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The data comes from `GET /api/agents/activity`.
+- MCP read tools now record which agent read what, so the page can count reads. Records are buffered and written every few seconds, and the server deletes them after 30 days.
+
 ### Storage
 
 - Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.
@@ -36,7 +41,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 
 ### Upgrading
 
-- Eight migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
+- Nine migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
 - `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
 
 ## v2.11.1 (2026-10-13)
