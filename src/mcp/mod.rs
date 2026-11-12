@@ -62,6 +62,49 @@ enum RequestData {
 
 tokio::task_local! {
     static REQUEST_DATA: RequestData;
+    /// The MCP revision the current tool call's client speaks, when known.
+    static CLIENT_PROTOCOL_VERSION: Option<String>;
+}
+
+/// Whether the current tool call's client understands `resource_link`
+/// content, added in MCP 2025-06-18. Unknown means no.
+pub(crate) fn client_supports_resource_links() -> bool {
+    CLIENT_PROTOCOL_VERSION
+        .try_with(|version| {
+            version
+                .as_deref()
+                .is_some_and(|version| version >= "2025-06-18")
+        })
+        .unwrap_or(false)
+}
+
+/// Run `future` as a call from a client speaking `version`.
+pub(crate) async fn with_client_protocol<Fut, R>(version: Option<String>, future: Fut) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    CLIENT_PROTOCOL_VERSION.scope(version, future).await
+}
+
+/// The revision a request's client speaks: its per-request metadata or
+/// handshake, else the `MCP-Protocol-Version` header a stateless HTTP client
+/// sends with every request.
+fn request_protocol_version(
+    context: &rmcp::service::RequestContext<rmcp::service::RoleServer>,
+) -> Option<String> {
+    context
+        .protocol_version()
+        .map(|version| version.to_string())
+        .or_else(|| {
+            context
+                .extensions
+                .get::<axum::http::request::Parts>()?
+                .headers
+                .get("mcp-protocol-version")?
+                .to_str()
+                .ok()
+                .map(str::to_owned)
+        })
 }
 
 /// Most tools use synchronous SQLite calls on Tokio workers. Bound concurrent
@@ -768,6 +811,7 @@ impl ServerHandler for LificMcp {
                 .await
                 .expect("MCP tool semaphore is never closed");
             let scope = self.take_request_scope(&mut context)?;
+            let version = request_protocol_version(&context);
             let tool = request.name.clone();
             let provided: Vec<String> = request
                 .arguments
@@ -777,7 +821,7 @@ impl ServerHandler for LificMcp {
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
-            let result = scope.run(dispatch()).await;
+            let result = with_client_protocol(version, scope.run(dispatch())).await;
             // rmcp reports argument deserialization failures as a failed tool
             // result rather than a protocol error, so the rewrite works on
             // the result text.

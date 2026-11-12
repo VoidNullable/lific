@@ -25,6 +25,7 @@ pub(crate) fn modern_meta() -> Value {
 }
 
 struct Session {
+    _attachments: tempfile::TempDir,
     input: WriteHalf<DuplexStream>,
     output: Lines<BufReader<ReadHalf<DuplexStream>>>,
     server: JoinHandle<()>,
@@ -48,7 +49,10 @@ impl Session {
         }
         let (client, server) = tokio::io::duplex(1 << 16);
         let (reader, writer) = tokio::io::split(server);
-        let service = crate::mcp::LificMcp::for_stdio(pool, None);
+        let attachments = tempfile::tempdir().unwrap();
+        let service = crate::mcp::LificMcp::for_stdio(pool, None).with_attachment_store(
+            crate::storage::AttachmentStore::new(attachments.path().join("attachments")),
+        );
         let server = tokio::spawn(async move {
             service
                 .serve(AsyncRwTransport::new_server(reader, writer))
@@ -60,6 +64,7 @@ impl Session {
         });
         let (reader, input) = tokio::io::split(client);
         Self {
+            _attachments: attachments,
             input,
             output: BufReader::new(reader).lines(),
             server,
@@ -283,7 +288,8 @@ async fn issues_and_pages_are_readable_as_resources() {
         uris,
         [
             "lific://{project}/issues/{identifier}",
-            "lific://{project}/pages/{identifier}"
+            "lific://{project}/pages/{identifier}",
+            "attachment://{id}"
         ]
     );
     let listed = session.request(3, "resources/list", json!({})).await;
@@ -350,5 +356,74 @@ async fn issues_and_pages_are_readable_as_resources() {
         )
         .await;
     assert_eq!(foreign["error"]["code"], -32002, "{foreign}");
+    session.finish().await;
+}
+
+async fn get_pdf_attachment(session: &mut Session) -> Value {
+    use base64::Engine;
+    let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody");
+    let uploaded = session
+        .request(
+            2,
+            "tools/call",
+            json!({"name": "upload_attachment", "arguments": {"filename": "spec.pdf", "content_base64": pdf}}),
+        )
+        .await;
+    assert_ne!(uploaded["result"]["isError"], true, "{uploaded}");
+    session
+        .request(
+            3,
+            "tools/call",
+            json!({"name": "get_attachment", "arguments": {"attachment_id": 1}}),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_2025_06_18_client_gets_a_resource_link_it_can_read() {
+    use base64::Engine;
+    let mut session = Session::start();
+    initialized(&mut session).await;
+    let got = get_pdf_attachment(&mut session).await;
+    let link = &got["result"]["content"][1];
+    assert_eq!(link["type"], "resource_link", "{got}");
+    assert_eq!(link["uri"], "attachment://1");
+    assert_eq!(link["name"], "spec.pdf");
+    assert_eq!(link["mimeType"], "application/pdf");
+    assert_eq!(link["size"], 13);
+
+    let read = session
+        .request(4, "resources/read", json!({"uri": "attachment://1"}))
+        .await;
+    let contents = &read["result"]["contents"][0];
+    assert_eq!(contents["mimeType"], "application/pdf", "{read}");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(contents["blob"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, b"%PDF-1.7\nbody");
+    session.finish().await;
+}
+
+#[tokio::test]
+async fn a_2025_03_26_client_still_gets_the_bytes_inline() {
+    let mut session = Session::start();
+    session
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "legacy-client", "version": "1.0"}
+            }),
+        )
+        .await;
+    session
+        .send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+    let got = get_pdf_attachment(&mut session).await;
+    let embedded = &got["result"]["content"][1];
+    assert_eq!(embedded["type"], "resource", "{got}");
+    assert_eq!(embedded["resource"]["uri"], "attachment://1");
     session.finish().await;
 }

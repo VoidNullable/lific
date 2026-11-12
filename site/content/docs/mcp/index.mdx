@@ -143,14 +143,15 @@ Agent harnesses cut long tool output off without saying so, so the tools that ca
 
 ## Resources
 
-Hosts that let you attach a server resource to a conversation, often with an @-mention, can read issues and pages without the model calling a tool. Lific declares the resources capability with two templates:
+Hosts that let you attach a server resource to a conversation, often with an @-mention, can read issues and pages without the model calling a tool. Lific declares the resources capability with three templates:
 
 | Template | Example | Returns |
 | --- | --- | --- |
 | `lific://{project}/issues/{identifier}` | `lific://APP/issues/APP-42` | The `get_issue` text |
 | `lific://{project}/pages/{identifier}` | `lific://APP/pages/APP-DOC-3` | The `get_page` text |
+| `attachment://{id}` | `attachment://12` | The file: text for text files, base64 otherwise |
 
-`resources/read` renders through the read tools, so it applies the same role checks and size bounds. An identifier from another project, an unknown entity or one you cannot see answers with error `-32002`. `resources/list` returns an empty list on purpose, so a host's picker never pulls in a whole tracker. The multi-instance proxy serves tools only.
+`resources/read` renders issues and pages through the read tools, so it applies the same role checks and size bounds, and reads an attachment behind the same check as `get_attachment`, which links to it. An identifier from another project, an unknown entity or one you cannot see answers with error `-32002`. `resources/list` returns an empty list on purpose, so a host's picker never pulls in a whole tracker. The multi-instance proxy serves tools only.
 
 ## Identity and authorization
 

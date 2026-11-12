@@ -37,6 +37,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 
 ### Images and attachments
 
+- `get_attachment` answers clients on MCP 2025-06-18 or later with a `resource_link` to `attachment://{id}` for files it does not show inline, such as PDFs and archives. The client reads the bytes with `resources/read` when it needs them, behind the same permission check, instead of receiving them up front or getting a download URL it has no credential for. Older clients see no change.
 - `get_attachment` returns SVG images as their XML source, paged by line like text files and marked as untrusted markup, instead of an opaque blob or a download link. Browsers still only download SVG.
 - `upload_attachment` takes a local `path` when the client connects through `lific mcp`, the local server or either proxy. The process reads the file and sends the bytes, so the model no longer has to write a file out as base64, which ran past output limits for any real screenshot and could corrupt it without an error. HTTP MCP refuses `path`, since the server cannot see the agent's files. `filename` defaults to the file's name.
 - Over HTTP MCP, `upload_attachment` with a `size` and no content returns an upload ticket: a one-time URL, valid for 10 minutes, that takes a `PUT` of the file and a ready `curl` command. The bytes skip the model, the upload is checked and linked as the agent that asked for it, and the reply carries the attachment's Markdown. The ticket follows the experimental MCP files extension's upload target shape.

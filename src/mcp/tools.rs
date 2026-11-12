@@ -6292,6 +6292,25 @@ No issues found."
         if let Some(alt) = &attachment.alt_text {
             metadata.push_str(&format!(" alt: \"{}\"", alt.replace(['\n', '\r'], " ")));
         }
+        // A client that understands links reads the bytes on demand, through
+        // the same read gate, instead of receiving them now or getting a URL
+        // it has no credential for.
+        if super::client_supports_resource_links() {
+            let mut link = rmcp::model::Resource::new(
+                super::resources::attachment_uri(attachment.id),
+                attachment.filename.clone(),
+            )
+            .with_mime_type(&attachment.mime);
+            if let Ok(size) = u64::try_from(attachment.size_bytes) {
+                link = link.with_size(size);
+            }
+            return Ok(vec![
+                Content::text(format!(
+                    "{metadata}. Binary; read it through the resource link."
+                )),
+                Content::resource_link(link),
+            ]);
+        }
         match download_url {
             Some(url) => Ok(vec![Content::text(format!(
                 "{metadata}. Binary, download at {url}"
@@ -17257,6 +17276,41 @@ mod authz_gating_tests {
         });
         assert!(allowed.contains("secret.txt"), "viewer read: {allowed}");
         assert!(allowed.contains("classified line one"), "{allowed}");
+    }
+
+    #[test]
+    fn attachment_resource_read_uses_the_attachment_read_gate() {
+        let (m, _lead, maintainer, viewer, non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        as_user(&maintainer, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: Some("MEM".into()),
+                title: "Target".into(),
+                ..Default::default()
+            }))
+        });
+        let receipt = upload_as(&maintainer, &m, Some("MEM-1"));
+        let id: i64 = receipt
+            .strip_prefix("Attachment ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no attachment id in: {receipt}"));
+        let uri = format!("attachment://{id}");
+
+        let denied = as_user(&non_member, || {
+            m.read_lific_resource(&uri).unwrap_err().message.to_string()
+        });
+        assert!(denied.starts_with("Forbidden:"), "{denied}");
+        assert!(!denied.contains("classified"), "{denied}");
+
+        let text = as_user(&viewer, || {
+            let read = m.read_lific_resource(&uri).unwrap();
+            serde_json::to_value(&read).unwrap()["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        });
+        assert!(text.contains("classified line one"), "{text}");
     }
 
     /// An unlinked upload has no project to gate on, so only its uploader (or
