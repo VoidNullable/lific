@@ -315,6 +315,7 @@ pub(crate) fn build_app_with_store(
     let mcp_config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
+        .with_max_request_body_bytes(mcp::MAX_REQUEST_BODY_BYTES)
         .with_allowed_hosts(mcp_allowed_hosts.clone());
 
     // rmcp's `Service::call` clones the service on every request. Keep
@@ -806,6 +807,7 @@ fn build_authless_mcp_router(
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
+        .with_max_request_body_bytes(mcp::MAX_REQUEST_BODY_BYTES)
         .with_allowed_hosts(allowed_hosts);
     let service = Arc::new(StreamableHttpService::new(
         move || Ok(mcp::LificMcp::with_realtime(pool.clone(), realtime.clone())),
@@ -2295,5 +2297,155 @@ mod authless_mcp_tests {
 
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod mcp_body_limit_tests {
+    use super::*;
+    use base64::Engine;
+
+    struct Served {
+        endpoint: String,
+        key: String,
+        pool: db::DbPool,
+        _temp: tempfile::TempDir,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn serve() -> Served {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("lific.db");
+        let pool = db::open(&db_path).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash, is_admin) VALUES (1, 'owner', 'owner@test', 'x', 1)",
+                [],
+            )
+            .unwrap();
+            db::queries::create_project(
+                &conn,
+                &db::models::CreateProject {
+                    name: "Limit project".into(),
+                    identifier: "LIM".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
+        let mut config = Config::default();
+        config.database.path = db_path.clone();
+        config.auth.required = true;
+        config.server.host = "127.0.0.1".into();
+        let trusted_proxies =
+            Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
+        let app = build_app_with_store(
+            &config,
+            pool.clone(),
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            storage::AttachmentStore::from_db_path(&db_path),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        Served {
+            endpoint: format!("http://{address}/mcp"),
+            key,
+            pool,
+            _temp: temp,
+            task,
+        }
+    }
+
+    async fn call(served: &Served, body: &serde_json::Value) -> (StatusCode, String) {
+        let res = reqwest::Client::new()
+            .post(&served.endpoint)
+            .bearer_auth(&served.key)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
+        (status, res.text().await.unwrap())
+    }
+
+    fn tool_call(name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        })
+    }
+
+    fn max_size_png_base64() -> String {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(api::attachments::DEFAULT_MAX_ATTACHMENT_BYTES, 0);
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[tokio::test]
+    async fn a_maximum_size_upload_fits_through_http_mcp() {
+        let served = serve().await;
+        let (status, text) = call(
+            &served,
+            &tool_call(
+                "upload_attachment",
+                serde_json::json!({
+                    "filename": "max.png",
+                    "content_base64": max_size_png_base64(),
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_ne!(value["result"]["isError"], true, "{value}");
+        let count: i64 = served
+            .pool
+            .read()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        served.task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_refused_before_any_tool_runs() {
+        let served = serve().await;
+        let padding = "x".repeat(mcp::MAX_REQUEST_BODY_BYTES);
+        let (status, text) = call(
+            &served,
+            &tool_call(
+                "create_issue",
+                serde_json::json!({
+                    "project": "LIM",
+                    "title": "Should never exist",
+                    "description": padding,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
+        let count: i64 = served
+            .pool
+            .read()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        served.task.abort();
     }
 }

@@ -28,6 +28,12 @@ use crate::storage::AttachmentStore;
 /// HTTP content negotiation used by stdio proxies to carry binary results.
 pub(crate) const INLINE_ATTACHMENT_HEADER: &str = "x-lific-mcp-inline-attachment";
 
+/// Largest `/mcp` request body: a maximum-size `upload_attachment`, whose
+/// file arrives base64-encoded, plus room for the JSON around it. rmcp
+/// refuses anything larger with 413 before parsing it.
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize =
+    crate::api::attachments::DEFAULT_MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 1024 * 1024;
+
 /// Direct-call tests still use process-wide context; production HTTP requests
 /// carry their context through rmcp's request extensions instead.
 #[cfg(test)]

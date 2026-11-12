@@ -41,6 +41,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - `upload_attachment` takes `alt_text`, stored like the web UI's and used as the embed snippet's link text. `get_attachment` and `list_attachments` show alt text and pixel dimensions, so an agent can often skip looking at an image at all.
 - `get_attachment` sends an image larger than 1600 px or 1 MB to the model as a scaled copy, cached beside its thumbnail, instead of the original. A 10 MiB original used to exceed what providers accept and could break the agent's session. `full: true` returns the original when it is within provider limits, and the first line names both sizes.
 - Images uploaded through MCP now record their pixel dimensions and get a thumbnail, as browser uploads always did, so the web UI no longer loads the full original where it shows a preview. Text files uploaded through MCP are searchable like browser uploads.
+- The HTTP `/mcp` endpoint accepts request bodies up to about 14.3 MiB, enough for a maximum-size base64 `upload_attachment`, and refuses larger ones with 413 before any tool runs.
 
 ### Agent activity
 
