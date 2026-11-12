@@ -28,33 +28,33 @@ test("inserting into an empty composer adds no leading break", () => {
   expect(caret).toBe(SNIPPET.length + 1);
 });
 
-test("inserting mid-line breaks onto its own block", () => {
+test("an image inserted mid-line becomes its own paragraph", () => {
   const current = "see this";
   const { text, caret } = insertSnippetAt(current, 8, 8, SNIPPET);
-  expect(text).toBe(`see this\n${SNIPPET}\n`);
+  expect(text).toBe(`see this\n\n${SNIPPET}\n`);
   expect(caret).toBe(text.length);
 });
 
-test("inserting at the start of a fresh line keeps it inline", () => {
+test("an image under a line of text is separated from it by a blank line", () => {
   const current = "intro\n";
   const { text, caret } = insertSnippetAt(current, 6, 6, SNIPPET);
-  expect(text).toBe(`intro\n${SNIPPET}\n`);
+  expect(text).toBe(`intro\n\n${SNIPPET}\n`);
   expect(caret).toBe(text.length);
 });
 
 test("inserting in the middle keeps the tail and lands the caret before it", () => {
   const current = "before\nafter";
   const { text, caret } = insertSnippetAt(current, 7, 7, SNIPPET);
-  expect(text).toBe(`before\n${SNIPPET}\nafter`);
-  expect(caret).toBe(`before\n${SNIPPET}\n`.length);
-  expect(text.slice(caret)).toBe("after");
+  expect(text).toBe(`before\n\n${SNIPPET}\n\nafter`);
+  expect(caret).toBe(`before\n\n${SNIPPET}\n`.length);
+  expect(text.slice(caret)).toBe("\nafter");
 });
 
 test("a selection is replaced, not pushed aside", () => {
   const current = "keep DROP keep";
   const { text, caret } = insertSnippetAt(current, 5, 9, SNIPPET);
-  expect(text).toBe(`keep \n${SNIPPET}\n keep`);
-  expect(text.slice(caret)).toBe(" keep");
+  expect(text).toBe(`keep \n\n${SNIPPET}\n\n keep`);
+  expect(text.slice(caret)).toBe("\n keep");
 });
 
 test("a backwards selection is normalised", () => {
@@ -66,11 +66,11 @@ test("a backwards selection is normalised", () => {
 test("out-of-range offsets clamp to the text instead of throwing", () => {
   const current = "short";
   const { text, caret } = insertSnippetAt(current, 999, 999, SNIPPET);
-  expect(text).toBe(`short\n${SNIPPET}\n`);
+  expect(text).toBe(`short\n\n${SNIPPET}\n`);
   expect(caret).toBe(text.length);
 
   const negative = insertSnippetAt(current, -4, -4, SNIPPET);
-  expect(negative.text).toBe(`${SNIPPET}\nshort`);
+  expect(negative.text).toBe(`${SNIPPET}\n\nshort`);
   expect(negative.caret).toBe(SNIPPET.length + 1);
 });
 
@@ -84,4 +84,27 @@ test("consecutive inserts stack one per line", () => {
   );
   expect(second.text).toBe("![a](/api/attachments/1)\n![b](/api/attachments/2)\n");
   expect(second.caret).toBe(second.text.length);
+});
+
+test("a file link keeps to its own line without paragraph breaks", () => {
+  const link = "[trace.log](/api/attachments/8)";
+  expect(insertSnippetAt("see this", 8, 8, link).text).toBe(`see this\n${link}\n`);
+  expect(insertSnippetAt("before\nafter", 7, 7, link).text).toBe(`before\n${link}\nafter`);
+});
+
+test("a multi-image drop under text lands as one paragraph of images", () => {
+  let state = { text: "Screenshots:\nmore text", caret: "Screenshots:".length };
+  for (const n of [1, 2, 3]) {
+    state = insertSnippetAt(state.text, state.caret, state.caret, `![${n}](/api/attachments/${n})`);
+  }
+  expect(state.text).toBe(
+    "Screenshots:\n\n![1](/api/attachments/1)\n![2](/api/attachments/2)\n![3](/api/attachments/3)\n\nmore text",
+  );
+});
+
+test("an image placed next to other images joins their paragraph", () => {
+  const current = "![a](/api/attachments/1)\n";
+  expect(insertSnippetAt(current, current.length, current.length, SNIPPET).text).toBe(
+    `![a](/api/attachments/1)\n${SNIPPET}\n`,
+  );
 });

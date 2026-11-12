@@ -89,10 +89,16 @@ export function imageOnlyParagraph(tokens: Token[]): Tokens.Image[] | null {
   return images.length > 0 ? images : null;
 }
 
+function figure(img: string, title: string): string {
+  return `<figure class="md-figure">${img}<figcaption>${escapeHtml(title)}</figcaption></figure>`;
+}
+
 /**
  * Route paragraphs made only of images through image layout. A lone image
  * with a title (`![alt](url "Caption")`) renders as a figure whose caption is
- * the title. Every other paragraph renders exactly as marked's default.
+ * the title. Two or more images render as a wrapping row of equal-height
+ * tiles, titled ones captioned. Every other paragraph renders exactly as
+ * marked's default.
  */
 export function withImageParagraphs(
   original: (token: Tokens.Paragraph) => string,
@@ -100,10 +106,14 @@ export function withImageParagraphs(
 ): (token: Tokens.Paragraph) => string {
   return function (this: unknown, token: Tokens.Paragraph): string {
     const images = imageOnlyParagraph(token.tokens);
-    if (images?.length === 1 && images[0].title) {
-      const img = parser().parseInline([images[0]]);
-      return `<figure class="md-figure">${img}<figcaption>${escapeHtml(images[0].title)}</figcaption></figure>\n`;
+    if (!images) return original.call(this, token);
+    const render = (image: Tokens.Image) => {
+      const img = parser().parseInline([image]);
+      return image.title ? figure(img, image.title) : img;
+    };
+    if (images.length === 1) {
+      return images[0].title ? `${render(images[0])}\n` : original.call(this, token);
     }
-    return original.call(this, token);
+    return `<div class="md-image-row">${images.map(render).join("")}</div>\n`;
   };
 }

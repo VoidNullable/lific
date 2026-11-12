@@ -3,6 +3,7 @@
 // signed-in and public scope: the width is a ceiling, a small image is not
 // stretched, a width past the thumbnail edge loads the original, and a lone
 // titled image becomes a figure whose caption wraps at the image edge.
+// Several images alone in a paragraph tile side by side and wrap on a phone.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -56,13 +57,17 @@ const content = [
   "![wide shot](/api/attachments/1)",
   "",
   '![captioned|240](/api/attachments/1 \\"The login dialog after a failed attempt, which wraps\\")',
+  "",
+  "![tile 1](/api/attachments/1)",
+  "![tile 2](/api/attachments/1)",
+  "![tile 3](/api/attachments/1)",
 ].join("\\n");
 const fixture = `<script>
   import Markdown from './lib/Markdown.svelte';
   import { setPublicProject } from './lib/publicScope';
   if (location.search.includes('public')) setPublicProject('TST');
 </script>
-<main style="width: 700px"><Markdown content={"${content}"} /></main>`;
+<main style="max-width: 700px"><Markdown content={"${content}"} /></main>`;
 const originalHtml = await Bun.file(root + "/index.html").text();
 const html = originalHtml.replace(
   '<script type="module" src="/src/main.ts"></script>',
@@ -93,7 +98,7 @@ const server = await createServer({
   ],
 });
 const deadline = setTimeout(() => {
-  console.error("Image width test deadline exceeded");
+  console.error("Image layout test deadline exceeded");
   process.exit(1);
 }, 90_000);
 
@@ -124,13 +129,13 @@ try {
 
   for (const scope of ["signed-in", "public"]) {
     await page.goto(server.resolvedUrls!.local[0] + (scope === "public" ? "?public" : ""));
-    await page.locator(".prose img").nth(4).waitFor();
+    await page.locator(".prose img").nth(7).waitFor();
     await page.waitForFunction(() =>
       Array.from(document.querySelectorAll<HTMLImageElement>(".prose img")).every(
         (img) => img.complete && img.naturalWidth > 0,
       ),
     );
-    const images = await page.$$eval(".prose img", (imgs) =>
+    const images = await page.$$eval(".prose img:not(.md-image-row img)", (imgs) =>
       imgs.map((img) => ({
         alt: img.getAttribute("alt"),
         width: Math.round(img.getBoundingClientRect().width),
@@ -166,9 +171,35 @@ try {
     assert.equal(figure.caption, "The login dialog after a failed attempt, which wraps");
     assert.ok(figure.captionLines >= 2, JSON.stringify(figure));
     console.log(report, JSON.stringify(figure));
+
+    const tiles = async () =>
+      page.$$eval(".prose .md-image-row img", (imgs) =>
+        imgs.map((img) => {
+          const box = img.getBoundingClientRect();
+          return { top: Math.round(box.top), height: Math.round(box.height) };
+        }),
+      );
+    const desktop = await tiles();
+    assert.equal(desktop.length, 3);
+    assert.ok(desktop.every((t) => t.top === desktop[0].top), `desktop ${JSON.stringify(desktop)}`);
+    assert.ok(desktop.every((t) => t.height === desktop[0].height), `desktop ${JSON.stringify(desktop)}`);
+    await page.setViewportSize({ width: 390, height: 2400 });
+    const phone = await tiles();
+    assert.ok(new Set(phone.map((t) => t.top)).size > 1, `phone ${JSON.stringify(phone)}`);
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+      390,
+      "the row must not overflow a phone",
+    );
+    // A tile still opens the lightbox.
+    await page.locator(".prose .md-image-row img").first().click();
+    await page.locator(".attachment-lightbox__img").waitFor();
+    await page.keyboard.press("Escape");
+    await page.setViewportSize({ width: 1200, height: 2400 });
+    console.log(`${scope} row: desktop ${JSON.stringify(desktop)} phone ${JSON.stringify(phone)}`);
   }
   assert.deepEqual(errors, []);
-  console.log("image widths: ok");
+  console.log("image layout: ok");
 } finally {
   clearTimeout(deadline);
   await browser?.close();

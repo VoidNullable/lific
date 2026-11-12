@@ -628,7 +628,8 @@
     for (const img of Array.from(imgs)) {
       // A width (from `![alt|320](url)`) is a ceiling, not a size: a smaller
       // image keeps its natural width instead of being stretched up to it.
-      const width = Number(img.getAttribute("width"));
+      // In a row of images the grid sizes every tile, so a width is ignored.
+      const width = img.closest(".md-image-row") ? 0 : Number(img.getAttribute("width"));
       if (width > 0) {
         img.style.width = "auto";
         img.style.maxWidth = `min(100%, ${width}px)`;
@@ -871,6 +872,25 @@
     color: var(--text-muted);
     font-size: var(--text-caption);
     line-height: 1.4;
+  }
+  /* Two or more images alone in a paragraph: equal-height tiles in a grid
+     that wraps on narrow screens. Each tile still opens the lightbox. */
+  :global(.prose .md-image-row) {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+  }
+  :global(.prose .md-image-row img) {
+    display: block;
+    width: 100%;
+    height: 10rem;
+    max-height: none;
+    object-fit: cover;
+  }
+  :global(.prose .md-image-row figure.md-figure) {
+    width: auto;
+    margin: 0;
   }
   :global(.prose img.attachment-image:hover) {
     filter: brightness(0.96);

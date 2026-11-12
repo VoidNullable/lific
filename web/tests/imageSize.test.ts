@@ -133,3 +133,26 @@ describe("captions", () => {
     expect(imageOnlyParagraph(tokens("just text"))).toBeNull();
   });
 });
+
+describe("image rows", () => {
+  test("two or more images alone in a paragraph render as a row", () => {
+    expect(render("![a](/api/attachments/1)\n![b](/api/attachments/2)")).toBe(
+      '<div class="md-image-row"><img src="/api/attachments/1" alt="a"><img src="/api/attachments/2" alt="b"></div>\n',
+    );
+  });
+
+  test("titled images in a row are captioned", () => {
+    expect(render('![a](x.png "First") ![b](y.png)')).toBe(
+      '<div class="md-image-row"><figure class="md-figure"><img src="x.png" alt="a" title="First"><figcaption>First</figcaption></figure><img src="y.png" alt="b"></div>\n',
+    );
+  });
+
+  test("a paragraph mixing text and images renders as before", () => {
+    const md = "Look:\n![a](x.png)\n![b](y.png)";
+    expect(render(md)).toBe(renderDefault(md));
+  });
+
+  test("a single untitled image renders as before", () => {
+    expect(render("![a](x.png)")).toBe(renderDefault("![a](x.png)"));
+  });
+});

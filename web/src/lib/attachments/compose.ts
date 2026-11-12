@@ -23,14 +23,27 @@ export interface Insertion {
   caret: number;
 }
 
+const IMAGE_LINE_RE = /^\s*(?:!\[[^\]\n]*\]\([^)\n]*\)\s*)+$/;
+
+/** A line that holds only image references. */
+export function isImageLine(line: string): boolean {
+  return IMAGE_LINE_RE.test(line);
+}
+
 /** Pure insertion math: splice `snippet` into `current` over the selection
  *  [start, end), returning the new text and where the caret lands.
  *
- *  A leading newline is added when the caret sits mid-line so an image embed
- *  starts its own block, and a trailing newline always follows so the next
- *  upload in a multi-file drop does not fuse onto this one. Out-of-range or
- *  reversed selections are clamped rather than throwing, because a detached
- *  textarea reports nonsense offsets. */
+ *  A leading newline is added when the caret sits mid-line so an embed starts
+ *  its own line, and a trailing newline always follows so the next upload in a
+ *  multi-file drop does not fuse onto this one. Out-of-range or reversed
+ *  selections are clamped rather than throwing, because a detached textarea
+ *  reports nonsense offsets.
+ *
+ *  An image also gets a blank line between it and any neighbouring line of
+ *  text, so it forms a paragraph of images only. Images inserted one after
+ *  another stay on consecutive lines of that paragraph, which renders them as
+ *  a row. The caret lands before the blank line that follows, where the next
+ *  image of a drop belongs. */
 export function insertSnippetAt(
   current: string,
   selectionStart: number,
@@ -45,9 +58,25 @@ export function insertSnippetAt(
 
   const before = current.slice(0, start);
   const after = current.slice(end);
-  const needsLeadingBreak = before.length > 0 && !before.endsWith("\n");
-  const insertion = `${needsLeadingBreak ? "\n" : ""}${snippet}\n`;
-  return { text: before + insertion + after, caret: before.length + insertion.length };
+  const image = snippet.startsWith("![");
+
+  let lead = "";
+  if (before.length > 0) {
+    const lines = before.split("\n");
+    // Mid-line, the line the caret is on; at a line start, the one above.
+    const neighbour = before.endsWith("\n") ? lines[lines.length - 2] : lines[lines.length - 1];
+    const textNeighbour = neighbour.trim() !== "" && !isImageLine(neighbour);
+    lead = before.endsWith("\n") ? "" : "\n";
+    if (image && textNeighbour) lead += "\n";
+  }
+  const nextLine = after.split("\n")[0];
+  const tail = image && nextLine.trim() !== "" && !isImageLine(nextLine) ? "\n" : "";
+
+  const insertion = `${lead}${snippet}\n`;
+  return {
+    text: before + insertion + tail + after,
+    caret: before.length + insertion.length,
+  };
 }
 
 /** Insert `snippet` into `textarea` at the caret. Thin wrapper over
