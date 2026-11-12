@@ -39,11 +39,11 @@
   aria-label={label}
 >
   {#if max > 0}
-    <path d={area} fill="var(--success)" opacity="0.14" />
+    <path d={area} fill="var(--aa-active)" opacity="0.16" />
     <path
       d={line}
       fill="none"
-      stroke="var(--success)"
+      stroke="var(--aa-active)"
       stroke-width="1.5"
       stroke-linejoin="round"
       stroke-linecap="round"
@@ -55,7 +55,8 @@
       x2={W - PAD}
       y1={H - PAD}
       y2={H - PAD}
-      stroke="var(--border)"
+      stroke="var(--aa-active)"
+      opacity="0.7"
       stroke-width="1.5"
       vector-effect="non-scaling-stroke"
     />

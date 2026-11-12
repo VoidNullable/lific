@@ -9,6 +9,7 @@ import {
   isQuiet,
   labelIndices,
   lastSeenAgo,
+  shortAgo,
   possessive,
   recentVerb,
   statusDetail,
@@ -84,6 +85,14 @@ describe("status copy", () => {
     expect(lastSeenAgo(ago(2 * 3_600_000 + 5 * 60_000), now)).toBe("2 h ago");
     expect(lastSeenAgo(ago(30 * 3_600_000), now)).toBe("yesterday");
     expect(lastSeenAgo(ago(3 * 86_400_000), now)).toBe("3 days ago");
+  });
+
+  test("compact age for the recent feed", () => {
+    expect(shortAgo(ago(20_000), now)).toBe("now");
+    expect(shortAgo(ago(2 * 60_000), now)).toBe("2m");
+    expect(shortAgo(ago(38 * 60_000), now)).toBe("38m");
+    expect(shortAgo(ago(3 * 3_600_000), now)).toBe("3h");
+    expect(shortAgo(ago(2 * 86_400_000), now)).toBe("2d");
   });
 
   test("active agents get no detail line", () => {

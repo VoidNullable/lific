@@ -3,42 +3,48 @@
   // Each item links to its entity through the hash route and navLink, so
   // modified clicks still open a new tab; gone entities render unlinked.
 
-  import { BookOpen, Pencil, Plus, Check } from "lucide-svelte";
+  import { FileText, Pencil, Plus, Check, Eye } from "lucide-svelte";
   import type { AgentActionKind, AgentRecentItem } from "../api";
-  import TimeAgo from "../TimeAgo.svelte";
+  import { now } from "../now.svelte";
   import { navLink } from "../navLink";
-  import { SERIES, recentVerb } from "./activity";
+  import { SERIES, recentVerb, shortAgo } from "./activity";
 
   let {
     items,
     navigate,
   }: { items: AgentRecentItem[]; navigate: (path: string) => void } = $props();
 
-  const ICON = { read: BookOpen, edit: Pencil, create: Plus, close: Check } as const;
+  const ICON = { edit: Pencil, create: Plus, close: Check } as const;
   const COLOR = Object.fromEntries(SERIES.map((s) => [s.key, s.color])) as Record<AgentActionKind, string>;
+
+  function iconFor(item: AgentRecentItem) {
+    if (item.kind === "read") return item.entity_type === "issue" ? Eye : FileText;
+    return ICON[item.kind];
+  }
 </script>
 
 {#snippet body(item: AgentRecentItem)}
-  {@const Icon = ICON[item.kind]}
+  {@const Icon = iconFor(item)}
   <span
-    class="relative z-[1] size-7 shrink-0 rounded-lg border border-[var(--border)] bg-[var(--surface)]
-           flex items-center justify-center"
-    style="color: {COLOR[item.kind]}"
+    class="relative z-[1] size-8 shrink-0 rounded-lg bg-[var(--aa-tile)] flex items-center justify-center"
+    style="color: {item.kind === 'read' ? 'var(--aa-text-2)' : COLOR[item.kind]}"
   >
-    <Icon size={14} strokeWidth={2.25} />
+    <Icon size={16} strokeWidth={2} />
   </span>
-  <span class="min-w-0 flex-1 text-body-sm leading-snug">
-    <span class="block text-[var(--text-muted)]">
-      <span class="font-semibold text-[var(--text)]">{item.agent.display_name}</span>
+  <span class="min-w-0 flex-1 leading-snug pt-0.5">
+    <span class="block text-[0.95rem] text-[var(--aa-text)]">
+      <span class="font-semibold">{item.agent.display_name}</span>
       {recentVerb(item)}
     </span>
-    <span class="block text-[var(--text)] break-words">
+    <span class="block text-[0.95rem] text-[var(--aa-text)] break-words">
       {#if item.identifier}
-        <span class="font-mono text-caption text-[var(--accent)] mr-1">{item.identifier}</span>
+        <span class="font-medium text-[var(--aa-link)] mr-1">{item.identifier}</span>
       {/if}
       {item.title ?? (item.identifier ? "" : "Untitled")}
     </span>
-    <TimeAgo date={new Date(item.at)} class="block text-micro text-[var(--text-faint)] mt-0.5" />
+    <time datetime={item.at} class="block text-[0.85rem] text-[var(--aa-text-2)] mt-1" title={new Date(item.at).toLocaleString()}>
+      {shortAgo(item.at, now())}
+    </time>
   </span>
 {/snippet}
 
@@ -46,18 +52,18 @@
   {#each items as item, i (`${item.at}:${item.kind}:${item.entity_type}:${item.identifier ?? item.title}:${i}`)}
     <li class="relative">
       {#if i < items.length - 1}
-        <span aria-hidden="true" class="absolute left-[1.375rem] top-9 bottom-0 w-px bg-[var(--border)]"></span>
+        <span aria-hidden="true" class="absolute left-4 top-[2.875rem] -bottom-0.5 w-px bg-[var(--aa-line)]"></span>
       {/if}
       {#if item.route}
         <a
           href="#{item.route}"
           use:navLink={navigate}
-          class="flex items-start gap-3 px-2 py-2 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+          class="flex items-start gap-3.5 px-2 py-2.5 -mx-2 rounded-lg hover:bg-[var(--aa-hover)] transition-colors"
         >
           {@render body(item)}
         </a>
       {:else}
-        <div class="flex items-start gap-3 px-2 py-2">
+        <div class="flex items-start gap-3.5 px-2 py-2.5 -mx-2">
           {@render body(item)}
         </div>
       {/if}

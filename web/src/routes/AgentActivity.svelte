@@ -123,183 +123,169 @@
   </div>
 {/snippet}
 
-{#snippet cardHeading(title: string, count?: number)}
-  <div class="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
-    <h2 class="text-body-sm font-semibold text-[var(--text)]">{title}</h2>
+{#snippet sectionHeading(title: string, count?: number)}
+  <div class="flex items-center gap-2.5 mb-4">
+    <h2 class="text-[1.35rem] font-semibold tracking-tight text-[var(--aa-text)]">{title}</h2>
     {#if count !== undefined}
-      <span
-        class="text-micro tabular-nums text-[var(--text-muted)] bg-[var(--bg-subtle)] px-1.5 py-px rounded-full"
-      >
+      <span class="text-[0.8rem] font-medium tabular-nums text-[var(--aa-text)] bg-[var(--aa-tile)] min-w-6 h-6 px-2 rounded-full inline-flex items-center justify-center">
         {count}
       </span>
     {/if}
   </div>
 {/snippet}
 
-<div class="h-full flex flex-col">
-  <div class="flex-1 overflow-y-auto">
-    <div class="agent-activity max-w-[1280px] mx-auto px-6 md:px-8 py-8 md:py-10 flex flex-col gap-6">
-      <!-- ── HEADER + WINDOW ──────────────────────────────── -->
-      <header class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <h1 class="font-display text-title tracking-tight text-[var(--text)] leading-none">Agent activity</h1>
-          <p class="text-body-sm text-[var(--text-muted)] mt-1.5">{WINDOW_SUBTITLE[win]}</p>
-        </div>
-        <div
-          class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
-          role="group"
-          aria-label="Time window"
-        >
-          {#each WINDOWS as w (w)}
-            <button
-              class="px-3 py-1 rounded-md text-caption font-medium tabular-nums transition
-                     {win === w
-                ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-              aria-pressed={win === w}
-              onclick={() => pickWindow(w)}
-            >
-              {w}
-            </button>
+<div class="agent-activity h-full overflow-y-auto">
+  <div class="max-w-[1320px] mx-auto px-6 md:px-10 pt-7 pb-12">
+    <!-- ── HEADER + WINDOW ──────────────────────────────── -->
+    <header class="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[var(--aa-line)]">
+      <div class="min-w-0">
+        <h1 class="text-[1.9rem] font-semibold tracking-tight leading-tight text-[var(--aa-text)]">Agent activity</h1>
+        <p class="text-[0.95rem] text-[var(--aa-text-2)] mt-1">
+          {WINDOW_SUBTITLE[win]}{#if data && !loading && total > 0}<span class="text-[var(--aa-text-3)]">
+              &nbsp;·&nbsp;{total} {total === 1 ? "action" : "actions"} by {busyAgents}
+              {busyAgents === 1 ? "agent" : "agents"}</span
+            >{/if}
+        </p>
+      </div>
+      <div class="inline-flex rounded-lg border border-[var(--aa-line-strong)] overflow-hidden" role="group" aria-label="Time window">
+        {#each WINDOWS as w, i (w)}
+          <button
+            class="px-4 py-1.5 text-[0.95rem] font-medium tabular-nums transition-colors
+                   {i > 0 ? 'border-l border-[var(--aa-line-strong)]' : ''}
+                   {win === w
+              ? 'bg-[var(--aa-primary)] text-white'
+              : 'text-[var(--aa-text-2)] hover:text-[var(--aa-text)] hover:bg-[var(--aa-hover)]'}"
+            aria-pressed={win === w}
+            onclick={() => pickWindow(w)}
+          >
+            {w}
+          </button>
+        {/each}
+      </div>
+    </header>
+
+    {#if loading}
+      <div class="py-6 border-b border-[var(--aa-line)]">
+        <div class="flex gap-5 mb-4">
+          {#each [0, 1, 2, 3] as k (k)}
+            <Skeleton variant="bar" class="h-3.5 w-14" />
           {/each}
         </div>
-      </header>
-
-      {#if loading}
-        <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] p-5">
-          <div class="flex gap-4 mb-4">
-            {#each [0, 1, 2, 3] as k (k)}
-              <Skeleton variant="bar" class="h-3 w-14" />
-            {/each}
-          </div>
-          <Skeleton variant="block" class="h-[200px] w-full rounded-lg" />
-        </div>
-        <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
-          <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
-            <div class="px-4 py-3 border-b border-[var(--border)]">
-              <Skeleton variant="bar" class="h-3.5 w-20" />
+        <Skeleton variant="block" class="h-[236px] w-full rounded-lg" />
+      </div>
+      <div class="pt-6 flex flex-col gap-5">
+        {#each [0, 1, 2] as row (row)}
+          <div class="flex items-center gap-4">
+            <Skeleton variant="circle" class="size-11 rounded-xl" />
+            <div class="flex flex-col gap-2 flex-1">
+              <Skeleton variant="bar" class="h-3.5 w-32" />
+              <Skeleton variant="bar" class="h-3 w-20" />
             </div>
-            {#each [0, 1, 2] as row (row)}
-              <div class="flex items-center gap-3 px-4 py-4 border-b border-[var(--border)] last:border-b-0">
-                <Skeleton variant="circle" class="size-9 rounded-lg" />
-                <div class="flex flex-col gap-2 flex-1">
-                  <Skeleton variant="bar" class="h-3 w-28" />
-                  <Skeleton variant="bar" class="h-3 w-16" />
-                </div>
-                <Skeleton variant="bar" class="h-6 w-28 hidden sm:block" />
-                <Skeleton variant="bar" class="h-6 w-48" />
-              </div>
-            {/each}
+            <Skeleton variant="bar" class="h-8 w-72" />
           </div>
-          <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] p-4 flex flex-col gap-4">
-            <Skeleton variant="bar" class="h-3.5 w-16" />
-            {#each [0, 1, 2, 3] as row (row)}
-              <div class="flex gap-3">
-                <Skeleton variant="circle" class="size-7 rounded-lg" />
-                <div class="flex flex-col gap-2 flex-1">
-                  <Skeleton variant="bar" class="h-3 w-32" />
-                  <Skeleton variant="bar" class="h-3 w-full" />
-                </div>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {:else if error || !data}
+        {/each}
+      </div>
+    {:else if error || !data}
+      <div class="pt-10">
         <ErrorState title="Couldn't load agent activity" message={error}>
           <button
-            class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+            class="text-[0.9rem] font-medium text-white bg-[var(--aa-primary)] px-3.5 py-1.5 rounded-md hover:opacity-90 transition-opacity"
             onclick={() => load("initial")}
           >
             Try again
           </button>
         </ErrorState>
-      {:else if data.agents.length === 0}
-        <section
-          class="rounded-xl bg-[var(--surface)] border border-[var(--border)] px-6 py-14
-                 flex flex-col items-center text-center gap-3"
-          data-testid="agents-empty"
+      </div>
+    {:else if data.agents.length === 0}
+      <section class="py-16 flex flex-col items-center text-center gap-3" data-testid="agents-empty">
+        <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.18} />
+        <h2 class="text-[1.35rem] font-semibold text-[var(--aa-text)]">No agents yet</h2>
+        <p class="text-[0.95rem] text-[var(--aa-text-2)] max-w-[46ch] leading-relaxed">
+          Agents show up here once a connected tool reads or changes something in Lific.
+          Connect one in Settings, under Connected tools.
+        </p>
+        <a
+          href="#/settings"
+          use:navLink={navigate}
+          class="mt-1 inline-flex items-center gap-1.5 text-[0.9rem] text-[var(--aa-text)]
+                 border border-[var(--aa-line-strong)] px-3.5 py-1.5 rounded-md hover:bg-[var(--aa-hover)] transition-colors"
         >
-          <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.18} />
-          <h2 class="font-display text-heading text-[var(--text)]">No agents yet</h2>
-          <p class="text-body text-[var(--text-muted)] max-w-[46ch] leading-relaxed">
-            Agents show up here once a connected tool reads or changes something in Lific.
-            Connect one in Settings, under Connected tools.
-          </p>
-          <a
-            href="#/settings"
-            use:navLink={navigate}
-            class="mt-1 inline-flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]
-                   hover:text-[var(--text)] border border-[var(--border)] px-3 py-1.5 rounded-md
-                   hover:bg-[var(--bg-subtle)] transition-colors"
-          >
-            <SettingsIcon size={14} /> Open Settings
-          </a>
+          <SettingsIcon size={15} /> Open Settings
+        </a>
+      </section>
+    {:else}
+      <div class="transition-opacity {switching ? 'opacity-60' : ''}" aria-busy={switching}>
+        <!-- ── CHART ─────────────────────────────────────── -->
+        <section class="py-6 border-b border-[var(--aa-line)] min-w-0">
+          <ActivityChart buckets={data.buckets} win={data.window} bucketSeconds={data.bucket_seconds} />
         </section>
-      {:else}
-        <div class="flex flex-col gap-6 transition-opacity {switching ? 'opacity-60' : ''}" aria-busy={switching}>
-          <!-- ── CHART ─────────────────────────────────────── -->
-          <section class="rounded-xl bg-[var(--surface)] border border-[var(--border)] p-5 min-w-0">
-            <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-3">
-              <h2 class="text-body-sm font-semibold text-[var(--text)]">Actions</h2>
-              <p class="text-caption text-[var(--text-faint)] tabular-nums">
-                {#if total === 0}
-                  None in {WINDOW_PHRASE[data.window]}
-                {:else}
-                  {total} {total === 1 ? "action" : "actions"} by {busyAgents}
-                  {busyAgents === 1 ? "agent" : "agents"}
-                {/if}
-              </p>
-            </div>
-            <ActivityChart buckets={data.buckets} win={data.window} bucketSeconds={data.bucket_seconds} />
+
+        <!-- ── AGENTS + RECENT ───────────────────────────── -->
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+          <section class="pt-6 xl:pr-8 min-w-0" data-testid="agent-list">
+            {@render sectionHeading("Agents", data.agents.length)}
+            <AgentList agents={data.agents} win={data.window} />
           </section>
 
-          <!-- ── AGENTS + RECENT ───────────────────────────── -->
-          <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
-            <section
-              class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden min-w-0"
-              data-testid="agent-list"
-            >
-              {@render cardHeading("Agents", data.agents.length)}
-              <AgentList agents={data.agents} win={data.window} />
-            </section>
-
-            <section
-              class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden min-w-0"
-              data-testid="agent-recent"
-            >
-              {@render cardHeading("Recent")}
-              {#if data.recent.length === 0}
-                <p class="px-4 py-4 text-body-sm text-[var(--text-muted)]">
-                  Nothing to list from {WINDOW_PHRASE[data.window]}.
-                </p>
-              {:else}
-                <div class="p-2">
-                  <RecentFeed items={data.recent} {navigate} />
-                </div>
-              {/if}
-            </section>
-          </div>
+          <section
+            class="pt-6 xl:pl-8 xl:border-l border-[var(--aa-line)] min-w-0 max-xl:mt-6"
+            data-testid="agent-recent"
+          >
+            {@render sectionHeading("Recent")}
+            {#if data.recent.length === 0}
+              <p class="text-[0.95rem] text-[var(--aa-text-2)]">Nothing to list from {WINDOW_PHRASE[data.window]}.</p>
+            {:else}
+              <RecentFeed items={data.recent} {navigate} />
+            {/if}
+          </section>
         </div>
-      {/if}
-    </div>
+      </div>
+    {/if}
   </div>
 </div>
 
 <style>
-  /* Series colors for the chart, legend and timeline icons. Deliberately
-     not derived from --accent, which follows the user's accent theme:
-     Read is a quiet neutral (it dominates the counts), Edit blue, Create
-     green, Close amber so it never reads as a shade of Edit. */
+  /* Page-local palette, deliberately not built from the app's theme tokens:
+     the page follows its own design until the app-wide tokens are reworked.
+     Close is amber so it never reads as a shade of Edit's blue. */
   .agent-activity {
-    --agent-read: #a3aea8;
-    --agent-edit: #3b6fd8;
-    --agent-create: #1f9d55;
-    --agent-close: #d98a0b;
+    --aa-text: #161a18;
+    --aa-text-2: #5d6762;
+    --aa-text-3: #9aa39e;
+    --aa-line: rgba(0, 0, 0, 0.09);
+    --aa-line-strong: rgba(0, 0, 0, 0.14);
+    --aa-grid: rgba(0, 0, 0, 0.06);
+    --aa-axis: rgba(0, 0, 0, 0.2);
+    --aa-tile: rgba(0, 0, 0, 0.055);
+    --aa-hover: rgba(0, 0, 0, 0.035);
+    --aa-pop: #ffffff;
+    --aa-primary: #4f5ae0;
+    --aa-link: #4652d6;
+    --aa-active: #16a34a;
+    --aa-idle: #d97706;
+    --agent-read: #aab5af;
+    --agent-edit: #4f5ee8;
+    --agent-create: #22b55a;
+    --agent-close: #ee8a0b;
   }
   :global(.dark) .agent-activity {
-    --agent-read: #6f7b75;
-    --agent-edit: #6b9bf0;
-    --agent-create: #4ade80;
-    --agent-close: #f5b53d;
+    --aa-text: #eef1ef;
+    --aa-text-2: #a3aca7;
+    --aa-text-3: #6c7570;
+    --aa-line: rgba(255, 255, 255, 0.09);
+    --aa-line-strong: rgba(255, 255, 255, 0.14);
+    --aa-grid: rgba(255, 255, 255, 0.07);
+    --aa-axis: rgba(255, 255, 255, 0.22);
+    --aa-tile: rgba(255, 255, 255, 0.075);
+    --aa-hover: rgba(255, 255, 255, 0.045);
+    --aa-pop: #1d2220;
+    --aa-primary: #4f5ae0;
+    --aa-link: #8f98ff;
+    --aa-active: #4ade80;
+    --aa-idle: #f5c542;
+    --agent-read: #6e7d76;
+    --agent-edit: #5b6cf0;
+    --agent-create: #5ee07a;
+    --agent-close: #f5a524;
   }
 </style>

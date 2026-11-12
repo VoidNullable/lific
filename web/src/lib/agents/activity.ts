@@ -143,6 +143,20 @@ export function lastSeenAgo(iso: string, nowMs: number): string {
   return new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+/** Compact age for the Recent feed: "now", "2m", "38m", "3h", "2d", then a date. */
+export function shortAgo(iso: string, nowMs: number): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const mins = Math.floor((nowMs - t) / 60_000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 /** Secondary line under the status pill. Active agents need none. */
 export function statusDetail(status: AgentStatus, lastSeen: string | null, nowMs: number): string | null {
   if (status === "active") return null;
