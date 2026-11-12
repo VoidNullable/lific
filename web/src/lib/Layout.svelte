@@ -47,6 +47,7 @@
   import { isTypingContext } from "./shortcuts";
   import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "./autoRefresh.svelte";
+  import { loadActiveAgentCount } from "./agents/activeCount"; // LIF-544
   import {
     clampSidebarWidth,
     loadSidebarWidthPreference,
@@ -221,14 +222,18 @@
   // caps each group at 50, hence the "50+" display.
   let inboxCount = $state<number | null>(null);
   let assignedCount = $state<number | null>(null);
+  // LIF-544: agents with an action in the last 10 minutes.
+  let activeAgents = $state<number | null>(null);
   let countsAt = 0;
   let countsRequest = 0;
   async function refreshCounts(force = false) {
     if (!force && Date.now() - countsAt < 15_000) return;
     countsAt = Date.now();
     const request = ++countsRequest;
-    const res = await getAttention();
-    if (request !== countsRequest || !res.ok) return;
+    const [res, agents] = await Promise.all([getAttention(), loadActiveAgentCount()]);
+    if (request !== countsRequest) return;
+    activeAgents = agents;
+    if (!res.ok) return;
     const { assigned, human, waiting } = res.data;
     inboxCount = new Set([...assigned, ...human, ...waiting].map((i) => i.id)).size;
     assignedCount = assigned.length;
@@ -615,6 +620,8 @@
   $effect(() =>
     startAutoRefresh({
       refresh: () => refreshCounts(true),
+      // Agent status decays with time alone, and reads emit no events.
+      intervalMs: 60_000,
       realtimeDebounceMs: 1_000,
       realtimeMaxWaitMs: 5_000,
       shouldRefresh: (event) =>
@@ -1026,7 +1033,7 @@
           {@render workspaceItem("/", "Home", Home, null, "plain", "home")}
           {@render workspaceItem("/inbox", "Inbox", Inbox, inboxCount, "accent", "inbox")}
           {@render workspaceItem("/assigned", "Assigned to me", UserCheck, assignedCount, "plain", "assigned")}
-          {@render workspaceItem("/agents", "Agent activity", Bot, null, "plain", "agents")}
+          {@render workspaceItem("/agents", "Agent activity", Bot, activeAgents, "plain", "agents")}
         </div>
 
         <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
@@ -1395,7 +1402,7 @@
           {@render railLink("/", "Home", Home, route === "/")}
           {@render railLink("/inbox", "Inbox", Inbox, route === "/inbox", inboxCount)}
           {@render railLink("/assigned", "Assigned to me", UserCheck, route === "/assigned")}
-          {@render railLink("/agents", "Agent activity", Bot, route === "/agents")}
+          {@render railLink("/agents", "Agent activity", Bot, route === "/agents", activeAgents)}
           <hr class="rail-rule" />
           {#each [...groups.flatMap((g) => projectsIn(g)), ...ungrouped] as project (project.id)}
             {@const current = activeProject?.toLowerCase() === project.identifier.toLowerCase()}
