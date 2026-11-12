@@ -621,6 +621,26 @@ impl LificMcp {
     }
 }
 
+/// The prefix every tool failure's text starts with (`tools::error_response`).
+pub(crate) const TOOL_ERROR_PREFIX: &str = "Error: ";
+
+/// Tools return their failures as text starting with `Error: `, which rmcp
+/// wraps as a successful result. Flag those as `isError: true` so hosts can
+/// tell a failed call from a successful one, leaving the text untouched. No
+/// successful tool output starts with that prefix: each opens with a header
+/// line or frontmatter.
+fn mark_tool_error(mut result: rmcp::model::CallToolResult) -> rmcp::model::CallToolResult {
+    let failed = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .is_some_and(|text| text.text.starts_with(TOOL_ERROR_PREFIX));
+    if failed {
+        result.is_error = Some(true);
+    }
+    result
+}
+
 impl ServerHandler for LificMcp {
     fn get_info(&self) -> ServerConfig {
         // No protocol pin: rmcp negotiates per client. An `initialize` naming
@@ -721,10 +741,9 @@ impl ServerHandler for LificMcp {
                         .tool_router
                         .get(&tool)
                         .map(|tool| arguments::ToolParameters::from_schema(&tool.input_schema));
-                    Ok(
-                        arguments::explain_unknown_parameter(&tool, params, &provided, result)
-                            .into(),
-                    )
+                    let result =
+                        arguments::explain_unknown_parameter(&tool, params, &provided, result);
+                    Ok(mark_tool_error(result).into())
                 }
                 other => other,
             }

@@ -116,7 +116,7 @@ Lists return one page, not the whole set, because a single comment can be 256 Ki
 
 ## Read the error text
 
-A failed call is a tool result whose text begins with `Error:`, not a protocol error, and the text says what to fix. Some you will meet:
+A failed call is a tool result flagged `isError: true` whose text begins with `Error:`, not a protocol error, and the text says what to fix. Some you will meet:
 
 - `project required (this session has no repository binding)`: you omitted `project` on a tool that needs it, and the session is not bound.
 - `old_string matches N locations`: add surrounding context, or pass `replace_all=true`.

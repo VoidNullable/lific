@@ -10,7 +10,7 @@ The short version:
 - The HTTP endpoint, `https://your-server.example/mcp`, authenticates every request with a bearer API key or an OAuth 2.1 access token.
 - Local stdio, `lific mcp`, has no transport authentication. The agent's identity is the API key in `LIFIC_TOKEN`, checked again before every tool call.
 - Remote stdio, `lific mcp --remote --url <BASE_URL>`, is a local command that forwards to a server's HTTP endpoint with a bearer credential.
-- A tool that cannot do what you asked returns text starting with `Error:`, not a protocol error. A parameter the tool does not declare is refused before it runs, with a suggestion for the name you probably meant.
+- A tool that cannot do what you asked returns a failed tool result (`isError: true`) whose text starts with `Error:`, not a protocol error. A parameter the tool does not declare is refused before it runs, with a suggestion for the name you probably meant.
 - Lists are paged. When more rows exist, the output ends with the `offset` to pass on the next call.
 - Clients on MCP 2026-07-28 can skip `initialize` and start with `server/discover`; older clients keep the `initialize` handshake. Both work on every transport.
 
@@ -113,15 +113,16 @@ These hold on every transport.
 
 ### Failures are text
 
-A tool that cannot do what you asked returns an ordinary result whose text starts with `Error:`, followed by what went wrong: an unknown identifier, a missing role, an ambiguous edit, a stale `expected_seq`. It is not a JSON-RPC error, so read the text and correct the call. Database and internal faults are reported only as `Error: internal server error`; the detail goes to the server log.
+A tool that cannot do what you asked returns a tool result flagged `isError: true`, whose text starts with `Error:` followed by what went wrong: an unknown identifier, a missing role, an ambiguous edit, a stale `expected_seq`. It is not a JSON-RPC error, so read the text and correct the call. Database and internal faults are reported only as `Error: internal server error`; the detail goes to the server log.
 
-Some failures happen before a tool runs, and those are JSON-RPC errors:
+Some failures happen before a tool runs:
 
 - Arguments that do not fit the tool's schema return a failed tool result (`isError: true`) and the tool does not run: a missing required parameter, a wrong type, or a parameter the tool does not declare. Unknown parameters are refused on every tool, nested objects included, so a misspelling cannot quietly change the answer. The message names the unknown key, suggests the closest valid name, and lists the valid ones, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``
-- The remote stdio proxy returns `-32603` when it cannot reach the server.
-- The multi-instance proxy returns `-32602` for a call it cannot route.
+- A revoked stdio credential is refused with a failed tool result telling the agent to reconnect.
+- The remote stdio proxy returns JSON-RPC error `-32603` when it cannot reach the server.
+- The multi-instance proxy returns JSON-RPC error `-32602` for a call it cannot route.
 
-A revoked stdio credential is the one tool result flagged `isError: true`. An unrecognized `resource_type` or `action` in `list_resources`, `manage_resource` or `delete` returns a line naming the accepted values.
+An unrecognized `resource_type` or `action` in `list_resources`, `manage_resource` or `delete` returns a line naming the accepted values.
 
 ### Lists are paged
 

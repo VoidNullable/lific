@@ -178,7 +178,7 @@ fn bounded_comment_response(
 /// MCP tool response has always carried, so the wrappers stay one-liners and
 /// no failure path can drift from the shape agents parse.
 fn error_response(error: String) -> String {
-    format!("Error: {error}")
+    format!("{}{error}", super::TOOL_ERROR_PREFIX)
 }
 
 /// `get_issue`'s comment-trail mode, refused by name when it is not one of

@@ -29,6 +29,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Module, label and folder names match regardless of case, and an exact spelling still wins. A name that matches nothing lists the project's valid names, closest first.
 - The MCP server runs on rmcp 3, which implements MCP 2026-07-28. Newer clients can start with `server/discover` and send their version with each request instead of initializing, over stdio and HTTP alike; older clients keep the `initialize` handshake and get the protocol version they ask for, rather than a fixed `2025-03-26`. `lific mcp --remote` passes the newer revision's required HTTP headers through for stdio clients.
 - A misspelled or missing tool parameter now comes back as a failed tool result (`isError: true`) instead of a JSON-RPC `-32602` error, so clients show the "Did you mean" hint to the model rather than treating it as a broken server.
+- A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
 - 32 tools now cost an agent 6,031 tokens of context.
 

@@ -212,3 +212,32 @@ async fn a_bare_discovery_probe_is_answered_and_the_session_survives() {
     assert_lists_tools(&list);
     session.finish().await;
 }
+
+/// A failed tool reports `isError: true` with its `Error: ` text unchanged,
+/// and a successful one reports `isError: false`.
+#[tokio::test]
+async fn tool_failures_set_is_error_and_successes_do_not() {
+    let mut session = Session::start();
+    let meta = modern_meta();
+    let missing = session
+        .request(
+            1,
+            "tools/call",
+            json!({"_meta": meta, "name": "get_issue", "arguments": {"identifier": "PRO-999"}}),
+        )
+        .await;
+    assert_eq!(missing["result"]["isError"], true, "{missing}");
+    let text = missing["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Error: "), "{text}");
+    assert!(text.contains("PRO-999"), "{text}");
+
+    let listed = session
+        .request(
+            2,
+            "tools/call",
+            json!({"_meta": meta, "name": "list_resources", "arguments": {"resource_type": "project"}}),
+        )
+        .await;
+    assert_eq!(listed["result"]["isError"], false, "{listed}");
+    session.finish().await;
+}
