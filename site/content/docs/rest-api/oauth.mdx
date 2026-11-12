@@ -65,7 +65,7 @@ The consent form's submission. Form fields: the request parameters above, `csrf_
 
 The form token is tied to the session and to the exact request, and expires after 10 minutes; a mismatch is an HTML `403`. A session older than 15 minutes gets a page explaining how to sign in again; nothing is connected.
 
-On approval, the browser is redirected to `redirect_uri` with `code` and `state`. The code works once, for 10 minutes. On denial, it is redirected with `error=access_denied` and `state`, and no code exists.
+On approval, the browser is redirected to `redirect_uri` with `code`, `state` and `iss`. The code works once, for 10 minutes. On denial, it is redirected with `error=access_denied`, `state` and `iss`, and no code exists. `iss` is the issuer from the server metadata (RFC 9207), which the metadata advertises with `authorization_response_iss_parameter_supported`, so a client using several authorization servers can check which one answered.
 
 ## Device login
 

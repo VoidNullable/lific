@@ -372,7 +372,8 @@ async fn authorization_server_metadata(
         // the metadata at its word and sent a secret would have it silently
         // ignored, which reads as "authenticated" when it isn't.
         "token_endpoint_auth_methods_supported": ["none"],
-        "code_challenge_methods_supported": ["S256"]
+        "code_challenge_methods_supported": ["S256"],
+        "authorization_response_iss_parameter_supported": true
     }))
 }
 
@@ -1002,6 +1003,14 @@ impl ApprovalRefusal {
     }
 }
 
+/// RFC 9207: name the issuer on every authorization response, the same one
+/// the metadata advertises, so a client talking to several authorization
+/// servers can tell which one answered (mix-up attack defense).
+fn push_issuer(redirect_url: &mut String, oauth: &OAuthState, headers: &HeaderMap) {
+    let issuer = effective_issuer(oauth, headers);
+    redirect_url.push_str(&format!("&iss={}", urlencoding::encode(&issuer)));
+}
+
 async fn authorize_approve(
     State(oauth): State<OAuthState>,
     headers: axum::http::HeaderMap,
@@ -1111,6 +1120,7 @@ async fn authorize_approve(
                 let encoded = urlencoding::encode(state);
                 redirect_url.push_str(&format!("&state={encoded}"));
             }
+            push_issuer(&mut redirect_url, &oauth, &headers);
             info!(client_id = %form.client_id, "OAuth authorization denied");
             return Redirect::to(&redirect_url).into_response();
         }
@@ -1198,6 +1208,7 @@ async fn authorize_approve(
         let encoded = urlencoding::encode(state);
         redirect_url.push_str(&format!("&state={encoded}"));
     }
+    push_issuer(&mut redirect_url, &oauth, &headers);
 
     info!(client_id = %form.client_id, "OAuth authorization approved");
     Redirect::to(&redirect_url).into_response()
@@ -2893,9 +2904,13 @@ mod tests {
     /// `server.public_url` is UNSET: bind-derived issuer, not explicit.
     /// Exercises the LIF-287 Host-derived issuer fallback.
     fn test_oauth_app_implicit_issuer() -> Router {
+        test_oauth_app_implicit_issuer_with_db().0
+    }
+
+    fn test_oauth_app_implicit_issuer_with_db() -> (Router, DbPool) {
         let db = crate::db::open_memory().expect("test db");
         let state = OAuthState {
-            db,
+            db: db.clone(),
             issuer: "http://127.0.0.1:3456".into(),
             issuer_is_explicit: false,
             allowed_hosts: test_allowed_hosts(),
@@ -2905,7 +2920,104 @@ mod tests {
             )),
             trusted_proxies: default_trusted_proxies(),
         };
-        router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242))))
+        (
+            router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
+            db,
+        )
+    }
+
+    /// Approve or deny a consent as a signed-in user, presenting `host`, and
+    /// return the redirect, next to the issuer the metadata advertises for
+    /// the same host.
+    async fn consent_redirect_and_issuer(
+        app: &Router,
+        db: &DbPool,
+        host: &str,
+        decision: &str,
+    ) -> (String, String) {
+        let session_token = create_test_session(db);
+        let client_id = register_client_helper(app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: Some("st"),
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session_token);
+        let body = format!(
+            "client_id={client_id}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&state=st&csrf_token={}&tool=claude-code&decision={decision}",
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("host", host)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_redirection(), "{}", resp.status());
+        let location = resp.headers()["location"].to_str().unwrap().to_owned();
+        let metadata = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .header("host", host)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = metadata.into_body().collect().await.unwrap().to_bytes();
+        let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            metadata["authorization_response_iss_parameter_supported"],
+            true
+        );
+        (location, metadata["issuer"].as_str().unwrap().to_owned())
+    }
+
+    fn iss_of(location: &str) -> String {
+        let query = location.split_once('?').unwrap().1;
+        let iss = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("iss="))
+            .unwrap_or_else(|| panic!("no iss in {location}"));
+        urlencoding::decode(iss).unwrap().into_owned()
+    }
+
+    #[tokio::test]
+    async fn authorization_responses_name_the_advertised_issuer() {
+        // Behind a proxy: public_url makes the issuer explicit.
+        for decision in ["approve", "deny"] {
+            let (app, db) = test_oauth_app();
+            let (location, issuer) =
+                consent_redirect_and_issuer(&app, &db, "lific.example.net", decision).await;
+            assert_eq!(issuer, "https://example.com");
+            assert_eq!(iss_of(&location), issuer, "{location}");
+        }
+
+        // Locally: the issuer follows the allowlisted Host the client dialed.
+        for decision in ["approve", "deny"] {
+            let (app, db) = test_oauth_app_implicit_issuer_with_db();
+            let (location, issuer) =
+                consent_redirect_and_issuer(&app, &db, "localhost:3456", decision).await;
+            assert_eq!(issuer, "http://localhost:3456");
+            assert_eq!(iss_of(&location), issuer, "{location}");
+        }
     }
 
     /// Register a client, returning the client_id.

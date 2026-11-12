@@ -35,6 +35,10 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Issues and pages are MCP resources: `lific://APP/issues/APP-42` and `lific://APP/pages/APP-DOC-3` read as the same text `get_issue` and `get_page` return, with the same role checks, so hosts that attach resources by @-mention can pull them into context. `resources/list` stays empty so a picker never lists a whole tracker.
 - 32 tools now cost an agent 6,913 tokens of context.
 
+### OAuth
+
+- Authorization responses carry `iss`, the issuer the metadata advertises, on approval and denial alike, and the metadata says so with `authorization_response_iss_parameter_supported`. Clients that connect to several authorization servers use it to reject a response from the wrong one.
+
 ### Images and attachments
 
 - `get_attachment` answers clients on MCP 2025-06-18 or later with a `resource_link` to `attachment://{id}` for files it does not show inline, such as PDFs and archives. The client reads the bytes with `resources/read` when it needs them, behind the same permission check, instead of receiving them up front or getting a download URL it has no credential for. Older clients see no change.
