@@ -20,6 +20,9 @@
   import ProjectActivity from "./routes/ProjectActivity.svelte";
   import Insights from "./routes/Insights.svelte";
   import DependencyGraph from "./routes/DependencyGraph.svelte";
+  import Inbox from "./routes/Inbox.svelte";
+  import Assigned from "./routes/Assigned.svelte";
+  import AgentActivity from "./routes/AgentActivity.svelte";
   import PublicLayout from "./lib/PublicLayout.svelte"; // LIF-471
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
@@ -485,6 +488,9 @@
     // redirect onto the canonical routes above.
     | { type: "public-redirect"; to: string }
     | { type: "app"; page: "home" }
+    | { type: "app"; page: "inbox" }
+    | { type: "app"; page: "assigned" }
+    | { type: "app"; page: "agents" }
     | { type: "app"; page: "settings" }
     | { type: "app"; page: "instance-settings" }
     | { type: "app"; page: "project-new" }
@@ -567,6 +573,17 @@
     // LIF-237: bare root — the "My Work" home dashboard.
     if (r === "/") {
       return { type: "app", page: "home" };
+    }
+    // Workspace views: lowercase and single-segment, so they can never
+    // collide with a project route, which always has a second segment.
+    if (r === "/inbox") {
+      return { type: "app", page: "inbox" };
+    }
+    if (r === "/assigned") {
+      return { type: "app", page: "assigned" };
+    }
+    if (r === "/agents") {
+      return { type: "app", page: "agents" };
     }
     if (r === "/settings") {
       return { type: "app", page: "settings" };
@@ -888,6 +905,12 @@
         {realtimeActivityReady}
         {realtimeActivityRevision}
       />
+    {:else if parsed.page === "inbox"}
+      <Inbox {navigate} />
+    {:else if parsed.page === "assigned"}
+      <Assigned {navigate} />
+    {:else if parsed.page === "agents"}
+      <AgentActivity {navigate} />
     {:else if parsed.page === "settings"}
       <Settings {navigate} />
     {:else if parsed.page === "instance-settings"}
