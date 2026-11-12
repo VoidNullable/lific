@@ -1,3 +1,4 @@
+pub mod agent_reads;
 pub mod migrate;
 pub mod models;
 pub mod page_audit;
@@ -34,6 +35,9 @@ pub struct DbPool {
     /// share the ordinary export budget would let one archive starve every
     /// issue/page export on the instance.
     archive_slots: Arc<Semaphore>,
+    /// LIF-541: MCP reads waiting to be written to `agent_reads`. Shared by
+    /// every clone; see [`agent_reads`] for why reads are buffered.
+    agent_reads: agent_reads::ReadBuffer,
 }
 
 /// RAII guard that returns the read connection to the pool on drop.
@@ -247,6 +251,7 @@ pub fn open_memory() -> Result<DbPool, LificError> {
         path: PathBuf::from(&name),
         export_slots: Arc::new(Semaphore::new(2)),
         archive_slots: Arc::new(Semaphore::new(1)),
+        agent_reads: agent_reads::new_buffer(),
     })
 }
 
@@ -287,6 +292,7 @@ pub fn open(path: &Path) -> Result<DbPool, LificError> {
         path: path.to_path_buf(),
         export_slots: Arc::new(Semaphore::new(2)),
         archive_slots: Arc::new(Semaphore::new(1)),
+        agent_reads: agent_reads::new_buffer(),
     })
 }
 

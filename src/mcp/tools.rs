@@ -17,6 +17,7 @@ use crate::{
     links::{IssueLinkContext, MarkdownReference},
 };
 
+use super::read_log::ReadLog;
 use super::schemas::*;
 use super::{LificMcp, current_issue_link_context, sanitize_error};
 
@@ -1891,10 +1892,12 @@ mod briefing;
 impl LificMcp {
     #[tool(description = "Search across all issues, pages, and comments by text")]
     fn search(&self, Parameters(input): Parameters<SearchInput>) -> String {
-        self.search_inner(input).unwrap_or_else(error_response)
+        let mut log = ReadLog::new("search");
+        let result = self.search_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn search_inner(&self, input: SearchInput) -> Result<String, String> {
+    fn search_inner(&self, input: SearchInput, log: &mut ReadLog) -> Result<String, String> {
         let visible = visible_project_ids_mcp(&self.db)?;
         let project_id = match &input.project {
             Some(p) => {
@@ -1920,6 +1923,7 @@ impl LificMcp {
             }
             None => None,
         };
+        log.scope(project_id);
         // The query owns the default (20) and the cap; clamping here too gives
         // the paging hint below the same numbers the query paged by — offset
         // included, or the hint would advertise a page the query refuses to
@@ -2029,11 +2033,16 @@ impl LificMcp {
         description = "Read who changed what and when, and through which interface, for an issue, page, or project. Newest first; since reads forward."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
-        self.get_activity_inner(input)
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("get_activity");
+        let result = self.get_activity_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn get_activity_inner(&self, input: GetActivityInput) -> Result<String, String> {
+    fn get_activity_inner(
+        &self,
+        input: GetActivityInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
         // This tool publishes a tighter default than the activity query's own
         // (30 against 50); the cap is the query's, read from it rather than
         // restated. Clamping here as well gives the paging hint below the same
@@ -2109,6 +2118,18 @@ impl LificMcp {
         // LIF-198: resolve the scope's project (Viewer gate); workspace
         // pages (project_id None) fall back to admin-only.
         require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+        let (entity_type, entity_id) = match scope {
+            queries::activity::ActivityScope::Issue(id) => ("issue", id),
+            queries::activity::ActivityScope::Page(id) => ("page", id),
+            queries::activity::ActivityScope::Project(id) => ("project", id),
+            queries::activity::ActivityScope::Plan(id) => ("plan", id),
+        };
+        log.entity(
+            project_id,
+            entity_type,
+            entity_id,
+            scope_identifier.as_str(),
+        );
 
         let link_context = current_issue_link_context();
         let scope_reference = reference_with_context(
@@ -2186,18 +2207,25 @@ impl LificMcp {
         description = "Call first when resuming a project, with since='last': the human queue across projects, what changed since your previous briefing, plans and next steps, blocked, workable and active issues, key pages, idle plans and empty modules. About 6,000 characters."
     )]
     fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
-        self.get_briefing_inner(input)
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("get_briefing");
+        let result = self.get_briefing_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
     #[tool(
         description = "List a project's issues, or with members, issues across projects. A row with for: needs a person; agents take rows without it."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
-        self.list_issues_inner(input).unwrap_or_else(error_response)
+        let mut log = ReadLog::new("list_issues");
+        let result = self.list_issues_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn list_issues_inner(&self, input: ListIssuesInput) -> Result<String, String> {
+    fn list_issues_inner(
+        &self,
+        input: ListIssuesInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
@@ -2256,9 +2284,13 @@ impl LificMcp {
             }
             Some(filter) => match self.member_issue_scope(filter, &input)? {
                 Ok(scope) => scope,
-                Err(empty) => return Ok(empty),
+                Err(empty) => {
+                    log.scope(None);
+                    return Ok(empty);
+                }
             },
         };
+        log.scope(scope.project_id);
         let IssueScope {
             project_id: pid,
             project_ids,
@@ -2464,20 +2496,24 @@ No issues found."
         description = "Get an issue with its details and last 3 comments, or up to 50 with identifiers."
     )]
     fn get_issue(&self, Parameters(mut input): Parameters<GetIssueInput>) -> String {
-        match input.identifiers.take() {
-            Some(identifiers) => self.get_issue_batch(input, identifiers),
+        let mut log = ReadLog::new("get_issue");
+        let result = match input.identifiers.take() {
+            Some(identifiers) => self.get_issue_batch(input, identifiers, &mut log),
             None if input.identifier.trim().is_empty() => {
                 Err("identifier is required (or pass identifiers to read several)".into())
             }
-            None => self.get_issue_inner(input),
-        }
-        .unwrap_or_else(error_response)
+            None => self.get_issue_inner(input, &mut log),
+        };
+        self.logged_read(log, result)
     }
 
     /// LIF-481: agents read issues in runs, one call each. A batch renders
     /// every issue exactly as a single read would, in the order asked, and a
     /// failed read (unknown, malformed, not visible) becomes that item's own
     /// `Error:` line instead of failing the rest.
+    ///
+    /// LIF-541: each issue that rendered is one read row, the same row a
+    /// single `get_issue` would leave; failed items record nothing.
     ///
     /// The 2 MiB response budget covers the whole batch, not each issue: once
     /// the next issue would not fit, it and everything after it are named as
@@ -2486,6 +2522,7 @@ No issues found."
         &self,
         input: GetIssueInput,
         identifiers: Vec<String>,
+        log: &mut ReadLog,
     ) -> Result<String, String> {
         const MAX_GET_BATCH: usize = 50;
         const SEPARATOR: &str = "\n\n=====\n\n";
@@ -2516,11 +2553,14 @@ No issues found."
         let mut spent = envelope;
         for (index, identifier) in identifiers.iter().enumerate() {
             let block = self
-                .get_issue_inner(GetIssueInput {
-                    identifier: identifier.clone(),
-                    identifiers: None,
-                    include_comments: input.include_comments.clone(),
-                })
+                .get_issue_inner(
+                    GetIssueInput {
+                        identifier: identifier.clone(),
+                        identifiers: None,
+                        include_comments: input.include_comments.clone(),
+                    },
+                    log,
+                )
                 .unwrap_or_else(|error| format!("{identifier}: Error: {error}"));
             let piece = if index == 0 {
                 block.trim_end().to_string()
@@ -2549,7 +2589,7 @@ No issues found."
         Ok(output)
     }
 
-    fn get_issue_inner(&self, input: GetIssueInput) -> Result<String, String> {
+    fn get_issue_inner(&self, input: GetIssueInput, log: &mut ReadLog) -> Result<String, String> {
         // Validate the comment-trail mode up front so a typo errors instead of
         // silently defaulting.
         let comment_mode = get_issue_comment_mode(input.include_comments.as_deref())?;
@@ -2718,7 +2758,7 @@ No issues found."
             };
             Ok((total, comments, budget_limited))
         })?;
-        bounded_comment_response(
+        let response = bounded_comment_response(
             comments.len(),
             || {
                 format!(
@@ -2782,19 +2822,28 @@ No issues found."
                 })(&mut output);
                 finish_response(output, result)
             },
-        )
+        );
+        if response.is_ok() {
+            log.entity(
+                Some(issue.project_id),
+                "issue",
+                issue.id,
+                issue.identifier.as_str(),
+            );
+        }
+        response
     }
 
     #[tool(
         description = "Export Markdown for an issue, a page, or a whole project. A project comes back in pages; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
-        self.export_inner(input)
-            .await
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("export");
+        let result = self.export_inner(input, &mut log).await;
+        self.logged_read(log, result)
     }
 
-    async fn export_inner(&self, input: ExportInput) -> Result<String, String> {
+    async fn export_inner(&self, input: ExportInput, log: &mut ReadLog) -> Result<String, String> {
         #[derive(Clone, Copy)]
         enum Kind {
             Issue,
@@ -2806,24 +2855,24 @@ No issues found."
         // Same identifier-shape dispatch as get_activity: pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
         // tail, so a bare project identifier falls through cleanly.
-        let kind = if looks_like_page_identifier(ident) {
-            let project_id = self.read(|conn| {
+        let (kind, project_id, entity_id) = if looks_like_page_identifier(ident) {
+            let (page_id, project_id) = self.read(|conn| {
                 let id = queries::resolve_page_identifier(conn, ident)?;
-                queries::page_project_id(conn, id)
+                Ok((id, queries::page_project_id(conn, id)?))
             })?;
             require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-            Kind::Page
-        } else if let Ok(project_id) = self.read(|conn| {
+            (Kind::Page, project_id, page_id)
+        } else if let Ok((issue_id, project_id)) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, ident)?;
-            queries::issue_project_id(conn, id)
+            Ok((id, queries::issue_project_id(conn, id)?))
         }) {
             require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-            Kind::Issue
+            (Kind::Issue, Some(project_id), issue_id)
         } else {
             let project_id = resolve_project(&*self.read_conn()?, ident)
                 .map_err(|_| unknown_identifier(ident))?;
             require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-            Kind::Project
+            (Kind::Project, Some(project_id), project_id)
         };
 
         // Resolved here, on the request's own task: the identity does not
@@ -2852,6 +2901,12 @@ No issues found."
         .await
         .map_err(|error| format!("export worker failed: {error}"))??;
 
+        let entity_type = match kind {
+            Kind::Issue => "issue",
+            Kind::Page => "page",
+            Kind::Project => "project",
+        };
+        log.entity(project_id, entity_type, entity_id, ident);
         match kind {
             Kind::Page => Ok(bundle.files.into_iter().next().map_or_else(
                 || "Error: page export produced no files".into(),
@@ -3666,10 +3721,12 @@ No issues found."
         description = "Issues grouped by status (default), priority, or module. Closed columns show only counts unless include_closed=true."
     )]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
-        self.get_board_inner(input).unwrap_or_else(error_response)
+        let mut log = ReadLog::new("get_board");
+        let result = self.get_board_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn get_board_inner(&self, input: GetBoardInput) -> Result<String, String> {
+    fn get_board_inner(&self, input: GetBoardInput, log: &mut ReadLog) -> Result<String, String> {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
@@ -3678,6 +3735,7 @@ No issues found."
             self.project_or_bound(input.project.as_deref())?,
         )?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+        log.scope(Some(pid));
         const BOARD_CAP: i64 = 500;
         let board = self.read(|conn| {
             queries::list_issues_page(
@@ -3920,10 +3978,12 @@ No issues found."
         description = "Get a page. Over 30,000 characters you get its outline and opening; read the rest by section."
     )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
-        self.get_page_inner(input).unwrap_or_else(error_response)
+        let mut log = ReadLog::new("get_page");
+        let result = self.get_page_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn get_page_inner(&self, input: GetPageInput) -> Result<String, String> {
+    fn get_page_inner(&self, input: GetPageInput, log: &mut ReadLog) -> Result<String, String> {
         let (page, folder_name, before) = self.read(|conn| {
             let id = queries::resolve_page_identifier(conn, &input.identifier)?;
             let page = queries::get_page(conn, id)?;
@@ -3963,6 +4023,7 @@ No issues found."
                 input.offset,
             )?,
         };
+        log.entity(page.project_id, "page", page.id, page.identifier.as_str());
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             writeln!(
@@ -4312,17 +4373,23 @@ No issues found."
         description = "List projects, modules, labels, folders, pages, issues, or plans. Most types need project. Project rows show a one-line description, members, your role, and counts per status."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
-        self.list_resources_inner(input)
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("list_resources");
+        let result = self.list_resources_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn list_resources_inner(&self, input: ListResourcesInput) -> Result<String, String> {
+    fn list_resources_inner(
+        &self,
+        input: ListResourcesInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
         let context = current_issue_link_context();
         match input.resource_type.as_str() {
             "plan" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                log.scope(Some(pid));
                 // No clamp here: list_plans applies the shared one, and its
                 // default (50) is this branch's documented default.
                 let plans = self.read(|conn| {
@@ -4386,6 +4453,7 @@ No issues found."
                     }
                     None => None,
                 };
+                log.scope(only);
                 let visible = visible_project_ids_mcp(&self.db)?;
                 let identity = super::current_identity(&self.db).map(|identity| identity.user);
                 let (ps, stats, mut rosters, caller, counts, team) = self.read(|conn| {
@@ -4476,6 +4544,7 @@ No issues found."
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                log.scope(Some(pid));
                 // This branch publishes a bigger default page than list_issues
                 // (100 against 50); the cap is the shared one.
                 let (limit, offset) = queries::page_with(
@@ -4531,6 +4600,7 @@ No issues found."
                 } else {
                     visible_project_ids_mcp(&self.db)?
                 };
+                log.scope(project_id);
                 let folder_id = match (&input.folder, project_id) {
                     (Some(name), Some(pid)) => Some(resolve_folder(&resolver, pid, name)?),
                     _ => None,
@@ -4624,6 +4694,7 @@ No issues found."
                 let resolver = self.read_conn()?;
                 let pid = resolve_project(&resolver, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                log.scope(Some(pid));
                 let canonical_project = canonical_project_identifier(&resolver, pid)?;
                 let modules = queries::list_modules(&resolver, pid).map_err(|e| e.to_string())?;
                 Ok(render_response(|output| {
@@ -4646,6 +4717,7 @@ No issues found."
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                log.scope(Some(pid));
                 let labels = self.read(|conn| queries::list_labels(conn, pid))?;
                 Ok(render_response(|output| {
                     writeln!(output, "{} labels:", labels.len())?;
@@ -4658,6 +4730,7 @@ No issues found."
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                log.scope(Some(pid));
                 let folders = self.read(|conn| queries::list_folders(conn, pid))?;
                 Ok(render_response(|output| {
                     writeln!(output, "{} folders:", folders.len())?;
@@ -4982,13 +5055,27 @@ No issues found."
         description = "List comments on an issue or page: the 50 newest by default. Page with offset, or order=asc for oldest first."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
-        self.list_comments_inner(input)
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("list_comments");
+        let result = self.list_comments_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn list_comments_inner(&self, input: ListCommentsInput) -> Result<String, String> {
-        let (parent, parent_identifier, _) = resolve_comment_parent(self, &input.identifier)?;
+    fn list_comments_inner(
+        &self,
+        input: ListCommentsInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
+        let (parent, parent_identifier, parent_project) =
+            resolve_comment_parent(self, &input.identifier)?;
         self.require_comment_role_mcp(parent, models::Role::Viewer)?;
+        match parent {
+            queries::comments::CommentParent::Issue(id) => {
+                log.entity(parent_project, "issue", id, parent_identifier.as_str());
+            }
+            queries::comments::CommentParent::Page(id) => {
+                log.entity(parent_project, "page", id, parent_identifier.as_str());
+            }
+        }
 
         // An omitted limit means the shared default page, not the whole
         // thread: a comment body may be up to 256 KiB, so an unbounded read
@@ -5326,15 +5413,23 @@ No issues found."
         description = "Get a plan's full step tree. Each step shows its #id (the step_id), done state, and linked issue."
     )]
     fn get_plan(&self, Parameters(input): Parameters<GetPlanInput>) -> String {
-        self.get_plan_inner(input).unwrap_or_else(error_response)
+        let mut log = ReadLog::new("get_plan");
+        let result = self.get_plan_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn get_plan_inner(&self, input: GetPlanInput) -> Result<String, String> {
+    fn get_plan_inner(&self, input: GetPlanInput, log: &mut ReadLog) -> Result<String, String> {
         let plan = self.read(|conn| {
             let id = queries::plans::resolve_plan_identifier(conn, &input.plan)?;
             queries::plans::get_plan(conn, id)
         })?;
         require_role_mcp(&self.db, plan.project_id, models::Role::Viewer)?;
+        log.entity(
+            Some(plan.project_id),
+            "plan",
+            plan.id,
+            plan.identifier.as_str(),
+        );
         Ok(fmt_plan(&plan))
     }
 
@@ -5823,15 +5918,18 @@ No issues found."
         // its own result. Failures still render as the `Error: ` text every
         // other tool returns, rather than a protocol-level error, so agents
         // parse one shape everywhere.
-        let contents = self
-            .get_attachment_inner(input)
-            .unwrap_or_else(|error| vec![rmcp::model::Content::text(error_response(error))]);
+        let mut log = ReadLog::new("get_attachment");
+        let result = self.get_attachment_inner(input, &mut log);
+        self.finish_read(log, result.is_ok());
+        let contents =
+            result.unwrap_or_else(|error| vec![rmcp::model::Content::text(error_response(error))]);
         rmcp::model::CallToolResult::success(contents)
     }
 
     fn get_attachment_inner(
         &self,
         input: GetAttachmentInput,
+        log: &mut ReadLog,
     ) -> Result<Vec<rmcp::model::Content>, String> {
         use rmcp::model::Content;
 
@@ -5845,6 +5943,12 @@ No issues found."
             &attachment,
         )
         .map_err(sanitize_error)?;
+        log.entity(
+            self.attachment_read_project(attachment.id)?,
+            "attachment",
+            attachment.id,
+            attachment.filename.as_str(),
+        );
         if attachment.mime.starts_with("text/") {
             let bytes = self
                 .store
@@ -5923,11 +6027,33 @@ No issues found."
 
     #[tool(description = "List attachments on an issue or page, or in a project.")]
     fn list_attachments(&self, Parameters(input): Parameters<ListAttachmentsInput>) -> String {
-        self.list_attachments_inner(input)
-            .unwrap_or_else(error_response)
+        let mut log = ReadLog::new("list_attachments");
+        let result = self.list_attachments_inner(input, &mut log);
+        self.logged_read(log, result)
     }
 
-    fn list_attachments_inner(&self, input: ListAttachmentsInput) -> Result<String, String> {
+    /// LIF-541: the project an attachment read is filed under: the first
+    /// project it is linked into that the caller can see, or none while it is
+    /// unlinked.
+    fn attachment_read_project(&self, attachment_id: i64) -> Result<Option<i64>, String> {
+        let visible = visible_project_ids_mcp(&self.db)?;
+        self.read(|conn| {
+            for (entity, entity_id) in queries::attachments::links_for(conn, attachment_id)? {
+                if let Some((_, Some(project_id))) = attachment_link_label(conn, entity, entity_id)?
+                    && visible.as_ref().is_none_or(|ids| ids.contains(&project_id))
+                {
+                    return Ok(Some(project_id));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    fn list_attachments_inner(
+        &self,
+        input: ListAttachmentsInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
         let entity = input
             .entity
             .as_deref()
@@ -5948,6 +6074,13 @@ No issues found."
                     crate::api::attachments::resolve_entity_project(&self.db, entity, entity_id)
                         .map_err(sanitize_error)?;
                 require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                // `resolve_attachment_entity` yields only issues and pages.
+                let entity_type = if matches!(entity, models::AttachmentEntity::Page) {
+                    "page"
+                } else {
+                    "issue"
+                };
+                log.entity(project_id, entity_type, entity_id, ident);
                 let listed = self
                     .read(|conn| queries::attachments::list_for_entity(conn, entity, entity_id))?;
                 (ident.to_string(), listed)
@@ -5955,6 +6088,7 @@ No issues found."
             (None, Some(ident)) => {
                 let project_id = resolve_project(&*self.read_conn()?, ident)?;
                 require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                log.scope(Some(project_id));
                 let listed =
                     self.read(|conn| queries::attachments::list_for_project(conn, project_id))?;
                 (ident.to_string(), listed)
@@ -6323,6 +6457,9 @@ mod tests_get_issue_batch;
 
 #[cfg(test)]
 mod tests_stale;
+
+#[cfg(test)]
+mod tests_agent_reads;
 
 #[cfg(test)]
 #[path = "tests_search_filing.rs"]

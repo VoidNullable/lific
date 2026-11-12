@@ -1051,6 +1051,7 @@ fn briefing_at(m: &LificMcp, project: &str, now: &str) -> String {
             ..Default::default()
         },
         now,
+        &mut ReadLog::new("get_briefing"),
     )
     .unwrap()
 }
@@ -1150,6 +1151,7 @@ fn briefing_in_days(m: &LificMcp, project: &str, days: i64) -> String {
             ..Default::default()
         },
         Utc::now() + chrono::Duration::days(days),
+        &mut ReadLog::new("get_briefing"),
     )
     .unwrap_or_else(|error| panic!("briefing failed: {error}"))
 }

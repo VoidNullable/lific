@@ -1008,6 +1008,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // does not multiply them.
             backup::start_scheduler(&cfg, pool.clone());
 
+            // LIF-541: a stdio session records its agent's reads like the
+            // HTTP server does, so it flushes them on the same schedule and
+            // once more when the session ends.
+            db::agent_reads::start_flush_task(pool.clone());
+            let flush_pool = pool.clone();
+
             let server =
                 mcp::LificMcp::for_stdio(pool, stdio_auth).with_bound_project(bound_project);
 
@@ -1026,7 +1032,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(u) = &token_user {
                 info!(user = %u.username, "stdio session bound to agent");
             }
-            handle.waiting().await?;
+            let waited = handle.waiting().await;
+            db::agent_reads::flush_blocking(&flush_pool).await;
+            waited?;
         }
 
         // CRUD commands and Completion are handled before this match

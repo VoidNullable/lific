@@ -331,6 +331,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "stale active reset days",
         include_str!("../../migrations/067_stale_active_reset_days.sql"),
     ),
+    (
+        68,
+        "agent reads",
+        include_str!("../../migrations/068_agent_reads.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

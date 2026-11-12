@@ -1,6 +1,7 @@
 mod arguments;
 pub(crate) mod page_reads;
 pub(crate) mod preinit;
+mod read_log;
 pub(crate) mod schemas;
 pub(crate) mod tools;
 mod waits;

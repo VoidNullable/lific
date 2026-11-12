@@ -1,10 +1,16 @@
-//! Background sweep that empties the trash (LIF-438).
+//! Background retention sweep: empties the trash (LIF-438) and expires agent
+//! read telemetry (LIF-541).
 //!
 //! Deleting an issue, page or comment leaves a tombstone: the row stays, with
 //! `deleted_at` set, so a replica can sync the deletion and a user can undo
 //! it. This task is what makes that bounded. Every `[retention] trash_days`
 //! the sweep runs a real DELETE over anything past the window, which is also
 //! the only moment the foreign-key cascades fire.
+//!
+//! The same sweep deletes `agent_reads` rows older than
+//! [`agent_reads::RETENTION_DAYS`]. That part always runs: `trash_days = 0`
+//! keeps tombstones forever, which says nothing about read telemetry, so the
+//! task is spawned either way and only the trash half is skipped.
 //!
 //! Shape copied from `backup::start_backup_task`: settle, sweep once at
 //! startup, then sweep on an interval, with the synchronous SQLite work handed
@@ -16,6 +22,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::db::DbPool;
+use crate::db::agent_reads;
 use crate::db::queries::trash;
 
 /// How often the sweep runs. Four times a day: a tombstone lives for days, so
@@ -27,64 +34,67 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// the backup task extends.
 const STARTUP_DELAY: Duration = Duration::from_secs(30);
 
-/// Start the trash sweep. Returns `None` when `trash_days` is `0`, which means
-/// the operator asked for tombstones to be kept indefinitely: no task is
-/// spawned at all rather than one that wakes up to do nothing.
-pub fn start_trash_purge_task(
-    pool: DbPool,
-    trash_days: u32,
-) -> Option<tokio::task::JoinHandle<()>> {
+/// Start the retention sweep. `trash_days = 0` means the operator asked for
+/// tombstones to be kept indefinitely, so the trash half is skipped; the
+/// agent read half still runs.
+pub fn start_retention_task(pool: DbPool, trash_days: u32) -> tokio::task::JoinHandle<()> {
     if trash_days == 0 {
         info!("[retention] trash_days = 0; soft-deleted rows are kept until removed by hand");
-        return None;
     }
 
-    Some(tokio::spawn(async move {
-        info!(trash_days, "trash purge task started");
+    tokio::spawn(async move {
+        info!(trash_days, "retention task started");
         tokio::time::sleep(STARTUP_DELAY).await;
-        run_purge_blocking(&pool, trash_days).await;
+        run_sweep_blocking(&pool, trash_days).await;
 
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         interval.tick().await; // skip the immediate tick
         loop {
             interval.tick().await;
-            run_purge_blocking(&pool, trash_days).await;
+            run_sweep_blocking(&pool, trash_days).await;
         }
-    }))
+    })
 }
 
 /// One sweep on the blocking pool, awaited.
 ///
-/// `purge_tombstones` is synchronous SQLite work that takes the exclusive
-/// write connection and can wait behind a backup. Running it inline would park
-/// a Tokio worker — one of the threads serving HTTP — for that whole time.
-async fn run_purge_blocking(pool: &DbPool, trash_days: u32) {
+/// The sweep is synchronous SQLite work that takes the exclusive write
+/// connection and can wait behind a backup. Running it inline would park a
+/// Tokio worker, one of the threads serving HTTP, for that whole time.
+async fn run_sweep_blocking(pool: &DbPool, trash_days: u32) {
     let pool = pool.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || purge_once(&pool, trash_days)).await {
+    if let Err(e) = tokio::task::spawn_blocking(move || sweep_once(&pool, trash_days)).await {
         // A panic here must not take the scheduling loop with it: the next
         // interval should still try.
-        error!(error = %e, "trash purge failed to run to completion");
+        error!(error = %e, "retention sweep failed to run to completion");
     }
 }
 
-fn purge_once(pool: &DbPool, trash_days: u32) {
+fn sweep_once(pool: &DbPool, trash_days: u32) {
     let conn = match pool.write() {
         Ok(conn) => conn,
         Err(e) => {
-            warn!(error = %e, "could not acquire write connection for trash purge");
+            warn!(error = %e, "could not acquire write connection for retention sweep");
             return;
         }
     };
-    match trash::purge_tombstones(&conn, trash_days) {
-        Ok(counts) if counts.is_empty() => {}
-        Ok(counts) => info!(
-            issues = counts.issues,
-            pages = counts.pages,
-            comments = counts.comments,
-            trash_days,
-            "purged expired tombstones"
-        ),
-        Err(e) => warn!(error = %e, "trash purge failed"),
+    if trash_days > 0 {
+        match trash::purge_tombstones(&conn, trash_days) {
+            Ok(counts) if counts.is_empty() => {}
+            Ok(counts) => info!(
+                issues = counts.issues,
+                pages = counts.pages,
+                comments = counts.comments,
+                trash_days,
+                "purged expired tombstones"
+            ),
+            Err(e) => warn!(error = %e, "trash purge failed"),
+        }
+    }
+    match agent_reads::prune(&conn, chrono::Utc::now().naive_utc()) {
+        Ok(0) => {}
+        Ok(rows) => info!(rows, "expired old agent reads"),
+        Err(e) => warn!(error = %e, "agent read expiry failed"),
     }
 }
 
@@ -149,7 +159,7 @@ mod tests {
     fn one_sweep_collects_expired_tombstones() {
         let (pool, pid) = seeded();
         let id = doomed_issue(&pool, pid, 90);
-        purge_once(&pool, 30);
+        sweep_once(&pool, 30);
         assert_eq!(issue_rows(&pool, id), 0);
     }
 
@@ -157,16 +167,52 @@ mod tests {
     fn one_sweep_leaves_fresh_tombstones_alone() {
         let (pool, pid) = seeded();
         let id = doomed_issue(&pool, pid, 2);
-        purge_once(&pool, 30);
+        sweep_once(&pool, 30);
         assert_eq!(issue_rows(&pool, id), 1);
     }
 
-    /// `trash_days = 0` must not spawn a task at all — a scheduler that wakes
-    /// four times a day to purge nothing is pure noise, and the sweep it would
-    /// call is a no-op anyway.
-    #[tokio::test]
-    async fn zero_trash_days_spawns_no_task() {
+    fn agent_read_rows(pool: &db::DbPool) -> Vec<String> {
+        let conn = pool.read().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT tool FROM agent_reads ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn agent_read(pool: &db::DbPool, tool: &str, age_days: i64) {
+        let conn = pool.write().unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO agent_reads (ts, user_id, tool)
+                 VALUES (datetime('now', '-{age_days} days'), 1, ?1)"
+            ),
+            rusqlite::params![tool],
+        )
+        .unwrap();
+    }
+
+    /// LIF-541: agent reads past the 30-day horizon go on every sweep.
+    #[test]
+    fn one_sweep_expires_old_agent_reads() {
         let (pool, _) = seeded();
-        assert!(start_trash_purge_task(pool, 0).is_none());
+        agent_read(&pool, "old", 31);
+        agent_read(&pool, "fresh", 2);
+        sweep_once(&pool, 30);
+        assert_eq!(agent_read_rows(&pool), ["fresh"]);
+    }
+
+    /// `trash_days = 0` keeps tombstones forever but must not keep agent
+    /// reads forever: that setting is about the trash only.
+    #[test]
+    fn zero_trash_days_keeps_tombstones_but_still_expires_agent_reads() {
+        let (pool, pid) = seeded();
+        let id = doomed_issue(&pool, pid, 90);
+        agent_read(&pool, "old", 31);
+        sweep_once(&pool, 0);
+        assert_eq!(issue_rows(&pool, id), 1);
+        assert!(agent_read_rows(&pool).is_empty());
     }
 }

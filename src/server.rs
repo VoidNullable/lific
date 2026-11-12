@@ -643,7 +643,12 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     // Empty the trash on a schedule (LIF-438). A delete is a tombstone now, so
     // something has to collect them once they are past the recovery window.
-    crate::retention::start_trash_purge_task(pool.clone(), cfg.retention.trash_days);
+    // The same sweep expires agent read telemetry (LIF-541).
+    crate::retention::start_retention_task(pool.clone(), cfg.retention.trash_days);
+
+    // LIF-541: MCP reads are buffered in memory; write them out every few
+    // seconds.
+    db::agent_reads::start_flush_task(pool.clone());
 
     // Return long-idle active issues to todo once a day (LIF-494). The
     // threshold is an instance setting read on each run; 0 turns it off.
@@ -676,6 +681,9 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_graceful_shutdown(shutdown_signal(shutdown_pool));
     server.await?;
+    // LIF-541: reads recorded by requests that finished during the graceful
+    // drain, after the shutdown hook's own flush.
+    db::agent_reads::flush_blocking(&pool).await;
     Ok(())
 }
 
@@ -876,6 +884,9 @@ async fn shutdown_signal(pool: db::DbPool) {
     }
 
     info!("shutdown signal received, checkpointing WAL...");
+    // LIF-541: best-effort, so buffered agent reads reach the WAL before it
+    // is checkpointed.
+    db::agent_reads::flush_blocking(&pool).await;
     backup::checkpoint_wal(&pool);
     info!("shutdown complete");
 }

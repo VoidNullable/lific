@@ -167,8 +167,12 @@ fn by(actor: Option<&str>) -> String {
 }
 
 impl LificMcp {
-    pub(super) fn get_briefing_inner(&self, input: GetBriefingInput) -> Result<String, String> {
-        self.get_briefing_at(input, Utc::now())
+    pub(super) fn get_briefing_inner(
+        &self,
+        input: GetBriefingInput,
+        log: &mut ReadLog,
+    ) -> Result<String, String> {
+        self.get_briefing_at(input, Utc::now(), log)
     }
 
     /// [`Self::get_briefing_inner`] with the clock passed in, so a test can
@@ -177,6 +181,7 @@ impl LificMcp {
         &self,
         input: GetBriefingInput,
         now: DateTime<Utc>,
+        log: &mut ReadLog,
     ) -> Result<String, String> {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
@@ -198,6 +203,7 @@ impl LificMcp {
             require_role_mcp(&self.db, pid, models::Role::Viewer)?;
             queries::get_project(&conn, pid).map_err(|error| error.to_string())?
         };
+        log.scope(Some(project.id));
         let context = current_issue_link_context();
         let context = context.as_deref();
         let ident = project.identifier.as_str();
