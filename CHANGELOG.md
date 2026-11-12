@@ -36,6 +36,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 
 ### Images and attachments
 
+- `get_attachment` returns SVG images as their XML source, paged by line like text files and marked as untrusted markup, instead of an opaque blob or a download link. Browsers still only download SVG.
 - `upload_attachment`'s description names every accepted file type, including video, audio, SQLite and HWP, which agents could not tell were allowed.
 - `upload_attachment` takes `alt_text`, stored like the web UI's and used as the embed snippet's link text. `get_attachment` and `list_attachments` show alt text and pixel dimensions, so an agent can often skip looking at an image at all.
 - `get_attachment` sends an image larger than 1600 px or 1 MB to the model as a scaled copy, cached beside its thumbnail, instead of the original. A 10 MiB original used to exceed what providers accept and could break the agent's session. `full: true` returns the original when it is within provider limits, and the first line names both sizes.
