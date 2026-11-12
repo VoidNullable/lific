@@ -79,6 +79,7 @@
           {#if item.status === "alt"}
             <AltTextInput
               onApply={(alt) => controller.applyAlt(item.id, alt)}
+              onSize={(width) => controller.applyWidth(item.id, width)}
               onSkip={() => controller.dismiss(item.id)}
             />
           {:else}

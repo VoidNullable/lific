@@ -27,6 +27,7 @@
   import { normalizeEscapedNewlines, setTaskChecked, taskStates } from "./taskList"; // LIF-502
   import { toast } from "./toast/toast.svelte";
   import { tick } from "svelte";
+  import { THUMBNAIL_EDGE, withImageWidths } from "./imageSize";
 
   // LIF-471: in public scope an <img> may only point at this instance's own
   // attachments. Registered once (hooks are global to DOMPurify) and inert
@@ -224,6 +225,9 @@
     if (!tasksInteractive) return origCheckbox(token);
     return `<input ${token.checked ? 'checked="" ' : ""}type="checkbox" class="task-toggle" data-task="${taskNonce}:${index}"> `;
   };
+
+  // `![alt|320](url)` renders at most 320 px wide (see imageSize.ts).
+  renderer.image = withImageWidths(renderer.image.bind(renderer));
 
   // Only the signed-in renderer of an editable body opts in; public scope
   // never does, whatever a caller passes.
@@ -617,6 +621,13 @@
       "img:not([data-attachment-decorated])",
     );
     for (const img of Array.from(imgs)) {
+      // A width (from `![alt|320](url)`) is a ceiling, not a size: a smaller
+      // image keeps its natural width instead of being stretched up to it.
+      const width = Number(img.getAttribute("width"));
+      if (width > 0) {
+        img.style.width = "auto";
+        img.style.maxWidth = `min(100%, ${width}px)`;
+      }
       const authored = img.getAttribute("src") ?? "";
       const match = authored.match(ATTACHMENT_SRC_RE);
       if (!match) {
@@ -641,7 +652,12 @@
         img.dataset.attachmentFullSrc = "true";
         img.src = src;
       });
-      img.src = attachmentThumbnailUrl(Number(match[1]));
+      if (width > THUMBNAIL_EDGE) {
+        img.dataset.attachmentFullSrc = "true";
+        img.src = src;
+      } else {
+        img.src = attachmentThumbnailUrl(Number(match[1]));
+      }
     }
 
     // LIF-418: attachment links become real viewers. decorateAttachmentLinks

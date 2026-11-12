@@ -10,6 +10,8 @@
 // Pure on purpose: the composer owns the draft string, this file owns the
 // splice, and neither needs the other's state to be tested.
 
+import { joinImageAlt, splitImageAlt } from "../imageSize";
+
 /**
  * Make a raw input string safe to sit inside `![...]`.
  *
@@ -67,5 +69,18 @@ export function applyAltText(markdown: string, offset: number, alt: string): str
   if (!clean) return markdown;
   const span = findAltSpan(markdown, offset);
   if (!span) return markdown;
-  return markdown.slice(0, span.start) + clean + markdown.slice(span.end);
+  // A width chosen on the chip (`|320`) belongs to the slot, not the old alt.
+  const { width } = splitImageAlt(markdown.slice(span.start, span.end));
+  return (
+    markdown.slice(0, span.start) + joinImageAlt(clean, width) + markdown.slice(span.end)
+  );
+}
+
+/** Set (or with `null`, remove) the width of the image reference nearest
+ *  `offset`, keeping its alt text. Unchanged when there is no reference. */
+export function applyImageWidth(markdown: string, offset: number, width: number | null): string {
+  const span = findAltSpan(markdown, offset);
+  if (!span) return markdown;
+  const { alt } = splitImageAlt(markdown.slice(span.start, span.end));
+  return markdown.slice(0, span.start) + joinImageAlt(alt, width) + markdown.slice(span.end);
 }

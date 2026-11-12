@@ -11,16 +11,26 @@
   // "apply to all". One image, one description.
 
   import { Check, X } from "lucide-svelte";
+  import { IMAGE_SIZE_PRESETS } from "../imageSize";
 
   let {
     onApply,
     onSkip,
+    onSize,
   }: {
     onApply: (alt: string) => void;
     onSkip: () => void;
+    // Writes the width into the reference at once; the chip stays open.
+    onSize?: (width: number | null) => void;
   } = $props();
 
   let value = $state("");
+  let size = $state<number | null>(null);
+
+  function pickSize(width: number) {
+    size = size === width ? null : width;
+    onSize?.(size);
+  }
 
   function commit() {
     // An empty field means "I do not want to do this", not "clear the alt".
@@ -50,6 +60,22 @@
     aria-label="Alt text for the image you just uploaded"
     onkeydown={onKeydown}
   />
+  {#if onSize}
+    <span class="alt__sizes" role="group" aria-label="Image size">
+      {#each IMAGE_SIZE_PRESETS as preset (preset.width)}
+        <button
+          type="button"
+          class="alt__size"
+          title={preset.title}
+          aria-label={preset.title}
+          aria-pressed={size === preset.width}
+          onclick={() => pickSize(preset.width)}
+        >
+          {preset.label}
+        </button>
+      {/each}
+    </span>
+  {/if}
   <button
     type="button"
     class="alt__act"
@@ -106,6 +132,38 @@
       background 0.15s var(--ease-out-expo),
       color 0.15s var(--ease-out-expo);
   }
+  .alt__sizes {
+    display: inline-flex;
+    gap: 0.0625rem;
+    margin-left: 0.125rem;
+  }
+  .alt__size {
+    min-width: 1.375rem;
+    height: 1.375rem;
+    padding: 0 0.25rem;
+    border: 0;
+    border-radius: 0.3125rem;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-caption);
+    cursor: pointer;
+    transition:
+      background 0.15s var(--ease-out-expo),
+      color 0.15s var(--ease-out-expo);
+  }
+  .alt__size:hover {
+    background: var(--surface);
+    color: var(--text);
+  }
+  .alt__size[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .alt__size:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
   .alt__act:hover {
     background: var(--surface);
     color: var(--text);
@@ -117,6 +175,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .alt__input,
+    .alt__size,
     .alt__act {
       transition: none;
     }

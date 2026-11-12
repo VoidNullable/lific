@@ -48,6 +48,16 @@ A reference is only linked if the person saving uploaded that attachment, is an 
 
 The same attachment can be linked from several places, for instance when a screenshot is quoted into a second comment.
 
+## Image size
+
+An attached image renders at its preview size, at most 480 pixels wide and never wider than the column. To change that, end the alt text with a pipe and a width in pixels:
+
+```markdown
+![Login dialog|240](/api/attachments/12)
+```
+
+The number is a ceiling between 16 and 4096: a smaller image keeps its own size. A width over 480 loads the original instead of the preview, so `|960` lets a dense screenshot fill the column. The width applies in issues, pages, comments and the public view. Other Markdown renderers, and exports, show an ordinary image whose alt text ends in `|240`. In a table cell, escape the pipe as `\|`, as with any pipe in a cell.
+
 ## Who can read an attachment
 
 A linked attachment can be read by anyone who can read a project it is linked into. An attachment that is not linked anywhere yet can be read only by its uploader and administrators. [Public projects](/docs/public-projects) serve the attachments linked from their published content.

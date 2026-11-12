@@ -40,7 +40,7 @@ import {
 import { markdownFor } from "./compose";
 import { createConcurrencyQueue } from "./queue";
 import { maybeAnnotate, type UploadSource } from "./annotateFlow";
-import { applyAltText } from "./altText";
+import { applyAltText, applyImageWidth } from "./altText";
 import {
   decideDownscale,
   downscaleImage,
@@ -215,6 +215,9 @@ export interface UploadController {
   /** Write `alt` into the alt slot of this upload's inserted reference, then
    *  drop the chip. Empty input is treated as a skip. */
   applyAlt: (id: number, alt: string) => void;
+  /** Write a width (`|240`) into this upload's reference, or remove it with
+   *  `null`, keeping the chip so alt text can still follow. */
+  applyWidth: (id: number, width: number | null) => void;
   /** Abort a queued or in-flight upload and drop its chip. */
   cancel: (id: number) => void;
   /** Drop a chip (typically a failed one) and revoke its preview URL. */
@@ -415,6 +418,20 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
     remove(id);
   }
 
+  // Unlike alt text, a size applies at once and keeps the chip open, so the
+  // description can still follow. The tracked snippet follows the rewrite or
+  // the next lookup would miss it.
+  function applyWidth(id: number, width: number | null) {
+    const item = get(id);
+    const text = opts.text;
+    if (!item || !text || !item.snippet) return;
+    const current = text.read();
+    const offset = current.indexOf(item.snippet);
+    const next = applyImageWidth(current, offset === -1 ? 0 : offset, width);
+    if (next !== current) text.write(next);
+    item.snippet = applyImageWidth(item.snippet, 0, width);
+  }
+
   function retry(id: number) {
     if (!get(id)) return;
     start(id);
@@ -469,6 +486,7 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
     enqueue,
     retry,
     applyAlt,
+    applyWidth,
     cancel,
     dismiss: remove,
     acceptDownscale,
