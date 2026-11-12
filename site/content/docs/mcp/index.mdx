@@ -12,7 +12,7 @@ The short version:
 - Remote stdio, `lific mcp --remote --url <BASE_URL>`, is a local command that forwards to a server's HTTP endpoint with a bearer credential.
 - A tool that cannot do what you asked returns text starting with `Error:`, not a protocol error. A parameter the tool does not declare is refused before it runs, with a suggestion for the name you probably meant.
 - Lists are paged. When more rows exist, the output ends with the `offset` to pass on the next call.
-- Local stdio answers a pre-initialize `server/discover` probe with "method not found" and keeps the session open.
+- Clients on MCP 2026-07-28 can skip `initialize` and start with `server/discover`; older clients keep the `initialize` handshake. Both work on every transport.
 
 Most people never configure this by hand. [`lific connect`](/docs/connect) detects your AI tools and writes one of these setups for each. This page describes what it writes, and what to write yourself when it does not cover your client.
 
@@ -35,7 +35,7 @@ The server advertises the tools capability only. It serves no MCP resources or p
 https://your-server.example/mcp
 ```
 
-The endpoint speaks Streamable HTTP in stateless mode and answers each POST with a JSON response. It is not a standalone SSE endpoint. The server reports MCP protocol version `2025-03-26`.
+The endpoint speaks Streamable HTTP in stateless mode and answers each POST with a JSON response. It is not a standalone SSE endpoint. The server negotiates the MCP protocol version per client: an `initialize` naming any released revision from `2024-11-05` to `2025-11-25` gets that revision back, and a `2026-07-28` client sends its version in each request's `_meta` instead of initializing.
 
 A request must carry a `Host` the server recognizes, as a guard against DNS rebinding: `localhost`, `127.0.0.1`, `::1`, or the hostname of `server.public_url` when that is set. Behind a reverse proxy, set [`server.public_url`](/docs/configuration) to the address agents use, or requests are refused with `403 Forbidden: Host header is not allowed`.
 
@@ -97,15 +97,15 @@ A session launched with no `LIFIC_TOKEN` has no credential to check and keeps it
 
 `LIFIC_TOKEN` is not `LIFIC_API_KEY`. `LIFIC_API_KEY` is the bearer credential for HTTP access, read by remote stdio, Codex and `lific doctor`. See [Connect agents](/docs/connect#lific_api_key-and-lific_token).
 
-### Discovery probes before `initialize`
+### Discovery before `initialize`
 
-Some clients send a `server/discover` request before `initialize`. Local stdio answers any pre-initialize request other than `ping` with JSON-RPC error `-32601` (method not found) and keeps the session open, so the client falls back to a normal handshake instead of reading end-of-file. Notifications sent before `initialize` are dropped.
+Clients on MCP 2026-07-28 open with `server/discover` and carry their protocol version, client information and capabilities in each request's `_meta`, with no `initialize` handshake. Lific answers discovery on every transport with the versions it supports and its server information. A discovery request without that metadata gets a JSON-RPC error and the session stays open, so a client can fall back to `initialize`.
 
 ## Remote stdio
 
 `lific mcp --remote --url https://your-server.example` gives a client that only launches commands a way to reach a server. It opens no database. Each request is POSTed to the server's `/mcp` endpoint with the credential, so authentication and revocation work exactly as they do over HTTP. `LIFIC_URL` can stand in for `--url`.
 
-When the server is unreachable, answers with an HTTP error, or rejects the credential, the proxy answers that request with a JSON-RPC error (`-32603`) carrying a readable message, and keeps running. It ends only when the client closes its input. The [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server) covers binding a checkout through it.
+When the server is unreachable, answers with an HTTP error, or rejects the credential, the proxy answers that request with a JSON-RPC error (`-32603`) carrying a readable message, and keeps running. A JSON-RPC protocol error the server sends with HTTP 400, such as an unsupported protocol version, is relayed unchanged. For a 2026-07-28 client, the proxy copies the protocol version, method and tool name from each request into the HTTP headers that revision requires. It ends only when the client closes its input. The [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server) covers binding a checkout through it.
 
 ## Response conventions
 
@@ -117,7 +117,7 @@ A tool that cannot do what you asked returns an ordinary result whose text start
 
 Some failures happen before a tool runs, and those are JSON-RPC errors:
 
-- Arguments that do not fit the tool's schema return `-32602` (invalid params): a missing required parameter, a wrong type, or a parameter the tool does not declare. Unknown parameters are refused on every tool, nested objects included, so a misspelling cannot quietly change the answer. The message names the unknown key, suggests the closest valid name, and lists the valid ones, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``
+- Arguments that do not fit the tool's schema return a failed tool result (`isError: true`) and the tool does not run: a missing required parameter, a wrong type, or a parameter the tool does not declare. Unknown parameters are refused on every tool, nested objects included, so a misspelling cannot quietly change the answer. The message names the unknown key, suggests the closest valid name, and lists the valid ones, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``
 - The remote stdio proxy returns `-32603` when it cannot reach the server.
 - The multi-instance proxy returns `-32602` for a call it cannot route.
 

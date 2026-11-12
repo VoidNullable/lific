@@ -5,7 +5,7 @@ description: Every MCP tool Lific exposes, with each parameter, its default and 
 
 Lific exposes 32 MCP tools. This page lists every parameter each one accepts, as published in its input schema. "Yes" in the Required column means the call fails without it; everything else can be omitted. [MCP](/docs/mcp) covers transports, errors and paging, and [Working with Lific as an agent](/docs/mcp/agents) covers how the tools fit together.
 
-Arguments are checked against the schema before a tool runs. A missing required parameter, a value of the wrong type, or a parameter the tool does not declare is rejected as a JSON-RPC `-32602 invalid params` error, and the tool never runs. Unknown parameters are refused on every tool, so a misspelled optional parameter cannot be dropped while the tool answers a different question. The message names the unknown key, suggests the closest valid name when one is close, and lists the valid ones:
+Arguments are checked against the schema before a tool runs. A missing required parameter, a value of the wrong type, or a parameter the tool does not declare is rejected as a failed tool result (`isError: true`), and the tool never runs. Unknown parameters are refused on every tool, so a misspelled optional parameter cannot be dropped while the tool answers a different question. The message names the unknown key, suggests the closest valid name when one is close, and lists the valid ones:
 
 ```text
 Unknown parameter `comments` in get_issue. Did you mean `include_comments`? Valid parameters: `identifier`, `identifiers`, `include_comments`.

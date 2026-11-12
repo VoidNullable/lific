@@ -123,7 +123,7 @@ A failed call is a tool result whose text begins with `Error:`, not a protocol e
 - `Forbidden: requires at least 'maintainer' access to this project`: your owner's role in that project is too low for the call.
 - A message that `LIFIC_TOKEN` is no longer valid: the session's credential was revoked. Nothing was written. A person must run `lific connect` and restart the MCP server.
 
-A call whose arguments do not fit the tool's schema is refused before the tool runs with a JSON-RPC `-32602 invalid params` error. That includes a parameter the tool does not declare, on every tool: ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?`` Fix the name and call again; nothing was written.
+A call whose arguments do not fit the tool's schema is refused before the tool runs, as a failed tool result (`isError: true`). That includes a parameter the tool does not declare, on every tool: ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?`` Fix the name and call again; nothing was written.
 
 ## What a bound repository gives you
 

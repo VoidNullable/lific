@@ -5,11 +5,15 @@
 //! parameter (`comments` for `include_comments`) fails instead of being
 //! dropped while the tool answers a different question. Serde's own message
 //! lists every valid field but buries the likely one; this rewrites it to
-//! lead with the closest match. The error stays `-32602 Invalid params`,
-//! which is exactly what it is, and the list of valid names comes from serde,
-//! so it can never disagree with what the deserializer accepts.
+//! lead with the closest match. rmcp reports the failure as a tool result with
+//! `isError: true`, so the agent reads it as text, and the list of valid names
+//! comes from serde, so it can never disagree with what the deserializer
+//! accepts.
 
-use rmcp::ErrorData;
+use rmcp::model::{CallToolResult, ContentBlock};
+
+/// The prefix rmcp puts on every argument deserialization failure.
+const DESERIALIZE_PREFIX: &str = "failed to deserialize parameters:";
 
 /// Remove one matching pair of quote characters around an MCP string value.
 /// Some clients include the source-language string delimiters in the value
@@ -53,18 +57,25 @@ impl ToolParameters {
     }
 }
 
-/// Rewrite an rmcp parameter-deserialization error that is about an unknown
-/// or missing field. Every other error passes through unchanged. `provided`
-/// is the top-level argument names the call sent.
+/// Rewrite rmcp's failed tool result for a parameter-deserialization error
+/// about an unknown or missing field. Every other result passes through
+/// unchanged. `provided` is the top-level argument names the call sent.
 pub(crate) fn explain_unknown_parameter(
     tool: &str,
     params: Option<ToolParameters>,
     provided: &[String],
-    error: ErrorData,
-) -> ErrorData {
-    match describe(tool, params.as_ref(), provided, &error.message) {
-        Some(message) => ErrorData::invalid_params(message, error.data),
-        None => error,
+    result: CallToolResult,
+) -> CallToolResult {
+    if result.is_error != Some(true) || result.content.len() != 1 {
+        return result;
+    }
+    let rewritten = result.content[0]
+        .as_text()
+        .filter(|text| text.text.starts_with(DESERIALIZE_PREFIX))
+        .and_then(|text| describe(tool, params.as_ref(), provided, &text.text));
+    match rewritten {
+        Some(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+        None => result,
     }
 }
 

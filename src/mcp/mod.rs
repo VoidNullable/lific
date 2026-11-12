@@ -1,6 +1,7 @@
 mod arguments;
 pub(crate) mod page_reads;
-pub(crate) mod preinit;
+#[cfg(test)]
+pub(crate) mod protocol_tests;
 mod read_log;
 pub(crate) mod schemas;
 pub(crate) mod tools;
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRouter,
-    model::{ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{CallToolResponse, ServerCapabilities, ServerConfig},
 };
 
 use crate::db::DbPool;
@@ -273,7 +274,7 @@ impl StdioAuthFailed {
          restart the MCP server.";
 
     fn into_tool_result(self) -> rmcp::model::CallToolResult {
-        rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(Self::MESSAGE)])
+        rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(Self::MESSAGE)])
     }
 }
 
@@ -469,17 +470,15 @@ impl LificMcp {
     /// surfacing anything to the model. A tool error reaches the agent as text
     /// it can read and act on, which is the whole point of telling it to
     /// reconnect. Either way `f` never runs.
-    async fn dispatch_tool<F, Fut>(
-        &self,
-        f: F,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData>
+    async fn dispatch_tool<F, Fut, R>(&self, f: F) -> Result<R, rmcp::ErrorData>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>,
+        Fut: std::future::Future<Output = Result<R, rmcp::ErrorData>>,
+        rmcp::model::CallToolResult: Into<R>,
     {
         match self.with_stdio_auth(f).await {
             Ok(result) => result,
-            Err(StdioAuthFailed) => Ok(StdioAuthFailed.into_tool_result()),
+            Err(StdioAuthFailed) => Ok(StdioAuthFailed.into_tool_result().into()),
         }
     }
 
@@ -623,11 +622,12 @@ impl LificMcp {
 }
 
 impl ServerHandler for LificMcp {
-    fn get_info(&self) -> ServerInfo {
-        // Pin to 2025-03-26: rmcp defaults to 2025-06-18 which many clients
-        // (including Zed) skipped, going straight from 2025-03-26 to 2025-11-25.
-        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+    fn get_info(&self) -> ServerConfig {
+        // No protocol pin: rmcp negotiates per client. An `initialize` naming
+        // a version we know (Zed's 2025-03-26 included) gets that version
+        // back, and a 2026-07-28 client skips `initialize` for
+        // `server/discover` and per-request `_meta`.
+        let info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             // Identify as lific, not rmcp's build-env default — this name is
             // what connected clients (and `lific doctor`) display.
             .with_server_info(rmcp::model::Implementation::new(
@@ -661,7 +661,7 @@ impl ServerHandler for LificMcp {
     /// The one place every MCP tool call passes through, whatever the
     /// transport. The stdio credential check lives here rather than in each
     /// tool for exactly that reason, and so does the rewrite of an
-    /// unknown-parameter error into a did-you-mean (LIF-474).
+    /// unknown-parameter tool error into a did-you-mean (LIF-474).
     ///
     /// Not an `async fn`: the `rmcp` trait declares an explicit
     /// `MaybeSendFuture` bound on the return type, which the desugared form
@@ -671,7 +671,7 @@ impl ServerHandler for LificMcp {
         &self,
         request: rmcp::model::CallToolRequestParams,
         mut context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, rmcp::ErrorData>>
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
@@ -712,13 +712,22 @@ impl ServerHandler for LificMcp {
                 }
                 None => dispatch().await,
             };
-            result.map_err(|error| {
-                let params = self
-                    .tool_router
-                    .get(&tool)
-                    .map(|tool| arguments::ToolParameters::from_schema(&tool.input_schema));
-                arguments::explain_unknown_parameter(&tool, params, &provided, error)
-            })
+            // rmcp reports argument deserialization failures as a failed tool
+            // result rather than a protocol error, so the rewrite works on
+            // the result text.
+            match result {
+                Ok(CallToolResponse::Complete(result)) => {
+                    let params = self
+                        .tool_router
+                        .get(&tool)
+                        .map(|tool| arguments::ToolParameters::from_schema(&tool.input_schema));
+                    Ok(
+                        arguments::explain_unknown_parameter(&tool, params, &provided, result)
+                            .into(),
+                    )
+                }
+                other => other,
+            }
         }
     }
 
@@ -1289,7 +1298,7 @@ mod tests {
                 )
                 .unwrap();
                 Ok(rmcp::model::CallToolResult::success(vec![
-                    rmcp::model::Content::text("ran"),
+                    rmcp::model::ContentBlock::text("ran"),
                 ]))
             }) as ToolBody
         };

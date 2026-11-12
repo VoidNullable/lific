@@ -97,6 +97,44 @@ pub(crate) fn tidy(detail: &str) -> String {
     }
 }
 
+/// The MCP 2026-07-28 HTTP headers for one request body. A client on that
+/// revision names its version in `params._meta`; the server requires the same
+/// version in `MCP-Protocol-Version`, plus `Mcp-Method` and, for named
+/// requests, `Mcp-Name`. A stdio client cannot set HTTP headers, so the proxy
+/// derives them. Older clients send no such metadata and get no headers.
+fn routing_headers(body: &str) -> Vec<(&'static str, String)> {
+    let Ok(message) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let params = message.get("params");
+    let Some(version) = params
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+    let mut headers = vec![("mcp-protocol-version", version.to_owned())];
+    if let Some(method) = message.get("method").and_then(Value::as_str) {
+        headers.push(("mcp-method", method.to_owned()));
+    }
+    if let Some(name) = params
+        .and_then(|params| params.get("name").or_else(|| params.get("uri")))
+        .and_then(Value::as_str)
+    {
+        headers.push(("mcp-name", name.to_owned()));
+    }
+    headers.retain(|(_, value)| reqwest::header::HeaderValue::from_str(value).is_ok());
+    headers
+}
+
+fn is_json_rpc_error(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        value.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && value.get("error").is_some_and(Value::is_object)
+    })
+}
+
 /// Sends one raw JSON-RPC request body to the remote and returns its raw
 /// response body. Abstracted so the pump can be tested without a server.
 ///
@@ -119,12 +157,16 @@ struct HttpForwarder {
 impl Forwarder for HttpForwarder {
     async fn forward(&self, body: String) -> Result<String, ForwardError> {
         let inline_attachment = is_get_attachment_call(&body);
+        let routing = routing_headers(&body);
         let mut request = self
             .client
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .body(body);
+        for (name, value) in routing {
+            request = request.header(name, value);
+        }
         if inline_attachment {
             request = request.header(INLINE_ATTACHMENT_HEADER, "1");
         }
@@ -139,6 +181,12 @@ impl Forwarder for HttpForwarder {
         }
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
+            // MCP 2026-07-28 servers answer protocol errors (an unsupported
+            // version, a missing header) with HTTP 400 and a JSON-RPC error
+            // body. Relay that body so the client sees the typed error.
+            if status == StatusCode::BAD_REQUEST && is_json_rpc_error(&detail) {
+                return Ok(detail);
+            }
             return Err(ForwardError::unreachable(format!(
                 "HTTP {status} from {}: {}",
                 self.endpoint,
@@ -835,6 +883,141 @@ mod tests {
         assert_eq!(output[1]["result"]["content"][0]["text"], "issue");
         assert_eq!(seen.lock().unwrap().as_slice(), &[Some("1".into()), None]);
         task.abort();
+    }
+
+    /// Remote stdio carries both protocol generations to a real server: a
+    /// 2025-03-26 client that initializes, and a 2026-07-28 client whose
+    /// version travels in `_meta` and must reach the server as HTTP headers.
+    #[tokio::test]
+    async fn remote_stdio_serves_legacy_and_2026_07_28_clients() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("lific.db");
+        let pool = db::open(&db_path).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash, is_admin) VALUES (1, 'owner', 'owner@test', 'x', 1)",
+                [],
+            )
+            .unwrap();
+            db::queries::create_project(
+                &conn,
+                &db::models::CreateProject {
+                    name: "Proxy project".into(),
+                    identifier: "PRX".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
+        let mut config = Config::default();
+        config.database.path = db_path.clone();
+        config.auth.required = true;
+        config.server.host = "127.0.0.1".into();
+        let trusted_proxies =
+            Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
+        let app = server::build_app_with_store(
+            &config,
+            pool,
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            storage::AttachmentStore::from_db_path(&db_path),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        let forwarder = HttpForwarder {
+            client: reqwest::Client::new(),
+            endpoint: format!("http://{address}/mcp"),
+            credential: Some(key),
+        };
+
+        let meta = crate::mcp::protocol_tests::modern_meta();
+        let list_projects = serde_json::json!({
+            "name": "list_resources",
+            "arguments": {"resource_type": "project"}
+        });
+        let mut modern_call = list_projects.clone();
+        modern_call["_meta"] = meta.clone();
+        let sessions = [
+            vec![
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                    "protocolVersion": "2025-03-26", "capabilities": {},
+                    "clientInfo": {"name": "legacy", "version": "1"}}}),
+                serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+                serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": list_projects}),
+            ],
+            vec![
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+                    "params": {"_meta": meta}}),
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                    "params": {"_meta": meta}}),
+                serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": modern_call}),
+            ],
+        ];
+        for (modern, session) in [false, true].into_iter().zip(sessions) {
+            let input: String = session.iter().map(|m| m.to_string() + "\n").collect();
+            let mut stdout = Vec::new();
+            pump(
+                BufReader::new(input.as_bytes()),
+                &mut stdout,
+                &forwarder,
+                None,
+            )
+            .await
+            .unwrap();
+            let output: Vec<Value> = String::from_utf8(stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(output.len(), 3, "{output:?}");
+            if modern {
+                let versions = &output[0]["result"]["supportedVersions"];
+                assert!(
+                    versions
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("2026-07-28")),
+                    "{output:?}"
+                );
+            } else {
+                assert_eq!(output[0]["result"]["protocolVersion"], "2025-03-26");
+            }
+            assert!(output[1]["result"]["tools"].as_array().unwrap().len() > 1);
+            let text = output[2]["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("Proxy project"), "{output:?}");
+        }
+        task.abort();
+    }
+
+    #[test]
+    fn routing_headers_follow_the_request_meta() {
+        let legacy = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        assert!(routing_headers(legacy).is_empty());
+        let modern = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
+                       "name": "get_issue"}
+        })
+        .to_string();
+        assert_eq!(
+            routing_headers(&modern),
+            vec![
+                ("mcp-protocol-version", "2026-07-28".to_owned()),
+                ("mcp-method", "tools/call".to_owned()),
+                ("mcp-name", "get_issue".to_owned()),
+            ]
+        );
     }
 
     #[tokio::test]

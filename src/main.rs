@@ -1019,16 +1019,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!("lific MCP server started (stdio)");
 
-            // Tolerate SEP-2575 stateless discovery: rmcp 1.x's serving loop
-            // answers only `ping` before `initialize`, and a modern client's
-            // `server/discover` probe makes it abort the session with no reply,
-            // so the client reads EOF mid-handshake instead of a JSON-RPC error
-            // it could fall back from. The guard transport answers unsupported
-            // pre-initialize requests with -32601 and only forwards once a real
-            // `initialize` arrives.
-            let (reader, writer) = rmcp::transport::io::stdio();
-            let transport = mcp::preinit::guard_stdio(reader, writer);
-            let handle = server.serve(transport).await?;
+            let handle = server.serve(rmcp::transport::io::stdio()).await?;
             if let Some(u) = &token_user {
                 info!(user = %u.username, "stdio session bound to agent");
             }

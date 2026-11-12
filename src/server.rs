@@ -313,11 +313,11 @@ pub(crate) fn build_app_with_store(
     }
 
     let mcp_config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
+        .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(mcp_allowed_hosts.clone());
 
-    // rmcp 1.4.0's `Service::call` clones its config on every request. Keep
+    // rmcp's `Service::call` clones the service on every request. Keep
     // the service behind an `Arc` so Axum's clone boundary does not copy the
     // host allowlist (the SDK's `handle` method only needs `&self`).
     let mcp_service = Arc::new(StreamableHttpService::new(
@@ -708,7 +708,8 @@ fn print_initial_key(key: &str) {
 ///
 /// Methods, request headers, and exposed response headers are all configured
 /// for the union of REST + MCP needs. Notably we accept the MCP transport
-/// headers (`mcp-protocol-version`, `mcp-session-id`, `last-event-id`) and
+/// headers (`mcp-protocol-version`, `mcp-session-id`, `last-event-id`,
+/// `mcp-method`, `mcp-name`) and
 /// expose `mcp-session-id` and `www-authenticate` so MCP clients can read
 /// the session id back and so 401 responses surface the resource metadata.
 fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
@@ -728,6 +729,10 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             HeaderName::from_static("mcp-protocol-version"),
             HeaderName::from_static("mcp-session-id"),
             HeaderName::from_static("last-event-id"),
+            // MCP 2026-07-28 routing headers. No tool promotes an argument
+            // with `x-mcp-header`, so no `Mcp-Param-*` header is ever sent.
+            HeaderName::from_static("mcp-method"),
+            HeaderName::from_static("mcp-name"),
         ])
         .expose_headers([
             header::WWW_AUTHENTICATE,
@@ -799,7 +804,7 @@ fn build_authless_mcp_router(
 ) -> Router {
     let allowed_hosts_for_links = allowed_hosts.clone();
     let config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
+        .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts);
     let service = Arc::new(StreamableHttpService::new(
@@ -1830,6 +1835,175 @@ mod authless_mcp_tests {
             val["result"]["serverInfo"].is_object(),
             "expected an initialize result, got: {val}"
         );
+    }
+
+    fn router_with_project() -> Router {
+        let pool = db::open_memory().unwrap();
+        {
+            let conn = pool.write().unwrap();
+            db::queries::users::create_passwordless_admin(&conn, "Operator").unwrap();
+            db::queries::create_project(
+                &conn,
+                &db::models::CreateProject {
+                    name: "Protocol project".into(),
+                    identifier: "PRO".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        build_authless_mcp_router(
+            pool,
+            "test-token",
+            None,
+            vec!["localhost".into()],
+            None,
+            realtime::RealtimeHub::new(),
+        )
+    }
+
+    /// POST one JSON-RPC message the way a stateless client does: no session
+    /// id, the version in a header, and the 2026-07-28 routing headers when
+    /// the client speaks that revision.
+    async fn post_mcp(
+        router: &Router,
+        version: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/test-token")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", version);
+        if version >= "2026-07-28" {
+            req = req.header("Mcp-Method", body["method"].as_str().unwrap());
+            if let Some(name) = body["params"]["name"].as_str() {
+                req = req.header("Mcp-Name", name);
+            }
+        }
+        let res = router
+            .clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert!(value.get("error").is_none(), "{value}");
+        value
+    }
+
+    fn assert_project_listed(call: &serde_json::Value) {
+        assert_ne!(call["result"]["isError"], true, "{call}");
+        let text = call["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Protocol project"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_2025_03_26_client_initializes_lists_and_calls_over_http() {
+        let router = router_with_project();
+        let init = post_mcp(
+            &router,
+            "2025-03-26",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legacy-client", "version": "1"}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(init["result"]["protocolVersion"], "2025-03-26", "{init}");
+
+        let list = post_mcp(
+            &router,
+            "2025-03-26",
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        )
+        .await;
+        assert!(list["result"]["tools"].as_array().unwrap().len() > 1);
+
+        let call = post_mcp(
+            &router,
+            "2025-03-26",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "list_resources", "arguments": {"resource_type": "project"}}
+            }),
+        )
+        .await;
+        assert_project_listed(&call);
+        assert!(call["result"].get("resultType").is_none(), "{call}");
+    }
+
+    #[tokio::test]
+    async fn a_2026_07_28_client_discovers_lists_and_calls_over_http() {
+        let router = router_with_project();
+        let meta = crate::mcp::protocol_tests::modern_meta();
+        let discover = post_mcp(
+            &router,
+            "2026-07-28",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+                "params": {"_meta": meta}
+            }),
+        )
+        .await;
+        let versions = discover["result"]["supportedVersions"].as_array().unwrap();
+        assert!(
+            versions.contains(&serde_json::json!("2026-07-28")),
+            "{discover}"
+        );
+
+        let list = post_mcp(
+            &router,
+            "2026-07-28",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                "params": {"_meta": meta}
+            }),
+        )
+        .await;
+        assert!(list["result"]["tools"].as_array().unwrap().len() > 1);
+
+        let call = post_mcp(
+            &router,
+            "2026-07-28",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {
+                    "_meta": meta,
+                    "name": "list_resources",
+                    "arguments": {"resource_type": "project"}
+                }
+            }),
+        )
+        .await;
+        assert_project_listed(&call);
+        assert_eq!(call["result"]["resultType"], "complete", "{call}");
+    }
+
+    /// The did-you-mean rewrite reaches an HTTP client as a failed tool result.
+    #[tokio::test]
+    async fn an_unknown_parameter_hint_reaches_an_http_client() {
+        let router = router_with_project();
+        let call = post_mcp(
+            &router,
+            "2025-03-26",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "list_resources", "arguments": {"resource": "project"}}
+            }),
+        )
+        .await;
+        assert_eq!(call["result"]["isError"], true, "{call}");
+        let text = call["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Did you mean `resource_type`?"), "{text}");
     }
 
     #[tokio::test]

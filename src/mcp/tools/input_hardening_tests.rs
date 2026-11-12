@@ -691,7 +691,8 @@ mod wire {
             response
         }
 
-        /// `Ok(text)` for a tool result, `Err(message)` for a JSON-RPC error.
+        /// `Ok(text)` for a successful tool result, `Err(message)` for a
+        /// failed one (`isError: true`) or a JSON-RPC error.
         pub(super) async fn call(
             &mut self,
             tool: &str,
@@ -700,12 +701,17 @@ mod wire {
             let response = self
                 .request("tools/call", json!({"name": tool, "arguments": arguments}))
                 .await;
-            match response.get("error") {
-                Some(error) => Err(error["message"].as_str().unwrap_or_default().to_owned()),
-                None => Ok(response["result"]["content"][0]["text"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned()),
+            if let Some(error) = response.get("error") {
+                return Err(error["message"].as_str().unwrap_or_default().to_owned());
+            }
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if response["result"]["isError"] == true {
+                Err(text)
+            } else {
+                Ok(text)
             }
         }
     }

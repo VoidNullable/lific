@@ -67,12 +67,12 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # MCP
-# rmcp breaks its API within minor versions (1.7 changed the JSON-RPC error
-# constructor; 1.8 changed version negotiation and tool argument errors), and
-# `cargo install` ignores Cargo.lock. Upgrade deliberately, not by resolution.
-# rmcp-macros is listed only to hold it to the same minor as rmcp.
-rmcp = { version = "~1.4", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
-rmcp-macros = "~1.4"
+# rmcp has changed behavior within minor versions before (1.7 changed the
+# JSON-RPC error constructor; 1.8 changed version negotiation and tool argument
+# errors), and `cargo install` ignores Cargo.lock. Upgrade deliberately, not by
+# resolution. rmcp-macros is listed only to hold it to the same minor as rmcp.
+rmcp = { version = "~3.9", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+rmcp-macros = "~3.9"
 schemars = "0.8"
 anyhow = "1"
 

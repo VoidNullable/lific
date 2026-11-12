@@ -134,7 +134,8 @@ fn finish_response(output: String, result: fmt::Result) -> String {
 }
 
 fn encoded_tool_result_bytes(output: &str) -> Result<usize, String> {
-    let result = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(output)]);
+    let result =
+        rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(output)]);
     let mut writer = CountingWriter(0);
     serde_json::to_writer(&mut writer, &result)
         .map(|()| writer.0)
@@ -5921,8 +5922,8 @@ No issues found."
         let mut log = ReadLog::new("get_attachment");
         let result = self.get_attachment_inner(input, &mut log);
         self.finish_read(log, result.is_ok());
-        let contents =
-            result.unwrap_or_else(|error| vec![rmcp::model::Content::text(error_response(error))]);
+        let contents = result
+            .unwrap_or_else(|error| vec![rmcp::model::ContentBlock::text(error_response(error))]);
         rmcp::model::CallToolResult::success(contents)
     }
 
@@ -5930,8 +5931,8 @@ No issues found."
         &self,
         input: GetAttachmentInput,
         log: &mut ReadLog,
-    ) -> Result<Vec<rmcp::model::Content>, String> {
-        use rmcp::model::Content;
+    ) -> Result<Vec<rmcp::model::ContentBlock>, String> {
+        use rmcp::model::ContentBlock as Content;
 
         let attachment =
             self.read(|conn| queries::attachments::get_attachment(conn, input.attachment_id))?;
@@ -6492,7 +6493,7 @@ mod tests {
         let large = "界".repeat(64 * 1024);
         for output in ["small", "caf\u{e9} \0 😀", large.as_str()] {
             let result =
-                rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(output)]);
+                rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(output)]);
             let wire = serde_json::to_vec(&result).unwrap();
             assert_eq!(
                 super::encoded_tool_result_bytes(output).unwrap(),
@@ -14405,9 +14406,7 @@ mod tests {
                     &base64::engine::general_purpose::STANDARD.encode(bytes)
                 );
             }
-            rmcp::model::ResourceContents::TextResourceContents { .. } => {
-                panic!("expected an embedded blob resource, got {resource:?}")
-            }
+            other => panic!("expected an embedded blob resource, got {other:?}"),
         }
     }
 
@@ -14437,9 +14436,7 @@ mod tests {
             rmcp::model::ResourceContents::BlobResourceContents { mime_type, .. } => {
                 assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
             }
-            rmcp::model::ResourceContents::TextResourceContents { .. } => {
-                panic!("expected an embedded blob resource, got {resource:?}")
-            }
+            other => panic!("expected an embedded blob resource, got {other:?}"),
         }
     }
 
