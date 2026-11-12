@@ -1,4 +1,5 @@
 pub(crate) mod activity;
+pub(crate) mod agents;
 pub(crate) mod assignees;
 pub(crate) mod attachments;
 pub(crate) mod briefing;

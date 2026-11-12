@@ -1,4 +1,5 @@
 mod activity;
+mod agents;
 mod archived_projects;
 /// LIF-418: the MCP attachment tools reuse this module's authorization gates
 /// and filename hygiene verbatim rather than growing a second copy, so the
@@ -165,6 +166,7 @@ fn router_impl(
         )
         .route("/api/issues/attention", get(issues::my_attention))
         .route("/api/home/overview", get(home::home_overview))
+        .route("/api/agents/activity", get(agents::agent_activity))
         .route(
             "/api/issues/{id}",
             get(issues::get_issue)
