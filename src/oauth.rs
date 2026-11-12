@@ -20,6 +20,8 @@ use crate::db::DbPool;
 use crate::error::LificError;
 use crate::ratelimit::RateLimiter;
 
+pub(crate) mod cimd;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const MAX_OAUTH_BODY_BYTES: usize = 64 * 1024;
@@ -188,6 +190,8 @@ pub struct OAuthState {
     pub register_limiter: Arc<RateLimiter>,
     /// Trusted reverse-proxy ranges parsed once at server startup.
     pub trusted_proxies: Arc<[crate::ratelimit::IpNetwork]>,
+    /// Where Client ID Metadata Documents come from.
+    pub client_documents: cimd::Source,
 }
 
 /// Resolve the issuer to advertise for this request (LIF-287).
@@ -373,7 +377,8 @@ async fn authorization_server_metadata(
         // ignored, which reads as "authenticated" when it isn't.
         "token_endpoint_auth_methods_supported": ["none"],
         "code_challenge_methods_supported": ["S256"],
-        "authorization_response_iss_parameter_supported": true
+        "authorization_response_iss_parameter_supported": true,
+        "client_id_metadata_document_supported": true
     }))
 }
 
@@ -694,6 +699,46 @@ fn valid_authorize_request(
         && code_challenge_method == Some("S256")
 }
 
+fn sign_in_to_review_page() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(
+            "<h1>Authentication required</h1><p>You must be signed in to review OAuth access. \
+             <a href=\"/#/login\">Sign in</a>, then start the connection again from the \
+             application that sent you here.</p>"
+                .to_string(),
+        ),
+    )
+        .into_response()
+}
+
+/// Make sure a document client's row is current: reuse a fresh one, else
+/// fetch, validate and store the document, within the client storage cap.
+async fn refresh_document_client(oauth: &OAuthState, client_id: &str) -> Result<(), String> {
+    let fresh = oauth
+        .db
+        .read()
+        .map_err(|_| "database error".to_owned())
+        .and_then(|conn| cimd::is_fresh(&conn, client_id).map_err(|_| "database error".into()))?;
+    if fresh {
+        return Ok(());
+    }
+    let metadata = cimd::load(oauth.client_documents.as_ref(), client_id).await?;
+    let conn = oauth.db.write().map_err(|_| "database error".to_owned())?;
+    let (known, count): (bool, i64) = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM oauth_clients WHERE client_id = ?1),
+                    (SELECT COUNT(*) FROM oauth_clients)",
+            params![client_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "database error".to_owned())?;
+    if !known && count >= MAX_DYNAMIC_CLIENT_ROWS {
+        return Err("OAuth client storage is temporarily full".into());
+    }
+    cimd::store(&conn, client_id, &metadata).map_err(|_| "database error".into())
+}
+
 async fn authorize_page(
     State(oauth): State<OAuthState>,
     headers: HeaderMap,
@@ -718,6 +763,26 @@ async fn authorize_page(
             Html("<h1>Unsupported OAuth request</h1><p>Only authorization-code access to the MCP capability is supported.</p>".to_string()),
         )
             .into_response();
+    }
+
+    // A URL client_id names a metadata document. It is fetched only for a
+    // signed-in browser, so an anonymous visitor cannot make the server fetch
+    // arbitrary URLs.
+    if cimd::is_document_client_id(&params.client_id) {
+        if authenticated_user_identity(&oauth.db, &headers).is_none() {
+            return sign_in_to_review_page();
+        }
+        if let Err(reason) = refresh_document_client(&oauth, &params.client_id).await {
+            warn!(client_id = %params.client_id, %reason, "client metadata document refused");
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(format!(
+                    "<h1>Invalid OAuth client</h1><p>{}</p>",
+                    html_escape(&reason)
+                )),
+            )
+                .into_response();
+        }
     }
 
     // Resolve the registered client before showing consent. A generic
@@ -756,6 +821,12 @@ async fn authorize_page(
         )
             .into_response();
     };
+    // A document's client_name is the client's own claim; the host that
+    // served it is the part a person can check.
+    let client_name = match cimd::document_host(&params.client_id) {
+        Some(host) => format!("{client_name} (metadata published by {host})"),
+        None => client_name,
+    };
 
     // Bind the CSRF token to the session the browser presents when loading this
     // page (sent on the top-level GET navigation under SameSite=Lax). The POST
@@ -778,16 +849,7 @@ async fn authorize_page(
     // every browser client that sends its user straight to /oauth/authorize.
     // Both approval POSTs already link to the sign-in page; match them.
     let Some(approving_identity) = authenticated_user_identity(&oauth.db, &headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html(
-                "<h1>Authentication required</h1><p>You must be signed in to review OAuth access. \
-                 <a href=\"/#/login\">Sign in</a>, then start the connection again from the \
-                 application that sent you here.</p>"
-                    .to_string(),
-            ),
-        )
-            .into_response();
+        return sign_in_to_review_page();
     };
     // LIFIC-13: the approval screen asks which tool is connecting so the audit
     // log can attribute requests to a per-tool bot. Options come from the same
@@ -1550,6 +1612,19 @@ async fn device_authorization(
         )
             .into_response();
     };
+    // A metadata-document client is cached only to serve the consent page;
+    // its document never granted device login.
+    if cimd::is_document_client_id(client_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "a metadata document client_id can use only the \
+                                      authorization-code grant"
+            })),
+        )
+            .into_response();
+    }
     let client_name: String = match state.db.read().ok().and_then(|conn| {
         conn.query_row(
             "SELECT client_name FROM oauth_clients WHERE client_id = ?1",
@@ -2877,6 +2952,7 @@ mod tests {
             allowed_hosts: test_allowed_hosts(),
             register_limiter: Arc::new(RateLimiter::new(cap, std::time::Duration::from_secs(3600))),
             trusted_proxies: default_trusted_proxies(),
+            client_documents: Arc::new(cimd::testing::FakeSource::default()),
         };
         (
             router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
@@ -2919,6 +2995,7 @@ mod tests {
                 std::time::Duration::from_secs(3600),
             )),
             trusted_proxies: default_trusted_proxies(),
+            client_documents: Arc::new(cimd::testing::FakeSource::default()),
         };
         (
             router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
@@ -2997,6 +3074,285 @@ mod tests {
             .find_map(|pair| pair.strip_prefix("iss="))
             .unwrap_or_else(|| panic!("no iss in {location}"));
         urlencoding::decode(iss).unwrap().into_owned()
+    }
+
+    const DOCUMENT_CLIENT: &str = "https://client.example/oauth/metadata.json";
+
+    fn test_oauth_app_with_documents(
+        source: cimd::testing::FakeSource,
+    ) -> (Router, DbPool, Arc<cimd::testing::FakeSource>) {
+        let db = crate::db::open_memory().expect("test db");
+        let source = Arc::new(source);
+        let state = OAuthState {
+            db: db.clone(),
+            issuer: "https://example.com".into(),
+            issuer_is_explicit: true,
+            allowed_hosts: test_allowed_hosts(),
+            register_limiter: Arc::new(RateLimiter::new(
+                1000,
+                std::time::Duration::from_secs(3600),
+            )),
+            trusted_proxies: default_trusted_proxies(),
+            client_documents: source.clone(),
+        };
+        (
+            router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
+            db,
+            source,
+        )
+    }
+
+    fn document_source() -> cimd::testing::FakeSource {
+        let mut source = cimd::testing::FakeSource::default();
+        source.dns.insert(
+            "client.example".into(),
+            vec!["93.184.216.34".parse().unwrap()],
+        );
+        source
+            .dns
+            .insert("internal.example".into(), vec!["10.0.0.5".parse().unwrap()]);
+        source.documents.insert(
+            DOCUMENT_CLIENT.into(),
+            serde_json::to_vec(&serde_json::json!({
+                "client_id": DOCUMENT_CLIENT,
+                "client_name": "Document Client",
+                "redirect_uris": ["http://localhost/callback"],
+                "token_endpoint_auth_method": "none"
+            }))
+            .unwrap(),
+        );
+        source
+    }
+
+    async fn consent_page(
+        app: &Router,
+        session: &str,
+        client_id: &str,
+        redirect_uri: &str,
+        challenge: &str,
+    ) -> (StatusCode, String) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256",
+                        urlencoding::encode(client_id),
+                        urlencoding::encode(redirect_uri),
+                    ))
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_metadata_document_client_cannot_start_device_login() {
+        let (app, db, _source) = test_oauth_app_with_documents(document_source());
+        let session = create_test_session(&db);
+        let (status, _) = consent_page(
+            &app,
+            &session,
+            DOCUMENT_CLIENT,
+            "http://localhost/callback",
+            &"a".repeat(43),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the document row is now cached");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device_authorization")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(format!(
+                        "client_id={}",
+                        urlencoding::encode(DOCUMENT_CLIENT)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "invalid_client");
+    }
+
+    #[tokio::test]
+    async fn a_metadata_document_client_completes_the_code_flow() {
+        let (app, db, source) = test_oauth_app_with_documents(document_source());
+        let session = create_test_session(&db);
+        let verifier = "test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789";
+        let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
+
+        let (status, page) = consent_page(
+            &app,
+            &session,
+            DOCUMENT_CLIENT,
+            "http://localhost/callback",
+            &challenge,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.contains("Document Client"), "{page}");
+        assert_eq!(source.fetched.lock().unwrap().len(), 1);
+
+        let request = AuthorizationRequest {
+            client_id: DOCUMENT_CLIENT,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session);
+        let body = format!(
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code&decision=approve",
+            urlencoding::encode(DOCUMENT_CLIENT),
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_redirection(), "{}", resp.status());
+        let location = resp.headers()["location"].to_str().unwrap().to_owned();
+        let code = location
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        let token_body = format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={}&code_verifier={verifier}",
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(DOCUMENT_CLIENT),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(token_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let token: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            token["access_token"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty())
+        );
+
+        // A second visit within the cache lifetime does not refetch.
+        consent_page(
+            &app,
+            &session,
+            DOCUMENT_CLIENT,
+            "http://localhost/callback",
+            &challenge,
+        )
+        .await;
+        assert_eq!(source.fetched.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_document_client_with_another_redirect_uri_is_refused() {
+        let (app, db, _source) = test_oauth_app_with_documents(document_source());
+        let session = create_test_session(&db);
+        let (status, page) = consent_page(
+            &app,
+            &session,
+            DOCUMENT_CLIENT,
+            "http://localhost/elsewhere",
+            &test_code_challenge(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+        assert!(page.contains("not registered"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_document_client_on_a_private_address_is_never_fetched() {
+        let (app, db, source) = test_oauth_app_with_documents(document_source());
+        let session = create_test_session(&db);
+        let (status, page) = consent_page(
+            &app,
+            &session,
+            "https://internal.example/meta.json",
+            "http://localhost/callback",
+            &test_code_challenge(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+        assert!(page.contains("non-public address"), "{page}");
+        assert!(source.fetched.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_signed_out_visit_never_fetches_a_document() {
+        let (app, _db, source) = test_oauth_app_with_documents(document_source());
+        let (status, _) = consent_page(
+            &app,
+            "",
+            DOCUMENT_CLIENT,
+            "http://localhost/callback",
+            &test_code_challenge(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(source.fetched.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_advertises_client_id_metadata_documents() {
+        let (app, _db) = test_oauth_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(metadata["client_id_metadata_document_supported"], true);
     }
 
     #[tokio::test]

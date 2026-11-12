@@ -38,6 +38,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 ### OAuth
 
 - Authorization responses carry `iss`, the issuer the metadata advertises, on approval and denial alike, and the metadata says so with `authorization_response_iss_parameter_supported`. Clients that connect to several authorization servers use it to reject a response from the wrong one.
+- Clients can skip registration by using an HTTPS URL as their `client_id`: Lific fetches the client metadata document behind it when a signed-in person opens the consent page, and the page names the host that published it. The fetch reaches only public addresses, follows no redirects, and is cached for an hour.
 
 ### Images and attachments
 

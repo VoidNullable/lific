@@ -32,7 +32,7 @@ Protected-resource metadata. Returns `resource` (the issuer followed by `/mcp`),
 
 ### GET `/.well-known/oauth-authorization-server`
 
-Authorization-server metadata: `issuer`, the `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint` and `device_authorization_endpoint` (all under `/oauth`), and the supported scopes, response types (`code`), response modes (`query`), grant types, token endpoint authentication method (`none`) and PKCE method (`S256`).
+Authorization-server metadata: `issuer`, the `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint` and `device_authorization_endpoint` (all under `/oauth`), and the supported scopes, response types (`code`), response modes (`query`), grant types, token endpoint authentication method (`none`) and PKCE method (`S256`). It also sets `client_id_metadata_document_supported` and `authorization_response_iss_parameter_supported` to `true`.
 
 ## Registering a client
 
@@ -50,6 +50,20 @@ Dynamic client registration. No credential. JSON body:
 Answers `201` with `client_id`, `client_name`, `redirect_uris`, `grant_types`, `response_types` and `token_endpoint_auth_method: "none"`, whatever method the client asked for.
 
 Invalid metadata is `400` with `invalid_redirect_uri` or `invalid_client_metadata`. Each client address may register 10 clients per hour; the next is `429` with `too_many_requests` and a `Retry-After` header. The instance keeps at most 1,024 clients; when full, registration is `429` with `temporarily_unavailable`. A client that has never been used is removed after 7 days.
+
+### Client ID metadata documents
+
+A client can skip registration and use an HTTPS URL as its `client_id`. The URL names a JSON document the client publishes, in the same shape as a registration request plus a `client_id` field equal to the URL itself.
+
+Lific fetches the document when a signed-in person opens the consent page for that client. A visitor who is not signed in gets the sign-in page and nothing is fetched, so an anonymous request cannot make the server fetch arbitrary URLs. The fetch has these limits:
+
+- The URL must be `https`, with a host and a path, no credentials, no fragment and no `.` or `..` segments.
+- Every address the host resolves to must be public. Loopback, private, link-local and other special-purpose addresses are refused before any request is sent, and the connection goes only to the addresses that were checked.
+- Redirects are not followed. The fetch gives up after 5 seconds, and the document may be at most 16 KiB.
+
+The document must name its own URL as `client_id`, carry no `client_secret`, use `token_endpoint_auth_method` `none` if it sets one, allow the `authorization_code` grant if it lists grants, and list 1 to 8 `redirect_uris` under the same rules as registration. `client_name` defaults to the URL's host. Lific keeps the result for an hour, then fetches it again on the next consent page. A document that fails any check is an HTML `400` naming the reason.
+
+The consent page names such a client as "client name (metadata published by host)", so the person can see who stands behind the name. Document clients count toward the 1,024-client limit. They can use the authorization-code grant only; device login still needs a registered client.
 
 ## Browser approval (authorization code)
 

@@ -416,6 +416,7 @@ pub(crate) fn build_app_with_store(
         allowed_hosts: mcp_allowed_hosts.clone().into(),
         register_limiter: oauth_register_limiter,
         trusted_proxies: trusted_proxies.clone(),
+        client_documents: Arc::new(oauth::cimd::HttpsSource),
     };
 
     // Optional authless MCP escape hatch at /mcp/<token> (see the
