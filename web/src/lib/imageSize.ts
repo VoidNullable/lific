@@ -9,7 +9,7 @@
 // scope. Inside a GFM table the pipe has to be escaped (`![alt\|320](url)`),
 // as any pipe in a cell does.
 
-import type { Tokens } from "marked";
+import type { Token, Tokens } from "marked";
 
 /** Widths outside this range are read as ordinary alt text. */
 export const MIN_IMAGE_WIDTH = 16;
@@ -64,5 +64,46 @@ export function withImageWidths(
     });
     if (!html.startsWith("<img ")) return html;
     return `<img width="${width}" ${html.slice(5)}`;
+  };
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** The images of a paragraph that holds nothing else (line breaks and
+ *  whitespace aside), or null when it has any other content. */
+export function imageOnlyParagraph(tokens: Token[]): Tokens.Image[] | null {
+  const images: Tokens.Image[] = [];
+  for (const token of tokens) {
+    if (token.type === "image") images.push(token as Tokens.Image);
+    else if (token.type === "br") continue;
+    else if (token.type === "text" && token.raw.trim() === "") continue;
+    else return null;
+  }
+  return images.length > 0 ? images : null;
+}
+
+/**
+ * Route paragraphs made only of images through image layout. A lone image
+ * with a title (`![alt](url "Caption")`) renders as a figure whose caption is
+ * the title. Every other paragraph renders exactly as marked's default.
+ */
+export function withImageParagraphs(
+  original: (token: Tokens.Paragraph) => string,
+  parser: () => { parseInline: (tokens: Token[]) => string },
+): (token: Tokens.Paragraph) => string {
+  return function (this: unknown, token: Tokens.Paragraph): string {
+    const images = imageOnlyParagraph(token.tokens);
+    if (images?.length === 1 && images[0].title) {
+      const img = parser().parseInline([images[0]]);
+      return `<figure class="md-figure">${img}<figcaption>${escapeHtml(images[0].title)}</figcaption></figure>\n`;
+    }
+    return original.call(this, token);
   };
 }

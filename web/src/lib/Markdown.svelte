@@ -27,7 +27,7 @@
   import { normalizeEscapedNewlines, setTaskChecked, taskStates } from "./taskList"; // LIF-502
   import { toast } from "./toast/toast.svelte";
   import { tick } from "svelte";
-  import { THUMBNAIL_EDGE, withImageWidths } from "./imageSize";
+  import { THUMBNAIL_EDGE, withImageParagraphs, withImageWidths } from "./imageSize";
 
   // LIF-471: in public scope an <img> may only point at this instance's own
   // attachments. Registered once (hooks are global to DOMPurify) and inert
@@ -226,8 +226,13 @@
     return `<input ${token.checked ? 'checked="" ' : ""}type="checkbox" class="task-toggle" data-task="${taskNonce}:${index}"> `;
   };
 
-  // `![alt|320](url)` renders at most 320 px wide (see imageSize.ts).
+  // `![alt|320](url)` renders at most 320 px wide, and a lone image with a
+  // title renders as a captioned figure (see imageSize.ts).
   renderer.image = withImageWidths(renderer.image.bind(renderer));
+  renderer.paragraph = withImageParagraphs(
+    renderer.paragraph.bind(renderer),
+    () => renderer.parser,
+  );
 
   // Only the signed-in renderer of an editable body opts in; public scope
   // never does, whatever a caller passes.
@@ -627,6 +632,10 @@
       if (width > 0) {
         img.style.width = "auto";
         img.style.maxWidth = `min(100%, ${width}px)`;
+        // A percentage cap does not shrink a fit-content figure, so its
+        // caption would size to the natural image; cap the figure too.
+        const figure = img.parentElement;
+        if (figure?.matches("figure.md-figure")) figure.style.maxWidth = img.style.maxWidth;
       }
       const authored = img.getAttribute("src") ?? "";
       const match = authored.match(ATTACHMENT_SRC_RE);
@@ -843,6 +852,25 @@
     border-radius: 0.5rem;
     border: 1px solid var(--border);
     transition: filter 0.15s var(--ease-out-expo);
+  }
+  /* A lone titled image: the caption sits under it and wraps to its width. */
+  :global(.prose figure.md-figure) {
+    width: fit-content;
+    max-width: 100%;
+    margin: 0.75rem 0;
+  }
+  :global(.prose figure.md-figure > img) {
+    display: block;
+  }
+  /* Zero width with a full minimum: the caption never widens the figure
+     past its image, and wraps at the image's edge instead. */
+  :global(.prose figure.md-figure > figcaption) {
+    width: 0;
+    min-width: 100%;
+    padding-top: 0.375rem;
+    color: var(--text-muted);
+    font-size: var(--text-caption);
+    line-height: 1.4;
   }
   :global(.prose img.attachment-image:hover) {
     filter: brightness(0.96);

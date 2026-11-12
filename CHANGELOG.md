@@ -53,6 +53,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Images uploaded through MCP now record their pixel dimensions and get a thumbnail, as browser uploads always did, so the web UI no longer loads the full original where it shows a preview. Text files uploaded through MCP are searchable like browser uploads.
 - The HTTP `/mcp` endpoint accepts request bodies up to about 14.3 MiB, enough for a maximum-size base64 `upload_attachment`, and refuses larger ones with 413 before any tool runs.
 - Images can be sized: `![alt|320](url)` renders at most 320 px wide, in issues, pages, comments and the public view, and a smaller image is never stretched. The suffix rides in the alt text, so other Markdown renderers and exports still show a normal image. The chip after an image upload offers S, M and L sizes that write it for you; L loads the original so a dense screenshot can fill the column instead of showing the 480 px preview.
+- An image on its own line with a Markdown title, `![alt](url "Caption")`, shows the title as a caption under it, wrapped to the image's width.
 
 ### Agent activity
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // `![alt|N](url)` image widths, rendered by the real Markdown component in
 // signed-in and public scope: the width is a ceiling, a small image is not
-// stretched, and a width past the thumbnail edge loads the original.
+// stretched, a width past the thumbnail edge loads the original, and a lone
+// titled image becomes a figure whose caption wraps at the image edge.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -53,6 +54,8 @@ const content = [
   "![wide shot|960](/api/attachments/1)",
   "",
   "![wide shot](/api/attachments/1)",
+  "",
+  '![captioned|240](/api/attachments/1 \\"The login dialog after a failed attempt, which wraps\\")',
 ].join("\\n");
 const fixture = `<script>
   import Markdown from './lib/Markdown.svelte';
@@ -121,7 +124,7 @@ try {
 
   for (const scope of ["signed-in", "public"]) {
     await page.goto(server.resolvedUrls!.local[0] + (scope === "public" ? "?public" : ""));
-    await page.locator(".prose img").nth(3).waitFor();
+    await page.locator(".prose img").nth(4).waitFor();
     await page.waitForFunction(() =>
       Array.from(document.querySelectorAll<HTMLImageElement>(".prose img")).every(
         (img) => img.complete && img.naturalWidth > 0,
@@ -141,6 +144,7 @@ try {
       { alt: "icon", width: 100, thumbnail: false },
       { alt: "wide shot", width: 700, thumbnail: false },
       { alt: "wide shot", width: 480, thumbnail: true },
+      { alt: "captioned", width: 240, thumbnail: true },
     ];
     assert.equal(images.length, expected.length, report);
     expected.forEach((want, i) => {
@@ -149,7 +153,19 @@ try {
       assert.equal(got.thumbnail, want.thumbnail, report);
       assert.ok(Math.abs(got.width - want.width) <= 2, report);
     });
-    console.log(report);
+    // The caption wraps inside the figure, which is no wider than its image.
+    const figure = await page.$eval(".prose figure.md-figure", (fig) => ({
+      width: Math.round(fig.getBoundingClientRect().width),
+      caption: fig.querySelector("figcaption")?.textContent,
+      captionLines: Math.round(
+        fig.querySelector("figcaption")!.getBoundingClientRect().height /
+          parseFloat(getComputedStyle(fig.querySelector("figcaption")!).lineHeight),
+      ),
+    }));
+    assert.ok(Math.abs(figure.width - 240) <= 2, JSON.stringify(figure));
+    assert.equal(figure.caption, "The login dialog after a failed attempt, which wraps");
+    assert.ok(figure.captionLines >= 2, JSON.stringify(figure));
+    console.log(report, JSON.stringify(figure));
   }
   assert.deepEqual(errors, []);
   console.log("image widths: ok");

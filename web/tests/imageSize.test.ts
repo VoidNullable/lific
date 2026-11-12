@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { marked } from "marked";
-import { splitImageAlt, joinImageAlt, withImageWidths } from "../src/lib/imageSize";
+import {
+  imageOnlyParagraph,
+  joinImageAlt,
+  splitImageAlt,
+  withImageParagraphs,
+  withImageWidths,
+} from "../src/lib/imageSize";
 import { applyAltText, applyImageWidth } from "../src/lib/attachments/altText";
 
 function render(markdown: string): string {
   const renderer = new marked.Renderer();
   renderer.image = withImageWidths(renderer.image.bind(renderer));
+  renderer.paragraph = withImageParagraphs(renderer.paragraph.bind(renderer), () => renderer.parser);
   return marked.parse(markdown, { breaks: true, gfm: true, renderer }) as string;
 }
 
@@ -43,10 +50,10 @@ describe("image renderer", () => {
     expect(html).toContain('<img width="320" src="/api/attachments/4" alt="login screen">');
   });
 
-  test("an image without a width renders exactly as marked's default", () => {
+  test("an image without a width or caption renders exactly as marked's default", () => {
     for (const md of [
       "![shot](/api/attachments/4)",
-      '![shot](/api/attachments/4 "Caption")',
+      'text ![shot](/api/attachments/4 "Inline title") more',
       "![a | b](x.png)",
       "text ![*em*](x.png) more",
     ]) {
@@ -55,7 +62,7 @@ describe("image renderer", () => {
   });
 
   test("the title is kept beside the width", () => {
-    const html = render('![shot|240](/api/attachments/4 "Login")');
+    const html = render('text ![shot|240](/api/attachments/4 "Login")');
     expect(html).toContain('<img width="240" src="/api/attachments/4" alt="shot" title="Login">');
   });
 
@@ -91,5 +98,38 @@ describe("rewriting the width in a draft", () => {
 
   test("a draft without an image is unchanged", () => {
     expect(applyImageWidth("no image here", 0, 240)).toBe("no image here");
+  });
+});
+
+describe("captions", () => {
+  test("a lone titled image renders as a figure with the title as caption", () => {
+    expect(render('![a](/api/attachments/1 "Login screen")')).toBe(
+      '<figure class="md-figure"><img src="/api/attachments/1" alt="a" title="Login screen"><figcaption>Login screen</figcaption></figure>\n',
+    );
+  });
+
+  test("a caption keeps the image's width", () => {
+    expect(render('![a|240](/api/attachments/1 "Small")')).toContain(
+      '<figure class="md-figure"><img width="240" src="/api/attachments/1" alt="a" title="Small"><figcaption>Small</figcaption></figure>',
+    );
+  });
+
+  test("the caption is escaped", () => {
+    expect(render('![a](x.png "<b>bold</b> & co")')).toContain(
+      "<figcaption>&lt;b&gt;bold&lt;/b&gt; &amp; co</figcaption>",
+    );
+  });
+
+  test("an image with text around it keeps its title as a tooltip only", () => {
+    const md = 'See ![a](x.png "Login") here';
+    expect(render(md)).toBe(renderDefault(md));
+  });
+
+  test("paragraphs made only of images are recognised", () => {
+    const tokens = (md: string) => (marked.lexer(md, { breaks: true, gfm: true })[0] as any).tokens;
+    expect(imageOnlyParagraph(tokens("![a](x.png)\n![b](y.png)"))?.length).toBe(2);
+    expect(imageOnlyParagraph(tokens("![a](x.png) ![b](y.png)"))?.length).toBe(2);
+    expect(imageOnlyParagraph(tokens("![a](x.png) and text"))).toBeNull();
+    expect(imageOnlyParagraph(tokens("just text"))).toBeNull();
   });
 });
