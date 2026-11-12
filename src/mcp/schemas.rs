@@ -691,6 +691,8 @@ pub struct GetAttachmentInput {
     pub offset: Option<i64>,
     #[schemars(description = "Text only: max lines to return (default 200, cap 500)")]
     pub limit: Option<i64>,
+    #[schemars(description = "Images only: the original instead of a copy scaled to 1600px")]
+    pub full: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

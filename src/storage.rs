@@ -274,10 +274,49 @@ impl AttachmentStore {
         Ok(self.paths.dir.join("thumbs").join(format!("{sha256}.webp")))
     }
 
+    /// Absolute path to the cached model rendition for a content hash: the
+    /// copy `get_attachment` sends to agents, beside the thumbnail. WebP or
+    /// JPEG, told apart by its magic bytes.
+    pub(crate) fn rendition_path_for(&self, sha256: &str) -> Result<PathBuf, LificError> {
+        self.path_for(sha256)?;
+        Ok(self
+            .paths
+            .dir
+            .join("thumbs")
+            .join(format!("{sha256}.model")))
+    }
+
     /// Cache a generated thumbnail. Same temp-file-then-rename dance as
     /// [`Self::write`], so a concurrent reader never sees a partial webp.
     pub fn write_thumb(&self, sha256: &str, bytes: &[u8]) -> Result<(), LificError> {
-        let path = self.thumb_path_for(sha256)?;
+        self.write_derivative(&self.thumb_path_for(sha256)?, sha256, bytes)
+    }
+
+    /// Cache a generated model rendition, the same way as a thumbnail.
+    pub fn write_rendition(&self, sha256: &str, bytes: &[u8]) -> Result<(), LificError> {
+        self.write_derivative(&self.rendition_path_for(sha256)?, sha256, bytes)
+    }
+
+    /// Read a cached model rendition; `Ok(None)` when none is cached yet.
+    pub fn read_rendition(&self, sha256: &str) -> Result<Option<Vec<u8>>, LificError> {
+        match std::fs::read(self.rendition_path_for(sha256)?) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(LificError::Internal(format!("read rendition: {e}"))),
+        }
+    }
+
+    /// Drop a cached model rendition. Missing file is success.
+    pub fn delete_rendition(&self, sha256: &str) -> Result<(), LificError> {
+        match std::fs::remove_file(self.rendition_path_for(sha256)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LificError::Internal(format!("delete rendition: {e}"))),
+        }
+    }
+
+    fn write_derivative(&self, path: &Path, sha256: &str, bytes: &[u8]) -> Result<(), LificError> {
+        let path = path.to_path_buf();
         let parent = path
             .parent()
             .ok_or_else(|| LificError::Internal("thumbnail path has no parent".into()))?;
@@ -696,6 +735,7 @@ impl AttachmentStore {
         // them. Best-effort: a failure to remove a cache file must not block
         // the blob delete the caller actually asked for.
         let _ = self.delete_thumb(sha256);
+        let _ = self.delete_rendition(sha256);
         let path = self.path_for(sha256)?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -1330,6 +1370,129 @@ pub fn generate_thumbnail(bytes: &[u8]) -> Result<Option<Vec<u8>>, LificError> {
     Ok(Some(out))
 }
 
+/// Long edge of the image `get_attachment` sends to a model. Providers
+/// downscale anything larger before the model sees it, so extra pixels cost
+/// bytes and buy nothing.
+pub const MODEL_IMAGE_MAX_EDGE: u32 = 1600;
+
+/// Byte budget for the image `get_attachment` sends to a model by default.
+pub const MODEL_IMAGE_MAX_BYTES: usize = 1024 * 1024;
+
+/// Largest original `get_attachment` will inline on request: Anthropic
+/// rejects images over 5 MB of base64 (3.75 MB of bytes) or 8000 px.
+pub const MODEL_IMAGE_FULL_MAX_BYTES: usize = 5 * 1024 * 1024 / 4 * 3;
+/// Longest edge of an original `get_attachment` will inline on request.
+pub const MODEL_IMAGE_FULL_MAX_EDGE: u32 = 8000;
+
+/// A model-sized copy of a raster image.
+#[derive(Debug)]
+pub struct Rendition {
+    pub bytes: Vec<u8>,
+    pub mime: &'static str,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rendition {
+    /// Rebuild a rendition from its cached bytes, which carry their own
+    /// format and dimensions.
+    pub fn from_cached(bytes: Vec<u8>) -> Option<Self> {
+        let mime = if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+            "image/webp"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "image/jpeg"
+        } else {
+            return None;
+        };
+        let (width, height) = image_dimensions(&bytes)?;
+        Some(Self {
+            bytes,
+            mime,
+            width,
+            height,
+        })
+    }
+}
+
+/// Downscale a raster image to fit [`MODEL_IMAGE_MAX_EDGE`] and
+/// [`MODEL_IMAGE_MAX_BYTES`].
+///
+/// `Ok(None)` means the original already fits both and should be sent as is.
+/// Otherwise the copy is lossless WebP when that fits the byte budget (sharp
+/// text in screenshots, alpha kept), else JPEG at falling quality, then at a
+/// smaller size, until it fits.
+pub fn model_rendition(bytes: &[u8]) -> Result<Option<Rendition>, LificError> {
+    let undecodable =
+        |e: image::ImageError| LificError::BadRequest(format!("undecodable image: {e}"));
+    let (w, h) = reader_for(bytes)
+        .map_err(undecodable)?
+        .into_dimensions()
+        .map_err(undecodable)?;
+    if w.max(h) <= MODEL_IMAGE_MAX_EDGE && bytes.len() <= MODEL_IMAGE_MAX_BYTES {
+        return Ok(None);
+    }
+    if u64::from(w) * u64::from(h) > MAX_DECODE_PIXELS {
+        return Err(LificError::BadRequest(
+            "image is too large to downscale".into(),
+        ));
+    }
+    let image = reader_for(bytes)
+        .and_then(|r| r.decode())
+        .map_err(undecodable)?;
+
+    let mut edge = MODEL_IMAGE_MAX_EDGE.min(w.max(h));
+    loop {
+        let scaled = if image.width().max(image.height()) > edge {
+            image.resize(edge, edge, image::imageops::FilterType::Triangle)
+        } else {
+            image.clone()
+        };
+        let rgba = scaled.to_rgba8();
+        let (sw, sh) = (rgba.width(), rgba.height());
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(std::io::Cursor::new(&mut webp))
+            .encode(rgba.as_raw(), sw, sh, image::ExtendedColorType::Rgba8)
+            .map_err(|e| LificError::Internal(format!("encode rendition: {e}")))?;
+        if webp.len() <= MODEL_IMAGE_MAX_BYTES {
+            return Ok(Some(Rendition {
+                bytes: webp,
+                mime: "image/webp",
+                width: sw,
+                height: sh,
+            }));
+        }
+        // JPEG has no alpha: composite onto white, which is how a
+        // transparent screenshot reads on a page.
+        let mut rgb = image::RgbImage::new(sw, sh);
+        for (out, px) in rgb.pixels_mut().zip(rgba.pixels()) {
+            let alpha = u16::from(px[3]);
+            for c in 0..3 {
+                out[c] = ((u16::from(px[c]) * alpha + 255 * (255 - alpha)) / 255) as u8;
+            }
+        }
+        for quality in [85, 70, 55] {
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                .encode(rgb.as_raw(), sw, sh, image::ExtendedColorType::Rgb8)
+                .map_err(|e| LificError::Internal(format!("encode rendition: {e}")))?;
+            if jpeg.len() <= MODEL_IMAGE_MAX_BYTES {
+                return Ok(Some(Rendition {
+                    bytes: jpeg,
+                    mime: "image/jpeg",
+                    width: sw,
+                    height: sh,
+                }));
+            }
+        }
+        if edge <= THUMBNAIL_MAX_EDGE {
+            return Err(LificError::BadRequest(
+                "image does not compress into the model budget".into(),
+            ));
+        }
+        edge = (edge * 3 / 4).max(THUMBNAIL_MAX_EDGE);
+    }
+}
+
 /// Whether a thumbnail is expected to exist for an attachment, given its mime
 /// and recorded dimensions. This is the value serialized as `has_thumbnail`,
 /// and it deliberately describes what the thumbnail endpoint will do rather
@@ -1370,6 +1533,40 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::png_image;
     use super::*;
+
+    /// A photo-like image whose lossless copy busts the byte budget falls
+    /// back to JPEG and still lands within it.
+    #[test]
+    fn a_noisy_image_renders_as_jpeg_within_the_model_budget() {
+        let mut state = 0x2545_f491_u32;
+        let buffer = image::RgbaImage::from_fn(2400, 1800, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let [r, g, b, _] = state.to_le_bytes();
+            image::Rgba([r, g, b, 255])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let rendition = model_rendition(&png)
+            .unwrap()
+            .expect("too large to send as is");
+        assert_eq!(rendition.mime, "image/jpeg");
+        assert!(rendition.bytes.len() <= MODEL_IMAGE_MAX_BYTES);
+        assert!(rendition.width.max(rendition.height) <= MODEL_IMAGE_MAX_EDGE);
+        let cached = Rendition::from_cached(rendition.bytes.clone()).unwrap();
+        assert_eq!(
+            (cached.width, cached.height),
+            (rendition.width, rendition.height)
+        );
+    }
+
+    #[test]
+    fn an_image_within_the_model_budget_is_sent_as_is() {
+        assert!(model_rendition(&png_image(1600, 900)).unwrap().is_none());
+    }
 
     #[test]
     fn streaming_blob_handle_reads_only_regular_files() {

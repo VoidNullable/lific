@@ -196,6 +196,24 @@ embed-manifest = "1.5"
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+# Image decoding, scaling and encoding run in attachment tests at real sizes
+# (a 4000x3000 upload); unoptimized they dominate the test run.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

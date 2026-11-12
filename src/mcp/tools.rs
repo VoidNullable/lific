@@ -6075,6 +6075,106 @@ No issues found."
         rmcp::model::CallToolResult::success(contents)
     }
 
+    /// A raster image for a model: by default a copy no larger than
+    /// [`MODEL_IMAGE_MAX_EDGE`](crate::storage::MODEL_IMAGE_MAX_EDGE) px and
+    /// [`MODEL_IMAGE_MAX_BYTES`](crate::storage::MODEL_IMAGE_MAX_BYTES), cached
+    /// beside the thumbnail; the original only on request and only within what
+    /// a provider accepts inline. SVG never comes here (`is_raster_mime`).
+    fn raster_attachment(
+        &self,
+        attachment: &models::Attachment,
+        bytes: Vec<u8>,
+        full: bool,
+    ) -> Result<Vec<rmcp::model::ContentBlock>, String> {
+        use crate::storage::{
+            MODEL_IMAGE_FULL_MAX_BYTES, MODEL_IMAGE_FULL_MAX_EDGE, MODEL_IMAGE_MAX_BYTES, Rendition,
+        };
+        use rmcp::model::ContentBlock as Content;
+
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let dimensions = match (attachment.width, attachment.height) {
+            (Some(w), Some(h)) => Some((w, h)),
+            _ => {
+                crate::storage::image_dimensions(&bytes).map(|(w, h)| (i64::from(w), i64::from(h)))
+            }
+        };
+        let mut header = format!(
+            "attachment {}: {} ({}, {}",
+            attachment.id,
+            attachment.filename,
+            attachment.mime,
+            HumanSize(attachment.size_bytes)
+        );
+        if let Some((w, h)) = dimensions {
+            header.push_str(&format!(", {w}x{h}"));
+        }
+        header.push(')');
+
+        if full {
+            let long_edge = dimensions.map_or(0, |(w, h)| w.max(h));
+            if bytes.len() > MODEL_IMAGE_FULL_MAX_BYTES
+                || long_edge > i64::from(MODEL_IMAGE_FULL_MAX_EDGE)
+            {
+                return Err(format!(
+                    "{header} is too large to send to a model: providers accept up to {} and \
+                     {MODEL_IMAGE_FULL_MAX_EDGE}px inline. Omit full for a scaled copy",
+                    HumanSize(MODEL_IMAGE_FULL_MAX_BYTES as i64)
+                ));
+            }
+            return Ok(vec![
+                Content::text(format!("{header}. Original.")),
+                Content::image(encode(&bytes), attachment.mime.clone()),
+            ]);
+        }
+
+        let cached = self
+            .store
+            .read_rendition(&attachment.sha256)
+            .ok()
+            .flatten()
+            .and_then(Rendition::from_cached);
+        let rendition = match cached {
+            Some(rendition) => Some(rendition),
+            None => match crate::storage::model_rendition(&bytes) {
+                Ok(rendition) => {
+                    if let Some(rendition) = &rendition
+                        && let Err(error) = self
+                            .store
+                            .write_rendition(&attachment.sha256, &rendition.bytes)
+                    {
+                        tracing::warn!(%error, "failed to cache attachment rendition");
+                    }
+                    rendition
+                }
+                // An image our decoder refuses is still sendable when it is
+                // already within the budget; a large one is not.
+                Err(_) if bytes.len() <= MODEL_IMAGE_MAX_BYTES => None,
+                Err(error) => {
+                    return Err(format!(
+                        "{header} could not be scaled for a model ({})",
+                        sanitize_error(error)
+                    ));
+                }
+            },
+        };
+        Ok(match rendition {
+            None => vec![
+                Content::text(header),
+                Content::image(encode(&bytes), attachment.mime.clone()),
+            ],
+            Some(rendition) => vec![
+                Content::text(format!(
+                    "{header}. Showing a {}x{} {} copy ({}); pass full: true for the original.",
+                    rendition.width,
+                    rendition.height,
+                    rendition.mime,
+                    HumanSize(rendition.bytes.len() as i64)
+                )),
+                Content::image(encode(&rendition.bytes), rendition.mime),
+            ],
+        })
+    }
+
     fn get_attachment_inner(
         &self,
         input: GetAttachmentInput,
@@ -6115,21 +6215,7 @@ No issues found."
                 .store
                 .read(&attachment.sha256)
                 .map_err(sanitize_error)?;
-            // The raster formats a multimodal agent can actually look at.
-            // SVG is deliberately excluded, matching `is_inline_safe_mime`.
-            return Ok(vec![
-                Content::text(format!(
-                    "attachment {}: {} ({}, {})",
-                    attachment.id,
-                    attachment.filename,
-                    attachment.mime,
-                    HumanSize(attachment.size_bytes)
-                )),
-                Content::image(
-                    base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    attachment.mime,
-                ),
-            ]);
+            return self.raster_attachment(&attachment, bytes, input.full.unwrap_or(false));
         }
         let download_url = current_issue_link_context()
             .as_deref()
@@ -14418,6 +14504,7 @@ mod tests {
             attachment_id: id,
             offset: None,
             limit: None,
+            full: None,
         })));
         assert!(
             first.starts_with(&format!(
@@ -14438,6 +14525,7 @@ mod tests {
             attachment_id: id,
             offset: Some(200),
             limit: None,
+            full: None,
         })));
         assert!(second.contains("lines 201-250 of 250"), "{second}");
         assert!(second.trim_end().ends_with("line 250"), "{second}");
@@ -14448,6 +14536,7 @@ mod tests {
             attachment_id: id,
             offset: Some(10),
             limit: Some(2),
+            full: None,
         })));
         assert!(window.contains("lines 11-12 of 250"), "{window}");
         assert!(window.contains("line 11\nline 12"), "{window}");
@@ -14455,17 +14544,96 @@ mod tests {
             attachment_id: id,
             offset: Some(9000),
             limit: None,
+            full: None,
         })));
         assert!(past.contains("no lines at offset 9000 of 250"), "{past}");
         let unrepresentable = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
             attachment_id: id,
             offset: Some(i64::MAX),
             limit: None,
+            full: None,
         })));
         assert!(
             unrepresentable.contains(&format!("no lines at offset {} of 250", i64::MAX)),
             "{unrepresentable}"
         );
+    }
+
+    /// A large image reaches the model as a scaled copy, cached beside the
+    /// thumbnail; `full` sends the original; the header names both sizes.
+    #[test]
+    fn get_attachment_scales_a_large_image_and_sends_the_original_on_request() {
+        use base64::Engine as _;
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let png = crate::storage::fixtures::png_image(4000, 3000);
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "big.png".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            entity: None,
+            comment_id: None,
+        })));
+        let image_of = |result: &rmcp::model::CallToolResult| {
+            let image = result
+                .content
+                .iter()
+                .find_map(|content| content.as_image())
+                .expect("image content");
+            (
+                base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .unwrap(),
+                image.mime_type.clone(),
+            )
+        };
+        let read = |full| {
+            m.get_attachment(Parameters(GetAttachmentInput {
+                attachment_id: id,
+                offset: None,
+                limit: None,
+                full,
+            }))
+        };
+
+        let scaled = read(None);
+        let header = text_of(&scaled);
+        assert!(header.contains("4000x3000"), "{header}");
+        assert!(header.contains("Showing a 1600x1200"), "{header}");
+        assert!(header.contains("full: true"), "{header}");
+        let (bytes, _mime) = image_of(&scaled);
+        assert!(bytes.len() < 1024 * 1024);
+        assert_eq!(crate::storage::image_dimensions(&bytes), Some((1600, 1200)));
+        let sha = m
+            .read(|conn| queries::attachments::get_attachment(conn, id))
+            .unwrap()
+            .sha256;
+        assert_eq!(m.store.read_rendition(&sha).unwrap(), Some(bytes.clone()));
+        // The second read is served from the cache, unchanged.
+        assert_eq!(image_of(&read(None)).0, bytes);
+
+        let original = read(Some(true));
+        assert!(text_of(&original).ends_with("Original."));
+        assert_eq!(image_of(&original), (png, "image/png".to_string()));
+    }
+
+    #[test]
+    fn get_attachment_refuses_an_original_too_large_for_a_provider() {
+        use base64::Engine as _;
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let png = crate::storage::fixtures::png_image(8200, 100);
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "strip.png".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            entity: None,
+            comment_id: None,
+        })));
+        let result = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+            full: Some(true),
+        })));
+        assert!(result.starts_with("Error: "), "{result}");
+        assert!(result.contains("8000px"), "{result}");
     }
 
     #[test]
@@ -14483,6 +14651,7 @@ mod tests {
             attachment_id: id,
             offset: None,
             limit: None,
+            full: None,
         }));
         let image = result
             .content
@@ -14522,6 +14691,7 @@ mod tests {
             attachment_id: id,
             offset: None,
             limit: None,
+            full: None,
         }));
         assert!(
             result
@@ -14548,6 +14718,7 @@ mod tests {
             attachment_id: id,
             offset: None,
             limit: None,
+            full: None,
         }));
         assert!(
             result.content.iter().all(|c| c.as_image().is_none()),
@@ -14600,6 +14771,7 @@ mod tests {
             attachment_id: id,
             offset: None,
             limit: None,
+            full: None,
         }));
         let resource = result
             .content
@@ -14644,6 +14816,7 @@ mod tests {
                         attachment_id: id,
                         offset: None,
                         limit: None,
+                        full: None,
                     }))),
                 )
             },
@@ -14664,6 +14837,7 @@ mod tests {
             attachment_id: 4242,
             offset: None,
             limit: None,
+            full: None,
         })));
         assert_eq!(result, "Error: Not found: attachment 4242 not found");
     }
@@ -16699,6 +16873,7 @@ mod authz_gating_tests {
                 attachment_id: id,
                 offset: None,
                 limit: None,
+                full: None,
             })))
         });
         assert!(is_forbidden(&denied), "non-member get_attachment: {denied}");
@@ -16710,6 +16885,7 @@ mod authz_gating_tests {
                 attachment_id: id,
                 offset: None,
                 limit: None,
+                full: None,
             })))
         });
         assert!(allowed.contains("secret.txt"), "viewer read: {allowed}");
@@ -16734,6 +16910,7 @@ mod authz_gating_tests {
                 attachment_id: id,
                 offset: None,
                 limit: None,
+                full: None,
             })))
         });
         assert!(uploader_read.contains("secret.txt"), "{uploader_read}");
@@ -16743,6 +16920,7 @@ mod authz_gating_tests {
                 attachment_id: id,
                 offset: None,
                 limit: None,
+                full: None,
             })))
         });
         assert!(is_forbidden(&other_read), "{other_read}");

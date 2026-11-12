@@ -27,7 +27,7 @@
 
 Plans and issues live on your server instead of in the context window, so work outlives the session. Agents use it over MCP; you use the web UI.
 
-- **32 MCP tools in 6,758 tokens**, about one long file read.
+- **32 MCP tools in 6,783 tokens**, about one long file read.
 - **One 25 to 32 MB binary** with SQLite, the web UI and backups built in. No Docker, no Postgres.
 - **`lific connect` writes MCP config for 11 AI clients.**
 - **Identifiers like `APP-42`**, never UUIDs.
@@ -80,7 +80,7 @@ Each AI tool connects as its own bot under your account. The history says "OpenC
 | Structure | `list_resources` · `manage_resource` · `delete` |
 | Export | `export` |
 
-The 6,758 tokens are the `tools/list` definitions as compact JSON, counted with tiktoken's o200k_base. Parameters and output: [MCP tools](https://lific.dev/docs/mcp/tools).
+The 6,783 tokens are the `tools/list` definitions as compact JSON, counted with tiktoken's o200k_base. Parameters and output: [MCP tools](https://lific.dev/docs/mcp/tools).
 
 ## Connect your AI tools
 
