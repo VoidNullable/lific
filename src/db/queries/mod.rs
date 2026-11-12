@@ -23,6 +23,7 @@ mod search;
 pub(crate) mod settings;
 pub(crate) mod stale;
 pub(crate) mod trash;
+pub(crate) mod upload_tickets;
 pub(crate) mod users;
 pub(crate) mod views;
 pub(crate) mod waits;

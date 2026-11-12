@@ -479,6 +479,14 @@ pub(crate) fn build_app_with_store(
     // neither is layered onto this router. Only
     // published projects are reachable through it (the flag is checked in the
     // SQL of every read), and only with `GET`.
+    // An upload ticket's URL is its own credential (the MCP files
+    // extension's `credentials: "omit"`), so the route sits outside the auth
+    // middleware like the public view.
+    let app = app.merge(api::upload_tickets::router(
+        pool.clone(),
+        attachment_store.clone(),
+        realtime,
+    ));
     let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
     with_compression(
         app.fallback(get(serve_frontend))
@@ -2492,5 +2500,172 @@ mod mcp_http_upload_tests {
             .unwrap()
             .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
             .unwrap()
+    }
+
+    /// Call a tool and return its first text block, asserting it succeeded.
+    async fn tool_text(served: &Served, name: &str, arguments: serde_json::Value) -> String {
+        let (status, text) = call(served, &tool_call(name, arguments)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_ne!(value["result"]["isError"], true, "{value}");
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Ask for an upload ticket and return its URL.
+    async fn ticket(served: &Served, arguments: serde_json::Value) -> String {
+        let text = tool_text(served, "upload_attachment", arguments).await;
+        let target = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Target: "))
+            .unwrap_or_else(|| panic!("no target in {text}"));
+        let target: serde_json::Value = serde_json::from_str(target).unwrap();
+        assert_eq!(target["method"], "PUT");
+        assert_eq!(target["credentials"], "omit");
+        target["url"].as_str().unwrap().to_owned()
+    }
+
+    async fn put(url: &str, bytes: Vec<u8>) -> (StatusCode, String) {
+        let res = reqwest::Client::new()
+            .put(url)
+            .body(bytes)
+            .send()
+            .await
+            .unwrap();
+        let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
+        (status, res.text().await.unwrap())
+    }
+
+    fn png(len: usize) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(len, 7);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn an_upload_ticket_accepts_one_put_and_links_it_as_the_issuer() {
+        let served = serve("Limit project", "LIM").await;
+        tool_text(
+            &served,
+            "create_issue",
+            serde_json::json!({"project": "LIM", "title": "Needs a screenshot"}),
+        )
+        .await;
+        let url = ticket(
+            &served,
+            serde_json::json!({
+                "filename": "shot.png", "size": 4096, "entity": "LIM-1", "alt_text": "the bug"
+            }),
+        )
+        .await;
+        assert!(url.contains("/api/uploads/"), "{url}");
+
+        let (status, body) = put(&url, png(4096)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = created["id"].as_i64().unwrap();
+        assert_eq!(
+            created["markdown"],
+            format!("![the bug](/api/attachments/{id})")
+        );
+        assert_eq!(created["size"], 4096);
+
+        let conn = served.pool.read().unwrap();
+        let (uploader, alt): (i64, String) = conn
+            .query_row(
+                "SELECT uploader_id, alt_text FROM attachments WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((uploader, alt.as_str()), (1, "the bug"));
+        let linked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attachment_links WHERE attachment_id = ?1 \
+                 AND entity_type = 'issue'",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 1);
+        drop(conn);
+
+        let (status, body) = put(&url, png(4096)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_expired_ticket_is_refused() {
+        let served = serve("Limit project", "LIM").await;
+        let url = ticket(
+            &served,
+            serde_json::json!({"filename": "a.png", "size": 64}),
+        )
+        .await;
+        served
+            .pool
+            .write()
+            .unwrap()
+            .execute(
+                "UPDATE upload_tickets SET expires_at = datetime('now', '-1 seconds')",
+                [],
+            )
+            .unwrap();
+        let (status, body) = put(&url, png(64)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_put_that_does_not_match_the_declared_size_is_refused() {
+        let served = serve("Limit project", "LIM").await;
+        let url = ticket(
+            &served,
+            serde_json::json!({"filename": "a.png", "size": 64}),
+        )
+        .await;
+        let (status, body) = put(&url, png(65)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+
+        let url = ticket(
+            &served,
+            serde_json::json!({"filename": "a.png", "size": 64}),
+        )
+        .await;
+        let (status, body) = put(&url, png(63)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, text) = call(
+            &served,
+            &tool_call(
+                "upload_attachment",
+                serde_json::json!({
+                    "filename": "huge.png",
+                    "size": api::attachments::DEFAULT_MAX_ATTACHMENT_BYTES + 1,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.contains("size must be 1 to"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_stops_working_when_its_issuer_is_deactivated() {
+        let served = serve("Limit project", "LIM").await;
+        let url = ticket(
+            &served,
+            serde_json::json!({"filename": "a.png", "size": 64}),
+        )
+        .await;
+        served
+            .pool
+            .write()
+            .unwrap()
+            .execute("UPDATE users SET is_active = 0 WHERE id = 1", [])
+            .unwrap();
+        let (status, body) = put(&url, png(64)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }

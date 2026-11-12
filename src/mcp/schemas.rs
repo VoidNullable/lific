@@ -682,6 +682,10 @@ pub struct UploadAttachmentInput {
         description = "Local file to upload instead of content_base64; stdio connections only"
     )]
     pub path: Option<String>,
+    #[schemars(
+        description = "File size in bytes, with no content: returns a one-time URL to PUT the file to"
+    )]
+    pub size: Option<i64>,
     #[schemars(description = "Link to this issue or page")]
     pub entity: Option<String>,
     #[schemars(description = "Link to this comment instead")]

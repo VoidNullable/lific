@@ -231,6 +231,13 @@ impl IssueLinkContext {
         })
     }
 
+    /// The absolute URL of an upload ticket's path on this server.
+    #[must_use]
+    pub(crate) fn absolute(&self, path: &str) -> String {
+        let base = self.base_url.as_str().trim_end_matches('/');
+        format!("{base}/{}", path.trim_start_matches('/'))
+    }
+
     #[must_use]
     pub(crate) fn attachment_url<'a>(&'a self, id: i64) -> Option<ResourceUrl<'a>> {
         (id > 0).then(|| self.url(ResourcePath::Attachment(id)))

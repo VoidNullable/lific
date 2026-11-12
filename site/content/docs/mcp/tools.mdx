@@ -671,14 +671,17 @@ Uploads a file and returns its id and a Markdown snippet to embed: `![name](/api
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `filename` | `string` | With `content_base64` | File name, e.g. `crash-log.txt`. With `path`, defaults to the file's own name. |
-| `content_base64` | `string` | One of these two | The file, base64-encoded. At most 10 MiB decoded. |
-| `path` | `string` | One of these two | A file on the agent's machine, absolute or relative to where `lific mcp` started. Stdio connections only. |
+| `filename` | `string` | With `content_base64` or `size` | File name, e.g. `crash-log.txt`. With `path`, defaults to the file's own name. |
+| `content_base64` | `string` | One of these three | The file, base64-encoded. At most 10 MiB decoded. |
+| `path` | `string` | One of these three | A file on the agent's machine, absolute or relative to where `lific mcp` started. Stdio connections only. |
+| `size` | `integer` | One of these three | The file's size in bytes, with no content: returns a one-time upload URL instead. HTTP connections only. |
 | `entity` | `string` | No | Link the upload to this issue (`APP-42`) or page (`APP-DOC-3`, `DOC-3`). |
 | `comment_id` | `integer` | No | Link the upload to this comment instead. |
 | `alt_text` | `string` | No | What the file shows. Trimmed, at most 1000 characters. It becomes the snippet's link text instead of the filename. |
 
 Prefer `path` whenever the client launched `lific mcp`, the local server or either proxy: the process reads the file itself and sends the bytes, so the model never has to write out base64, which costs an output token per few bytes and can corrupt silently. Over HTTP MCP the server cannot see the agent's files, so a `path` sent there is refused with a pointer to the stdio proxy.
+
+Over HTTP MCP, pass `size` instead and the reply is an upload ticket: a URL that accepts one `PUT` of exactly that many bytes within 10 minutes, with a ready `curl` command. The URL is its own credential, so the `PUT` carries no token. Lific checks the link target when it issues the ticket and again when the bytes arrive, applies the same type check and size cap as any upload, attributes the file to the agent that asked, and answers with JSON holding the attachment id and its Markdown. A ticket that has been used or has expired answers 404, and a body of the wrong size is refused. Each user can hold 20 open tickets. The reply also carries the target in the shape of the experimental MCP files extension's `UploadTarget`. `content_base64` still works and suits files of a few kilobytes.
 
 Pass at most one of `entity` and `comment_id`. Linking to an issue or page takes `maintainer` in its project; linking to a comment takes `viewer`. An upload with no link stays unlinked, and a sweep deletes unlinked files after 24 hours, so embed the snippet in an issue, page or comment before then. Embedding it links it.
 

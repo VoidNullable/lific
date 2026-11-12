@@ -208,28 +208,86 @@ pub(super) async fn upload_attachment(
         )));
     }
 
-    let prepared = PreparedUpload::new(&bytes, &mime);
+    let (attachment, event) = store_upload(
+        &db,
+        &store,
+        &identity,
+        &NewAttachment {
+            filename: &filename,
+            mime: &mime,
+            bytes: &bytes,
+            uploader: user.id,
+            alt_text: None,
+            link,
+        },
+    )?;
+    if let Some(event) = event {
+        realtime.send(event);
+    }
+    Ok((StatusCode::OK, axum::Json(UploadResponse::from(attachment))).into_response())
+}
+
+impl From<Attachment> for UploadResponse {
+    fn from(attachment: Attachment) -> Self {
+        Self {
+            id: attachment.id,
+            url: format!("/api/attachments/{}", attachment.id),
+            filename: attachment.filename,
+            mime: attachment.mime,
+            size: attachment.size_bytes,
+            width: attachment.width,
+            height: attachment.height,
+            alt_text: attachment.alt_text,
+            has_thumbnail: attachment.has_thumbnail,
+        }
+    }
+}
+
+/// A validated upload, ready to store: the MIME is already sniffed and
+/// allowed, and the link target already passed its pre-flight check.
+pub(crate) struct NewAttachment<'a> {
+    pub(crate) filename: &'a str,
+    pub(crate) mime: &'a str,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) uploader: i64,
+    pub(crate) alt_text: Option<&'a str>,
+    pub(crate) link: Option<(AttachmentEntity, i64)>,
+}
+
+/// Store an upload's bytes and derivations, insert its row and link it, all
+/// or nothing. The link is authorized again inside the transaction. Returns
+/// the event to broadcast when a linked entity changed.
+pub(crate) fn store_upload(
+    db: &DbPool,
+    store: &AttachmentStore,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    upload: &NewAttachment<'_>,
+) -> Result<(Attachment, Option<RealtimeEvent>), LificError> {
+    let prepared = PreparedUpload::new(upload.bytes, upload.mime);
     // Serialize the blob write with metadata insertion and orphan cleanup.
     // Otherwise GC can delete a newly written blob in the gap before its row
     // is inserted.
-    // Non-blocking: a REST handler must not park a Tokio worker for the
-    // length of a dump. Busy means "retry", not "failed".
-    let (attachment, event) = store
+    // Non-blocking: a handler must not park a Tokio worker for the length of
+    // a dump. Busy means "retry", not "failed".
+    store
         .try_with_lock(|store| {
             let probe = prepared.probe(store)?;
             let result = db.transaction(|conn| {
                 let att = q::create_attachment(
                     conn,
                     &prepared.sha,
-                    &filename,
-                    &mime,
+                    upload.filename,
+                    upload.mime,
                     prepared.size,
-                    Some(user.id),
+                    Some(upload.uploader),
                 )?;
-                let att = prepared.store(conn, store, att, &bytes)?;
-                let event = match link {
+                let mut att = prepared.store(conn, store, att, upload.bytes)?;
+                if let Some(alt_text) = upload.alt_text {
+                    att = q::update_alt_text(conn, att.id, Some(alt_text))?;
+                }
+                let event = match upload.link {
                     Some((entity, eid)) => {
-                        authorize_link_conn(conn, &identity, entity, eid)?;
+                        authorize_link_conn(conn, identity, entity, eid)?;
                         q::link_attachment(conn, att.id, entity, eid)?;
                         linked_entity_event(conn, entity, eid)?
                     }
@@ -238,27 +296,43 @@ pub(super) async fn upload_attachment(
                 Ok((att, event))
             });
             if result.is_err() {
-                prepared.discard(&db, store, probe);
+                prepared.discard(db, store, probe);
             }
             result
         })?
-        .ok_or_else(AttachmentStore::busy_error)?;
-    if let Some(event) = event {
-        realtime.send(event);
-    }
+        .ok_or_else(AttachmentStore::busy_error)
+}
 
-    let resp = UploadResponse {
-        id: attachment.id,
-        url: format!("/api/attachments/{}", attachment.id),
-        filename: attachment.filename,
-        mime: attachment.mime,
-        size: attachment.size_bytes,
-        width: attachment.width,
-        height: attachment.height,
-        alt_text: attachment.alt_text,
-        has_thumbnail: attachment.has_thumbnail,
-    };
-    Ok((StatusCode::OK, axum::Json(resp)).into_response())
+/// The Markdown that embeds attachment `id`: an image embed for images, a
+/// link otherwise, with `label` escaped for link text.
+pub(crate) fn attachment_markdown(label: &str, mime: &str, id: i64) -> String {
+    let embed = if mime.starts_with("image/") { "!" } else { "" };
+    let mut text = String::with_capacity(label.len());
+    for c in label.chars() {
+        match c {
+            '[' | ']' | '\\' => {
+                text.push('\\');
+                text.push(c);
+            }
+            '\n' | '\r' => text.push(' '),
+            c => text.push(c),
+        }
+    }
+    format!("{embed}[{text}](/api/attachments/{id})")
+}
+
+/// The type a filename vouches for, for the formats with no signature of
+/// their own. Everything else is decided by the bytes.
+pub(crate) fn declared_mime_for_filename(filename: &str) -> Option<&'static str> {
+    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    match extension.as_str() {
+        "svg" => Some("image/svg+xml"),
+        "txt" | "log" | "md" | "csv" | "json" => Some("text/plain"),
+        // Legacy HWP shares the OLE signature with other formats, so the
+        // name has to vouch for it, exactly as the REST upload requires.
+        "hwp" => Some("application/x-hwp"),
+        _ => None,
+    }
 }
 
 /// Everything an upload derives from its bytes, computed once before the store

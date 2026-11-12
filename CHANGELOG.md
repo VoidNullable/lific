@@ -32,12 +32,13 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
-- 32 tools now cost an agent 6,871 tokens of context.
+- 32 tools now cost an agent 6,913 tokens of context.
 
 ### Images and attachments
 
 - `get_attachment` returns SVG images as their XML source, paged by line like text files and marked as untrusted markup, instead of an opaque blob or a download link. Browsers still only download SVG.
 - `upload_attachment` takes a local `path` when the client connects through `lific mcp`, the local server or either proxy. The process reads the file and sends the bytes, so the model no longer has to write a file out as base64, which ran past output limits for any real screenshot and could corrupt it without an error. HTTP MCP refuses `path`, since the server cannot see the agent's files. `filename` defaults to the file's name.
+- Over HTTP MCP, `upload_attachment` with a `size` and no content returns an upload ticket: a one-time URL, valid for 10 minutes, that takes a `PUT` of the file and a ready `curl` command. The bytes skip the model, the upload is checked and linked as the agent that asked for it, and the reply carries the attachment's Markdown. The ticket follows the experimental MCP files extension's upload target shape.
 - `upload_attachment`'s description names every accepted file type, including video, audio, SQLite and HWP, which agents could not tell were allowed.
 - `upload_attachment` takes `alt_text`, stored like the web UI's and used as the embed snippet's link text. `get_attachment` and `list_attachments` show alt text and pixel dimensions, so an agent can often skip looking at an image at all.
 - `get_attachment` sends an image larger than 1600 px or 1 MB to the model as a scaled copy, cached beside its thumbnail, instead of the original. A 10 MiB original used to exceed what providers accept and could break the agent's session. `full: true` returns the original when it is within provider limits, and the first line names both sizes.
@@ -56,7 +57,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 
 ### Upgrading
 
-- Nine migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
+- Ten migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
 - `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
 
 ## v2.11.1 (2026-10-13)

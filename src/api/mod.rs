@@ -25,6 +25,7 @@ pub mod public;
 mod repo_bindings;
 mod resources;
 mod sync;
+pub(crate) mod upload_tickets;
 mod views;
 mod waits;
 

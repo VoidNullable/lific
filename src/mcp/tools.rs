@@ -5921,7 +5921,7 @@ No issues found."
             idempotent_hint = false,
             open_world_hint = false
         ),
-        description = "Upload a file (max 10 MiB) and get Markdown to embed. Over stdio, pass a local path; otherwise base64. Types: PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM, Ogg, MP3, SQLite, HWP. Optionally link it to an issue, page, or comment."
+        description = "Upload a file (max 10 MiB) and get Markdown to embed. Over stdio pass a local path; over HTTP pass size for a one-time upload URL, or base64 for small files. Types: PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM, Ogg, MP3, SQLite, HWP. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
         self.upload_attachment_inner(input)
@@ -5936,6 +5936,9 @@ No issues found."
             .filter(|ident| !ident.is_empty());
         if entity.is_some() && input.comment_id.is_some() {
             return Err("pass entity or comment_id, not both".into());
+        }
+        if let Some(size) = input.size {
+            return self.issue_upload_ticket(&input, entity, size);
         }
 
         // The cap is REST's cap, read from the same type `server.rs` injects
@@ -6400,6 +6403,99 @@ No issues found."
     /// Resolve an issue or page identifier into the attachment-link entity it
     /// names. Attachments never hang off a project, so the bare-project shape
     /// other tools accept is not a target here.
+    /// `upload_attachment(size)`: check everything that does not need the
+    /// bytes, then hand out a one-time URL that accepts them.
+    fn issue_upload_ticket(
+        &self,
+        input: &UploadAttachmentInput,
+        entity: Option<&str>,
+        size: i64,
+    ) -> Result<String, String> {
+        let has_path = input
+            .path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+        if has_path || !input.content_base64.is_empty() {
+            return Err(
+                "size asks for an upload URL; pass it without path or content_base64".into(),
+            );
+        }
+        if self.transport == super::McpTransport::Stdio {
+            return Err(
+                "upload URLs are for HTTP connections; over stdio, pass the file's path".into(),
+            );
+        }
+        let filename = input.filename.trim();
+        if filename.is_empty() {
+            return Err("filename is required with size".into());
+        }
+        let filename = crate::api::attachments::sanitize_filename(filename);
+        let max_bytes = crate::api::AttachmentConfig::default().max_bytes;
+        if size < 1 || usize::try_from(size).is_ok_and(|size| size > max_bytes) {
+            return Err(format!("size must be 1 to {max_bytes} bytes"));
+        }
+        let alt_text = crate::api::attachments::normalize_alt_text(input.alt_text.clone())
+            .map_err(sanitize_error)?;
+
+        let link = match (entity, input.comment_id) {
+            (Some(ident), _) => Some(self.resolve_attachment_entity(ident)?),
+            (None, Some(comment_id)) => Some((models::AttachmentEntity::Comment, comment_id)),
+            (None, None) => None,
+        };
+        let identity = super::current_identity(&self.db);
+        if let Some((entity, entity_id)) = link {
+            crate::api::attachments::authorize_link(&self.db, &identity, entity, entity_id)
+                .map_err(sanitize_error)?;
+        }
+
+        let token = crate::api::upload_tickets::new_token().map_err(sanitize_error)?;
+        let hash = crate::api::upload_tickets::hash_token(&token);
+        let expires_at = self.transaction(|conn| {
+            let ticket = queries::upload_tickets::UploadTicket {
+                user_id: resolve_attachment_uploader_conn(conn)?,
+                filename: filename.clone(),
+                size_bytes: size,
+                link,
+                alt_text: alt_text.clone(),
+            };
+            queries::upload_tickets::create(
+                conn,
+                &hash,
+                &ticket,
+                crate::api::upload_tickets::TICKET_TTL_SECONDS,
+            )
+        })?;
+
+        let path = crate::api::upload_tickets::upload_path(&token);
+        let url = super::current_issue_link_context().map(|links| links.absolute(&path));
+        let target = url.as_deref().unwrap_or(&path);
+        let linked = match (entity, input.comment_id) {
+            (Some(ident), _) => format!(", linked to {ident} when it arrives"),
+            (None, Some(comment_id)) => format!(", linked to comment {comment_id} when it arrives"),
+            (None, None) => String::new(),
+        };
+        let mut out = format!(
+            "Upload ticket for {filename} ({size} bytes){linked}. PUT exactly those bytes \
+             before {expires_at} UTC; the URL works once and needs no credential.\n\
+             curl -sS --fail-with-body --upload-file <path to {filename}> '{target}'\n"
+        );
+        if url.is_none() {
+            out.push_str("The path is relative to this server's address.\n");
+        }
+        out.push_str("The reply is JSON with the attachment id and its Markdown to embed.");
+        if let Some(url) = url {
+            // The experimental MCP files extension's UploadTarget.
+            let target = serde_json::json!({
+                "url": url,
+                "method": "PUT",
+                "credentials": "omit",
+                "expiresAt": format!("{}Z", expires_at.replace(' ', "T")),
+            });
+            out.push_str(&format!("\nTarget: {target}"));
+        }
+        Ok(out)
+    }
+
     fn resolve_attachment_entity(
         &self,
         identifier: &str,
@@ -6503,7 +6599,7 @@ const ATTACHMENT_TEXT_DEFAULT_LINES: i64 = 200;
 /// name a file on the server rather than on the agent's machine.
 pub(crate) const PATH_UPLOAD_OVER_HTTP: &str = "path uploads need the file on this machine, and \
      this server is remote. Connect through the `lific mcp` stdio proxy, which reads the file \
-     for you, or send the bytes as content_base64.";
+     for you, or pass size instead for a one-time upload URL.";
 
 /// Render a byte count the way a person reads it. Sizes are informational
 /// (deciding whether to fetch a file), so one decimal place is plenty.
@@ -6528,43 +6624,7 @@ impl Display for HumanSize {
     }
 }
 
-/// The markdown an agent pastes into an issue, page or comment body to use an
-/// attachment. Images embed, everything else links, matching what the web
-/// composer inserts (and what `parse_referenced_ids` scans back out on save).
-/// The Markdown that embeds an attachment, with `label` (its alt text, else
-/// its filename) as the link text. Brackets and backslashes are escaped and
-/// line breaks folded so any label stays one well-formed link.
-fn attachment_markdown(label: &str, mime: &str, id: i64) -> String {
-    let embed = if mime.starts_with("image/") { "!" } else { "" };
-    let mut text = String::with_capacity(label.len());
-    for c in label.chars() {
-        match c {
-            '[' | ']' | '\\' => {
-                text.push('\\');
-                text.push(c);
-            }
-            '\n' | '\r' => text.push(' '),
-            c => text.push(c),
-        }
-    }
-    format!("{embed}[{text}](/api/attachments/{id})")
-}
-
-/// The content type an MCP upload "declares". There is no header to read, so
-/// the extension speaks for the formats `sniff_and_validate` cannot recognize
-/// from magic bytes (SVG and plain text). Anything with a real signature is
-/// decided by the bytes regardless of what this returns.
-fn declared_mime_for_filename(filename: &str) -> Option<&'static str> {
-    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
-    match extension.as_str() {
-        "svg" => Some("image/svg+xml"),
-        "txt" | "log" | "md" | "csv" | "json" => Some("text/plain"),
-        // Legacy HWP shares the OLE signature with other formats, so the
-        // name has to vouch for it, exactly as the REST upload requires.
-        "hwp" => Some("application/x-hwp"),
-        _ => None,
-    }
-}
+use crate::api::attachments::{attachment_markdown, declared_mime_for_filename};
 
 /// The user an MCP upload is attributed to: the request's authenticated agent,
 /// or the fallback identity `resolve_caller` picks for a credential-less
@@ -14329,6 +14389,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         let id = attachment_id_from(&receipt);
         assert!(receipt.contains("shot.png (image/png, 14 B)"), "{receipt}");
@@ -14365,6 +14426,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         let id = attachment_id_from(&receipt);
         let attachment = m
@@ -14392,6 +14454,7 @@ mod tests {
             comment_id: None,
             alt_text: Some("  Weekly signups [draft]  ".into()),
             path: None,
+            size: None,
         }));
         let id = attachment_id_from(&receipt);
         assert!(
@@ -14430,6 +14493,7 @@ mod tests {
             comment_id: None,
             alt_text: Some("x".repeat(1001)),
             path: None,
+            size: None,
         }));
         assert!(refused.starts_with("Error: "), "{refused}");
     }
@@ -14451,6 +14515,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(
             receipt.contains("report.hwp (application/x-hwp"),
@@ -14464,6 +14529,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(refused.starts_with("Error:"), "{refused}");
     }
@@ -14490,6 +14556,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(page_receipt.contains("linked."), "{page_receipt}");
         assert!(
@@ -14508,6 +14575,7 @@ mod tests {
             comment_id: Some(comment_id),
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(comment_receipt.contains("linked."), "{comment_receipt}");
 
@@ -14549,6 +14617,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(receipt.starts_with("Error"), "got: {receipt}");
 
@@ -14572,6 +14641,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(receipt.contains("Not linked yet"), "{receipt}");
         assert!(receipt.contains("24h"), "{receipt}");
@@ -14590,6 +14660,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert_eq!(
             result,
@@ -14608,6 +14679,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert!(
             malformed.starts_with("Error: content_base64 is not valid base64:"),
@@ -14621,6 +14693,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert_eq!(empty, "Error: empty file");
 
@@ -14649,6 +14722,16 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(both, "Error: pass path or content_base64, not both");
+
+        let ticket = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "notes.txt".into(),
+            size: Some(14),
+            ..Default::default()
+        }));
+        assert_eq!(
+            ticket,
+            "Error: upload URLs are for HTTP connections; over stdio, pass the file's path"
+        );
     }
 
     #[test]
@@ -14679,6 +14762,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert_eq!(
             result,
@@ -14696,6 +14780,7 @@ mod tests {
             comment_id: Some(1),
             alt_text: None,
             path: None,
+            size: None,
         }));
         assert_eq!(result, "Error: pass entity or comment_id, not both");
     }
@@ -14714,6 +14799,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
 
         // Default window: 200 lines, with the continuation hint.
@@ -14790,6 +14876,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
         let image_of = |result: &rmcp::model::CallToolResult| {
             let image = result
@@ -14846,6 +14933,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
         let result = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
             attachment_id: id,
@@ -14868,6 +14956,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14937,6 +15026,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14991,6 +15081,7 @@ mod tests {
             comment_id: None,
             alt_text: None,
             path: None,
+            size: None,
         })));
         let read = |offset, limit| {
             let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -15046,6 +15137,7 @@ mod tests {
                         comment_id: None,
                         alt_text: None,
                         path: None,
+                        size: None,
                     })));
                 (
                     id,
@@ -17034,6 +17126,7 @@ mod authz_gating_tests {
                 comment_id: None,
                 alt_text: None,
                 path: None,
+                size: None,
             }))
         })
     }
