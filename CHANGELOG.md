@@ -56,6 +56,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - An image on its own line with a Markdown title, `![alt](url "Caption")`, shows the title as a caption under it, wrapped to the image's width.
 - Several images alone in a paragraph render side by side as equal-height tiles that wrap on a phone, instead of a tall stack. Dropping several screenshots at once now inserts them as such a group, set apart from the text around them by a blank line.
 - The Attachments panel under an issue or page has an Insert action on each file. It puts the file's Markdown, with the image's alt text, at the editor's caret, or opens the editor and adds it at the end when you are reading, so a file uploaded once can be placed again without copying its link by hand.
+- The image viewer zooms and pans: a click shows the native size, the wheel, a pinch or `+`/`-` zoom further, and a drag moves around, so a 4000 px screenshot of a log or a dense UI is finally readable. The arrow keys step through the other images on the page, and the toolbar downloads the original or opens it in a new tab. The same viewer now serves issue and page bodies, comments, and the Attachments panel.
 - The panel's Details action edits an image's alt text after upload (for whoever may delete the file) and lists every issue, page and comment you can see that uses the file, linked.
 
 ### Agent activity

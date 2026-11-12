@@ -18,6 +18,7 @@
   import ZipViewer from "./ZipViewer.svelte";
   import SqliteViewer from "./SqliteViewer.svelte";
   import MediaViewer from "./MediaViewer.svelte";
+  import ImageLightbox from "../ImageLightbox.svelte";
 
   let {
     id,
@@ -76,18 +77,10 @@
     onclick={() => (lightboxOpen = true)}
   />
   {#if lightboxOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="av__lightbox"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
-      tabindex="-1"
-      onclick={() => (lightboxOpen = false)}
-    >
-      <img src={attachmentUrl(id)} alt={altText ?? filename} />
-    </div>
+    <ImageLightbox
+      images={[{ src: attachmentUrl(id), alt: altText ?? filename, name: filename }]}
+      onClose={() => (lightboxOpen = false)}
+    />
   {/if}
 {:else if kind === "video" || kind === "audio"}
   <MediaViewer {id} {filename} {mime} {sizeBytes} {hasThumbnail} {kind} />
@@ -107,12 +100,6 @@
   <FileChip {id} {filename} {sizeBytes} />
 {/if}
 
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === "Escape" && lightboxOpen) lightboxOpen = false;
-  }}
-/>
-
 <style>
   .av__image {
     display: block;
@@ -127,23 +114,6 @@
   }
   .av__image:hover {
     filter: brightness(0.96);
-  }
-  .av__lightbox {
-    position: fixed;
-    inset: 0;
-    z-index: 1200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem;
-    background: rgba(0, 0, 0, 0.78);
-    cursor: zoom-out;
-  }
-  .av__lightbox img {
-    max-width: 100%;
-    max-height: 100%;
-    border-radius: 0.5rem;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
   }
   @media (prefers-reduced-motion: reduce) {
     .av__image {

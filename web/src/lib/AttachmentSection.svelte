@@ -39,6 +39,7 @@
   import { Info, Paperclip, TextCursorInput, Trash2, X } from "lucide-svelte";
   import { markdownFor } from "./attachments/compose";
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
+  import ImageLightbox from "./attachments/ImageLightbox.svelte";
 
   let {
     entityType,
@@ -64,8 +65,8 @@
 
   let attachments = $state<Attachment[]>([]);
   let loaded = $state(false);
-  let lightboxSrc = $state<string | null>(null);
-  let lightboxAlt = $state("");
+  // Index into `images` of the open lightbox, which steps through them all.
+  let lightboxStart = $state<number | null>(null);
 
   // Delete flow: which row is confirming, how many references it has, and
   // whether a request is in flight.
@@ -233,10 +234,7 @@
               type="button"
               class="att__thumb"
               title={a.filename}
-              onclick={() => {
-                lightboxSrc = urlFor(a.id);
-                lightboxAlt = a.alt_text ?? a.filename;
-              }}
+              onclick={() => (lightboxStart = images.indexOf(a))}
             >
               <img
                 src={attachmentThumbnailUrl(a.id)}
@@ -439,25 +437,12 @@
   </section>
 {/if}
 
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === "Escape" && lightboxSrc) lightboxSrc = null;
-  }}
-/>
-
-{#if lightboxSrc}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="att__lightbox"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Image preview"
-    tabindex="-1"
-    onclick={() => (lightboxSrc = null)}
-  >
-    <img src={lightboxSrc} alt={lightboxAlt} />
-  </div>
+{#if lightboxStart !== null}
+  <ImageLightbox
+    images={images.map((a) => ({ src: urlFor(a.id), alt: a.alt_text ?? a.filename, name: a.filename }))}
+    start={lightboxStart}
+    onClose={() => (lightboxStart = null)}
+  />
 {/if}
 
 <style>
@@ -796,23 +781,6 @@
     text-align: left;
   }
 
-  .att__lightbox {
-    position: fixed;
-    inset: 0;
-    z-index: 1200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem;
-    background: rgba(0, 0, 0, 0.78);
-    cursor: zoom-out;
-  }
-  .att__lightbox img {
-    max-width: 100%;
-    max-height: 100%;
-    border-radius: 0.5rem;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
-  }
 
   @media (prefers-reduced-motion: reduce) {
     .att__thumb {

@@ -44,6 +44,7 @@
     }
   });
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
+  import ImageLightbox, { type LightboxImage } from "./attachments/ImageLightbox.svelte";
 
   let {
     content,
@@ -602,8 +603,18 @@
 
   // Lightbox: clicking an inline attachment image opens it full-size in an
   // overlay. State lives here so the overlay can render at the component root.
-  let lightboxSrc = $state<string | null>(null);
-  let lightboxAlt = $state("");
+  // The lightbox steps through every attachment image in this body.
+  let lightboxImages = $state<LightboxImage[] | null>(null);
+  let lightboxStart = $state(0);
+
+  function openLightbox(root: HTMLElement, clicked: HTMLImageElement) {
+    const imgs = Array.from(root.querySelectorAll<HTMLImageElement>("img.attachment-image"));
+    lightboxImages = imgs.map((img) => ({
+      src: attachmentUrl(Number(img.dataset.attachmentId)),
+      alt: img.getAttribute("alt") ?? "",
+    }));
+    lightboxStart = Math.max(0, imgs.indexOf(clicked));
+  }
 
   // Decorate inline attachment images (cap width, click-to-lightbox) and
   // rewrite non-image chips with a file icon + human size + download action.
@@ -653,10 +664,8 @@
       img.classList.add("attachment-image");
       img.loading = "lazy";
       img.style.cursor = "zoom-in";
-      img.addEventListener("click", () => {
-        lightboxSrc = src;
-        lightboxAlt = img.getAttribute("alt") ?? "";
-      });
+      img.dataset.attachmentId = match[1];
+      img.addEventListener("click", () => openLightbox(root, img));
       img.addEventListener("error", () => {
         if (img.dataset.attachmentFullSrc === "true") return;
         img.dataset.attachmentFullSrc = "true";
@@ -816,28 +825,13 @@
   />
 {/if}
 
-{#if lightboxSrc}
-  <!-- LIF-262: click-to-lightbox for inline attachment images. Backdrop
-       click or Escape closes it. -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="attachment-lightbox"
-    onclick={() => (lightboxSrc = null)}
-    role="dialog"
-    aria-modal="true"
-    aria-label="Image preview"
-    tabindex="-1"
-  >
-    <img src={lightboxSrc} alt={lightboxAlt} class="attachment-lightbox__img" />
-  </div>
+{#if lightboxImages}
+  <ImageLightbox
+    images={lightboxImages}
+    start={lightboxStart}
+    onClose={() => (lightboxImages = null)}
+  />
 {/if}
-
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === "Escape" && lightboxSrc) lightboxSrc = null;
-  }}
-/>
 
 <style>
   /* LIF-262: attachment rendering. The nodes come from raw {@html}, so these
@@ -950,37 +944,7 @@
     cursor: pointer;
   }
 
-  /* Lightbox overlay for inline images. */
-  .attachment-lightbox {
-    position: fixed;
-    inset: 0;
-    z-index: 1200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem;
-    background: rgba(0, 0, 0, 0.78);
-    cursor: zoom-out;
-    animation: attachment-fade 0.12s var(--ease-out-expo);
-  }
-  .attachment-lightbox__img {
-    max-width: 100%;
-    max-height: 100%;
-    border-radius: 0.5rem;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
-  }
-  @keyframes attachment-fade {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
-    .attachment-lightbox {
-      animation: none;
-    }
     :global(.prose img.attachment-image),
     :global(.prose a.attachment-chip) {
       transition: none;
