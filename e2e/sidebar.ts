@@ -55,7 +55,7 @@ const server = await createServer({
 const stamp = "2026-09-10T12:00:00Z";
 const longName = "The extraordinarily long project name that must not hide its actions";
 const longTitle = "Investigate the extraordinarily long sidebar regression title with enough detail to wrap across several lines";
-const destinations = ["Overview", "Issues", "Board", "Graph", "Modules", "Pages", "Files", "Plans", "Activity", "Insights"];
+const destinations = ["Overview", "Issues", "Board", "Modules", "Pages", "Plans", "Graph", "Files", "Activity", "Insights"];
 type Call = { method: string; path: string; query: string; body: any };
 type Gate = { method: string; path: string; status: number; release: () => void; promise: Promise<void> };
 class API {
@@ -142,6 +142,10 @@ class API {
           }];
         } else if (path === "/instance" && method === "GET") data = { web_auto_login: false, auth_mode: "passwords" };
         else if (["/auth/bots", "/folders"].includes(path) && method === "GET") data = [];
+        else if (path === "/issues/attention" && method === "GET") {
+          const issue = (id: number) => ({ id, project_id: 1, identifier: `ONE-${id}`, title: "Needs you", status: "todo", priority: "medium", updated_at: stamp, created_at: stamp, labels: [] });
+          data = { assigned: [issue(1)], human: [issue(2)], waiting: [] };
+        }
         else {
           this.unexpected.push(`${method} ${path}${url.search}`);
           return await route.fulfill({ status: 501, json: { error: "Unmocked API request" } });
@@ -630,6 +634,37 @@ try {
     await page.getByRole("button", { name: "Expand sidebar", exact: true }).click();
     await width(230);
     assert.equal(await stored(), null);
+  });
+
+  await test("workspace counts and the collapsed icon rail", async () => {
+    const s = await session({ route: "/ONE/issues" }); const { page, aside } = s;
+    const inbox = aside.locator('a[data-workspace="inbox"]');
+    await inbox.locator(".sidebar-count").filter({ hasText: "2" }).waitFor();
+    assert.equal((await aside.locator('a[data-workspace="assigned"] .sidebar-count').innerText()).trim(), "1");
+    await inbox.click(); await page.waitForURL("**/#/inbox");
+    await attr(inbox, "aria-current", "page");
+
+    await aside.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    assert.ok(Math.abs((await aside.boundingBox())!.width - 52) < 1, "Rail is 3.25rem wide");
+    assert.equal(await aside.getByRole("separator", { name: "Resize sidebar" }).count(), 0, "No resize handle on the rail");
+    await attr(aside.getByRole("link", { name: "Inbox, 2", exact: true }), "aria-current", "page");
+    const assigned = aside.getByRole("link", { name: "Assigned to me", exact: true });
+    await assigned.hover();
+    await page.getByRole("tooltip").filter({ hasText: "Assigned to me" }).waitFor();
+    await assigned.click(); await page.waitForURL("**/#/assigned");
+    await page.getByRole("tooltip").waitFor({ state: "detached" });
+
+    const one = aside.getByRole("button", { name: "One views", exact: true });
+    await one.click();
+    await menuItem(page, "Board").click();
+    await page.waitForURL("**/#/ONE/board");
+    await attr(one, "aria-current", "true");
+
+    await page.reload();
+    await aside.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
+    await page.keyboard.press("Control+\\");
+    await aside.getByRole("button", { name: "Collapse sidebar", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => localStorage.getItem("lific:sidebar:collapsed")), "0");
   });
 
   await test("native modified sidebar links", async () => {

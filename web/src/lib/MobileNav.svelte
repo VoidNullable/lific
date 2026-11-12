@@ -54,6 +54,9 @@
     Ellipsis,
     ArrowUp,
     ArrowDown,
+    Inbox,
+    UserCheck,
+    Bot,
   } from "lucide-svelte";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
@@ -85,6 +88,8 @@
     themePref,
     themeResolved,
     onCycleTheme,
+    inboxCount = null,
+    assignedCount = null,
   }: {
     open?: boolean;
     route: string;
@@ -111,6 +116,8 @@
     themePref: ThemePreference;
     themeResolved: "light" | "dark";
     onCycleTheme: (event: MouseEvent) => void;
+    inboxCount?: number | null;
+    assignedCount?: number | null;
   } = $props();
 
   // ── Mount / visibility ──────────────────────────────────────
@@ -651,6 +658,23 @@
           <Home size={18} class="shrink-0" />
           Home
         </a>
+        {#snippet workspaceRow(href: string, label: string, Icon: typeof Home, count: number | null, tone: "accent" | "plain")}
+          <a
+            class="sidebar-destination mobile-main-row w-full min-h-12 flex items-center gap-3 px-3 rounded-lg text-left text-body-lg transition-colors"
+            href={`#${href}`}
+            aria-current={route === href ? "page" : undefined}
+            onclick={(e) => go(e, href)}
+          >
+            <Icon size={18} class="shrink-0" />
+            <span class="flex-1 min-w-0 truncate">{label}</span>
+            {#if count}
+              <span class="sidebar-count" data-tone={tone}>{count >= 50 ? "50+" : count}</span>
+            {/if}
+          </a>
+        {/snippet}
+        {@render workspaceRow("/inbox", "Inbox", Inbox, inboxCount, "accent")}
+        {@render workspaceRow("/assigned", "Assigned to me", UserCheck, assignedCount, "plain")}
+        {@render workspaceRow("/agents", "Agent activity", Bot, null, "plain")}
 
         <div class="flex items-center justify-between pl-3 pr-1 pt-2 pb-1">
           <span class="sidebar-section-label text-micro font-semibold uppercase text-[var(--text-faint)]">

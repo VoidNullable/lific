@@ -14,6 +14,7 @@
     renameProjectGroup,
     deleteProjectGroup,
     assignProjectGroup,
+    getAttention,
     type Project,
     type ProjectGroup,
     type Issue,
@@ -32,9 +33,9 @@
   import { currentUser, getUserRevision, publishUser } from "./userState";
   import { mobileNavState } from "./mobileNavState.svelte";
   import { navLink } from "./navLink";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
+  import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
-  import { Ellipsis, ArrowUp, ArrowDown } from "lucide-svelte";
+  import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
@@ -174,10 +175,66 @@
   // its scroll position, and the collapsed-group state all survive a toggle.
   // Below md this flag is inert: navigation there is MobileNav, which the
   // sidebar's `hidden` base class already defers to.
+  // LIF-537: collapsed no longer means hidden. The sidebar folds into an icon
+  // rail inside the same chrome, so every destination stays one click away.
   let sidebarCollapsed = $state(loadSidebarCollapsed());
   function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed;
     saveSidebarCollapsed(sidebarCollapsed);
+    if (railTip !== null) railTip = null;
+  }
+
+  // The rail's nav scrolls, which would clip a tooltip positioned inside it,
+  // so a single fixed tooltip follows whichever rail control is hovered.
+  let railTip = $state<{ text: string; top: number; left: number } | null>(null);
+  function tip(node: HTMLElement, text: string) {
+    let label = text;
+    const show = () => {
+      const r = node.getBoundingClientRect();
+      railTip = { text: label, top: r.top + r.height / 2, left: r.right + 8 };
+    };
+    // A focused control blurs while the rail unmounts, inside Svelte's
+    // teardown, where writing state is forbidden even when it is a no-op.
+    const hide = () => { if (railTip !== null) railTip = null; };
+    node.addEventListener("pointerenter", show);
+    node.addEventListener("pointerleave", hide);
+    node.addEventListener("focus", show);
+    node.addEventListener("blur", hide);
+    node.addEventListener("click", hide);
+    return {
+      update(next: string) { label = next; },
+      destroy() {
+        node.removeEventListener("pointerenter", show);
+        node.removeEventListener("pointerleave", hide);
+        node.removeEventListener("focus", show);
+        node.removeEventListener("blur", hide);
+        node.removeEventListener("click", hide);
+      },
+    };
+  }
+
+  const modKey = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+
+  // ── Workspace counts (LIF-538) ──────────────────────────────
+  // One attention read feeds both badges: Inbox counts every issue waiting on
+  // the caller, Assigned to me counts the ones that name them. The endpoint
+  // caps each group at 50, hence the "50+" display.
+  let inboxCount = $state<number | null>(null);
+  let assignedCount = $state<number | null>(null);
+  let countsAt = 0;
+  let countsRequest = 0;
+  async function refreshCounts(force = false) {
+    if (!force && Date.now() - countsAt < 15_000) return;
+    countsAt = Date.now();
+    const request = ++countsRequest;
+    const res = await getAttention();
+    if (request !== countsRequest || !res.ok) return;
+    const { assigned, human, waiting } = res.data;
+    inboxCount = new Set([...assigned, ...human, ...waiting].map((i) => i.id)).size;
+    assignedCount = assigned.length;
+  }
+  function countLabel(n: number): string {
+    return n >= 50 ? "50+" : String(n);
   }
 
   // "?" summons the Shortcut Help overlay from anywhere in the app
@@ -398,6 +455,29 @@
     ], e.currentTarget as HTMLElement);
   }
 
+  const projectViews = [
+    ["overview", "Overview", LayoutDashboard],
+    ["issues", "Issues", List],
+    ["board", "Board", LayoutGrid],
+    ["modules", "Modules", Layers],
+    ["pages", "Pages", FileText],
+    ["plans", "Plans", ListChecks],
+    ["graph", "Graph", Waypoints],
+    ["files", "Files", Paperclip],
+    ["activity", "Activity", History],
+    ["insights", "Insights", TrendingUp],
+  ] as const;
+
+  function openRailProjectMenu(e: MouseEvent, project: Project) {
+    e.stopPropagation();
+    const trigger = e.currentTarget as HTMLElement;
+    const rect = trigger.getBoundingClientRect();
+    openContextMenu(rect.right + 6, rect.top, projectViews.map(([slug, label, icon]) => {
+      const path = `/${project.identifier}/${slug}`;
+      return { label, icon, href: `#${path}`, action: () => navigate(path) };
+    }), trigger);
+  }
+
   function openGroupMenu(e: MouseEvent, group: ProjectGroup) {
     e.preventDefault();
     e.stopPropagation();
@@ -529,7 +609,18 @@
       return;
     }
     refreshProjects();
+    void refreshCounts();
   });
+
+  $effect(() =>
+    startAutoRefresh({
+      refresh: () => refreshCounts(true),
+      realtimeDebounceMs: 1_000,
+      realtimeMaxWaitMs: 5_000,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" || event.type.startsWith("issue."),
+    }),
+  );
 
   $effect(() =>
     startAutoRefresh({
@@ -558,6 +649,7 @@
       navigate("/login");
       return;
     }
+    void refreshCounts(true);
     await refreshProjects();
     loading = false;
   }
@@ -813,6 +905,9 @@
   );
   let mobileSection = $derived.by(() => {
     if (route === "/") return "Home";
+    if (route === "/inbox") return "Inbox";
+    if (route === "/assigned") return "Assigned to me";
+    if (route === "/agents") return "Agent activity";
     if (isActive("/settings")) return "Settings";
     if (route === "/projects/new") return "New project";
     if (route === "/projects/import") return "Import archive";
@@ -854,29 +949,28 @@
          drilldown surface with its own structure, not this tree at a
          narrower width (LIF-349). -->
     <aside
-      class="sidebar-theme desktop-sidebar {sidebarCollapsed ? 'hidden' : 'hidden md:flex'} w-[var(--sidebar-w)]
+      class="sidebar-theme desktop-sidebar hidden md:flex
+             {sidebarCollapsed ? 'sidebar-rail w-[3.25rem]' : 'w-[var(--sidebar-w)]'}
              shrink-0 relative flex-col bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
       <span aria-hidden="true" class="absolute invisible h-0 pointer-events-none" style="width: 1rem"
         use:observeSidebarFontSize={(size) => sidebarFontSize = size}></span>
+      {#if sidebarCollapsed}
+        {@render rail()}
+      {:else}
       <!-- Brand header -->
       <div class="px-3 pt-3 pb-2 flex items-center gap-1.5">
         <a
           href="https://github.com/VoidNullable/lific"
           target="_blank"
           rel="noopener noreferrer"
-          title="View Lific on GitHub"
+          title={`Lific v${__APP_VERSION__} on GitHub`}
           class="sidebar-brand flex flex-1 min-w-0 items-center gap-2.5 px-1 py-1 transition-colors"
         >
           <img src="/logo.webp" alt="" width="26" height="26" class="rounded-md shrink-0" />
           <span class="font-display text-heading tracking-tight text-[var(--text)] leading-none flex-1">
             Lific
-          </span>
-          <span
-            class="sidebar-version text-micro text-[var(--text-faint)] shrink-0"
-          >
-            v{__APP_VERSION__}
           </span>
         </a>
         <!-- LIF-360: collapse control. Sits beside the brand rather than in
@@ -897,29 +991,43 @@
       <!-- Jump-to / command palette trigger -->
       <div class="sidebar-launcher-wrap px-3">
         <button
-          class="sidebar-launcher w-full h-8 flex items-center gap-2 px-2.5 rounded-md transition-colors"
+          class="sidebar-launcher w-full h-9 flex items-center gap-2 pl-2.5 pr-1.5 rounded-lg transition-colors"
           onclick={() => palette?.openPalette()}
         >
           <Search size={14} class="shrink-0" />
-          <span class="flex-1 text-left text-body-sm">Jump to…</span>
-          <kbd class="font-mono text-micro leading-none text-[var(--text-faint)]
-                      bg-[var(--sidebar-hover)] rounded px-1 py-0.5">⌘K</kbd>
+          <span class="flex-1 min-w-0 truncate text-left text-body-sm">Search…</span>
+          <span class="flex items-center gap-0.5 shrink-0" aria-hidden="true">
+            <kbd class="sidebar-key">{modKey}</kbd><kbd class="sidebar-key">K</kbd>
+          </span>
         </button>
       </div>
 
       <!-- Navigation -->
       <nav class="flex-1 px-2 py-1 overflow-y-auto">
-        <!-- LIF-237: Home — "My Work" landing dashboard. Sits above the
-             project list as its own top-level entry, mirroring the sub-nav
-             pill's shape (icon + label) but unindented and un-chevroned
-             since it isn't a disclosure. -->
-        <a href="#/" use:navLink={navigate} aria-current={route === "/" ? "page" : undefined}
-          class="sidebar-destination sidebar-home w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md
-                 text-left text-body-sm transition-colors"
-        >
-          <Home size={14} class="shrink-0" />
-          Home
-        </a>
+        <!-- LIF-538: cross-project views for the signed-in person. Home keeps
+             its LIF-237 role as the landing dashboard. -->
+        {#snippet workspaceItem(href: string, label: string, Icon: typeof Home, count: number | null, tone: "accent" | "plain", key: string)}
+          <a href={`#${href}`} use:navLink={navigate} aria-current={route === href ? "page" : undefined}
+            data-workspace={key}
+            class="sidebar-destination sidebar-workspace-item w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md
+                   text-left text-body-sm transition-colors"
+          >
+            <Icon size={14} class="shrink-0" />
+            <span class="flex-1 min-w-0 truncate">{label}</span>
+            {#if count}
+              <span class="sidebar-count" data-tone={tone}>{countLabel(count)}</span>
+            {/if}
+          </a>
+        {/snippet}
+        <div class="sidebar-workspace">
+          <span class="sidebar-section-label block px-2 pb-1 text-micro font-semibold uppercase text-[var(--text-faint)]">
+            Workspace
+          </span>
+          {@render workspaceItem("/", "Home", Home, null, "plain", "home")}
+          {@render workspaceItem("/inbox", "Inbox", Inbox, inboxCount, "accent", "inbox")}
+          {@render workspaceItem("/assigned", "Assigned to me", UserCheck, assignedCount, "plain", "assigned")}
+          {@render workspaceItem("/agents", "Agent activity", Bot, null, "plain", "agents")}
+        </div>
 
         <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
              the grouped lists and the ungrouped drag zone below, so a project
@@ -1013,11 +1121,13 @@
                 {@render subItem(`/${project.identifier}/overview`, "Overview", LayoutDashboard)}
                 {@render subItem(`/${project.identifier}/issues`, "Issues", List)}
                 {@render subItem(`/${project.identifier}/board`, "Board", LayoutGrid)}
-                {@render subItem(`/${project.identifier}/graph`, "Graph", Waypoints)}
                 {@render subItem(`/${project.identifier}/modules`, "Modules", Layers)}
                 {@render subItem(`/${project.identifier}/pages`, "Pages", FileText)}
-                {@render subItem(`/${project.identifier}/files`, "Files", Paperclip)}
                 {@render subItem(`/${project.identifier}/plans`, "Plans", ListChecks)}
+                <!-- Daily views above the rule, reference views below it. -->
+                <hr class="sidebar-subnav-rule" />
+                {@render subItem(`/${project.identifier}/graph`, "Graph", Waypoints)}
+                {@render subItem(`/${project.identifier}/files`, "Files", Paperclip)}
                 {@render subItem(`/${project.identifier}/activity`, "Activity", History)}
                 {@render subItem(`/${project.identifier}/insights`, "Insights", TrendingUp)}
                 {#if isProjectActive && activeRecentSection}
@@ -1172,24 +1282,25 @@
 
       <!-- Footer: the user identity IS the Settings entry (logout now lives
            inside Settings → Security). A compact theme toggle sits beside it. -->
-      <div class="sidebar-footer p-2 flex items-center gap-1">
+      <div class="sidebar-footer p-2">
+        <div class="sidebar-account-card flex items-center gap-0.5 p-1 rounded-lg">
         <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
-          class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors"
+          class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-2.5 px-1.5 py-1.5 rounded-md text-left transition-colors"
           title="Account settings"
         >
           <div
-            class="sidebar-avatar size-7 rounded-full
-                   flex items-center justify-center text-micro font-semibold
+            class="sidebar-avatar size-8 rounded-full
+                   flex items-center justify-center text-caption font-semibold
                    tracking-wide select-none shrink-0"
           >
             {initials(user.display_name || user.username)}
           </div>
           <div class="flex-1 min-w-0">
-            <div class="text-body-sm text-[var(--text)] truncate leading-tight">
+            <div class="text-body-sm font-medium text-[var(--text)] truncate leading-tight">
               {user.display_name || user.username}
             </div>
-            <div class="text-micro text-[var(--text-faint)] flex items-center gap-1 leading-tight mt-0.5">
-              <Settings size={9} /> Settings
+            <div class="text-micro text-[var(--text-faint)] truncate leading-tight mt-1">
+              @{user.username}{user.is_admin ? " · Admin" : ""}
             </div>
           </div>
         </a>
@@ -1221,6 +1332,7 @@
         >
           <HelpCircle size={15} />
         </button>
+        </div>
       </div>
       <!-- LIF-309: an 8px hit area keeps the 3px resize indicator easy to grab. -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1243,7 +1355,114 @@
             : 'bg-transparent group-hover:bg-[var(--border)] group-focus-visible:bg-[var(--accent)]'}"
         ></span>
       </div>
+      {/if}
+
+      <!-- LIF-537: the collapsed sidebar. Same chrome, same destinations, as
+           icons: workspace views are links, and a project opens a menu of its
+           views so any page is still one choice away. -->
+      {#snippet railLink(href: string, label: string, Icon: typeof Home, active: boolean, count: number | null = null)}
+        <a href={`#${href}`} use:navLink={navigate} use:tip={count ? `${label} · ${countLabel(count)}` : label}
+          aria-label={count ? `${label}, ${countLabel(count)}` : label}
+          aria-current={active ? "page" : undefined}
+          class="sidebar-destination rail-item relative size-9 grid place-items-center rounded-md transition-colors"
+        >
+          <Icon size={16} />
+          {#if count}<span class="rail-dot" aria-hidden="true"></span>{/if}
+        </a>
+      {/snippet}
+      {#snippet rail()}
+        <div class="flex flex-col items-center gap-1 pt-3 pb-2 px-1.5">
+          <img src="/logo.webp" alt="Lific" width="26" height="26" class="rounded-md mb-1" />
+          <button
+            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+                   hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
+            onclick={toggleSidebar}
+            use:tip={"Expand sidebar  ·  " + modKey + " \\"}
+            aria-label="Expand sidebar"
+          >
+            <PanelLeftOpen size={16} />
+          </button>
+          <button
+            class="sidebar-launcher rail-item size-9 grid place-items-center rounded-lg transition-colors"
+            onclick={() => palette?.openPalette()}
+            use:tip={`Search  ·  ${modKey} K`}
+            aria-label="Search or jump to"
+          >
+            <Search size={15} />
+          </button>
+        </div>
+        <nav class="rail-nav flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col items-center gap-1 px-1.5 pb-2" aria-label="Navigation">
+          {@render railLink("/", "Home", Home, route === "/")}
+          {@render railLink("/inbox", "Inbox", Inbox, route === "/inbox", inboxCount)}
+          {@render railLink("/assigned", "Assigned to me", UserCheck, route === "/assigned")}
+          {@render railLink("/agents", "Agent activity", Bot, route === "/agents")}
+          <hr class="rail-rule" />
+          {#each [...groups.flatMap((g) => projectsIn(g)), ...ungrouped] as project (project.id)}
+            {@const current = activeProject?.toLowerCase() === project.identifier.toLowerCase()}
+            <button
+              class="sidebar-destination rail-item size-9 grid place-items-center rounded-md transition-colors"
+              data-rail-project={project.id}
+              aria-current={current ? "true" : undefined}
+              aria-haspopup="menu"
+              aria-label={`${project.name} views`}
+              use:tip={project.name}
+              onclick={(e) => openRailProjectMenu(e, project)}
+              oncontextmenu={(e) => openProjectMenu(e, project)}
+            >
+              {#if project.emoji}
+                <ProjectIcon value={project.emoji} size={16} />
+              {:else}
+                <span class="sidebar-initials size-5 grid place-items-center rounded text-micro font-medium tracking-tight">
+                  {project.identifier.slice(0, 2)}
+                </span>
+              {/if}
+            </button>
+          {/each}
+          <button
+            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+                   hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
+            aria-label="New project or group" aria-haspopup="menu"
+            use:tip={"New project or group"}
+            onclick={openCreateMenu}
+          >
+            <Plus size={15} />
+          </button>
+        </nav>
+        <div class="flex flex-col items-center gap-1 px-1.5 pt-2 pb-2.5 border-t border-[var(--sidebar-guide)]">
+          <button
+            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+                   hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
+            onclick={themeMenu}
+            use:tip={`Theme: ${themePref}`}
+            aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
+          >
+            {#if themePref === "system"}
+              <Monitor size={15} />
+            {:else if themeResolved === "dark"}
+              <Moon size={15} />
+            {:else}
+              <Sun size={15} />
+            {/if}
+          </button>
+          <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
+            use:tip={user ? `${user.display_name || user.username} · Settings` : "Settings"}
+            aria-label="Account settings"
+            class="sidebar-destination rail-item size-9 grid place-items-center rounded-full transition-colors"
+          >
+            <span class="sidebar-avatar size-8 rounded-full grid place-items-center text-caption font-semibold tracking-wide">
+              {initials(user?.display_name || user?.username || "")}
+            </span>
+          </a>
+        </div>
+      {/snippet}
     </aside>
+    {#if railTip && sidebarCollapsed}
+      <div role="tooltip" class="rail-tip fixed z-50 -translate-y-1/2 pointer-events-none whitespace-nowrap
+                                  px-2 py-1 rounded-md text-caption"
+        style={`top: ${railTip.top}px; left: ${railTip.left}px`}>
+        {railTip.text}
+      </div>
+    {/if}
 
     <!-- Right column: chrome topbar (continuous with sidebar) + inset panel -->
     <div class="flex-1 min-w-0 flex flex-col">
@@ -1310,37 +1529,16 @@
       <!-- Chrome topbar slot. Routes pass a `topbar` snippet for breadcrumb,
            filters, search, etc. Background matches the sidebar so the L is
            visually seamless. -->
-      {#if topbarSnippet || sidebarCollapsed}
+      {#if topbarSnippet}
         <!-- The topbar deliberately uses muted text/icon colors so it
              reads as quieter than the content panel below. We avoid
              `opacity` for the dimming effect because it creates a CSS
              stacking context that traps absolutely-positioned dropdowns
              (filters, display, help popovers) BEHIND the content panel. -->
         <div class="shrink-0 flex items-stretch min-h-0 bg-[var(--chrome)]">
-          {#if sidebarCollapsed}
-            <!-- LIF-360: with the sidebar folded away this is the only way
-                 back to it besides the shortcut, so it leads the topbar. It
-                 renders even on routes that supply no topbar snippet, which
-                 is why the row above is no longer gated on the snippet
-                 alone. -->
-            <div class="hidden md:flex items-start shrink-0 pl-2 pr-0.5 py-2">
-              <button
-                class="size-7 grid place-items-center rounded-md
-                       text-[var(--text-faint)] hover:text-[var(--text)]
-                       hover:bg-[var(--bg-subtle)] transition-colors"
-                onclick={toggleSidebar}
-                title="Expand sidebar  ·  ⌘\\"
-                aria-label="Expand sidebar"
-              >
-                <PanelLeftOpen size={15} />
-              </button>
-            </div>
-          {/if}
-          {#if topbarSnippet}
-            <div class="flex-1 min-w-0 flex items-stretch">
-              {@render topbarSnippet()}
-            </div>
-          {/if}
+          <div class="flex-1 min-w-0 flex items-stretch">
+            {@render topbarSnippet()}
+          </div>
         </div>
       {/if}
 
@@ -1369,16 +1567,13 @@
           class="pointer-events-none absolute top-0 left-0 right-0 h-6 z-10
                  bg-gradient-to-b from-[var(--shadow-recess)] to-transparent"
         ></div>
-        <!-- Left edge: TL → BL. Only meaningful at md+ where the sidebar is
-             docked to cast the shadow; on mobile there's nothing to its left,
-             and neither is there once the sidebar is collapsed (LIF-360), so
-             the gradient would read as a vignette against the viewport edge. -->
-        {#if !sidebarCollapsed}
-          <div
-            class="hidden md:block pointer-events-none absolute top-0 left-0 bottom-0 w-6 z-10
-                   bg-gradient-to-r from-[var(--shadow-recess)] to-transparent"
-          ></div>
-        {/if}
+        <!-- Left edge: TL → BL. Only meaningful at md+ where the sidebar (or
+             its LIF-537 rail) is docked to cast the shadow; on mobile there's
+             nothing to its left. -->
+        <div
+          class="hidden md:block pointer-events-none absolute top-0 left-0 bottom-0 w-6 z-10
+                 bg-gradient-to-r from-[var(--shadow-recess)] to-transparent"
+        ></div>
       </div>
     </div>
   </div>
@@ -1412,6 +1607,8 @@
     {themePref}
     {themeResolved}
     onCycleTheme={themeMenu}
+    {inboxCount}
+    {assignedCount}
   />
 
   <!-- LIF-159: cmd+k / ctrl+p jump-anywhere. Mounted here (once, above
