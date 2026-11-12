@@ -2659,3 +2659,84 @@ export async function getProjectChanges(
   if (limit !== undefined) params.set("limit", String(limit));
   return request<ChangesPage>(`/projects/${projectId}/changes?${params}`);
 }
+
+// ── Agent activity (LIF-542) ─────────────────────────────────
+//
+// One read for the Agent activity page: per-bucket action counts, the bot
+// roster with status and a per-agent series, and a recent feed. Buckets are
+// aligned to the caller's local clock, so the request carries `tz` exactly
+// like `getHomeOverview`. Status is absolute (last action under 10 minutes
+// is active, under 60 idle), independent of the selected window.
+
+export type AgentWindow = "1h" | "24h" | "7d";
+export type AgentActionKind = "read" | "edit" | "create" | "close";
+export type AgentStatus = "active" | "idle" | "inactive";
+
+export interface AgentActionCounts {
+  read: number;
+  edit: number;
+  create: number;
+  close: number;
+}
+
+export interface AgentActivityBucket extends AgentActionCounts {
+  /** Bucket start, RFC 3339 UTC. */
+  start: string;
+}
+
+export interface AgentOwner {
+  user_id: number;
+  username: string;
+  display_name: string;
+}
+
+export interface AgentSummary {
+  user_id: number;
+  username: string;
+  display_name: string;
+  owner: AgentOwner | null;
+  status: AgentStatus;
+  /** Most recent visible action of any age, RFC 3339 UTC; null if never. */
+  last_seen: string | null;
+  counts: AgentActionCounts;
+  /** Total actions per bucket, same length as `buckets`. */
+  series: number[];
+}
+
+export interface AgentRecentItem {
+  /** RFC 3339 UTC. */
+  at: string;
+  kind: AgentActionKind;
+  agent: { user_id: number; display_name: string };
+  entity_type: string;
+  identifier: string | null;
+  title: string | null;
+  /** null | "comment" | "label" | "link" | "delete" | a field name. */
+  detail: string | null;
+  /** App hash route without '#', or null when the entity is gone. */
+  route: string | null;
+  /** Reads only: the MCP tool name. */
+  tool: string | null;
+}
+
+export interface AgentActivity {
+  window: AgentWindow;
+  /** Server time, RFC 3339 UTC. */
+  now: string;
+  bucket_seconds: number;
+  /** Oldest first; the last bucket contains `now`. */
+  buckets: AgentActivityBucket[];
+  totals: AgentActionCounts;
+  active_count: number;
+  agents: AgentSummary[];
+  /** Newest first, at most 30. */
+  recent: AgentRecentItem[];
+}
+
+export async function getAgentActivity(window: AgentWindow) {
+  const params = new URLSearchParams({
+    window,
+    tz: String(-new Date().getTimezoneOffset()),
+  });
+  return request<AgentActivity>(`/agents/activity?${params}`);
+}
