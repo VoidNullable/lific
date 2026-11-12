@@ -35,6 +35,7 @@ impl Session {
         let pool = crate::db::open_memory().unwrap();
         {
             let conn = pool.write().unwrap();
+            crate::db::queries::users::create_passwordless_admin(&conn, "Operator").unwrap();
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
@@ -239,5 +240,115 @@ async fn tool_failures_set_is_error_and_successes_do_not() {
         )
         .await;
     assert_eq!(listed["result"]["isError"], false, "{listed}");
+    session.finish().await;
+}
+
+async fn initialized(session: &mut Session) -> Value {
+    let init = session
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "resource-client", "version": "1.0"}
+            }),
+        )
+        .await;
+    session
+        .send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await;
+    init
+}
+
+#[tokio::test]
+async fn issues_and_pages_are_readable_as_resources() {
+    let mut session = Session::start();
+    let init = initialized(&mut session).await;
+    assert!(
+        init["result"]["capabilities"]["resources"].is_object(),
+        "{init}"
+    );
+
+    let templates = session
+        .request(2, "resources/templates/list", json!({}))
+        .await;
+    let uris: Vec<&str> = templates["result"]["resourceTemplates"]
+        .as_array()
+        .expect("templates")
+        .iter()
+        .map(|template| template["uriTemplate"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        [
+            "lific://{project}/issues/{identifier}",
+            "lific://{project}/pages/{identifier}"
+        ]
+    );
+    let listed = session.request(3, "resources/list", json!({})).await;
+    assert_eq!(listed["result"]["resources"], json!([]), "{listed}");
+
+    let created = session
+        .request(
+            4,
+            "tools/call",
+            json!({"name": "create_issue", "arguments": {"project": "PRO", "title": "Readable"}}),
+        )
+        .await;
+    assert_ne!(created["result"]["isError"], true, "{created}");
+    let tool = session
+        .request(
+            5,
+            "tools/call",
+            json!({"name": "get_issue", "arguments": {"identifier": "PRO-1"}}),
+        )
+        .await;
+    let read = session
+        .request(
+            6,
+            "resources/read",
+            json!({"uri": "lific://PRO/issues/PRO-1"}),
+        )
+        .await;
+    let contents = &read["result"]["contents"][0];
+    assert_eq!(contents["uri"], "lific://PRO/issues/PRO-1", "{read}");
+    assert_eq!(contents["mimeType"], "text/markdown");
+    assert_eq!(contents["text"], tool["result"]["content"][0]["text"]);
+
+    let page = session
+        .request(
+            7,
+            "tools/call",
+            json!({"name": "create_page", "arguments": {"project": "PRO", "title": "Guide", "content": "Read me."}}),
+        )
+        .await;
+    assert_ne!(page["result"]["isError"], true, "{page}");
+    let read = session
+        .request(
+            8,
+            "resources/read",
+            json!({"uri": "lific://PRO/pages/PRO-DOC-1"}),
+        )
+        .await;
+    let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Read me."), "{read}");
+
+    let missing = session
+        .request(
+            9,
+            "resources/read",
+            json!({"uri": "lific://PRO/issues/PRO-99"}),
+        )
+        .await;
+    assert_eq!(missing["error"]["code"], -32002, "{missing}");
+    let foreign = session
+        .request(
+            10,
+            "resources/read",
+            json!({"uri": "lific://PRO/issues/OPS-1"}),
+        )
+        .await;
+    assert_eq!(foreign["error"]["code"], -32002, "{foreign}");
     session.finish().await;
 }

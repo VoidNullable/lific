@@ -4,6 +4,7 @@ pub(crate) mod page_reads;
 #[cfg(test)]
 pub(crate) mod protocol_tests;
 mod read_log;
+mod resources;
 pub(crate) mod schemas;
 pub(crate) mod tools;
 mod waits;
@@ -648,19 +649,78 @@ fn mark_tool_error(mut result: rmcp::model::CallToolResult) -> rmcp::model::Call
     result
 }
 
+/// Who an MCP request runs as, taken from the HTTP request it arrived on.
+/// Stdio requests carry nothing here; their identity is the stdio credential.
+enum RequestScope {
+    Http(Arc<HttpRequestData>),
+    HttpUser(Option<AuthUser>),
+    Stdio,
+}
+
+impl RequestScope {
+    async fn run<Fut, R>(self, future: Fut) -> R
+    where
+        Fut: std::future::Future<Output = R>,
+    {
+        match self {
+            Self::Http(http) => scope_request_data(RequestData::Http(http), future).await,
+            Self::HttpUser(user) => scope_request_context(user, None, future).await,
+            Self::Stdio => future.await,
+        }
+    }
+}
+
+impl LificMcp {
+    /// rmcp copies the HTTP request's extensions into the request context;
+    /// take the identity the auth layer put there. An HTTP request without
+    /// one is a wiring bug, never an anonymous caller.
+    fn take_request_scope(
+        &self,
+        context: &mut rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<RequestScope, rmcp::ErrorData> {
+        let parts = context.extensions.get_mut::<axum::http::request::Parts>();
+        let (http_context, http_user) = match parts {
+            Some(parts) => (
+                parts.extensions.remove::<Arc<HttpRequestData>>(),
+                parts.extensions.remove::<Option<AuthUser>>(),
+            ),
+            None => (None, None),
+        };
+        match (http_context, http_user) {
+            (Some(http), _) => Ok(RequestScope::Http(http)),
+            (None, Some(user)) if self.transport == McpTransport::Http => {
+                Ok(RequestScope::HttpUser(user))
+            }
+            (None, None) if self.transport == McpTransport::Http => {
+                tracing::error!("HTTP MCP request has no request context");
+                Err(rmcp::ErrorData::internal_error(
+                    "HTTP MCP request context missing",
+                    None,
+                ))
+            }
+            _ => Ok(RequestScope::Stdio),
+        }
+    }
+}
+
 impl ServerHandler for LificMcp {
     fn get_info(&self) -> ServerConfig {
         // No protocol pin: rmcp negotiates per client. An `initialize` naming
         // a version we know (Zed's 2025-03-26 included) gets that version
         // back, and a 2026-07-28 client skips `initialize` for
         // `server/discover` and per-request `_meta`.
-        let info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            // Identify as lific, not rmcp's build-env default — this name is
-            // what connected clients (and `lific doctor`) display.
-            .with_server_info(rmcp::model::Implementation::new(
-                "lific",
-                env!("CARGO_PKG_VERSION"),
-            ));
+        let info = ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        // Identify as lific, not rmcp's build-env default — this name is
+        // what connected clients (and `lific doctor`) display.
+        .with_server_info(rmcp::model::Implementation::new(
+            "lific",
+            env!("CARGO_PKG_VERSION"),
+        ));
         // LIF-452: a bound session says so, once, in one sentence. The
         // unbound path stays byte-identical to before the feature existed.
         match &self.bound_project {
@@ -707,22 +767,7 @@ impl ServerHandler for LificMcp {
                 .acquire_many(mcp_tool_permits_per_call(workers))
                 .await
                 .expect("MCP tool semaphore is never closed");
-            let http_context = context
-                .extensions
-                .get_mut::<axum::http::request::Parts>()
-                .and_then(|parts| parts.extensions.remove::<Arc<HttpRequestData>>());
-            let http_user = context
-                .extensions
-                .get_mut::<axum::http::request::Parts>()
-                .and_then(|parts| parts.extensions.remove::<Option<AuthUser>>());
-            if self.transport == McpTransport::Http && http_context.is_none() && http_user.is_none()
-            {
-                tracing::error!("HTTP MCP tool call has no request context");
-                return Err(rmcp::ErrorData::internal_error(
-                    "HTTP MCP request context missing",
-                    None,
-                ));
-            }
+            let scope = self.take_request_scope(&mut context)?;
             let tool = request.name.clone();
             let provided: Vec<String> = request
                 .arguments
@@ -732,13 +777,7 @@ impl ServerHandler for LificMcp {
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
-            let result = match http_context {
-                Some(http) => scope_request_data(RequestData::Http(http), dispatch()).await,
-                None if self.transport == McpTransport::Http => {
-                    scope_request_context(http_user.flatten(), None, dispatch()).await
-                }
-                None => dispatch().await,
-            };
+            let result = scope.run(dispatch()).await;
             // rmcp reports argument deserialization failures as a failed tool
             // result rather than a protocol error, so the rewrite works on
             // the result text.
@@ -759,6 +798,66 @@ impl ServerHandler for LificMcp {
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
         self.tool_router.get(name).cloned()
+    }
+
+    /// Empty on purpose: the templates name what can be read, and listing
+    /// issues or pages here would dump the tracker into a host's picker.
+    fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::ListResourcesResult, rmcp::ErrorData>>
+    + rmcp::service::MaybeSendFuture
+    + '_ {
+        std::future::ready(Ok(rmcp::model::ListResourcesResult::default()))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<
+        Output = Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData>,
+    > + rmcp::service::MaybeSendFuture
+    + '_ {
+        std::future::ready(Ok(
+            rmcp::model::ListResourceTemplatesResult::with_all_items(resources::templates()),
+        ))
+    }
+
+    /// Reads run as the caller, through the same credential checks as a
+    /// tool call, and render through the read tools themselves.
+    #[allow(clippy::manual_async_fn)]
+    fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        mut context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<
+        Output = Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData>,
+    > + rmcp::service::MaybeSendFuture
+    + '_ {
+        async move {
+            let workers = tokio::runtime::Handle::current().metrics().num_workers();
+            let _permit = MCP_TOOL_PERMITS
+                .acquire_many(mcp_tool_permits_per_call(workers))
+                .await
+                .expect("MCP tool semaphore is never closed");
+            let scope = self.take_request_scope(&mut context)?;
+            let read = || async { self.read_lific_resource(&request.uri) };
+            let result = scope
+                .run(async {
+                    self.with_stdio_auth(read)
+                        .await
+                        .unwrap_or_else(|StdioAuthFailed| {
+                            Err(rmcp::ErrorData::invalid_request(
+                                StdioAuthFailed::MESSAGE,
+                                None,
+                            ))
+                        })
+                })
+                .await?;
+            Ok(result.into())
+        }
     }
 }
 

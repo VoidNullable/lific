@@ -141,6 +141,17 @@ Agent harnesses cut long tool output off without saying so, so the tools that ca
 | `get_briefing` | 6,000 characters | Lines are dropped from the longest sections, and each cut section names the call that lists everything. |
 | `export` for a project | 256 KiB of Markdown | The page of documents stops early, and the last line gives the next `offset`. |
 
+## Resources
+
+Hosts that let you attach a server resource to a conversation, often with an @-mention, can read issues and pages without the model calling a tool. Lific declares the resources capability with two templates:
+
+| Template | Example | Returns |
+| --- | --- | --- |
+| `lific://{project}/issues/{identifier}` | `lific://APP/issues/APP-42` | The `get_issue` text |
+| `lific://{project}/pages/{identifier}` | `lific://APP/pages/APP-DOC-3` | The `get_page` text |
+
+`resources/read` renders through the read tools, so it applies the same role checks and size bounds. An identifier from another project, an unknown entity or one you cannot see answers with error `-32002`. `resources/list` returns an empty list on purpose, so a host's picker never pulls in a whole tracker. The multi-instance proxy serves tools only.
+
 ## Identity and authorization
 
 MCP resolves the caller exactly as REST does, in every auth mode. An agent cannot do more through MCP than the same account can do through the web UI, and both surfaces check the same roles.

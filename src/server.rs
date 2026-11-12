@@ -1913,6 +1913,32 @@ mod authless_mcp_tests {
     }
 
     #[tokio::test]
+    async fn an_issue_resource_reads_as_the_http_caller() {
+        let router = router_with_project();
+        let created = post_mcp(
+            &router,
+            "2025-06-18",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "create_issue", "arguments": {"project": "PRO", "title": "Over HTTP"}}
+            }),
+        )
+        .await;
+        assert_ne!(created["result"]["isError"], true, "{created}");
+        let read = post_mcp(
+            &router,
+            "2025-06-18",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+                "params": {"uri": "lific://PRO/issues/PRO-1"}
+            }),
+        )
+        .await;
+        let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Over HTTP"), "{read}");
+    }
+
+    #[tokio::test]
     async fn a_2025_03_26_client_initializes_lists_and_calls_over_http() {
         let router = router_with_project();
         let init = post_mcp(

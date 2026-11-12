@@ -2503,7 +2503,7 @@ No issues found."
         annotations(read_only_hint = true, open_world_hint = false),
         description = "Get an issue with its details and last 3 comments, or up to 50 with identifiers."
     )]
-    fn get_issue(&self, Parameters(mut input): Parameters<GetIssueInput>) -> String {
+    pub(super) fn get_issue(&self, Parameters(mut input): Parameters<GetIssueInput>) -> String {
         let mut log = ReadLog::new("get_issue");
         let result = match input.identifiers.take() {
             Some(identifiers) => self.get_issue_batch(input, identifiers, &mut log),
@@ -4034,7 +4034,7 @@ No issues found."
         annotations(read_only_hint = true, open_world_hint = false),
         description = "Get a page. Over 30,000 characters you get its outline and opening; read the rest by section."
     )]
-    fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
+    pub(super) fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
         let mut log = ReadLog::new("get_page");
         let result = self.get_page_inner(input, &mut log);
         self.logged_read(log, result)
@@ -15557,6 +15557,41 @@ mod authz_gating_tests {
         });
         assert!(!is_forbidden(&allowed), "viewer get_issue: {allowed}");
         assert!(allowed.contains("Secret work"), "got: {allowed}");
+    }
+
+    #[test]
+    fn issue_resource_read_is_refused_for_a_non_member_like_the_tool() {
+        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: Some("MEM".into()),
+                title: "Secret work".into(),
+                ..Default::default()
+            }))
+        });
+        let uri = "lific://MEM/issues/MEM-1";
+        let tool = as_user(&non_member, || {
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+                ..Default::default()
+            }))
+        });
+        let denied = as_user(&non_member, || {
+            let error = m.read_lific_resource(uri).unwrap_err();
+            format!("{}{}", super::super::TOOL_ERROR_PREFIX, error.message)
+        });
+        assert_eq!(denied, tool);
+        assert!(is_forbidden(&tool), "{tool}");
+
+        let text = as_user(&viewer, || {
+            let read = m.read_lific_resource(uri).unwrap();
+            serde_json::to_value(&read).unwrap()["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        });
+        assert!(text.contains("Secret work"), "{text}");
     }
 
     /// Seed a second project the fixture's members have no role on, with one
