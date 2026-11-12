@@ -145,6 +145,8 @@ class API {
         else if (path === "/issues/attention" && method === "GET") {
           const issue = (id: number) => ({ id, project_id: 1, identifier: `ONE-${id}`, title: "Needs you", status: "todo", priority: "medium", updated_at: stamp, created_at: stamp, labels: [] });
           data = { assigned: [issue(1)], human: [issue(2)], waiting: [] };
+        } else if (path === "/agents/activity" && method === "GET") {
+          data = { window: "1h", active_count: 3, buckets: [], agents: [], recent: [] };
         }
         else {
           this.unexpected.push(`${method} ${path}${url.search}`);
@@ -645,7 +647,7 @@ try {
     await attr(inbox, "aria-current", "page");
 
     await aside.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
-    assert.ok(Math.abs((await aside.boundingBox())!.width - 52) < 1, "Rail is 3.25rem wide");
+    assert.ok(Math.abs((await aside.boundingBox())!.width - 56) < 1, "Rail is 3.5rem wide");
     assert.equal(await aside.getByRole("separator", { name: "Resize sidebar" }).count(), 0, "No resize handle on the rail");
     await attr(aside.getByRole("link", { name: "Inbox, 2", exact: true }), "aria-current", "page");
     const assigned = aside.getByRole("link", { name: "Assigned to me", exact: true });
@@ -665,6 +667,18 @@ try {
     await page.keyboard.press("Control+\\");
     await aside.getByRole("button", { name: "Collapse sidebar", exact: true }).waitFor();
     assert.equal(await page.evaluate(() => localStorage.getItem("lific:sidebar:collapsed")), "0");
+  });
+
+  await test("a long project list scrolls the rail instead of squashing it", async () => {
+    const api = new API();
+    for (let i = 5; i <= 30; i++) api.projects.push({ ...api.projects[3], id: i, name: `Project ${i}`, identifier: `P${i}`, sort_order: i });
+    const { page, aside } = await session({ api, route: "/inbox" });
+    await page.evaluate(() => { localStorage.setItem("lific:sidebar:collapsed", "1"); });
+    await page.reload();
+    await aside.getByRole("button", { name: "Project 30 views", exact: true }).waitFor({ state: "attached" });
+    const heights = await aside.locator(".rail-item").evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
+    assert.ok(heights.length > 30 && heights.every(h => Math.abs(h - 40) < 0.5), JSON.stringify(heights));
+    assert.ok(await aside.locator(".rail-nav").evaluate(el => el.scrollHeight > el.clientHeight), "Rail nav scrolls");
   });
 
   await test("native modified sidebar links", async () => {

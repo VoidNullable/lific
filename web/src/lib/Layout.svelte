@@ -957,7 +957,7 @@
          narrower width (LIF-349). -->
     <aside
       class="sidebar-theme desktop-sidebar hidden md:flex
-             {sidebarCollapsed ? 'sidebar-rail w-[3.25rem]' : 'w-[var(--sidebar-w)]'}
+             {sidebarCollapsed ? 'sidebar-rail w-[3.5rem]' : 'w-[var(--sidebar-w)]'}
              shrink-0 relative flex-col bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
@@ -1371,9 +1371,9 @@
         <a href={`#${href}`} use:navLink={navigate} use:tip={count ? `${label} · ${countLabel(count)}` : label}
           aria-label={count ? `${label}, ${countLabel(count)}` : label}
           aria-current={active ? "page" : undefined}
-          class="sidebar-destination rail-item relative size-9 grid place-items-center rounded-md transition-colors"
+          class="sidebar-destination rail-item relative size-10 grid place-items-center rounded-md transition-colors"
         >
-          <Icon size={16} />
+          <Icon size={18} />
           {#if count}<span class="rail-dot" aria-hidden="true"></span>{/if}
         </a>
       {/snippet}
@@ -1381,21 +1381,21 @@
         <div class="flex flex-col items-center gap-1 pt-3 pb-2 px-1.5">
           <img src="/logo.webp" alt="Lific" width="26" height="26" class="rounded-md mb-1" />
           <button
-            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+            class="rail-item size-10 grid place-items-center rounded-md text-[var(--text-faint)]
                    hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
             onclick={toggleSidebar}
             use:tip={"Expand sidebar  ·  " + modKey + " \\"}
             aria-label="Expand sidebar"
           >
-            <PanelLeftOpen size={16} />
+            <PanelLeftOpen size={18} />
           </button>
           <button
-            class="sidebar-launcher rail-item size-9 grid place-items-center rounded-lg transition-colors"
+            class="sidebar-launcher rail-item size-10 grid place-items-center rounded-lg transition-colors"
             onclick={() => palette?.openPalette()}
             use:tip={`Search  ·  ${modKey} K`}
             aria-label="Search or jump to"
           >
-            <Search size={15} />
+            <Search size={17} />
           </button>
         </div>
         <nav class="rail-nav flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col items-center gap-1 px-1.5 pb-2" aria-label="Navigation">
@@ -1407,7 +1407,7 @@
           {#each [...groups.flatMap((g) => projectsIn(g)), ...ungrouped] as project (project.id)}
             {@const current = activeProject?.toLowerCase() === project.identifier.toLowerCase()}
             <button
-              class="sidebar-destination rail-item size-9 grid place-items-center rounded-md transition-colors"
+              class="sidebar-destination rail-item size-10 grid place-items-center rounded-md transition-colors"
               data-rail-project={project.id}
               aria-current={current ? "true" : undefined}
               aria-haspopup="menu"
@@ -1417,44 +1417,44 @@
               oncontextmenu={(e) => openProjectMenu(e, project)}
             >
               {#if project.emoji}
-                <ProjectIcon value={project.emoji} size={16} />
+                <ProjectIcon value={project.emoji} size={18} />
               {:else}
-                <span class="sidebar-initials size-5 grid place-items-center rounded text-micro font-medium tracking-tight">
+                <span class="sidebar-initials size-6 grid place-items-center rounded-md text-caption font-medium tracking-tight">
                   {project.identifier.slice(0, 2)}
                 </span>
               {/if}
             </button>
           {/each}
           <button
-            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+            class="rail-item size-10 grid place-items-center rounded-md text-[var(--text-faint)]
                    hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
             aria-label="New project or group" aria-haspopup="menu"
             use:tip={"New project or group"}
             onclick={openCreateMenu}
           >
-            <Plus size={15} />
+            <Plus size={17} />
           </button>
         </nav>
         <div class="flex flex-col items-center gap-1 px-1.5 pt-2 pb-2.5 border-t border-[var(--sidebar-guide)]">
           <button
-            class="rail-item size-9 grid place-items-center rounded-md text-[var(--text-faint)]
+            class="rail-item size-10 grid place-items-center rounded-md text-[var(--text-faint)]
                    hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
             onclick={themeMenu}
             use:tip={`Theme: ${themePref}`}
             aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
           >
             {#if themePref === "system"}
-              <Monitor size={15} />
+              <Monitor size={17} />
             {:else if themeResolved === "dark"}
-              <Moon size={15} />
+              <Moon size={17} />
             {:else}
-              <Sun size={15} />
+              <Sun size={17} />
             {/if}
           </button>
           <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
             use:tip={user ? `${user.display_name || user.username} · Settings` : "Settings"}
             aria-label="Account settings"
-            class="sidebar-destination rail-item size-9 grid place-items-center rounded-full transition-colors"
+            class="sidebar-destination rail-item size-10 grid place-items-center rounded-full transition-colors"
           >
             <span class="sidebar-avatar size-8 rounded-full grid place-items-center text-caption font-semibold tracking-wide">
               {initials(user?.display_name || user?.username || "")}

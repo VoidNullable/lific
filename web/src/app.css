@@ -481,7 +481,9 @@ html[data-motion="reduced"] *::after {
   border: 0;
   border-top: 1px solid var(--sidebar-guide);
 }
-/* LIF-537: the collapsed icon rail. */
+/* LIF-537: the collapsed icon rail. Items never shrink: a long project list
+   must scroll, not squash every control down to its icon. */
+.sidebar-rail .rail-item { flex-shrink: 0; }
 .sidebar-rail .rail-item[aria-current] {
   color: var(--text);
   background: var(--sidebar-selected);
