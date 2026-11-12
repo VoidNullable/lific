@@ -10,7 +10,7 @@ An attachment is a file uploaded to Lific, such as a screenshot, a log or a repr
 | Interface | How |
 | --- | --- |
 | Web UI | Paste, drop or pick a file in any editor or comment box, take a photo, or record a voice note. The editor inserts the reference for you. |
-| MCP | `upload_attachment` with the file base64-encoded. It returns the Markdown to embed. |
+| MCP | `upload_attachment` with a local `path` over stdio, or the file base64-encoded. It returns the Markdown to embed. |
 | REST | `POST /api/attachments` as a multipart form. |
 
 A file can be up to 10 MiB, and each account can upload 30 files per 10 minutes. Any signed-in user can upload. An upload can also be linked to an issue, page or comment in the same request, which takes `maintainer` on the project for an issue or page, and `viewer` for a comment.

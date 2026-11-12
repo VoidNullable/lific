@@ -32,11 +32,12 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
-- 32 tools now cost an agent 6,837 tokens of context.
+- 32 tools now cost an agent 6,871 tokens of context.
 
 ### Images and attachments
 
 - `get_attachment` returns SVG images as their XML source, paged by line like text files and marked as untrusted markup, instead of an opaque blob or a download link. Browsers still only download SVG.
+- `upload_attachment` takes a local `path` when the client connects through `lific mcp`, the local server or either proxy. The process reads the file and sends the bytes, so the model no longer has to write a file out as base64, which ran past output limits for any real screenshot and could corrupt it without an error. HTTP MCP refuses `path`, since the server cannot see the agent's files. `filename` defaults to the file's name.
 - `upload_attachment`'s description names every accepted file type, including video, audio, SQLite and HWP, which agents could not tell were allowed.
 - `upload_attachment` takes `alt_text`, stored like the web UI's and used as the embed snippet's link text. `get_attachment` and `list_attachments` show alt text and pixel dimensions, so an agent can often skip looking at an image at all.
 - `get_attachment` sends an image larger than 1600 px or 1 MB to the model as a scaled copy, cached beside its thumbnail, instead of the original. A 10 MiB original used to exceed what providers accept and could break the agent's session. `full: true` returns the original when it is within provider limits, and the first line names both sizes.

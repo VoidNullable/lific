@@ -1,4 +1,5 @@
 mod arguments;
+pub(crate) mod local_file;
 pub(crate) mod page_reads;
 #[cfg(test)]
 pub(crate) mod protocol_tests;

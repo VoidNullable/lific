@@ -2301,19 +2301,26 @@ mod authless_mcp_tests {
 }
 
 #[cfg(test)]
-mod mcp_body_limit_tests {
+pub(crate) mod test_server {
     use super::*;
-    use base64::Engine;
 
-    struct Served {
-        endpoint: String,
-        key: String,
-        pool: db::DbPool,
+    /// A real Lific HTTP server on a loopback port, with API-key auth on, an
+    /// admin `owner` holding `key`, and one project.
+    pub(crate) struct Served {
+        pub(crate) endpoint: String,
+        pub(crate) key: String,
+        pub(crate) pool: db::DbPool,
         _temp: tempfile::TempDir,
         task: tokio::task::JoinHandle<()>,
     }
 
-    async fn serve() -> Served {
+    impl Drop for Served {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    pub(crate) async fn serve(project_name: &str, identifier: &str) -> Served {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("lific.db");
         let pool = db::open(&db_path).unwrap();
@@ -2327,8 +2334,8 @@ mod mcp_body_limit_tests {
             db::queries::create_project(
                 &conn,
                 &db::models::CreateProject {
-                    name: "Limit project".into(),
-                    identifier: "LIM".into(),
+                    name: project_name.into(),
+                    identifier: identifier.into(),
                     ..Default::default()
                 },
             )
@@ -2366,6 +2373,13 @@ mod mcp_body_limit_tests {
             task,
         }
     }
+}
+
+#[cfg(test)]
+mod mcp_http_upload_tests {
+    use super::test_server::{Served, serve};
+    use super::*;
+    use base64::Engine;
 
     async fn call(served: &Served, body: &serde_json::Value) -> (StatusCode, String) {
         let res = reqwest::Client::new()
@@ -2397,7 +2411,7 @@ mod mcp_body_limit_tests {
 
     #[tokio::test]
     async fn a_maximum_size_upload_fits_through_http_mcp() {
-        let served = serve().await;
+        let served = serve("Limit project", "LIM").await;
         let (status, text) = call(
             &served,
             &tool_call(
@@ -2419,12 +2433,11 @@ mod mcp_body_limit_tests {
             .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
-        served.task.abort();
     }
 
     #[tokio::test]
     async fn an_oversized_body_is_refused_before_any_tool_runs() {
-        let served = serve().await;
+        let served = serve("Limit project", "LIM").await;
         let padding = "x".repeat(mcp::MAX_REQUEST_BODY_BYTES);
         let (status, text) = call(
             &served,
@@ -2439,13 +2452,45 @@ mod mcp_body_limit_tests {
         )
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
+        assert_eq!(issue_count(&served), 0);
+    }
+
+    #[tokio::test]
+    async fn a_path_upload_sent_straight_to_http_is_refused_without_reading_the_file() {
+        let served = serve("Limit project", "LIM").await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("server-side.png");
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\nbytes").unwrap();
+        let (status, text) = call(
+            &served,
+            &tool_call(
+                "upload_attachment",
+                serde_json::json!({"path": file.to_str().unwrap()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["result"]["isError"], true, "{value}");
+        assert_eq!(
+            value["result"]["content"][0]["text"],
+            format!("Error: {}", mcp::tools::PATH_UPLOAD_OVER_HTTP)
+        );
         let count: i64 = served
             .pool
             .read()
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
-        served.task.abort();
+    }
+
+    fn issue_count(served: &Served) -> i64 {
+        served
+            .pool
+            .read()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap()
     }
 }

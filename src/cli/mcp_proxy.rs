@@ -39,6 +39,13 @@ use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::mcp::INLINE_ATTACHMENT_HEADER;
+pub(crate) use crate::mcp::local_file::{inline_upload_path, tool_error_response};
+
+/// The largest file a proxy reads for `upload_attachment(path)`: the
+/// server's default attachment cap, which is what MCP uploads are held to.
+pub(crate) fn max_upload_bytes() -> usize {
+    crate::api::AttachmentConfig::default().max_bytes
+}
 
 /// Only attachment calls need the binary MCP result from an HTTP backend.
 pub(crate) fn is_get_attachment_call(body: &str) -> bool {
@@ -487,6 +494,19 @@ where
         };
 
         let is_initialize = message.get("method").and_then(Value::as_str) == Some("initialize");
+        // A path upload is read here, on the agent's machine, so the bytes
+        // reach the server without passing through the model.
+        let (message, line) = match inline_upload_path(&message, max_upload_bytes()) {
+            None => (message, line),
+            Some(Ok(patched)) => {
+                let line = encode(&patched);
+                (patched, line)
+            }
+            Some(Err(error)) => {
+                write_line(&mut output, &encode(&tool_error_response(&id, &error))).await?;
+                continue;
+            }
+        };
         let request = inject_bound_project(&message, bound).unwrap_or(line);
 
         let outcome = match forwarder.forward(request).await {
@@ -890,54 +910,11 @@ mod tests {
     /// version travels in `_meta` and must reach the server as HTTP headers.
     #[tokio::test]
     async fn remote_stdio_serves_legacy_and_2026_07_28_clients() {
-        let temp = tempfile::tempdir().unwrap();
-        let db_path = temp.path().join("lific.db");
-        let pool = db::open(&db_path).unwrap();
-        {
-            let conn = pool.write().unwrap();
-            conn.execute(
-                "INSERT INTO users (id, username, email, password_hash, is_admin) VALUES (1, 'owner', 'owner@test', 'x', 1)",
-                [],
-            )
-            .unwrap();
-            db::queries::create_project(
-                &conn,
-                &db::models::CreateProject {
-                    name: "Proxy project".into(),
-                    identifier: "PRX".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
-        let key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
-        let mut config = Config::default();
-        config.database.path = db_path.clone();
-        config.auth.required = true;
-        config.server.host = "127.0.0.1".into();
-        let trusted_proxies =
-            Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
-        let app = server::build_app_with_store(
-            &config,
-            pool,
-            realtime::RealtimeHub::new(),
-            trusted_proxies,
-            storage::AttachmentStore::from_db_path(&db_path),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await
-            .unwrap()
-        });
+        let served = server::test_server::serve("Proxy project", "PRX").await;
         let forwarder = HttpForwarder {
             client: reqwest::Client::new(),
-            endpoint: format!("http://{address}/mcp"),
-            credential: Some(key),
+            endpoint: served.endpoint.clone(),
+            credential: Some(served.key.clone()),
         };
 
         let meta = crate::mcp::protocol_tests::modern_meta();
@@ -997,7 +974,88 @@ mod tests {
             let text = output[2]["result"]["content"][0]["text"].as_str().unwrap();
             assert!(text.contains("Proxy project"), "{output:?}");
         }
-        task.abort();
+    }
+
+    /// Noise, so the PNG encoder cannot shrink it below the size under test.
+    fn noisy_png(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x2545_f491_u32;
+        let image = image::RgbImage::from_fn(width, height, |_, _| {
+            let mut channel = || {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            };
+            image::Rgb([channel(), channel(), channel()])
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    /// The proxy reads a path upload on the agent's side and the server
+    /// stores exactly the file's bytes, without the model ever holding them.
+    #[tokio::test]
+    async fn remote_stdio_uploads_a_local_file_by_path() {
+        use sha2::Digest;
+
+        let served = server::test_server::serve("Proxy project", "PRX").await;
+        let forwarder = HttpForwarder {
+            client: reqwest::Client::new(),
+            endpoint: served.endpoint.clone(),
+            credential: Some(served.key.clone()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("screen.png");
+        let png = noisy_png(1000, 1000);
+        assert!(png.len() > 3_000_000, "{}", png.len());
+        std::fs::write(&file, &png).unwrap();
+
+        let line = call(
+            "upload_attachment",
+            serde_json::json!({"path": file.to_str().unwrap()}),
+        );
+        let mut stdout = Vec::new();
+        pump(
+            BufReader::new(line.as_bytes()),
+            &mut stdout,
+            &forwarder,
+            None,
+        )
+        .await
+        .unwrap();
+        let reply: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_ne!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("screen.png (image/png"), "{text}");
+
+        let stored: String = served
+            .pool
+            .read()
+            .unwrap()
+            .query_row("SELECT sha256 FROM attachments", [], |row| row.get(0))
+            .unwrap();
+        let expected = format!("{:x}", sha2::Sha256::digest(&png));
+        assert_eq!(stored, expected);
+    }
+
+    #[tokio::test]
+    async fn a_path_the_proxy_cannot_read_answers_a_tool_error_without_forwarding() {
+        let forwarder = MockForwarder::replying(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        let line = call(
+            "upload_attachment",
+            serde_json::json!({"path": "/nonexistent/lific/shot.png"}),
+        );
+        let output = run_pump(&(line + "\n"), &forwarder).await;
+        assert!(forwarder.received().is_empty());
+        assert_eq!(output[0]["result"]["isError"], true, "{output:?}");
+        let text = output[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("Error: cannot read /nonexistent/lific/shot.png"),
+            "{text}"
+        );
     }
 
     #[test]

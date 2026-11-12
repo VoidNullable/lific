@@ -667,15 +667,18 @@ Uploads share the REST limits: 10 MiB per file, and a type allowlist decided fro
 
 ### `upload_attachment`
 
-Uploads a file from base64 and returns its id and a Markdown snippet to embed: `![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise, where `name` is the alt text when you give one and the filename otherwise. Image uploads record their pixel dimensions and a thumbnail, as web uploads do.
+Uploads a file and returns its id and a Markdown snippet to embed: `![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise, where `name` is the alt text when you give one and the filename otherwise. Image uploads record their pixel dimensions and a thumbnail, as web uploads do.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `filename` | `string` | Yes | File name, e.g. `crash-log.txt`. |
-| `content_base64` | `string` | Yes | The file, base64-encoded. At most 10 MiB decoded. |
+| `filename` | `string` | With `content_base64` | File name, e.g. `crash-log.txt`. With `path`, defaults to the file's own name. |
+| `content_base64` | `string` | One of these two | The file, base64-encoded. At most 10 MiB decoded. |
+| `path` | `string` | One of these two | A file on the agent's machine, absolute or relative to where `lific mcp` started. Stdio connections only. |
 | `entity` | `string` | No | Link the upload to this issue (`APP-42`) or page (`APP-DOC-3`, `DOC-3`). |
 | `comment_id` | `integer` | No | Link the upload to this comment instead. |
 | `alt_text` | `string` | No | What the file shows. Trimmed, at most 1000 characters. It becomes the snippet's link text instead of the filename. |
+
+Prefer `path` whenever the client launched `lific mcp`, the local server or either proxy: the process reads the file itself and sends the bytes, so the model never has to write out base64, which costs an output token per few bytes and can corrupt silently. Over HTTP MCP the server cannot see the agent's files, so a `path` sent there is refused with a pointer to the stdio proxy.
 
 Pass at most one of `entity` and `comment_id`. Linking to an issue or page takes `maintainer` in its project; linking to a comment takes `viewer`. An upload with no link stays unlinked, and a sweep deletes unlinked files after 24 hours, so embed the snippet in an issue, page or comment before then. Embedding it links it.
 

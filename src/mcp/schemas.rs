@@ -672,10 +672,16 @@ pub struct UpdatePlanStepInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UploadAttachmentInput {
-    #[schemars(description = "File name, e.g. crash-log.txt or screenshot.png")]
+    #[serde(default)]
+    #[schemars(description = "File name, e.g. crash-log.txt; defaults to the path's name")]
     pub filename: String,
+    #[serde(default)]
     #[schemars(description = "File bytes, base64 (max 10 MiB decoded)")]
     pub content_base64: String,
+    #[schemars(
+        description = "Local file to upload instead of content_base64; stdio connections only"
+    )]
+    pub path: Option<String>,
     #[schemars(description = "Link to this issue or page")]
     pub entity: Option<String>,
     #[schemars(description = "Link to this comment instead")]

@@ -28,8 +28,9 @@ use serde_json::{Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, BufReader};
 
 use super::mcp_proxy::{
-    ForwardError, encode, inject_bound_project, internal_error_response, is_get_attachment_call,
-    parse_error_response, tidy, write_line,
+    ForwardError, encode, inject_bound_project, inline_upload_path, internal_error_response,
+    is_get_attachment_call, max_upload_bytes, parse_error_response, tidy, tool_error_response,
+    write_line,
 };
 use crate::mcp::INLINE_ATTACHMENT_HEADER;
 
@@ -1446,6 +1447,16 @@ where
             "tools/call" => match router.plan(&message) {
                 Ok(Route::Local) => router.list_instances_result(&id),
                 Ok(Route::Remote { alias, body }) => {
+                    // Read a path upload here, on the agent's machine.
+                    let body = match inline_upload_path(&body, max_upload_bytes()) {
+                        None => body,
+                        Some(Ok(patched)) => patched,
+                        Some(Err(error)) => {
+                            write_frame(&mut output, router, &tool_error_response(&id, &error))
+                                .await?;
+                            continue;
+                        }
+                    };
                     forward(&mut output, router, transport, &id, &alias, body).await?;
                     continue;
                 }

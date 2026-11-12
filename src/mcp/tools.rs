@@ -5921,7 +5921,7 @@ No issues found."
             idempotent_hint = false,
             open_world_hint = false
         ),
-        description = "Upload a base64 file (max 10 MiB) and get Markdown to embed. Types: PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM, Ogg, MP3, SQLite, HWP. Optionally link it to an issue, page, or comment."
+        description = "Upload a file (max 10 MiB) and get Markdown to embed. Over stdio, pass a local path; otherwise base64. Types: PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM, Ogg, MP3, SQLite, HWP. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
         self.upload_attachment_inner(input)
@@ -5938,27 +5938,51 @@ No issues found."
             return Err("pass entity or comment_id, not both".into());
         }
 
-        // Decode before anything else: a malformed payload is the caller's
-        // mistake and costs nothing to reject.
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(input.content_base64.trim())
-            .map_err(|error| format!("content_base64 is not valid base64: {error}"))?;
-        if bytes.is_empty() {
-            return Err("empty file".into());
-        }
         // The cap is REST's cap, read from the same type `server.rs` injects
         // into the upload route, so the two transports can never drift.
         let max_bytes = crate::api::AttachmentConfig::default().max_bytes;
-        if bytes.len() > max_bytes {
-            return Err(format!(
-                "file too large: {} bytes (max {max_bytes})",
-                bytes.len()
-            ));
-        }
+        let path = input
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let (bytes, path_name) = if let Some(path) = path {
+            if !input.content_base64.is_empty() {
+                return Err("pass path or content_base64, not both".into());
+            }
+            // Over HTTP the server would be reading its own disk, not the
+            // agent's. Only the local stdio server shares the agent's files.
+            if self.transport != super::McpTransport::Stdio {
+                return Err(PATH_UPLOAD_OVER_HTTP.into());
+            }
+            let file = super::local_file::read_upload(path, max_bytes)?;
+            (file.bytes, Some(file.name))
+        } else {
+            // Decode before anything else: a malformed payload is the
+            // caller's mistake and costs nothing to reject.
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(input.content_base64.trim())
+                .map_err(|error| format!("content_base64 is not valid base64: {error}"))?;
+            if bytes.is_empty() {
+                return Err("empty file".into());
+            }
+            if bytes.len() > max_bytes {
+                return Err(format!(
+                    "file too large: {} bytes (max {max_bytes})",
+                    bytes.len()
+                ));
+            }
+            (bytes, None)
+        };
+        let filename = match (input.filename.trim(), path_name) {
+            ("", Some(name)) => name,
+            ("", None) => return Err("filename is required with content_base64".into()),
+            (name, _) => name.to_owned(),
+        };
 
         let alt_text =
             crate::api::attachments::normalize_alt_text(input.alt_text).map_err(sanitize_error)?;
-        let filename = crate::api::attachments::sanitize_filename(&input.filename);
+        let filename = crate::api::attachments::sanitize_filename(&filename);
         // MCP carries no content-type header, so the extension stands in as
         // the "declared" type for the signature-less formats. Everything with
         // real magic bytes is still decided by the bytes, and the allowlist
@@ -6474,6 +6498,12 @@ fn build_create_step(
 /// limit. Enough to read a short log or config in one call, small enough that
 /// a 20k-line file does not blow the context window open by accident.
 const ATTACHMENT_TEXT_DEFAULT_LINES: i64 = 200;
+
+/// `upload_attachment(path)` reaching the HTTP server, where the path would
+/// name a file on the server rather than on the agent's machine.
+pub(crate) const PATH_UPLOAD_OVER_HTTP: &str = "path uploads need the file on this machine, and \
+     this server is remote. Connect through the `lific mcp` stdio proxy, which reads the file \
+     for you, or send the bytes as content_base64.";
 
 /// Render a byte count the way a person reads it. Sizes are informational
 /// (deciding whether to fetch a file), so one decimal place is plenty.
@@ -14298,6 +14328,7 @@ mod tests {
             entity: Some("ATT-1".into()),
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         let id = attachment_id_from(&receipt);
         assert!(receipt.contains("shot.png (image/png, 14 B)"), "{receipt}");
@@ -14333,6 +14364,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         let id = attachment_id_from(&receipt);
         let attachment = m
@@ -14359,6 +14391,7 @@ mod tests {
             entity: Some("ALT-1".into()),
             comment_id: None,
             alt_text: Some("  Weekly signups [draft]  ".into()),
+            path: None,
         }));
         let id = attachment_id_from(&receipt);
         assert!(
@@ -14396,6 +14429,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: Some("x".repeat(1001)),
+            path: None,
         }));
         assert!(refused.starts_with("Error: "), "{refused}");
     }
@@ -14416,6 +14450,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(
             receipt.contains("report.hwp (application/x-hwp"),
@@ -14428,6 +14463,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(refused.starts_with("Error:"), "{refused}");
     }
@@ -14453,6 +14489,7 @@ mod tests {
             entity: Some("ATT-DOC-1".into()),
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(page_receipt.contains("linked."), "{page_receipt}");
         assert!(
@@ -14470,6 +14507,7 @@ mod tests {
             entity: None,
             comment_id: Some(comment_id),
             alt_text: None,
+            path: None,
         }));
         assert!(comment_receipt.contains("linked."), "{comment_receipt}");
 
@@ -14510,6 +14548,7 @@ mod tests {
             entity: Some("ATX-1".into()),
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(receipt.starts_with("Error"), "got: {receipt}");
 
@@ -14532,6 +14571,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(receipt.contains("Not linked yet"), "{receipt}");
         assert!(receipt.contains("24h"), "{receipt}");
@@ -14549,6 +14589,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert_eq!(
             result,
@@ -14566,6 +14607,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert!(
             malformed.starts_with("Error: content_base64 is not valid base64:"),
@@ -14578,8 +14620,51 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert_eq!(empty, "Error: empty file");
+
+        let unnamed = m.upload_attachment(Parameters(UploadAttachmentInput {
+            content_base64: text_base64("x"),
+            ..Default::default()
+        }));
+        assert_eq!(unnamed, "Error: filename is required with content_base64");
+    }
+
+    #[test]
+    fn local_stdio_uploads_a_path_and_names_it_after_the_file() {
+        let (m, tmp, _guard, _identity) = mcp_with_attachments();
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "read from disk").unwrap();
+
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            path: Some(file.to_str().unwrap().into()),
+            ..Default::default()
+        }));
+        assert!(receipt.contains("notes.txt (text/plain"), "{receipt}");
+
+        let both = m.upload_attachment(Parameters(UploadAttachmentInput {
+            path: Some(file.to_str().unwrap().into()),
+            content_base64: text_base64("x"),
+            ..Default::default()
+        }));
+        assert_eq!(both, "Error: pass path or content_base64, not both");
+    }
+
+    #[test]
+    fn http_refuses_a_path_upload() {
+        let (m, tmp, _guard, _identity) = mcp_with_attachments();
+        let m = LificMcp {
+            transport: super::super::McpTransport::Http,
+            ..m
+        };
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "server disk").unwrap();
+        let refused = m.upload_attachment(Parameters(UploadAttachmentInput {
+            path: Some(file.to_str().unwrap().into()),
+            ..Default::default()
+        }));
+        assert_eq!(refused, format!("Error: {PATH_UPLOAD_OVER_HTTP}"));
     }
 
     #[test]
@@ -14593,6 +14678,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         }));
         assert_eq!(
             result,
@@ -14609,6 +14695,7 @@ mod tests {
             entity: Some("ATT-1".into()),
             comment_id: Some(1),
             alt_text: None,
+            path: None,
         }));
         assert_eq!(result, "Error: pass entity or comment_id, not both");
     }
@@ -14626,6 +14713,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
 
         // Default window: 200 lines, with the continuation hint.
@@ -14701,6 +14789,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
         let image_of = |result: &rmcp::model::CallToolResult| {
             let image = result
@@ -14756,6 +14845,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
         let result = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
             attachment_id: id,
@@ -14777,6 +14867,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14845,6 +14936,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
 
         let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14898,6 +14990,7 @@ mod tests {
             entity: None,
             comment_id: None,
             alt_text: None,
+            path: None,
         })));
         let read = |offset, limit| {
             let result = m.get_attachment(Parameters(GetAttachmentInput {
@@ -14952,6 +15045,7 @@ mod tests {
                         entity: None,
                         comment_id: None,
                         alt_text: None,
+                        path: None,
                     })));
                 (
                     id,
@@ -16939,6 +17033,7 @@ mod authz_gating_tests {
                 entity: entity.map(str::to_string),
                 comment_id: None,
                 alt_text: None,
+                path: None,
             }))
         })
     }

@@ -3401,3 +3401,42 @@ async fn an_omitted_selector_still_reaches_the_default() {
 
     assert_eq!(transport.seen()[0].0, "community");
 }
+
+#[tokio::test]
+async fn a_path_upload_is_read_locally_and_forwarded_as_base64() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("log.txt");
+    std::fs::write(&file, "local bytes").unwrap();
+    let router = router(&["private", "community"], Some("private"));
+    let transport = RecordingTransport::default();
+
+    let line = call(
+        "upload_attachment",
+        serde_json::json!({"instance": "community", "path": file.to_str().unwrap()}),
+    );
+    let output = run_pump(&line, &router, &transport).await;
+    assert_ne!(output[0]["result"]["isError"], true, "{output:?}");
+
+    let seen = transport.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "community");
+    let arguments = &seen[0].1["params"]["arguments"];
+    assert!(arguments.get("path").is_none(), "{arguments}");
+    assert_eq!(arguments["filename"], "log.txt");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(arguments["content_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, b"local bytes");
+}
+
+#[tokio::test]
+async fn an_unreadable_path_upload_is_a_tool_error_and_never_forwarded() {
+    let router = router(&["private"], Some("private"));
+    let line = call(
+        "upload_attachment",
+        serde_json::json!({"instance": "private", "path": "/nonexistent/lific/x.png"}),
+    );
+    let output = run_pump(&line, &router, &NeverCalled).await;
+    assert_eq!(output[0]["result"]["isError"], true, "{output:?}");
+}
