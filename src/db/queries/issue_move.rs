@@ -141,8 +141,9 @@ pub fn move_issue(
                     |_| Ok(()),
                 )
                 .optional()
-                .map(|found| found.is_none())
-                .unwrap_or(true)
+                .ok()
+                .flatten()
+                .is_none()
             })
             .cloned()
             .collect();
