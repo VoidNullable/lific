@@ -65,6 +65,7 @@
   } from "./references";
   import type { AttachmentEntity } from "./api";
   import { createComposerAttachments } from "./attachments/composer.svelte";
+  import { insertSnippetAt } from "./attachments/compose";
   import AttachComposer from "./attachments/AttachComposer.svelte";
   import AttachTrigger from "./attachments/AttachTrigger.svelte";
   import { onDestroy } from "svelte";
@@ -689,6 +690,32 @@
   // surfaces stay in sync.
   export function toggle() {
     togglePill();
+  }
+
+  // Put a snippet (a file from the Attachments panel) into the draft. While
+  // editing it lands at the caret. From read mode there is no caret, so the
+  // editor opens with it at the end of the body and the caret after it.
+  export function insertMarkdown(snippet: string) {
+    if (!editable) return;
+    if (mode === "edit") {
+      attach.insert(snippet);
+      return;
+    }
+    enterEdit();
+    const { text, caret } = insertSnippetAt(draft, draft.length, draft.length, snippet);
+    draft = text;
+    // enterEdit's own two frames focus, resize and restore the reading
+    // position; this runs after them and moves to the insertion instead.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const el = textareaEl;
+        if (!el) return;
+        autoResize();
+        el.focus();
+        el.setSelectionRange(caret, caret);
+        el.scrollIntoView({ block: "end", behavior: "instant" });
+      }),
+    );
   }
 
   // Drive the mode from a segmented control. Read→Edit enters,

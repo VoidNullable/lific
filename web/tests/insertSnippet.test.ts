@@ -22,6 +22,16 @@ test("images embed, everything else links", () => {
   );
 });
 
+test("an image's alt text stands in for its filename", () => {
+  expect(markdownFor(upload(), "The [login] dialog\nafter")).toBe(
+    "![The login dialog after](/api/attachments/7)",
+  );
+  expect(markdownFor(upload(), "  ")).toBe("![shot.png](/api/attachments/7)");
+  expect(markdownFor(upload({ filename: "a.pdf", mime: "application/pdf" }), "ignored")).toBe(
+    "[a.pdf](/api/attachments/7)",
+  );
+});
+
 test("inserting into an empty composer adds no leading break", () => {
   const { text, caret } = insertSnippetAt("", 0, 0, SNIPPET);
   expect(text).toBe(`${SNIPPET}\n`);

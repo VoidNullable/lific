@@ -27,7 +27,8 @@
   import { canDeleteAttachment, deleteConfirmMessage } from "./files/files";
   import { projectRole } from "./projectRole.svelte";
   import { toast } from "./toast/toast.svelte";
-  import { Paperclip, Trash2 } from "lucide-svelte";
+  import { Paperclip, TextCursorInput, Trash2 } from "lucide-svelte";
+  import { markdownFor } from "./attachments/compose";
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
 
   let {
@@ -36,11 +37,21 @@
     // Bump this to force a re-fetch after the body/comments change (a new
     // markdown reference may have just been linked server-side).
     refreshKey = 0,
+    // When set, each file offers Insert, which hands its Markdown to the
+    // body editor (opening it if needed).
+    onInsert,
   }: {
     entityType: AttachmentEntity;
     entityId: number;
     refreshKey?: number;
+    onInsert?: (snippet: string) => void;
   } = $props();
+
+  function insert(a: Attachment) {
+    onInsert?.(
+      markdownFor({ mime: a.mime, filename: a.filename, url: `/api/attachments/${a.id}` }, a.alt_text),
+    );
+  }
 
   let attachments = $state<Attachment[]>([]);
   let loaded = $state(false);
@@ -175,6 +186,17 @@
               />
               <span class="att__thumb-name">{a.filename}</span>
             </button>
+            {#if onInsert && !inPublicScope()}
+              <button
+                type="button"
+                class="att__insert"
+                title="Insert {a.filename} into the body"
+                aria-label="Insert {a.filename} into the body"
+                onclick={() => insert(a)}
+              >
+                <TextCursorInput size={13} />
+              </button>
+            {/if}
             {#if mayDelete(a)}
               <button
                 type="button"
@@ -204,6 +226,17 @@
               altText={a.alt_text ?? null}
               hasThumbnail={a.has_thumbnail ?? false}
             />
+            {#if onInsert && !inPublicScope()}
+              <button
+                type="button"
+                class="att__insert"
+                title="Insert {a.filename} into the body"
+                aria-label="Insert {a.filename} into the body"
+                onclick={() => insert(a)}
+              >
+                <TextCursorInput size={13} />
+              </button>
+            {/if}
             {#if mayDelete(a)}
               <button
                 type="button"
@@ -317,6 +350,36 @@
     position: relative;
     display: flex;
   }
+  .att__insert {
+    position: absolute;
+    top: 0.25rem;
+    left: 0.25rem;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.375rem;
+    height: 1.375rem;
+    border-radius: 0.3125rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity 0.15s var(--ease-out-expo);
+  }
+  .att__item:hover .att__insert,
+  .att__insert:focus-visible {
+    opacity: 1;
+  }
+  .att__insert:hover {
+    color: var(--accent);
+  }
+  /* Without hover there is nothing to reveal it, so it simply shows. */
+  @media (hover: none) {
+    .att__insert {
+      opacity: 1;
+    }
+  }
   .att__delete {
     position: absolute;
     top: 0.25rem;
@@ -395,6 +458,11 @@
   }
   .att__stack .att__item {
     width: 100%;
+  }
+  /* A file row has its own icon on the left; sit beside Delete instead. */
+  .att__stack .att__insert {
+    left: auto;
+    right: 1.875rem;
   }
   .att__stack .att__item > :global(*:first-child) {
     flex: 1;

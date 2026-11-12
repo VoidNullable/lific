@@ -55,6 +55,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Images can be sized: `![alt|320](url)` renders at most 320 px wide, in issues, pages, comments and the public view, and a smaller image is never stretched. The suffix rides in the alt text, so other Markdown renderers and exports still show a normal image. The chip after an image upload offers S, M and L sizes that write it for you; L loads the original so a dense screenshot can fill the column instead of showing the 480 px preview.
 - An image on its own line with a Markdown title, `![alt](url "Caption")`, shows the title as a caption under it, wrapped to the image's width.
 - Several images alone in a paragraph render side by side as equal-height tiles that wrap on a phone, instead of a tall stack. Dropping several screenshots at once now inserts them as such a group, set apart from the text around them by a blank line.
+- The Attachments panel under an issue or page has an Insert action on each file. It puts the file's Markdown, with the image's alt text, at the editor's caret, or opens the editor and adds it at the end when you are reading, so a file uploaded once can be placed again without copying its link by hand.
 
 ### Agent activity
 

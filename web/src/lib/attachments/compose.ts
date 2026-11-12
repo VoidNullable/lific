@@ -7,13 +7,19 @@
 // free of runes and of the DOM wherever possible so it can be unit tested.
 
 import type { UploadResponse } from "../api";
+import { sanitizeAltText } from "./altText";
 
-/** The markdown snippet to insert for a finished upload: an image embed for
- *  images, a link chip for everything else. */
-export function markdownFor(up: UploadResponse): string {
+/** The markdown snippet to insert for a file: an image embed for images, a
+ *  link chip for everything else. An image's alt text, when it has one,
+ *  stands in for the filename. */
+export function markdownFor(
+  up: Pick<UploadResponse, "mime" | "filename" | "url">,
+  altText?: string | null,
+): string {
   const isImage = up.mime.startsWith("image/");
   if (isImage) {
-    return `![${up.filename}](${up.url})`;
+    const alt = (altText ? sanitizeAltText(altText) : "") || up.filename;
+    return `![${alt}](${up.url})`;
   }
   return `[${up.filename}](${up.url})`;
 }

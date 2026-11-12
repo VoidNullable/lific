@@ -498,6 +498,7 @@
       entityType={attachEntity.entity_type}
       entityId={attachEntity.entity_id}
       refreshKey={attachmentRefresh}
+      onInsert={editable && !bodyContent ? (snippet) => bodyRef?.insertMarkdown(snippet) : undefined}
     />
   {/if}
 

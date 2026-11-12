@@ -52,6 +52,9 @@ export interface ComposerAttachments {
    *  offered first, so drops, pastes and camera shots all say where they came
    *  from. */
   enqueue: (files: File[], source?: UploadSource) => void;
+  /** Insert a snippet at the textarea's caret with the same spacing rules as
+   *  a finished upload. */
+  insert: (snippet: string) => void;
   /** `onpaste` handler. Consumes file pastes and big text pastes. */
   handlePaste: (e: ClipboardEvent) => void;
   /** `onkeydown` handler. Returns true when it consumed the key, so the host
@@ -190,6 +193,7 @@ export function createComposerAttachments(
       return pendingPaste;
     },
     enqueue,
+    insert: insertMarkdown,
     handlePaste,
     handleKeydown,
     attachPaste,
