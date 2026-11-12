@@ -1738,4 +1738,42 @@ mod surface_tests {
             .expect("delete is annotated");
         assert_eq!(delete.destructive_hint, Some(true));
     }
+
+    /// Agents read `upload_attachment`'s description to decide whether a file
+    /// is worth trying, so it must name every type the upload path accepts.
+    /// A new entry in `ALLOWED_MIMES` fails here until it has a name and the
+    /// description carries it.
+    #[test]
+    fn upload_attachment_description_names_every_allowed_type() {
+        let db = crate::db::open_memory().expect("test db");
+        let tool = LificMcp::new(db)
+            .tool_router
+            .get("upload_attachment")
+            .cloned()
+            .expect("upload_attachment is registered");
+        let description = tool.description.expect("described");
+        for mime in crate::storage::ALLOWED_MIMES {
+            let name = match *mime {
+                "image/png" => "PNG",
+                "image/jpeg" => "JPEG",
+                "image/gif" => "GIF",
+                "image/webp" => "WebP",
+                "image/svg+xml" => "SVG",
+                "application/pdf" => "PDF",
+                "text/plain" => "plain text",
+                "application/zip" => "ZIP",
+                "video/mp4" => "MP4",
+                "video/webm" | "audio/webm" => "WebM",
+                "audio/ogg" => "Ogg",
+                "audio/mpeg" => "MP3",
+                "application/vnd.sqlite3" => "SQLite",
+                "application/x-hwp" => "HWP",
+                other => panic!("name {other} here and in upload_attachment's description"),
+            };
+            assert!(
+                description.contains(name),
+                "upload_attachment's description does not mention {name} ({mime})"
+            );
+        }
+    }
 }

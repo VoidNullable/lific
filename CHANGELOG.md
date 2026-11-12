@@ -32,10 +32,11 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
-- 32 tools now cost an agent 6,811 tokens of context.
+- 32 tools now cost an agent 6,837 tokens of context.
 
 ### Images and attachments
 
+- `upload_attachment`'s description names every accepted file type, including video, audio, SQLite and HWP, which agents could not tell were allowed.
 - `upload_attachment` takes `alt_text`, stored like the web UI's and used as the embed snippet's link text. `get_attachment` and `list_attachments` show alt text and pixel dimensions, so an agent can often skip looking at an image at all.
 - `get_attachment` sends an image larger than 1600 px or 1 MB to the model as a scaled copy, cached beside its thumbnail, instead of the original. A 10 MiB original used to exceed what providers accept and could break the agent's session. `full: true` returns the original when it is within provider limits, and the first line names both sizes.
 - Images uploaded through MCP now record their pixel dimensions and get a thumbnail, as browser uploads always did, so the web UI no longer loads the full original where it shows a preview. Text files uploaded through MCP are searchable like browser uploads.

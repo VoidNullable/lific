@@ -5921,7 +5921,7 @@ No issues found."
             idempotent_hint = false,
             open_world_hint = false
         ),
-        description = "Upload a base64 file (max 10 MiB; images, PDF, zip, SVG, plain text) and get Markdown to embed. Optionally link it to an issue, page, or comment."
+        description = "Upload a base64 file (max 10 MiB) and get Markdown to embed. Types: PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM, Ogg, MP3, SQLite, HWP. Optionally link it to an issue, page, or comment."
     )]
     fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
         self.upload_attachment_inner(input)
