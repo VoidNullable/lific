@@ -991,9 +991,10 @@
     ];
   });
 
-  // ⌘ on Mac, Ctrl elsewhere, for the footer hint.
+  // ⌘ on Mac, Ctrl elsewhere, for the footer keycaps.
   const isMac =
     typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
+  const modKey = isMac ? "⌘" : "Ctrl";
 
   /** Routes are hash paths, so a new tab is this page with another hash. */
   function openInNewTab(path: string) {
@@ -1115,15 +1116,8 @@
           oninput={onInput}
           onkeydown={onInputKeydown}
         />
-        <!-- The `esc` hint means nothing without a keyboard, so on phones it
-             is swapped for a real close control (LIF-227). -->
-        <kbd
-          class="hidden sm:block px-1.5 py-0.5 rounded border border-[var(--border)]
-                 bg-[var(--bg-subtle)] text-[var(--text-faint)]
-                 font-mono text-micro leading-none shrink-0"
-        >
-          esc
-        </kbd>
+        <!-- Esc is in the footer legend; phones have no keyboard, so they get
+             a real close control instead (LIF-227). -->
         <button
           class="sm:hidden size-11 -mr-2 shrink-0 grid place-items-center rounded-lg
                  text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
@@ -1135,11 +1129,7 @@
       </div>
 
       <!-- Results -->
-      {#if mode.type === "prompt"}
-        <p class="px-4 py-3 text-caption text-[var(--text-faint)]">
-          Enter to save · Esc to cancel
-        </p>
-      {:else}
+      {#if mode.type !== "prompt"}
       <div
         class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1
                pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1 sm:max-h-[420px]"
@@ -1320,17 +1310,35 @@
           {/each}
         {/if}
       </div>
-      {#if mode.type === "root" && flatItems.length > 0}
+      {/if}
+      {#if mode.type === "prompt" || flatItems.length > 0}
         <!-- Keyboard legend; phones have no keyboard to hint at. -->
         <div
-          class="hidden sm:flex shrink-0 items-center gap-4 px-4 py-1.5 border-t border-[var(--border)]
-                 text-micro text-[var(--text-faint)]"
+          data-palette-footer
+          class="hidden sm:flex shrink-0 items-center gap-4 px-3 py-2 border-t border-[var(--border)]
+                 text-caption text-[var(--text-faint)]"
         >
-          <span><kbd class="font-mono">↑↓</kbd> move</span>
-          <span><kbd class="font-mono">↵</kbd> open</span>
-          <span><kbd class="font-mono">{isMac ? "⌘" : "Ctrl"}↵</kbd> new tab</span>
+          {#if mode.type === "prompt"}
+            <span class="palette-legend"><kbd class="palette-key">↵</kbd> Save</span>
+          {:else}
+            <span class="palette-legend">
+              <kbd class="palette-key" aria-label="Up">↑</kbd><kbd class="palette-key" aria-label="Down">↓</kbd>
+              Navigate
+            </span>
+            <span class="palette-legend">
+              <kbd class="palette-key">↵</kbd> {mode.type === "root" ? "Open" : "Select"}
+            </span>
+            {#if mode.type === "root"}
+              <span class="palette-legend">
+                <kbd class="palette-key">{modKey} ↵</kbd> New tab
+              </span>
+            {/if}
+          {/if}
+          <span class="palette-legend ml-auto">
+            <kbd class="palette-key">Esc</kbd>
+            {mode.type === "root" ? "Close" : mode.type === "prompt" ? "Cancel" : "Back"}
+          </span>
         </div>
-      {/if}
       {/if}
     </div>
   </div>
