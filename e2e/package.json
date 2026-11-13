@@ -17,7 +17,8 @@
     "issue-assignees": "bun issue-assignees.ts",
     "image-layout": "bun image-layout.ts",
     "attachment-panel": "bun attachment-panel.ts",
-    "lightbox": "bun lightbox.ts"
+    "lightbox": "bun lightbox.ts",
+    "palette-design": "bun palette-design.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"
