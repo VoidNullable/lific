@@ -156,28 +156,48 @@
     return scope === "all" || scope === "issue" || scope === "page";
   }
 
+  // Reopening soon after closing picks up where you left off: same query,
+  // scope and row, with the query selected so typing starts afresh.
+  const RESTORE_WINDOW_MS = 60_000;
+  type Session = RootSnapshot & { scope: Scope; at: number };
+  let lastSession: Session | null = null;
+
+  /** The root list's state, even from inside an item's action list. */
+  function rootSnapshot(): RootSnapshot {
+    if (mode.type === "item") return mode.back;
+    if ((mode.type === "submenu" || mode.type === "prompt") && mode.parent) return mode.parent.back;
+    if (mode.type !== "root") return { query: "", key: null, idx: 0 };
+    const it = flatItems[selectedIdx];
+    return { query, key: it ? flatKey(it) : null, idx: selectedIdx };
+  }
+
   async function show() {
     const generation = ++openingGeneration;
+    const restore =
+      lastSession && Date.now() - lastSession.at < RESTORE_WINDOW_MS ? lastSession : null;
     open = true;
     commandPaletteState.open = true;
     cancelSearch();
     mode = { type: "root" };
-    query = "";
-    scope = "all";
+    query = restore?.query ?? "";
+    scope = restore?.scope ?? "all";
     selectedIdx = 0;
     await tick();
     if (generation !== openingGeneration || !open) return;
     inputEl?.focus();
+    if (query) inputEl?.select();
     // The project switcher only needs projects. Module and folder metadata
     // can finish loading after the palette becomes usable.
     await ensureProjects();
     if (generation === openingGeneration && open && mode.type === "root") {
-      void runSearch(query);
+      runSearch(query);
+      if (restore) restoreSelection(restore);
     }
     void ensureCatalog();
   }
 
   function hide() {
+    if (open) lastSession = { ...rootSnapshot(), scope, at: Date.now() };
     openingGeneration++;
     open = false;
     commandPaletteState.open = false;

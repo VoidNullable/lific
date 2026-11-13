@@ -379,7 +379,11 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
         await page.keyboard.press("Escape");
         await page.getByPlaceholder(PLACEHOLDER).waitFor({ state: "detached", timeout: 5_000 });
         await page.waitForTimeout(1_800); // the held response lands while closed
-        await openPalette(page);
+        const reopened = await openPalette(page);
+        // Reopening restores the last query, selected so typing replaces it.
+        // Clear it: the old response must not repaint the fresh list.
+        assert.equal(await reopened.inputValue(), BODY_ONLY_TOKEN, "reopen did not restore the query");
+        await page.keyboard.press("Backspace");
         await page.waitForTimeout(300);
         const visible = await rows(page);
         assert(
