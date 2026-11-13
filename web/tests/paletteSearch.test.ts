@@ -12,9 +12,11 @@ import {
   boundedEditDistance,
   dedupeByIdentifier,
   dedupeByKey,
+  highlightSegments,
   isStaleSearch,
   localScoreToPaletteScore,
   matchQuality,
+  matchRanges,
   parseRefQuery,
   projectCatalogChanged,
   preserveSelection,
@@ -563,5 +565,44 @@ describe("preserveSelection", () => {
 
   test("an empty list selects nothing", () => {
     expect(preserveSelection("n:a", [], 3)).toBe(0);
+  });
+});
+
+describe("matchRanges", () => {
+  test("marks every literal occurrence of each term, case-insensitively", () => {
+    expect(matchRanges("retry", "Retry the retry limit")).toEqual([[0, 5], [10, 15]]);
+    expect(matchRanges("add limits", "Add retry limits")).toEqual([[0, 3], [10, 16]]);
+  });
+
+  test("merges overlapping and adjacent term hits", () => {
+    expect(matchRanges("web hook", "webhook sender")).toEqual([[0, 7]]);
+  });
+
+  test("a one-character term marks only its first occurrence", () => {
+    expect(matchRanges("e", "Deep sleep")).toEqual([[1, 2]]);
+  });
+
+  test("falls back to subsequence positions for a one-word query", () => {
+    expect(matchRanges("rtb", "Retry backoff")).toEqual([[0, 1], [2, 3], [6, 7]]);
+  });
+
+  test("highlights nothing for typo matches or empty input", () => {
+    expect(matchRanges("retyr", "Retry")).toEqual([]);
+    expect(matchRanges("", "Retry")).toEqual([]);
+    expect(matchRanges("retry", "")).toEqual([]);
+  });
+});
+
+describe("highlightSegments", () => {
+  test("splits text into plain and matched runs", () => {
+    expect(highlightSegments("Add retry limits", [[4, 9]])).toEqual([
+      { text: "Add ", hit: false },
+      { text: "retry", hit: true },
+      { text: " limits", hit: false },
+    ]);
+  });
+
+  test("returns the whole text as one plain run without ranges", () => {
+    expect(highlightSegments("Retry", [])).toEqual([{ text: "Retry", hit: false }]);
   });
 });

@@ -1217,3 +1217,9 @@ html[data-motion="reduced"] *::after {
   line-height: 1;
 }
 .palette-legend > .palette-key + .palette-key { margin-left: -0.125rem; }
+.palette-mark {
+  background: var(--palette-match);
+  color: inherit;
+  border-radius: 0.1875rem;
+  box-shadow: 0 0 0 1px var(--palette-match);
+}

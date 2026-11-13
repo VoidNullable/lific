@@ -42,8 +42,10 @@
     LOCAL_HIT_SERVER_THRESHOLD,
     dedupeByIdentifier,
     dedupeByKey,
+    highlightSegments,
     isStaleSearch,
     localScoreToPaletteScore,
+    matchRanges,
     parseRefQuery,
     preserveSelection,
     refIdentifier,
@@ -301,6 +303,16 @@
     /** A recently viewed item, listed in its own group on an empty query. */
     recent?: boolean;
   };
+
+  /** Title runs with the query's matched characters marked. A reference
+   *  query ("34") names an identifier, so it marks nothing in titles. */
+  function titleSegments(title: string) {
+    const q = query.trim();
+    if (!q || (mode.type === "root" && parseRefQuery(q))) {
+      return [{ text: title, hit: false }];
+    }
+    return highlightSegments(title, matchRanges(q, title));
+  }
 
   type SnippetSegment = { text: string; highlighted: boolean };
 
@@ -1183,7 +1195,7 @@
                 {/if}
               </span>
               <span class="flex-1 min-w-0 text-body text-[var(--text)] capitalize truncate">
-                {c.title}
+                {#each titleSegments(c.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
               </span>
               {#if c.hint}
                 <span class="text-caption text-[var(--text-faint)] shrink-0">
@@ -1212,7 +1224,7 @@
                   <Zap size={14} />
                 </span>
                 <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
-                  {a.title}
+                  {#each titleSegments(a.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
                 {#if a.hint}
                   <span class="max-w-[12rem] truncate text-caption text-[var(--text-faint)] capitalize shrink-0">
@@ -1275,7 +1287,7 @@
                   class="min-w-0 truncate text-body text-[var(--text)]
                          {r.snippet ? 'shrink' : 'flex-1'}"
                 >
-                  {r.title}
+                  {#each titleSegments(r.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
                 {#if r.snippet}
                   <span class="flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">

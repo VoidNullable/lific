@@ -406,3 +406,69 @@ export function preserveSelection(
   }
   return Math.min(Math.max(previousIdx, 0), nextKeys.length - 1);
 }
+
+/** A half-open `[start, end)` character range of a title the query matched. */
+export type MatchRange = [start: number, end: number];
+
+/**
+ * Which characters of `text` the query matched, for highlighting. Every
+ * literal occurrence of each term counts; a one-character term marks only
+ * its first occurrence, since marking every "e" in a title is noise. When a
+ * one-word query occurs nowhere literally, its subsequence positions are
+ * used instead (the catalog's fuzzy matcher accepts those). Typo-tolerant
+ * hits highlight nothing: there is no honest character to point at.
+ */
+export function matchRanges(query: string, text: string): MatchRange[] {
+  const terms = tokenize(query);
+  if (terms.length === 0 || !text) return [];
+  const lower = text.toLowerCase();
+  const ranges: MatchRange[] = [];
+
+  for (const term of terms) {
+    let from = 0;
+    while (from <= lower.length - term.length) {
+      const at = lower.indexOf(term, from);
+      if (at === -1) break;
+      ranges.push([at, at + term.length]);
+      if (term.length < PREFIX_MIN_TERM) break;
+      from = at + term.length;
+    }
+  }
+
+  if (ranges.length === 0 && terms.length === 1 && terms[0].length >= PREFIX_MIN_TERM) {
+    const term = terms[0];
+    const positions: number[] = [];
+    let ti = 0;
+    for (const ch of term) {
+      while (ti < lower.length && lower[ti] !== ch) ti++;
+      if (ti === lower.length) return [];
+      positions.push(ti++);
+    }
+    for (const p of positions) ranges.push([p, p + 1]);
+  }
+
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: MatchRange[] = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+  return merged;
+}
+
+/** Split `text` into plain and matched runs for rendering. */
+export function highlightSegments(
+  text: string,
+  ranges: MatchRange[],
+): Array<{ text: string; hit: boolean }> {
+  const out: Array<{ text: string; hit: boolean }> = [];
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (start > cursor) out.push({ text: text.slice(cursor, start), hit: false });
+    out.push({ text: text.slice(start, end), hit: true });
+    cursor = end;
+  }
+  if (cursor < text.length) out.push({ text: text.slice(cursor), hit: false });
+  return out;
+}
