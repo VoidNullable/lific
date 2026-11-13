@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// The Attachments panel. Insert: from read mode, Insert on an image opens the
-// body editor with the image's Markdown (alt text included) at the end and the
-// caret after it, and saving renders the image in the body. Details: the alt
+// The Attachments panel. Insert: before the body was ever focused, Insert on
+// an image puts the image's Markdown (alt text included) at the end of the
+// body editor with the caret after it, and the image renders in place. Details: the alt
 // text can be edited and persists across a reload, and "Used in" links every
 // issue that references the file.
 import { strict as assert } from "node:assert";
@@ -14,16 +14,16 @@ const fixtureId = root + "/src/AttachmentInsertFixture.svelte";
 const fixture = `<script>
   import EditableMarkdown from './lib/EditableMarkdown.svelte';
   import AttachmentSection from './lib/AttachmentSection.svelte';
+  import { EditorView } from '@codemirror/view';
   let body = $state('Intro paragraph.');
   let editor = $state(null);
-  let mode = $state('read');
   window.saved = [];
+  window.view = () => EditorView.findFromDOM(document.querySelector('.cm-editor'));
 </script>
 <main style="max-width: 700px">
-  <p data-mode>{mode}</p>
-  <EditableMarkdown bind:this={editor} bind:mode value={body} floatingToggle={false}
+  <EditableMarkdown bind:this={editor} value={body}
     attachTo={{ entity_type: 'page', entity_id: 1 }}
-    onSave={async (next) => { window.saved.push(next); body = next; }} />
+    onSave={async (next) => { window.saved.push(next); body = next; return { ok: true, body: next, seq: null }; }} />
   <AttachmentSection entityType="page" entityId={1}
     onInsert={(snippet) => editor?.insertMarkdown(snippet)} />
 </main>`;
@@ -121,25 +121,29 @@ try {
   });
 
   await page.goto(server.resolvedUrls!.local[0]);
-  await page.getByText("Intro paragraph.").waitFor();
-  assert.equal(await page.locator("[data-mode]").textContent(), "read");
+  await page.locator(".cm-content").getByText("Intro paragraph.").waitFor();
 
   const insert = page.getByRole("button", { name: "Insert login.png into the body" });
   await insert.hover();
   await insert.click();
 
-  const textarea = page.locator("textarea");
-  await textarea.waitFor();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const text = () => page.evaluate(() => (window as any).view().state.doc.toString() as string);
   const snippet = "![The login dialog](/api/attachments/7)";
   await page.waitForFunction(
-    (s) => document.querySelector("textarea")?.value.includes(s),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (s) => (window as any).view()?.state.doc.toString().includes(s),
     snippet,
   );
-  const state = await textarea.evaluate((el: HTMLTextAreaElement) => ({
-    value: el.value,
-    caret: el.selectionStart,
-    focused: document.activeElement === el,
-  }));
+  const state = await page.evaluate(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const view = (window as any).view();
+    return {
+      value: view.state.doc.toString() as string,
+      caret: view.state.selection.main.head as number,
+      focused: view.hasFocus as boolean,
+    };
+  });
   assert.equal(state.value, `Intro paragraph.\n\n${snippet}\n`, JSON.stringify(state));
   assert.equal(state.caret, state.value.length, JSON.stringify(state));
   assert.ok(state.focused, "the editor has focus");
@@ -148,15 +152,19 @@ try {
   await insert.hover();
   await insert.click();
   await page.waitForFunction(
-    (s) => (document.querySelector("textarea")?.value.split(s).length ?? 0) === 3,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (s) => (window as any).view().state.doc.toString().split(s).length === 3,
     snippet,
   );
-  assert.equal(await textarea.inputValue(), `Intro paragraph.\n\n${snippet}\n${snippet}\n`);
+  assert.equal(await text(), `Intro paragraph.\n\n${snippet}\n${snippet}\n`);
 
-  await textarea.press("Control+s");
+  await page.keyboard.press("Control+s");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await page.waitForFunction(() => (window as any).saved.length === 1);
-  await page.locator(".prose img[alt='The login dialog']").first().waitFor();
-  assert.equal(await page.locator(".prose .md-image-row img").count(), 2);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal(await page.evaluate(() => (window as any).saved[0]), `Intro paragraph.\n\n${snippet}\n${snippet}\n`);
+  await page.locator(".cm-md-image img[alt='The login dialog']").first().waitFor();
+  assert.equal(await page.locator(".cm-md-image img").count(), 2);
   console.log("attachment insert: ok");
 
   // Details: edit the alt text, then reload and find it persisted.

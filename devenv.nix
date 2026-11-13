@@ -273,6 +273,7 @@ in
             bun run context-menu
             bun run peek-permissions
             bun run issue-topbar
+            bun run body-editor
           '';
           after = [
             "lific:web:build"

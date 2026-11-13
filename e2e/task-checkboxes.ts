@@ -1,16 +1,17 @@
 #!/usr/bin/env bun
 /**
- * LIF-502: tick task-list checkboxes in a rendered issue description and page
- * body without opening the editor.
+ * LIF-502, LIF-567: tick task-list checkboxes in an issue description and a
+ * page body, straight in the live editor.
  *
  * Spawns the debug binary against a scratch config + DB, signs in through
  * /login as the instance admin and as a project viewer, and checks that:
  *
- *   - the Nth rendered checkbox rewrites exactly the Nth real task marker,
- *     skipping `- [ ]` inside a fenced code block, and survives a reload;
- *   - Space on a focused checkbox toggles it back;
+ *   - the Nth checkbox rewrites exactly the Nth real task marker, skipping
+ *     `- [ ]` inside a fenced code block, saves at once and survives a reload;
+ *   - ⌘/Ctrl+Enter on the caret's line toggles it back;
  *   - two quick clicks on different items both land (saves are serialized);
- *   - a body changed elsewhere is reloaded, not overwritten (`expected_seq`);
+ *   - a body changed elsewhere is merged, not overwritten (`expected_seq`):
+ *     a different part merges and saves, the same part asks first;
  *   - checkboxes in comments stay disabled;
  *   - a viewer sees disabled checkboxes and cannot change anything.
  *
@@ -109,21 +110,28 @@ async function signIn(context: BrowserContext, base: string, identity: string, p
   return page;
 }
 
-/** The rendered body's task checkboxes (not the comment thread's). */
-function bodyTasks(page: Page) {
+/** The live editor's task checkboxes. */
+function editorTasks(page: Page) {
+  return page.locator(".cm-content input.cm-md-task");
+}
+
+/** The read-only body's task checkboxes (not the comment thread's). */
+function readTasks(page: Page) {
   return page.locator(".em-rendered .prose li input[type=checkbox]");
 }
 
-async function checkedStates(page: Page): Promise<boolean[]> {
-  return bodyTasks(page).evaluateAll((els) => els.map((el) => (el as HTMLInputElement).checked));
+type Tasks = (page: Page) => ReturnType<Page["locator"]>;
+
+async function checkedStates(page: Page, tasks: Tasks): Promise<boolean[]> {
+  return tasks(page).evaluateAll((els) => els.map((el) => (el as HTMLInputElement).checked));
 }
 
 /** Waits for the body's task checkboxes to show `expected`. */
-async function expectStates(page: Page, expected: boolean[], what: string) {
+async function expectStates(page: Page, expected: boolean[], what: string, tasks: Tasks = editorTasks) {
   const deadline = Date.now() + 8_000;
   let last: boolean[] = [];
   while (Date.now() < deadline) {
-    last = await checkedStates(page);
+    last = await checkedStates(page, tasks);
     if (JSON.stringify(last) === JSON.stringify(expected)) return;
     await page.waitForTimeout(100);
   }
@@ -143,21 +151,26 @@ interface Entity {
   write: (body: string) => Promise<void>;
 }
 
+/** Waits for the next PUT the page sends and returns its response. */
+function nextPut(page: Page) {
+  return page.waitForResponse((r) => r.request().method() === "PUT");
+}
+
 async function exerciseEditor(page: Page, entity: Entity) {
   const label = entity.kind;
   await page.goto(entity.url);
-  await bodyTasks(page).nth(2).waitFor();
-  assert.equal(await bodyTasks(page).count(), 3, `${label}: three task checkboxes render`);
-  for (const box of await bodyTasks(page).all()) {
-    assert.equal(await box.isEnabled(), true, `${label}: an editor's checkboxes are enabled`);
-  }
-  await page.getByText("- [ ] not a task").waitFor();
+  await editorTasks(page).nth(2).waitFor();
+  assert.equal(await editorTasks(page).count(), 3, `${label}: three task checkboxes render, none in the code block`);
+  await page.locator(".cm-content", { hasText: "- [ ] not a task" }).waitFor();
 
-  // Tick the second rendered item: the stored body changes only there.
+  // Tick the second item: it saves at once, and the stored body changes
+  // only there.
   const before = await entity.read();
-  const put = page.waitForResponse((r) => r.request().method() === "PUT");
-  await bodyTasks(page).nth(1).click();
+  const put = nextPut(page);
+  const clickedAt = Date.now();
+  await editorTasks(page).nth(1).click();
   const response = await put;
+  assert.ok(Date.now() - clickedAt < 1_200, `${label}: a tick saves without waiting for a typing pause`);
   assert.equal(response.status(), 200, `${label}: the toggle saves`);
   const sent = response.request().postDataJSON();
   assert.equal(sent.expected_seq, before.seq, `${label}: the save carries expected_seq`);
@@ -169,24 +182,23 @@ async function exerciseEditor(page: Page, entity: Entity) {
   assert.ok(ticked.seq > before.seq, `${label}: seq advanced`);
 
   await page.reload();
-  await bodyTasks(page).nth(2).waitFor();
+  await editorTasks(page).nth(2).waitFor();
   await expectStates(page, [false, true, false], `${label}: tick survives a reload`);
-  assert.equal(await page.locator(".em-rendered textarea").count(), 0, `${label}: still in read mode`);
-  console.log(`ok   ${label}: second checkbox ticks Option B only and survives reload`);
+  console.log(`ok   ${label}: second checkbox ticks Option B only, saves at once and survives reload`);
 
-  // Untick with the keyboard.
-  await bodyTasks(page).nth(1).focus();
-  const unput = page.waitForResponse((r) => r.request().method() === "PUT");
-  await page.keyboard.press("Space");
+  // Untick from the keyboard: caret on the line, ⌘/Ctrl+Enter.
+  await page.locator(".cm-line", { hasText: "Option B" }).click();
+  const unput = nextPut(page);
+  await page.keyboard.press("ControlOrMeta+Enter");
   await unput;
-  await expectStates(page, [false, false, false], `${label}: Space unticks`);
+  await page.keyboard.press("Escape");
+  await expectStates(page, [false, false, false], `${label}: Ctrl+Enter unticks`);
   assert.equal((await entity.read()).body, BODY, `${label}: body is back to the original`);
-  console.log(`ok   ${label}: Space on a focused checkbox unticks it`);
+  console.log(`ok   ${label}: Ctrl+Enter on the caret's line unticks it`);
 
   // Two quick clicks on different items: both must land, the second built
-  // on the first save's body and seq.
-  // Each save is held for 400 ms so the second click certainly lands while
-  // the first is still in flight.
+  // on the first save's body and seq. Each save is held for 400 ms so the
+  // second click certainly lands while the first is still in flight.
   const events: string[] = [];
   const statuses: number[] = [];
   const hold = async (route: any) => {
@@ -200,8 +212,8 @@ async function exerciseEditor(page: Page, entity: Entity) {
   };
   const target = /\/api\/(issues|pages)\/\d+$/;
   await page.route(target, hold);
-  await bodyTasks(page).nth(0).click();
-  await bodyTasks(page).nth(2).click();
+  await editorTasks(page).nth(0).click();
+  await editorTasks(page).nth(2).click();
   const deadline = Date.now() + 8_000;
   while (statuses.length < 2 && Date.now() < deadline) await page.waitForTimeout(50);
   await expectStates(page, [true, false, true], `${label}: both quick clicks show`);
@@ -216,33 +228,49 @@ async function exerciseEditor(page: Page, entity: Entity) {
   console.log(`ok   ${label}: two quick clicks both save, one after the other`);
 
   // Someone else edits the body while this view holds the old seq. A live
-  // view would normally refresh from the realtime event first, so this tab
-  // gets no socket: it stays stale, the way a view does when an event is
-  // late or the socket is down. The toggle is refused, the view reloads,
-  // and their edit survives.
+  // view would normally take the realtime event first, so this tab gets no
+  // socket: it stays stale, the way a view does when an event is late or
+  // the socket is down. The save is refused, the edits touch different
+  // lines, so they merge and the merged text saves.
   const stale = await page.context().newPage();
   stale.setDefaultTimeout(10_000);
   await stale.routeWebSocket(/\/api\/events/, () => {});
   await stale.goto(entity.url);
-  await bodyTasks(stale).nth(2).waitFor();
+  await editorTasks(stale).nth(2).waitFor();
   await expectStates(stale, [true, false, true], `${label}: stale tab loads`);
   const theirs = withTicked(BODY, "Option A", "Option C") + "\nAdded elsewhere.\n";
   await entity.write(theirs);
-  const conflict = stale.waitForResponse((r) => r.request().method() === "PUT");
-  await bodyTasks(stale).nth(1).click();
-  assert.equal((await conflict).status(), 409, `${label}: stale toggle is refused`);
-  await stale.getByText("changed since you opened it").waitFor();
-  await stale.getByText("Added elsewhere.").waitFor();
-  await expectStates(stale, [true, false, true], `${label}: view shows the latest version`);
-  assert.equal((await entity.read()).body, theirs, `${label}: the other edit was not overwritten`);
-  console.log(`ok   ${label}: a stale toggle reloads instead of overwriting`);
+  const statusesStale: number[] = [];
+  stale.on("response", (r) => {
+    if (r.request().method() === "PUT") statusesStale.push(r.status());
+  });
+  await editorTasks(stale).nth(1).click();
+  await stale.locator(".cm-content", { hasText: "Added elsewhere." }).waitFor();
+  const merged = withTicked(theirs, "Option B");
+  const mergeDeadline = Date.now() + 8_000;
+  while ((await entity.read()).body !== merged && Date.now() < mergeDeadline) await stale.waitForTimeout(100);
+  assert.deepEqual(statusesStale, [409, 200], `${label}: the stale save is refused, the merged one lands`);
+  assert.equal((await entity.read()).body, merged, `${label}: both edits are kept`);
+  await expectStates(stale, [true, true, true], `${label}: stale tab shows the merged body`);
+  console.log(`ok   ${label}: a stale tick merges with an edit made elsewhere instead of overwriting it`);
 
-  // With the fresh seq the next toggle goes through.
-  const retry = stale.waitForResponse((r) => r.request().method() === "PUT");
-  await bodyTasks(stale).nth(1).click();
-  assert.equal((await retry).status(), 200);
-  await expectStates(stale, [true, true, true], `${label}: retry ticks`);
-  assert.equal((await entity.read()).body, withTicked(theirs, "Option B"));
+  // An edit elsewhere to the same marker: nothing is saved until the person
+  // picks a version.
+  const sameSpot = merged.replace("- [x] Option B", "- [X] Option B");
+  await entity.write(sameSpot);
+  statusesStale.length = 0;
+  await editorTasks(stale).nth(1).click();
+  await stale.locator(".em-conflict").waitFor();
+  assert.deepEqual(statusesStale, [409], `${label}: only the refused save was sent`);
+  assert.equal((await entity.read()).body, sameSpot, `${label}: the other edit stands while in conflict`);
+  await stale.getByRole("button", { name: "Keep mine" }).click();
+  await stale.locator(".em-conflict").waitFor({ state: "detached" });
+  const mine = merged.replace("- [x] Option B", "- [ ] Option B");
+  const keepDeadline = Date.now() + 8_000;
+  while ((await entity.read()).body !== mine && Date.now() < keepDeadline) await stale.waitForTimeout(100);
+  assert.equal((await entity.read()).body, mine, `${label}: "Keep mine" saves this tab's text`);
+  console.log(`ok   ${label}: an edit to the same spot asks first, then "Keep mine" saves`);
+
   await stale.close();
   await entity.write(BODY);
 }
@@ -250,9 +278,10 @@ async function exerciseEditor(page: Page, entity: Entity) {
 async function exerciseViewer(page: Page, entity: Entity) {
   const label = `viewer ${entity.kind}`;
   await page.goto(entity.url);
-  await bodyTasks(page).nth(2).waitFor();
+  await readTasks(page).nth(2).waitFor();
+  assert.equal(await page.locator(".cm-content").count(), 0, `${label}: no editor`);
   assert.equal(await page.locator(".prose input.task-toggle").count(), 0, `${label}: no interactive checkboxes`);
-  for (const box of await bodyTasks(page).all()) {
+  for (const box of await readTasks(page).all()) {
     assert.equal(await box.isDisabled(), true, `${label}: checkboxes are disabled`);
   }
   const before = await entity.read();
@@ -260,9 +289,9 @@ async function exerciseViewer(page: Page, entity: Entity) {
   page.on("request", (r) => {
     if (r.method() === "PUT") writes += 1;
   });
-  await bodyTasks(page).nth(1).click({ force: true });
+  await readTasks(page).nth(1).click({ force: true });
   await page.waitForTimeout(400);
-  await expectStates(page, [false, false, false], `${label}: click does nothing`);
+  await expectStates(page, [false, false, false], `${label}: click does nothing`, readTasks);
   assert.equal(writes, 0, `${label}: no save was attempted`);
   assert.equal((await entity.read()).body, before.body);
   console.log(`ok   ${label}: checkboxes are disabled and nothing is saved`);
