@@ -13,15 +13,14 @@
   //   - `belowTitle`  snippet — the page's label strip
   //   - `metaFooter`  snippet — the page's created/updated dates
   //
-  // The route stays a thin adapter; this component is presentational +
-  // owns only the body's read/edit mode (so the topbar toggle and the
-  // "E" shortcut can drive EditableMarkdown without the route caring).
+  // The route stays a thin adapter; this component is presentational. The
+  // body is always a live editor for people who can edit (no read/edit
+  // mode), and the "E" shortcut puts the caret in it.
 
   import Comments from "./Comments.svelte";
   import QuoteSelectionToolbar from "./QuoteSelectionToolbar.svelte";
   import EditableMarkdown from "./EditableMarkdown.svelte";
   import AttachmentSection from "./AttachmentSection.svelte";
-  import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
   import DeleteMenu, { type MenuItem } from "./DeleteMenu.svelte";
   import ActivityTimeline from "./ActivityTimeline.svelte";
@@ -31,6 +30,7 @@
   import { Download, PanelRight, X } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
   import type { Activity, AuthUser, Comment } from "./api";
+  import type { BodySaveResult } from "./editor/bodySync";
   import { isTypingContext } from "./shortcuts";
   import { peekState } from "./issues/peek.svelte"; // LIF-248
   import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
@@ -65,14 +65,15 @@
     onSaveTitle,
     // Body
     body,
-    bodyPlaceholder = "Start writing... (markdown supported)",
-    bodyEmptyEditCta = "Click to start writing...",
+    // The body's write sequence and record id, for conflict-checked saves
+    // (see EditableMarkdown).
+    bodySeq = null,
+    bodyDocId = null,
+    bodyNoun = "This text",
+    bodyPlaceholder = undefined,
     bodyEmptyReadText = "Nothing here yet",
     bodyProseMinHeight = "120px",
     onSaveBody,
-    // LIF-502: save a body rewritten by ticking one of its task checkboxes
-    // in the read view. Optional; without it the checkboxes stay disabled.
-    onToggleBodyTask = undefined,
     autofocusWhenEmpty = false,
     // Save indicator (route-owned state)
     saving = false,
@@ -127,10 +128,6 @@
     // after the identifier (e.g. IssueDetail's status badge). PageDetail
     // omits it.
     breadcrumbExtra,
-    // LIF-129: body read/edit mode, surfaced upward (bindable) so a route
-    // can pause auto-refresh while the user is editing. Defaults to "read"
-    // and is fully optional — IssueDetail doesn't bind it.
-    bodyMode = $bindable<"read" | "edit">("read"),
     // LIF-262: when set (e.g. { entity_type: "issue", entity_id }), the body
     // editor + comment composer link uploads to this entity, and an
     // "Attachments (n)" section is rendered below the body. Omitted for
@@ -154,12 +151,18 @@
     titleSize?: "md" | "lg";
     onSaveTitle: (next: string) => Promise<void> | void;
     body: string;
+    bodySeq?: number | null;
+    bodyDocId?: number | null;
+    bodyNoun?: string;
     bodyPlaceholder?: string;
-    bodyEmptyEditCta?: string;
     bodyEmptyReadText?: string;
     bodyProseMinHeight?: string;
-    onSaveBody: (next: string) => Promise<void> | void;
-    onToggleBodyTask?: ((next: string) => Promise<boolean>) | undefined;
+    /** Required unless `bodyContent` replaces the body. */
+    onSaveBody?: (
+      next: string,
+      expectedSeq: number | null,
+      docId: number | null,
+    ) => Promise<BodySaveResult>;
     autofocusWhenEmpty?: boolean;
     saving?: boolean;
     lastSaved?: string | null;
@@ -189,7 +192,6 @@
     metaFooter?: Snippet;
     breadcrumbExtra?: Snippet;
     bodyContent?: Snippet;
-    bodyMode?: "read" | "edit";
     attachEntity?: { entity_type: "issue" | "page"; entity_id: number } | null;
   } = $props();
 
@@ -269,9 +271,6 @@
     return () => paletteCtx?.set(undefined);
   });
 
-  // Body read/edit mode is a bindable prop (LIF-129) so a route can read
-  // it to pause auto-refresh mid-edit; it still drives EditableMarkdown
-  // via the topbar toggle + "E" shortcut here.
   let bodyRef = $state<EditableMarkdown | null>(null);
 
   // LIF-111 — refs for the quote-in-comment selection helper. `contentEl`
@@ -285,11 +284,9 @@
   // state; meaningless at md+.
   let propsOpen = $state(false);
 
-  // Reset to read mode + close the mobile props panel whenever we switch
-  // documents.
+  // Close the mobile props panel whenever we switch documents.
   $effect(() => {
     identifier; // track
-    bodyMode = "read";
     propsOpen = false;
   });
 
@@ -328,18 +325,21 @@
     // locally duplicated computation) — see lib/shortcuts.ts.
     const inField = isTypingContext();
 
-    // "E" enters edit mode for the body from anywhere outside a field.
+    // "E" puts the caret in the body from anywhere outside a field.
     if ((e.key === "e" || e.key === "E") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (inField || !editable || bodyMode !== "read") return;
+      if (inField || !editable || bodyContent) return;
       e.preventDefault();
       bodyRef?.focus();
       return;
     }
 
-    // Esc backs out to the list, unless we're mid-edit or inside a field
-    // (the title input / body textarea handle their own Esc to cancel).
+    // Esc backs out to the list, unless we're inside a field (the title
+    // input and the body editor handle their own Esc: the body's blurs it,
+    // so a second Esc goes back).
     if (e.key === "Escape") {
-      if (inField || bodyMode === "edit") return;
+      // The body editor blurs itself on Esc before this runs; it marks the
+      // event handled so that same press doesn't also leave.
+      if (inField || e.defaultPrevented) return;
       // The mobile props panel intercepts Esc first — close it instead of
       // navigating away.
       if (propsOpen) {
@@ -456,13 +456,11 @@
     </div>
   </div>
 
-  {#if bodyMode === "read"}
-    <QuoteSelectionToolbar
-      container={contentEl}
-      canQuote={commentsEnabled && !!onNewComment}
-      onQuote={(t) => commentsRef?.insertQuote(t)}
-    />
-  {/if}
+  <QuoteSelectionToolbar
+    container={contentEl}
+    canQuote={commentsEnabled && !!onNewComment}
+    onQuote={(t) => commentsRef?.insertQuote(t)}
+  />
 {/if}
 
 {#snippet mainColumn()}
@@ -473,24 +471,27 @@
   {#if bodyContent}
     {@render bodyContent()}
   {:else}
-    <EditableMarkdown
-      floatingToggle={false}
-      bind:this={bodyRef}
-      bind:mode={bodyMode}
-      value={body}
-      {editable}
-      {saving}
-      placeholder={bodyPlaceholder}
-      emptyEditCta={bodyEmptyEditCta}
-      emptyReadText={bodyEmptyReadText}
-      proseMinHeight={bodyProseMinHeight}
-      onSave={async (next) => {
-        await onSaveBody(next);
-        attachmentRefresh += 1;
-      }}
-      onTaskToggle={onToggleBodyTask}
-      attachTo={attachEntity}
-    />
+    {#key identifier}
+      <EditableMarkdown
+        bind:this={bodyRef}
+        value={body}
+        seq={bodySeq}
+        docId={bodyDocId}
+        noun={bodyNoun}
+        {editable}
+        placeholder={bodyPlaceholder}
+        emptyReadText={bodyEmptyReadText}
+        proseMinHeight={bodyProseMinHeight}
+        onSave={async (next, expectedSeq, docId) => {
+          if (!onSaveBody) return { ok: false, error: "This body can't be saved here" };
+          const result = await onSaveBody(next, expectedSeq, docId);
+          if (result.ok) attachmentRefresh += 1;
+          return result;
+        }}
+        attachTo={attachEntity}
+        onQuote={commentsEnabled && onNewComment ? (t) => commentsRef?.insertQuote(t) : undefined}
+      />
+    {/key}
   {/if}
 
   {#if attachEntity}
@@ -555,19 +556,10 @@
         {#if breadcrumbExtra}{@render breadcrumbExtra()}{/if}
       </div>
 
-      <!-- Right zone: mode toggle + save indicator + export + menu -->
+      <!-- Right zone: save indicator + export + menu -->
       <div class="ml-auto flex items-center gap-1 sm:gap-2 shrink-0">
         {#if exportError}
           <span class="hidden sm:inline text-caption text-[var(--error)]">{exportError}</span>
-        {/if}
-
-        {#if editable && body.trim() && !bodyContent}
-          <ModeToggle
-            mode={bodyMode}
-            size="compact"
-            disabled={saving}
-            onSelect={(next) => bodyRef?.setMode(next)}
-          />
         {/if}
 
         <span class="hidden sm:inline text-caption text-[var(--text-faint)] sm:min-w-[5rem] text-right">

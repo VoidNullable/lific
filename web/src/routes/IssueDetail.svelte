@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     resolveIssue,
+    getIssue,
     updateIssue,
     downloadIssueExport,
     listModules,
@@ -22,6 +23,7 @@
     type AuthUser,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
+  import type { BodySaveResult } from "../lib/editor/bodySync";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import IssuePickerModal from "../lib/IssuePickerModal.svelte";
   import MoveIssueModal from "../lib/issues/MoveIssueModal.svelte"; // LIF-488
@@ -157,9 +159,7 @@
     if (res.ok) currentUser = res.data;
   });
 
-  // Sidebar dropdown states (issue-specific; the body's read/edit mode
-  // lives inside DocumentDetail).
-  let bodyMode = $state<"read" | "edit">("read");
+  // Sidebar dropdown states (issue-specific).
   let statusOpen = $state(false);
   // LIF-359: the topbar's status chip is its own picker. It shares STATUSES
   // and setStatus with the sidebar field but needs a separate open flag so
@@ -234,8 +234,9 @@
       // Rides the current generation rather than claiming a new one, so a
       // navigation that starts mid-refresh wins and this result is dropped.
       refresh: () => loadIssue(issueIdentifier, true, loadGen),
+      // The description editor merges refreshes into what is being typed,
+      // so editing it does not hold refreshes back.
       isBusy: () =>
-        bodyMode === "edit" ||
         saving ||
         loading ||
         statusOpen ||
@@ -449,36 +450,41 @@
     await saveField("title", next);
   }
 
-  async function saveDescription(next: string) {
-    if (!issue) return;
-    if (next !== issue.description) {
-      await saveField("description", next);
-    }
-  }
-
-  /** LIF-502: a task checkbox ticked in the rendered description. Guarded by
-   *  `expected_seq` so a body someone else changed since this view loaded is
-   *  reloaded, not overwritten. Resolves false when nothing was saved. */
-  async function saveDescriptionTask(next: string): Promise<boolean> {
-    const current = issue;
-    if (!current) return false;
+  /** Save the description. Guarded by `expected_seq`, so a description
+   *  changed elsewhere since the editor last synced is merged or reported as a
+   *  conflict by the editor, never overwritten. `issueId` is the issue the
+   *  editor was opened for, which may no longer be the one on screen. */
+  async function saveDescription(
+    next: string,
+    expectedSeq: number | null,
+    issueId: number | null,
+  ): Promise<BodySaveResult> {
+    const id = issueId ?? issue?.id;
+    if (id == null) return { ok: false, error: "No issue loaded" };
+    const onScreen = () => issue?.id === id;
     saving = true;
-    const res = await updateIssue(current.id, { description: next, expected_seq: current.seq });
+    const res = await updateIssue(id, {
+      description: next,
+      ...(expectedSeq != null ? { expected_seq: expectedSeq } : {}),
+    });
     saving = false;
-    if (issue?.id !== current.id) return false;
     if (res.ok) {
-      issue = res.data;
-      lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      refreshActivity();
-      return true;
+      if (onScreen()) {
+        issue = res.data;
+        lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        refreshActivity();
+      }
+      return { ok: true, body: res.data.description, seq: res.data.seq ?? null };
     }
     if (res.status === 409) {
-      toast(`${current.identifier} changed since you opened it. Showing the latest version.`, { kind: "error" });
-      void loadIssue(issueIdentifier, true, loadGen);
-    } else {
-      toast(`Couldn't save ${current.identifier}: ${res.error}`, { kind: "error" });
+      const fresh = await getIssue(id);
+      if (fresh.ok) {
+        if (onScreen()) issue = fresh.data;
+        return { ok: false, conflict: { body: fresh.data.description, seq: fresh.data.seq ?? null } };
+      }
     }
-    return false;
+    // The editor shows the failure and retries on its own.
+    return { ok: false, error: res.error };
   }
 
   // ── Metadata updates ─────────────────────────────────
@@ -851,13 +857,13 @@
   titleSize="md"
   onSaveTitle={saveTitle}
   body={issue?.description ?? ""}
-  bodyPlaceholder="Add a description... (markdown supported)"
-  bodyEmptyEditCta="Click to add a description..."
+  bodySeq={issue?.seq ?? null}
+  bodyDocId={issue?.id ?? null}
+  bodyNoun="The description"
+  bodyPlaceholder="Add a description…  Type / for headings, lists, checklists and more."
   bodyEmptyReadText="No description"
   bodyProseMinHeight="60px"
   onSaveBody={saveDescription}
-  onToggleBodyTask={editable ? saveDescriptionTask : undefined}
-  bind:bodyMode
   autofocusWhenEmpty
   {saving}
   {lastSaved}

@@ -374,7 +374,6 @@
   titleSize="md"
   onSaveTitle={saveTitle}
   body=""
-  onSaveBody={() => {}}
   {saving}
   {lastSaved}
   deleteNoun="plan"

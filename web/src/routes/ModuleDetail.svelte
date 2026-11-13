@@ -21,7 +21,7 @@
     type Issue,
   } from "../lib/api";
   import EditableMarkdown from "../lib/EditableMarkdown.svelte";
-  import ModeToggle from "../lib/ModeToggle.svelte";
+  import type { BodySaveResult } from "../lib/editor/bodySync";
   import DeleteMenu from "../lib/DeleteMenu.svelte";
   import IconPicker from "../lib/IconPicker.svelte";
   import Breadcrumbs from "../lib/Breadcrumbs.svelte";
@@ -95,7 +95,6 @@
   // Editing
   let editingName = $state(false);
   let draftName = $state("");
-  let descriptionMode = $state<"read" | "edit">("read");
   let descriptionRef = $state<EditableMarkdown | null>(null);
 
   // Save indicator
@@ -123,7 +122,6 @@
     const id = moduleId;
     // Reset volatile state when navigating between modules.
     editingName = false;
-    descriptionMode = "read";
     statusOpen = false;
     lastSaved = null;
     loadModule(id);
@@ -191,11 +189,24 @@
 
   // ── Description (delegated to EditableMarkdown) ──────
 
-  async function saveDescription(next: string) {
-    if (!mod) return;
-    if (next !== mod.description) {
-      await saveField("description", next);
+  /** Modules carry no write sequence, so the last save wins. `moduleId` is
+   *  the module the editor was opened for. */
+  async function saveDescription(
+    next: string,
+    _expectedSeq: number | null,
+    moduleIdAtOpen: number | null,
+  ): Promise<BodySaveResult> {
+    const id = moduleIdAtOpen ?? mod?.id;
+    if (id == null) return { ok: false, error: "No module loaded" };
+    saving = true;
+    const res = await updateModule(id, { description: next });
+    saving = false;
+    if (!res.ok) return { ok: false, error: res.error };
+    if (mod?.id === id) {
+      mod = res.data;
+      lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
+    return { ok: true, body: res.data.description, seq: null };
   }
 
   // ── Status ───────────────────────────────────────────
@@ -242,7 +253,6 @@
         return;
       }
     }
-    if (descriptionMode === "edit") return;
     e.preventDefault();
     descriptionRef?.focus();
   }
@@ -298,15 +308,6 @@
       </div>
 
       <div class="ml-auto flex items-center gap-1 sm:gap-2 shrink-0">
-        {#if editable && mod.description.trim()}
-          <ModeToggle
-            mode={descriptionMode}
-            size="compact"
-            disabled={saving}
-            onSelect={(next) => descriptionRef?.setMode(next)}
-          />
-        {/if}
-
         <span class="hidden sm:inline text-caption text-[var(--text-faint)] sm:min-w-[5rem] text-right">
           {#if saving}
             <span class="animate-pulse">Saving...</span>
@@ -515,19 +516,19 @@
 
           <!-- Description -->
           <section class="mb-10">
-            <EditableMarkdown
-              floatingToggle={false}
-              bind:this={descriptionRef}
-              bind:mode={descriptionMode}
-              value={mod.description}
-              {editable}
-              {saving}
-              placeholder="Describe this module... (markdown supported)"
-              emptyEditCta="Click to describe this module..."
-              emptyReadText="No description"
-              proseMinHeight="60px"
-              onSave={saveDescription}
-            />
+            {#key mod.id}
+              <EditableMarkdown
+                bind:this={descriptionRef}
+                value={mod.description}
+                docId={mod.id}
+                noun="The description"
+                {editable}
+                placeholder="Describe this module…  Type / for headings, lists and more."
+                emptyReadText="No description"
+                proseMinHeight="60px"
+                onSave={saveDescription}
+              />
+            {/key}
           </section>
 
           <!-- Issues section -->

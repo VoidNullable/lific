@@ -765,14 +765,12 @@ html[data-motion="reduced"] *::after {
 }
 
 /*
- * Toolbar pill — single-action sibling of the ModeToggle segmented
- * control. Matches its outer dimensions (padding / type / icon /
- * radius / border / track color / inset shadow) so two of these
- * sitting side-by-side in a topbar read as one button family.
+ * Toolbar pill: a single-action topbar control on a recessed track
+ * (padding / type / icon / radius / border / inset shadow), so several
+ * side by side read as one button family.
  *
  * Used by the Export action in PageDetail / IssueDetail / ModuleDetail
- * topbars; available to any other single-action toolbar control that
- * needs to live next to the ModeToggle without looking like a stray.
+ * topbars; available to any other single-action toolbar control.
  */
 .toolbar-pill {
   display: inline-flex;
@@ -788,9 +786,8 @@ html[data-motion="reduced"] *::after {
   background: var(--bg-subtle);
   border: 1px solid var(--border);
   border-radius: 999px;
-  /* Grounds the pill so it reads as the same "recessed track" tier
-     the ModeToggle uses. Anything that should lift above this (like
-     a sliding indicator) ships with its own shadow on top. */
+  /* Grounds the pill as a recessed track. Anything that should lift
+     above this ships with its own shadow on top. */
   box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.04);
   cursor: pointer;
   user-select: none;
@@ -804,9 +801,7 @@ html[data-motion="reduced"] *::after {
   color: var(--text);
   background: var(--surface);
   border-color: var(--text-faint);
-  /* Drop the inset, hint a tiny outset on hover — same motion the
-     ModeToggle's sliding pill plays into when it lands on the active
-     slot. Keeps the family coherent. */
+  /* Drop the inset and hint a tiny outset on hover. */
   box-shadow:
     0 1px 2px rgb(0 0 0 / 0.04),
     0 1px 3px rgb(0 0 0 / 0.05);

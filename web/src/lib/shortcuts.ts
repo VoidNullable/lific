@@ -86,11 +86,17 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "⌫", label: "Step back out of a submenu", scope: "palette" },
   { keys: "Esc", label: "Close", scope: "palette" },
 
-  // ── Markdown editor (EditableMarkdown.svelte, edit mode) ──
+  // ── Markdown editor (editor/cm/index.ts) ──
   { keys: "⌘ B", label: "Bold", scope: "editor" },
   { keys: "⌘ I", label: "Italic", scope: "editor" },
+  { keys: "⌘ E", label: "Inline code", scope: "editor" },
+  { keys: "⌘ ⇧ X", label: "Strikethrough", scope: "editor" },
   { keys: "⌘ ⇧ K", label: "Insert link", scope: "editor" },
-  { keys: "⌘ S", label: "Save", scope: "editor" },
+  { keys: "⌘ Enter", label: "Tick or untick the task on this line", scope: "editor" },
+  { keys: "/", label: "Insert a block (heading, list, table…)", scope: "editor" },
+  { keys: "Tab ⇧ Tab", label: "Indent or outdent a list item", scope: "editor" },
+  { keys: "⌘ S", label: "Save now (saves on its own too)", scope: "editor" },
+  { keys: "Esc", label: "Leave the text", scope: "editor" },
 ];
 
 /** True when focus is in something that owns its own text input — a

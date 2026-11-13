@@ -20,6 +20,7 @@
     type AuthUser,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
+  import type { BodySaveResult } from "../lib/editor/bodySync";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import Select from "../lib/Select.svelte";
   import { formatDate } from "../lib/format";
@@ -173,10 +174,8 @@
   // Focus-only (no interval): the page body is an inline editor, so a
   // periodic poll mid-read is more disruptive than it's worth. Refetching
   // when the tab regains focus covers the real case — the agent edited a
-  // page while you were elsewhere. We never refetch while editing or
-  // while a save is in flight, so unsaved keystrokes can't be clobbered.
-  // `bodyMode` is bound up from DocumentDetail's EditableMarkdown.
-  let bodyMode = $state<"read" | "edit">("read");
+  // page while you were elsewhere. The body editor merges a refreshed body
+  // into whatever is being typed; refreshes only wait out a save in flight.
 
   // Refresh the page *currently routed to* (pageId), not whatever `page`
   // happens to hold — and drop the result if navigation moved on while
@@ -292,7 +291,9 @@
       refresh: refreshPage,
       // Also skip while a navigation load is running (loading) so a focus
       // event can't fire a redundant fetch on top of the mount load.
-      isBusy: () => bodyMode === "edit" || saving || loading,
+      // The body editor merges refreshes into what is being typed, so
+      // editing does not hold them back.
+      isBusy: () => saving || loading,
       // Focus-only — no background interval for the page editor.
       intervalMs: 0,
       shouldRefresh: (event) =>
@@ -394,38 +395,43 @@
     await saveField("title", next);
   }
 
-  async function saveBody(next: string) {
-    if (!page) return;
-    if (next !== page.content) {
-      await saveField("content", next);
-    }
-  }
-
-  /** LIF-502: a task checkbox ticked in the rendered body. Guarded by
-   *  `expected_seq` so a page someone else changed since this view loaded is
-   *  reloaded, not overwritten. Resolves false when nothing was saved. */
-  async function saveBodyTask(next: string): Promise<boolean> {
-    const current = page;
-    if (!current) return false;
+  /** Save the body. Guarded by `expected_seq`, so a page changed elsewhere
+   *  since the editor last synced is merged or reported as a conflict by the
+   *  editor, never overwritten. `docId` is the page the editor was opened
+   *  for, which may no longer be the one on screen. */
+  async function saveBody(
+    next: string,
+    expectedSeq: number | null,
+    docId: number | null,
+  ): Promise<BodySaveResult> {
+    const id = docId ?? page?.id;
+    if (id == null) return { ok: false, error: "No page loaded" };
+    const onScreen = () => page?.id === id;
     saving = true;
-    const res = await updatePage(current.id, { content: next, expected_seq: current.seq });
+    const res = await updatePage(id, {
+      content: next,
+      ...(expectedSeq != null ? { expected_seq: expectedSeq } : {}),
+    });
     saving = false;
-    if (page?.id !== current.id) return false;
     if (res.ok) {
-      page = res.data;
-      lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      listPageActivity(current.id).then((r) => {
-        if (r.ok && page?.id === current.id) activity = r.data.items;
-      });
-      return true;
+      if (onScreen()) {
+        page = res.data;
+        lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        listPageActivity(id).then((r) => {
+          if (r.ok && page?.id === id) activity = r.data.items;
+        });
+      }
+      return { ok: true, body: res.data.content, seq: res.data.seq ?? null };
     }
     if (res.status === 409) {
-      toast(`${current.identifier} changed since you opened it. Showing the latest version.`, { kind: "error" });
-      void refreshPage();
-    } else {
-      toast(`Couldn't save ${current.identifier}: ${res.error}`, { kind: "error" });
+      const fresh = await getPage(id);
+      if (fresh.ok) {
+        if (onScreen()) page = fresh.data;
+        return { ok: false, conflict: { body: fresh.data.content, seq: fresh.data.seq ?? null } };
+      }
     }
-    return false;
+    // The editor shows the failure and retries on its own.
+    return { ok: false, error: res.error };
   }
 
   // LIF-112: persist a lifecycle status change. The Select binds to a
@@ -646,12 +652,13 @@
   titleSize="lg"
   onSaveTitle={saveTitle}
   body={page?.content ?? ""}
-  bodyPlaceholder="Start writing... (markdown supported)"
-  bodyEmptyEditCta="Click to start writing..."
+  bodySeq={page?.seq ?? null}
+  bodyDocId={page?.id ?? null}
+  bodyNoun="This page"
+  bodyPlaceholder="Start writing…  Type / for headings, lists, tables and more."
   bodyEmptyReadText="Empty page"
   bodyProseMinHeight="120px"
   onSaveBody={saveBody}
-  onToggleBodyTask={editable ? saveBodyTask : undefined}
   {saving}
   {lastSaved}
   onExport={inPublicScope() ? undefined : exportMarkdown}
@@ -673,7 +680,6 @@
   {activity}
   {paletteActions}
   layout="wide"
-  bind:bodyMode
 >
   {#snippet breadcrumbExtra()}
     {#if !editable && (isWorkspacePage ? projectRole.globalEnforced : projectRole.enforced)}
