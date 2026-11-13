@@ -1188,3 +1188,9 @@ html[data-motion="reduced"] *::after {
   background: color-mix(in oklab, var(--text) 6%, var(--surface));
   color: var(--text-muted);
 }
+.palette-section {
+  padding: 0.625rem 1rem 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-faint);
+}

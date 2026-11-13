@@ -58,7 +58,7 @@
   import { shortcutHelpState } from "./shortcutHelpState.svelte";
   import ProjectIcon from "./ProjectIcon.svelte";
   import {
-    Search, CircleDot, FileText, Layers, FolderClosed, Box, CornerDownLeft,
+    Search, CircleDot, FileText, Layers, FolderClosed, Box,
     Zap, ChevronRight, X, ListChecks,
   } from "lucide-svelte";
   import { tick, untrack } from "svelte";
@@ -284,11 +284,15 @@
     kind: "issue" | "page" | "plan" | "project" | "module" | "folder";
     title: string;
     identifier?: string;
-    sub?: string;
-    subIsSnippet?: boolean;
+    /** Owning project's name, shown as the row's muted right column. */
+    project?: string;
+    /** Server FTS snippet with `**match**` markers: why a server hit matched. */
+    snippet?: string;
     emoji?: string | null;
     /** Issue status, when known, drawn as the row's icon. */
     status?: string;
+    /** Issue priority, when known, drawn as a small trailing icon. */
+    priority?: string;
     route: string;
     score: number;
     remote?: boolean;
@@ -418,6 +422,10 @@
     }));
   });
 
+  function projectName(ident: string): string {
+    return projectByIdent(ident)?.name ?? ident;
+  }
+
   function projectByIdent(ident: string): Project | undefined {
     return catalog.projects.find(
       (p) => p.identifier.toLowerCase() === ident.toLowerCase(),
@@ -440,15 +448,16 @@
 
   function issueResult(
     project: Project,
-    issue: { title: string; identifier: string; status: string },
+    issue: { title: string; identifier: string; status: string; priority?: string },
     score: number,
   ): PaletteResult {
     return {
       kind: "issue",
       title: issue.title,
       identifier: issue.identifier,
-      sub: project.name,
+      project: project.name,
       status: issue.status,
+      priority: issue.priority,
       route: `/${project.identifier}/issues/${issue.identifier}`,
       score,
     };
@@ -471,7 +480,7 @@
           kind: "page",
           title: page.title,
           identifier: page.identifier,
-          sub: project.name,
+          project: project.name,
           route: `/${project.identifier}/pages/${page.id}`,
           score,
         }
@@ -505,7 +514,7 @@
             kind: "page",
             title: page.title,
             identifier: page.identifier,
-            sub: project.name,
+            project: project.name,
             route: `/${project.identifier}/pages/${page.id}`,
             score: refScore(ref, project),
           }]
@@ -570,7 +579,7 @@
         hits.push({
           kind: "module",
           title: mod.name,
-          sub: mod.projectIdent,
+          project: projectName(mod.projectIdent),
           emoji: mod.emoji,
           route: `/${mod.projectIdent}/modules/${mod.id}`,
           score: m.score,
@@ -583,7 +592,7 @@
         hits.push({
           kind: "folder",
           title: f.name,
-          sub: f.projectIdent,
+          project: projectName(f.projectIdent),
           route: `/${f.projectIdent}/pages`,
           score: m.score,
         });
@@ -626,8 +635,9 @@
       kind: doc.kind,
       title: doc.title,
       identifier: doc.identifier,
-      sub: doc.preview || project.name,
+      project: project.name,
       status: doc.kind === "issue" ? doc.status : undefined,
+      priority: doc.kind === "issue" ? doc.priority : undefined,
       route:
         doc.kind === "page"
           ? `/${project.identifier}/pages/${doc.id}`
@@ -698,7 +708,7 @@
         kind: e.type,
         title: e.title,
         identifier: e.identifier,
-        sub: project?.name ?? e.project,
+        project: project?.name ?? e.project,
         route: path,
         score: 1,
         recent: true,
@@ -711,6 +721,7 @@
           if (!row) continue;
           r.title = row.title;
           r.status = row.status;
+          r.priority = row.priority;
         } else {
           const row = model.pages.get(Number(e.routeId));
           if (!row) continue;
@@ -854,8 +865,8 @@
           kind: r.result_type === "page" ? "page" : "issue",
           title: r.title,
           identifier: r.identifier ?? undefined,
-          sub: r.snippet || project?.name,
-          subIsSnippet: Boolean(r.snippet),
+          project: project?.name,
+          snippet: r.snippet || undefined,
           route,
           score: 1 - i * 0.03,
           remote: true,
@@ -1069,7 +1080,7 @@
       data-command-palette
       class="command-palette w-full h-full flex flex-col bg-[var(--surface)]
              border-[var(--border)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden
-             sm:h-auto sm:max-w-[580px] sm:border sm:rounded-xl"
+             sm:h-auto sm:max-w-[640px] sm:border sm:rounded-xl"
       onclick={(e) => e.stopPropagation()}
     >
       <!-- Input row -->
@@ -1130,8 +1141,10 @@
         </p>
       {:else}
       <div
-        class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1.5
-               pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1.5 sm:max-h-[420px]"
+        class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1
+               pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1 sm:max-h-[420px]"
+        role="listbox"
+        aria-label="Results"
         bind:this={listEl}
       >
         {#if mode.type === "root" && !query}
@@ -1139,7 +1152,7 @@
                only useful before the first keystroke. -->
           <p
             data-palette-hint
-            class="px-4 pt-1.5 pb-2 text-caption text-[var(--text-faint)] truncate"
+            class="px-4 pt-1.5 pb-1 text-caption text-[var(--text-faint)] truncate"
           >
             <code class="palette-code">34</code>{#if !narrow} or <code class="palette-code">OMN-156</code>{/if}
             jumps to an issue, <code class="palette-code">doc 3</code> to a page
@@ -1158,14 +1171,16 @@
         {:else if mode.type === "submenu"}
           {#each childHits as c, i (c.title)}
             <button
-              class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+              class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
+                     rounded-md text-left"
               role="option"
               aria-selected={i === selectedIdx}
               data-flat-idx={i}
+              data-kind="child"
               onclick={() => pickItem({ t: "child", c })}
               onmouseenter={() => { selectedIdx = i; }}
             >
-              <span class="size-5 flex items-center justify-center shrink-0">
+              <span class="size-4 grid place-items-center shrink-0">
                 {#if c.status !== undefined}
                   <StatusIcon status={c.status} size={14} />
                 {:else if c.priority !== undefined}
@@ -1177,16 +1192,13 @@
                   ></span>
                 {/if}
               </span>
-              <span class="flex-1 text-body text-[var(--text)] capitalize truncate">
+              <span class="flex-1 min-w-0 text-body text-[var(--text)] capitalize truncate">
                 {c.title}
               </span>
               {#if c.hint}
-                <span class="text-micro text-[var(--text-faint)] shrink-0">
+                <span class="text-caption text-[var(--text-faint)] shrink-0">
                   {c.hint}
                 </span>
-              {/if}
-              {#if i === selectedIdx}
-                <CornerDownLeft size={12} class="shrink-0 text-[var(--text-faint)]" />
               {/if}
             </button>
           {/each}
@@ -1194,53 +1206,45 @@
           <!-- Context actions first: on a detail page they're the most
                likely intent. -->
           {#if actionHits.length > 0}
-            <div
-              class="px-4 pt-2 pb-1 text-micro font-semibold uppercase
-                     tracking-widest text-[var(--text-faint)]"
-            >
-              Actions
-            </div>
+            <div class="palette-section">Actions</div>
             {#each actionHits as a, i (a.id)}
               <button
-                class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+                class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
+                       rounded-md text-left"
                 role="option"
                 aria-selected={i === selectedIdx}
                 data-flat-idx={i}
+                data-kind="action"
                 onclick={() => pickItem({ t: "action", a })}
                 onmouseenter={() => { selectedIdx = i; }}
               >
-                <span class="size-5 flex items-center justify-center shrink-0 text-[var(--accent)]">
+                <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
                   <Zap size={14} />
                 </span>
-                <span class="flex-1 text-body text-[var(--text)] truncate">
+                <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
                   {a.title}
                 </span>
                 {#if a.hint}
-                  <span class="text-micro text-[var(--text-faint)] capitalize shrink-0">
+                  <span class="max-w-[12rem] truncate text-caption text-[var(--text-faint)] capitalize shrink-0">
                     {a.hint}
                   </span>
                 {/if}
                 {#if a.children}
-                  <ChevronRight size={12} class="shrink-0 text-[var(--text-faint)]" />
-                {:else if i === selectedIdx}
-                  <CornerDownLeft size={12} class="shrink-0 text-[var(--text-faint)]" />
+                  <ChevronRight size={14} class="shrink-0 text-[var(--text-faint)]" />
                 {/if}
               </button>
             {/each}
           {/if}
           {#each grouped as group (group.label)}
-            <div
-              class="px-4 pt-2 pb-1 text-micro font-semibold uppercase
-                     tracking-widest text-[var(--text-faint)]"
-            >
-              {group.label}
-            </div>
+            <div class="palette-section">{group.label}</div>
             {#each group.entries as { r, flatIdx } (r.route + (r.identifier ?? r.title))}
               <button
-                class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+                class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
+                       rounded-md text-left"
                 role="option"
                 aria-selected={flatIdx === selectedIdx}
                 data-flat-idx={flatIdx}
+                data-kind={r.kind}
                 onclick={(e) => pickItem({ t: "nav", r }, e.metaKey || e.ctrlKey)}
                 onmousedown={(e) => { if (e.button === 1) e.preventDefault(); }}
                 onauxclick={(e) => {
@@ -1251,7 +1255,7 @@
                 onmouseenter={() => { selectedIdx = flatIdx; }}
               >
                 <!-- Kind icon (project/module emoji wins when set) -->
-                <span class="size-5 flex items-center justify-center shrink-0 text-[var(--text-faint)]">
+                <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
                   {#if r.emoji}
                     <ProjectIcon value={r.emoji} size={15} />
                   {:else if r.kind === "issue" && r.status}
@@ -1270,35 +1274,46 @@
                     <Box size={14} />
                   {/if}
                 </span>
-
-                <span class="flex-1 min-w-0 flex flex-col gap-0.5">
-                  <span class="w-full text-body text-[var(--text)] truncate">
-                    {r.title}
-                  </span>
-                  {#if r.sub}
-                    <span class="w-full text-caption text-[var(--text-faint)] truncate">
-                      {#if r.subIsSnippet}
-                        {#each snippetSegments(r.sub) as segment}
-                          {#if segment.highlighted}
-                            <span class="font-medium text-[var(--text-muted)]">{segment.text}</span>
-                          {:else}
-                            {segment.text}
-                          {/if}
-                        {/each}
-                      {:else}
-                        {r.sub}
-                      {/if}
-                    </span>
-                  {/if}
-                </span>
-
-                {#if r.identifier}
-                  <span class="font-mono text-micro text-[var(--text-faint)] shrink-0">
+                {#if r.identifier && r.kind !== "project"}
+                  <span
+                    class="shrink-0 min-w-[4.5rem] font-mono text-caption text-[var(--text-faint)]"
+                  >
                     {r.identifier}
                   </span>
                 {/if}
-                {#if flatIdx === selectedIdx}
-                  <CornerDownLeft size={12} class="shrink-0 text-[var(--text-faint)]" />
+                <span
+                  class="min-w-0 truncate text-body text-[var(--text)]
+                         {r.snippet ? 'shrink' : 'flex-1'}"
+                >
+                  {r.title}
+                </span>
+                {#if r.snippet}
+                  <span class="flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">
+                    {#each snippetSegments(r.snippet) as segment}
+                      {#if segment.highlighted}
+                        <span class="font-medium text-[var(--text-muted)]">{segment.text}</span>
+                      {:else}
+                        {segment.text}
+                      {/if}
+                    {/each}
+                  </span>
+                {/if}
+                {#if r.kind === "project" && r.identifier}
+                  <span class="shrink-0 font-mono text-caption text-[var(--text-faint)]">
+                    {r.identifier}
+                  </span>
+                {:else if r.project}
+                  <span
+                    class="hidden sm:block shrink-0 max-w-[9rem] truncate text-caption
+                           text-[var(--text-faint)]"
+                  >
+                    {r.project}
+                  </span>
+                {/if}
+                {#if r.priority && r.priority !== "none"}
+                  <span class="shrink-0 grid place-items-center" title="{r.priority} priority">
+                    <PriorityIcon priority={r.priority} size={13} />
+                  </span>
                 {/if}
               </button>
             {/each}
