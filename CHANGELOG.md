@@ -64,6 +64,14 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A new Agent activity page (`/agents`) shows what connected tools have been doing over the last hour, day or week: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The data comes from `GET /api/agents/activity`.
 - MCP read tools now record which agent read what, so the page can count reads. Records are buffered and written every few seconds, and the server deletes them after 30 days.
 
+### Editing in the browser
+
+- Issue descriptions, pages and module descriptions are edited in place, with formatting rendered as you type. The Edit and Preview switch and the Save and Cancel buttons are gone: click into the text and write. Markdown marks show only where the caret is, and images, tables, task checkboxes and diagrams stay rendered around it. The stored Markdown is exactly what you typed.
+- Edits save on their own after a short pause, when you click away and when you leave the page; Ctrl/⌘ S saves at once. Each save carries the body's `expected_seq`. An edit made elsewhere to a different part of the body is merged into yours; an edit to the same part stops and asks which version to keep, with the other version shown on request.
+- A body you are writing in no longer pauses live updates. Changes from agents and other tabs flow into the text without moving the caret.
+- Type `/` for a block menu (headings, lists, checklists, quotes, code, tables, diagrams, dividers, files) and `#` or a project prefix for issue references. Selecting text shows a formatting toolbar with a Quote into the comment box. Ctrl/⌘ Enter ticks the task on the caret's line, Tab and Shift+Tab indent list items, pasting a URL over selected text makes a link, and Ctrl/⌘-click opens a link.
+- Files dropped into the body upload at the point where they are dropped.
+
 ### Command palette
 
 - The palette (Ctrl/⌘ K) is easier to read. The selected row gets a neutral fill and a thin accent marker on its left edge instead of an accent tint, and every row is one line: status or kind icon, identifier, title, then the project and priority. The characters your query matched are highlighted. All palette text meets WCAG AA contrast with every accent in light and dark.

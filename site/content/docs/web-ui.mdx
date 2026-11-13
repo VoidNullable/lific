@@ -64,12 +64,20 @@ Start and target dates are not shown or editable in the browser. Set them throug
 
 ### The Markdown editor
 
-Issue descriptions and pages use the same editor. Choose **Edit**, or press `E`, to switch from the rendered view to the Markdown source. **Preview**, **Save** or `Cmd/Ctrl+S` saves and switches back; `Esc` or **Cancel** throws the draft away. The editor keeps the text you were reading at the same height on screen when it switches, so the page does not jump.
+Issue descriptions, pages and module descriptions are edited in place. There is no edit mode: click into the text, or press `E`, and type. Formatting renders as you write, and the Markdown marks (`**`, `#`, `[ ](...)`) appear only on the line or span the caret is in. Images, tables, rules, task checkboxes and `mermaid` diagrams stay rendered; put the caret on one to edit its source. What is saved is exactly the Markdown you typed, character for character, so agents that edit bodies with find and replace see the same text you do.
 
-- The toolbar inserts bold, italic, headings, bulleted, numbered and task lists, inline code, code blocks, links and quotes. `Cmd/Ctrl+B`, `Cmd/Ctrl+I` and `Cmd/Ctrl+Shift+K` cover bold, italic and links.
-- Type part of an identifier, such as `APP-`, to get suggestions. `APP-12`, `APP-DOC-3` and `APP-PLAN-2` render as links, and hovering an issue link shows a summary card.
-- Code blocks get a copy button, and `mermaid` code blocks render as diagrams.
-- Select text in a rendered description to copy it or quote it into a comment.
+Changes save on their own a moment after you stop typing, when you click away, and when you leave the page. `Cmd/Ctrl+S` saves at once. The row under the text shows **Unsaved changes**, **Saving…** or **Saved**, and **Couldn't save** with a **Retry now** button when the server cannot be reached; Lific keeps retrying in the background. `Esc` leaves the text; press it again to go back to the list.
+
+If someone else (a person or an agent) changes the same body while you are writing, their edit is merged into your text when it touches a different part, and the row says **Merged an edit made elsewhere**. When both of you changed the same part, nothing is saved until you choose: **Keep mine** saves your text over theirs, **Use the other version** replaces yours (`Cmd/Ctrl+Z` brings it back), and **Show the other version** lets you compare first.
+
+- Type `/` at the start of a line for a menu of headings, lists, task lists, quotes, code blocks, tables, rules, diagrams and files.
+- Select text for a toolbar with bold, italic, strikethrough, inline code, link, headings, lists and quote, plus **Quote** into a comment. `Cmd/Ctrl+B`, `Cmd/Ctrl+I`, `Cmd/Ctrl+E`, `Cmd/Ctrl+Shift+X` and `Cmd/Ctrl+Shift+K` cover bold, italic, code, strikethrough and links. Pasting a URL over selected text turns it into a link.
+- Click a task checkbox to tick it, or put the caret on the line and press `Cmd/Ctrl+Enter`. A tick saves straight away.
+- `Tab` and `Shift+Tab` indent and outdent list items.
+- Type `#` or part of an identifier, such as `APP-`, to get suggestions. `APP-12`, `APP-DOC-3` and `APP-PLAN-2` render as links, and hovering an issue link shows a summary card. With the caret in a link, an **Open** button appears; `Cmd/Ctrl`-click opens a link directly.
+- Drop or paste a file into the text to upload it where it lands.
+
+People who can only read a body see it rendered, with task checkboxes they cannot change.
 
 ### Link issues in the graph
 
@@ -95,7 +103,7 @@ A long thread opens on its newest comments, with **Load older comments** above t
 
 Put project pages in folders by dragging a page onto a folder on desktop, or with the move-to-folder picker on a touch screen. A page and its folder must be in the same project. **Pin** keeps a page at the top of the page list and puts it on Home.
 
-Pages use the Markdown editor described above and have their own comments and activity. Workspace pages belong to no project, have no folders or labels, and only an administrator can edit them.
+Pages are edited in place like issue descriptions (see above) and have their own comments and activity. Workspace pages belong to no project, have no folders or labels, and only an administrator can edit them.
 
 ## Work with plans
 
@@ -119,7 +127,7 @@ Click an image to open it full screen. It opens fitted to the window; click it t
 
 Attachments open in place instead of downloading when Lific has a viewer for them: images, video, audio, text and source code, diffs and patches, CSV and TSV tables, JSON, zip archives and SQLite databases. Other files, including PDFs, appear as a download chip.
 
-The **Attachments** panel under an issue or page body lists the files linked to it. **Insert** on a file (shown on hover, always on touch screens) puts its Markdown into the body, using the image's alt text when it has one: at the caret while you are editing, or at the end of the body, with the editor opened, when you are reading. **Details** on a file shows its alt text, which the uploader, a maintainer or an administrator can edit there, and every issue, page and comment you can see that uses it, linked.
+The **Attachments** panel under an issue or page body lists the files linked to it. **Insert** on a file (shown on hover, always on touch screens) puts its Markdown into the body, using the image's alt text when it has one: at the caret when you have clicked into the body, otherwise at the end of the body. **Details** on a file shows its alt text, which the uploader, a maintainer or an administrator can edit there, and every issue, page and comment you can see that uses it, linked.
 
 **Files** lists every attachment in the project. Filter by type (All, Images, Video, Audio, Text, PDF, Archives, Other) or by uploader, and sort by newest, largest or name. The header shows how many files the project holds and their total size. Expand a row to see which issues, pages and comments use the file and jump to them. The uploader, a maintainer or an administrator can delete a file; the confirmation says how many references it will break.
 
