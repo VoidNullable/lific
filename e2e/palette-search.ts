@@ -30,7 +30,7 @@ const BODY_ONLY_TOKEN = "zarquontoken";
  *  page. */
 const MIXED_TOKEN = "mixedtoken";
 
-const PLACEHOLDER = /^Jump or act/;
+const PLACEHOLDER = /^Search or jump to/;
 
 type Seeded = { projectId: number };
 

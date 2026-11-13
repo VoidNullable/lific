@@ -1180,3 +1180,11 @@ html[data-motion="reduced"] *::after {
   border-radius: 2px;
   background: var(--palette-accent);
 }
+.palette-code {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 0.25rem;
+  background: color-mix(in oklab, var(--text) 6%, var(--surface));
+  color: var(--text-muted);
+}

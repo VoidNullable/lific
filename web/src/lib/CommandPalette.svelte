@@ -93,8 +93,8 @@
     | { type: "prompt"; action: PaletteAction };
 
   let open = $state(false);
-  // The full placeholder is a 45-character sentence that clips on a phone,
-  // where the overlay is full-screen and the field has no card to sit in.
+  // Phones get a shorter syntax hint: the overlay is full-screen there and
+  // the line has no card to sit in.
   let innerWidth = $state(1024);
   let narrow = $derived(innerWidth < 640);
   let mode = $state<Mode>({ type: "root" });
@@ -1100,9 +1100,7 @@
             ? (mode.action.prompt?.placeholder ?? "Type a value…")
             : mode.type === "submenu"
               ? "Filter…"
-              : narrow
-                ? "Jump or act…"
-                : "Jump or act… (try 34, OMN156, doc 3, or “status”)"}
+              : "Search or jump to…"}
           oninput={onInput}
           onkeydown={onInputKeydown}
         />
@@ -1136,6 +1134,17 @@
                pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1.5 sm:max-h-[420px]"
         bind:this={listEl}
       >
+        {#if mode.type === "root" && !query}
+          <!-- Syntax tips live here rather than in the placeholder: they are
+               only useful before the first keystroke. -->
+          <p
+            data-palette-hint
+            class="px-4 pt-1.5 pb-2 text-caption text-[var(--text-faint)] truncate"
+          >
+            <code class="palette-code">34</code>{#if !narrow} or <code class="palette-code">OMN-156</code>{/if}
+            jumps to an issue, <code class="palette-code">doc 3</code> to a page
+          </p>
+        {/if}
         {#if flatItems.length === 0}
           <p class="px-4 py-6 text-center text-body-sm text-[var(--text-faint)]">
             {searching
