@@ -1152,3 +1152,31 @@ html[data-motion="reduced"] *::after {
     transition: none;
   }
 }
+
+/* Command palette. Selection follows the sidebar: a neutral lift plus a thin
+   accent marker on the leading edge, so the row's ink never sits on an accent
+   tint and every accent reads the same in light and dark. */
+.command-palette {
+  --palette-selected: color-mix(in oklab, var(--text) 7%, var(--surface));
+  --palette-accent: color-mix(in oklab, var(--accent) 85%, var(--text));
+  --palette-match: color-mix(in oklab, var(--accent) 16%, transparent);
+}
+.palette-row {
+  position: relative;
+}
+.palette-row[aria-selected="true"] {
+  /* Faint metadata would fall under AA on the lifted fill; bump it within
+     the selected row only, as the sidebar does. */
+  --text-faint: var(--text-muted);
+  background: var(--palette-selected);
+}
+.palette-row[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.375rem;
+  bottom: 0.375rem;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--palette-accent);
+}

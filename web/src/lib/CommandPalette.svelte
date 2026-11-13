@@ -1066,7 +1066,8 @@
          the input at the top, above the keyboard, with the results between
          them — which is also what every native search surface does. -->
     <div
-      class="w-full h-full flex flex-col bg-[var(--surface)]
+      data-command-palette
+      class="command-palette w-full h-full flex flex-col bg-[var(--surface)]
              border-[var(--border)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden
              sm:h-auto sm:max-w-[580px] sm:border sm:rounded-xl"
       onclick={(e) => e.stopPropagation()}
@@ -1148,11 +1149,9 @@
         {:else if mode.type === "submenu"}
           {#each childHits as c, i (c.title)}
             <button
-              class="w-full flex items-center gap-2.5 px-4 py-2 text-left
-                     transition-colors
-                     {i === selectedIdx
-                ? 'bg-[var(--accent-subtle)]'
-                : 'hover:bg-[var(--bg-subtle)]'}"
+              class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+              role="option"
+              aria-selected={i === selectedIdx}
               data-flat-idx={i}
               onclick={() => pickItem({ t: "child", c })}
               onmouseenter={() => { selectedIdx = i; }}
@@ -1194,11 +1193,9 @@
             </div>
             {#each actionHits as a, i (a.id)}
               <button
-                class="w-full flex items-center gap-2.5 px-4 py-2 text-left
-                       transition-colors
-                       {i === selectedIdx
-                  ? 'bg-[var(--accent-subtle)]'
-                  : 'hover:bg-[var(--bg-subtle)]'}"
+                class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+                role="option"
+                aria-selected={i === selectedIdx}
                 data-flat-idx={i}
                 onclick={() => pickItem({ t: "action", a })}
                 onmouseenter={() => { selectedIdx = i; }}
@@ -1231,11 +1228,9 @@
             </div>
             {#each group.entries as { r, flatIdx } (r.route + (r.identifier ?? r.title))}
               <button
-                class="w-full flex items-center gap-2.5 px-4 py-2 text-left
-                       transition-colors
-                       {flatIdx === selectedIdx
-                  ? 'bg-[var(--accent-subtle)]'
-                  : 'hover:bg-[var(--bg-subtle)]'}"
+                class="palette-row w-full flex items-center gap-2.5 px-4 py-2 text-left"
+                role="option"
+                aria-selected={flatIdx === selectedIdx}
                 data-flat-idx={flatIdx}
                 onclick={(e) => pickItem({ t: "nav", r }, e.metaKey || e.ctrlKey)}
                 onmousedown={(e) => { if (e.button === 1) e.preventDefault(); }}
