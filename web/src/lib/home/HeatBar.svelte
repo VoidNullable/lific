@@ -7,7 +7,7 @@
 </script>
 
 <span
-  class="relative block h-1.5 w-full overflow-hidden rounded-full"
+  class="relative block h-1.5 w-full overflow-hidden"
   style="background: linear-gradient(90deg, var(--heat-1), var(--heat-2), var(--heat-3), var(--heat-4), var(--heat-5), var(--heat-6));"
   role="meter"
   aria-valuemin={0}

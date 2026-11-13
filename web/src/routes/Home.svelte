@@ -44,12 +44,7 @@
   import {
     Plus,
     Command,
-    Pin,
     FileText,
-    Sunrise,
-    Sun,
-    Sunset,
-    Moon,
     UserCheck,
     User,
     Hourglass,
@@ -355,17 +350,8 @@
     return "Good night";
   }
 
-  function greetingIcon(h: number) {
-    if (h < 5) return Moon;
-    if (h < 12) return Sunrise;
-    if (h < 17) return Sun;
-    if (h < 21) return Sunset;
-    return Moon;
-  }
-
   const nowHour = new Date().getHours();
   const greeting = greetingText(nowHour);
-  const GreetIcon = greetingIcon(nowHour);
   const todayLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
@@ -389,59 +375,52 @@
   </div>
 {/snippet}
 
-{#snippet cardHeader(Icon: typeof Bot, title: string, subtitle: string, count?: number)}
-  <div class="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
-    <span class="size-7 shrink-0 rounded-lg bg-[var(--bg-subtle)] flex items-center justify-center text-[var(--text-muted)]">
-      <Icon size={14} />
-    </span>
-    <div class="min-w-0 flex-1">
-      <h2 class="text-body-sm font-semibold text-[var(--text)] leading-tight flex items-center gap-2">
-        {title}
-        {#if count !== undefined}
-          <span class="text-micro font-normal text-[var(--text-faint)] tabular-nums">{count}</span>
-        {/if}
-      </h2>
-      <p class="text-caption text-[var(--text-faint)] truncate">{subtitle}</p>
-    </div>
+{#snippet sectionHeading(title: string, count?: number, note?: string)}
+  <div class="mb-4">
+    <h2 class="flex items-center gap-2.5 text-[1.35rem] font-semibold tracking-tight leading-tight text-[var(--text)]">
+      {title}
+      {#if count !== undefined}
+        <span
+          class="text-[0.8rem] font-medium tabular-nums text-[var(--text)] bg-[var(--chart-tile)]
+                 min-w-6 h-6 px-2 rounded-full inline-flex items-center justify-center"
+        >
+          {count}
+        </span>
+      {/if}
+    </h2>
+    {#if note}
+      <p class="text-[0.95rem] text-[var(--text-muted)] mt-1">{note}</p>
+    {/if}
   </div>
 {/snippet}
 
-<div class="h-full flex flex-col">
-  <div class="flex-1 overflow-y-auto">
+<div class="home h-full overflow-y-auto">
+  <div class="max-w-[1320px] mx-auto px-6 md:px-10 pt-7 pb-12">
     {#if loading}
       <!-- LIF-281: content-shaped skeleton mirroring the loaded layout:
-           greeting, the chart card, the two lanes, then the bottom row. -->
-      <div class="max-w-[1280px] mx-auto px-6 md:px-8 py-8 md:py-10">
-        <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+           the header, the charts row, then the two lanes. -->
+      <div class="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[var(--border)]">
+        <div class="flex flex-col gap-2.5">
+          <Skeleton variant="bar" class="h-7 w-64" />
+          <Skeleton variant="bar" class="h-3.5 w-40" />
+        </div>
+        <div class="flex items-center gap-2">
+          <Skeleton variant="bar" class="h-8 w-28 rounded-md" />
+          <Skeleton variant="bar" class="h-8 w-24 rounded-md" />
+        </div>
+      </div>
+      <div class="py-6 border-b border-[var(--border)]">
+        <Skeleton variant="bar" class="h-5 w-48 mb-5" />
+        <Skeleton variant="block" class="h-[264px] w-full rounded-lg" />
+      </div>
+      <div class="pt-6 flex flex-col gap-4">
+        <Skeleton variant="bar" class="h-5 w-40 mb-1" />
+        {#each [0, 1, 2, 3] as row (row)}
           <div class="flex items-center gap-3">
-            <Skeleton variant="circle" class="size-11 rounded-xl" />
-            <div class="flex flex-col gap-2">
-              <Skeleton variant="bar" class="h-5 w-48" />
-              <Skeleton variant="bar" class="h-3 w-32" />
-            </div>
+            <Skeleton variant="bar" class="h-3 w-16 shrink-0" />
+            <Skeleton variant="bar" class="h-3 flex-1 max-w-[360px]" />
           </div>
-          <div class="flex items-center gap-2">
-            <Skeleton variant="bar" class="h-8 w-28 rounded-md" />
-            <Skeleton variant="bar" class="h-8 w-24 rounded-md" />
-          </div>
-        </div>
-        <Skeleton variant="block" class="h-[300px] w-full rounded-xl mb-6" />
-        <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6 mb-6">
-          {#each [0, 1] as lane (lane)}
-            <div class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
-              <div class="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
-                <Skeleton variant="circle" class="size-7 rounded-lg" />
-                <Skeleton variant="bar" class="h-3.5 w-32" />
-              </div>
-              {#each [0, 1, 2, 3] as row (row)}
-                <div class="flex items-center gap-2.5 px-4 py-2.5 border-b border-[var(--border)] last:border-b-0">
-                  <Skeleton variant="bar" class="h-3 w-16 shrink-0" />
-                  <Skeleton variant="bar" class="h-3 flex-1 max-w-[260px]" />
-                </div>
-              {/each}
-            </div>
-          {/each}
-        </div>
+        {/each}
       </div>
     {:else if error}
       <ErrorState title="Couldn't load your dashboard" message={error}>
@@ -453,188 +432,162 @@
         </button>
       </ErrorState>
     {:else}
-      <div class="max-w-[1280px] mx-auto px-6 md:px-8 py-8 md:py-10 flex flex-col gap-6">
-        <!-- ── GREETING + QUICK ACTIONS ─────────────────────── -->
-        <div class="flex flex-wrap items-start justify-between gap-4">
-          <div class="flex items-center gap-3 min-w-0">
-            <span
-              class="size-11 shrink-0 rounded-xl bg-[var(--accent-subtle)]
-                     flex items-center justify-center text-[var(--accent)]"
-            >
-              <GreetIcon size={20} />
-            </span>
-            <div class="min-w-0">
-              <h1 class="font-display text-title tracking-tight text-[var(--text)] leading-none">
-                {greeting}{user ? `, ${user.display_name || user.username}` : ""}
-              </h1>
-              <p class="text-body-sm text-[var(--text-muted)] mt-1">{todayLabel}</p>
-            </div>
-          </div>
-
-          <div class="flex items-center gap-2">
-            {#if quickIssueProject}
-              <button
-                class="flex items-center gap-1.5 text-body-sm font-medium
-                       text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                       px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-                onclick={() => navigate(`/${quickIssueProject}/issues/new`)}
-              >
-                <Plus size={14} /> New issue
-              </button>
-            {/if}
-            <button
-              class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]
-                     hover:text-[var(--text)] border border-[var(--border)]
-                     px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={openPalette}
-              title="Open command palette"
-            >
-              <Command size={13} />
-              Jump to…
-              <kbd class="font-mono text-micro leading-none text-[var(--text-faint)]
-                          border border-[var(--border)] rounded px-1 py-0.5 ml-0.5">⌘K</kbd>
-            </button>
-          </div>
+      <!-- ── HEADER + QUICK ACTIONS ───────────────────────── -->
+      <header class="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-[var(--border)]">
+        <div class="min-w-0">
+          <h1 class="text-[1.9rem] font-semibold tracking-tight leading-tight text-[var(--text)]">
+            {greeting}{user ? `, ${user.display_name || user.username}` : ""}
+          </h1>
+          <p class="text-[0.95rem] text-[var(--text-muted)] mt-1">{todayLabel}</p>
           {#if sinceLine}
-            <p class="basis-full -mt-2 text-body-sm text-[var(--text-muted)]" data-testid="since-line">
-              {sinceLine}
-            </p>
+            <p class="text-[0.95rem] text-[var(--text-muted)] mt-0.5" data-testid="since-line">{sinceLine}</p>
           {/if}
         </div>
 
-        <!-- ── OPEN WORK BY AGE ─────────────────────────────── -->
-        {#if overview}
-          <section
-            class="rounded-xl bg-[var(--surface)] border border-[var(--border)]
-                   grid grid-cols-1 lg:grid-cols-[1fr_340px]"
-          >
-            <div class="p-5 min-w-0">
-              <h2 class="text-body-sm font-semibold text-[var(--text)]">Open work by age</h2>
-              <p class="text-caption text-[var(--text-faint)] mt-0.5">
-                {overview.open_total} open across {overview.projects.filter((p) => p.open > 0).length}
-                {overview.projects.filter((p) => p.open > 0).length === 1 ? "project" : "projects"},
-                {weekDelta > 0 ? `+${weekDelta}` : weekDelta === 0 ? "no change" : weekDelta} this week
-              </p>
-              <AgeChart buckets={overview.age_buckets} />
-            </div>
-            <div
-              class="p-5 flex flex-col gap-5 border-t lg:border-t-0 lg:border-l border-[var(--border)] min-w-0"
+        <div class="flex items-center gap-2">
+          {#if quickIssueProject}
+            <button
+              class="flex items-center gap-1.5 text-body-sm font-medium
+                     text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                     px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+              onclick={() => navigate(`/${quickIssueProject}/issues/new`)}
             >
-              <div>
-                <div class="flex items-baseline justify-between mb-2">
-                  <h2 class="text-body-sm font-semibold text-[var(--text)]">Open over 90 days</h2>
-                  <span class="text-micro text-[var(--text-faint)] tabular-nums">
-                    {overview.open_trend[overview.open_trend.length - 1]?.count ?? 0} now
-                  </span>
-                </div>
-                <OpenTrend points={overview.open_trend} />
-              </div>
-              <div>
-                <h2 class="text-body-sm font-semibold text-[var(--text)] mb-1.5">Project freshness</h2>
-                <ProjectFreshness pulses={overview.projects} {projects} {navigate} />
-              </div>
-            </div>
-          </section>
-        {/if}
-
-        <!-- ── THE TWO LANES ─────────────────────────────────── -->
-        <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6 items-start">
-          <section
-            class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden min-w-0"
-            data-testid="agent-queue"
+              <Plus size={14} /> New issue
+            </button>
+          {/if}
+          <button
+            class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]
+                   hover:text-[var(--text)] border border-[var(--border)]
+                   px-3 py-1.5 rounded-md hover:bg-[var(--chart-hover)] transition-colors"
+            onclick={openPalette}
+            title="Open command palette"
           >
-            {@render cardHeader(
-              Bot,
-              "Agent queue",
-              "Unassigned and unblocked, ranked by priority, age and idle time.",
-              agentQueue.length,
+            <Command size={13} />
+            Jump to…
+            <kbd class="font-mono text-micro leading-none text-[var(--text-faint)]
+                        border border-[var(--border)] rounded px-1 py-0.5 ml-0.5">⌘K</kbd>
+          </button>
+        </div>
+      </header>
+
+      <!-- ── OPEN WORK: AGE AND TREND ──────────────────────── -->
+      {#if overview}
+        {@const busyProjects = overview.projects.filter((p) => p.open > 0).length}
+        <div class="home-split border-b border-[var(--border)]">
+          <section class="py-6 min-w-0" data-testid="open-by-age">
+            {@render sectionHeading(
+              "Open work by age",
+              undefined,
+              `${overview.open_total} open across ${busyProjects} ${busyProjects === 1 ? "project" : "projects"}, ` +
+                `${weekDelta > 0 ? `+${weekDelta}` : weekDelta === 0 ? "no change" : weekDelta} this week`,
             )}
-            {#if agentQueue.length === 0}
-              <div class="flex flex-col items-center justify-center py-12 gap-3">
-                <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.16} />
-                <p class="text-body-sm text-[var(--text-muted)]">Nothing is waiting for an agent.</p>
-              </div>
-            {:else}
+            <AgeChart buckets={overview.age_buckets} />
+          </section>
+          <section class="home-aside py-6 min-w-0">
+            {@render sectionHeading(
+              "Open over 90 days",
+              undefined,
+              `${overview.open_trend[overview.open_trend.length - 1]?.count ?? 0} open now`,
+            )}
+            <OpenTrend points={overview.open_trend} />
+          </section>
+        </div>
+      {/if}
+
+      <!-- ── THE TWO LANES ─────────────────────────────────── -->
+      <div class="home-split border-b border-[var(--border)]">
+        <section class="py-6 min-w-0" data-testid="agent-queue">
+          {@render sectionHeading(
+            "Agent queue",
+            agentQueue.length,
+            "Unassigned and unblocked, ranked by priority, age and idle time.",
+          )}
+          {#if agentQueue.length === 0}
+            <div class="flex flex-col items-center justify-center py-10 gap-3">
+              <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.16} />
+              <p class="text-[0.95rem] text-[var(--text-muted)]">Nothing is waiting for an agent.</p>
+            </div>
+          {:else}
+            <ol class="flex flex-col border-t border-[var(--border)]">
               {#each agentQueue.slice(0, QUEUE_CAP) as { issue, score }, rank (issue.id)}
                 {@const idle = daysSince(issue.updated_at)}
-                <button
-                  class="w-full flex items-center gap-3 px-4 py-2.5 text-left border-b border-[var(--border)]
-                         last:border-b-0 hover:bg-[var(--bg-subtle)] transition-colors"
-                  data-identifier={issue.identifier}
-                  onclick={() => openIssue(issue)}
-                >
-                  <span class="w-4 shrink-0 text-caption tabular-nums text-[var(--text-faint)] text-right">{rank + 1}</span>
-                  <span class="w-14 shrink-0 hidden sm:block"><HeatBar value={heat(score)} /></span>
-                  <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
-                    {issue.identifier}
-                  </span>
-                  <span class="text-body-sm text-[var(--text)] truncate flex-1">{issue.title}</span>
-                  <PriorityIcon priority={issue.priority} size={15} />
-                  <span class="shrink-0 hidden md:flex items-center gap-1.5 text-micro tabular-nums">
-                    <span class="w-[52px] text-right text-[var(--text-faint)]">{ageLabel(daysSince(issue.created_at))} old</span>
-                    {#if idle >= 14}
-                      <span class="px-1.5 py-0.5 rounded-full text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)]">
-                        idle {ageLabel(idle)}
-                      </span>
-                    {:else}
-                      <span class="px-1.5 py-0.5 text-[var(--text-faint)]">idle {ageLabel(idle)}</span>
-                    {/if}
-                  </span>
-                </button>
+                <li>
+                  <button
+                    class="w-full flex items-center gap-3 px-1 py-2.5 text-left border-b border-[var(--border)]
+                           hover:bg-[var(--chart-hover)] transition-colors"
+                    data-identifier={issue.identifier}
+                    onclick={() => openIssue(issue)}
+                  >
+                    <span class="w-4 shrink-0 text-caption tabular-nums text-[var(--text-faint)] text-right">{rank + 1}</span>
+                    <span class="w-14 shrink-0 hidden sm:block"><HeatBar value={heat(score)} /></span>
+                    <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
+                      {issue.identifier}
+                    </span>
+                    <span class="text-body-sm text-[var(--text)] truncate flex-1">{issue.title}</span>
+                    <PriorityIcon priority={issue.priority} size={15} />
+                    <span class="shrink-0 hidden md:flex items-center gap-1.5 text-micro tabular-nums">
+                      <span class="w-[52px] text-right text-[var(--text-faint)]">{ageLabel(daysSince(issue.created_at))} old</span>
+                      {#if idle >= 14}
+                        <span class="px-1.5 py-0.5 rounded-full text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)]">
+                          idle {ageLabel(idle)}
+                        </span>
+                      {:else}
+                        <span class="px-1.5 py-0.5 text-[var(--text-faint)]">idle {ageLabel(idle)}</span>
+                      {/if}
+                    </span>
+                  </button>
+                </li>
               {/each}
-              {#if agentQueue.length > QUEUE_CAP}
-                <p class="px-4 py-2 text-caption text-[var(--text-faint)] border-t border-[var(--border)]">
-                  {agentQueue.length - QUEUE_CAP} more ready after these.
-                </p>
-              {/if}
-            {/if}
-          </section>
-
-          <section
-            class="rounded-xl bg-[var(--surface)] border border-[var(--border)] overflow-hidden min-w-0"
-            data-testid="needs-you"
-          >
-            {@render cardHeader(
-              User,
-              "Only you",
-              "Assigned to you, marked for a person, or waiting on you.",
-              attention ? attentionTotal : undefined,
-            )}
-            {#if !attention}
-              <p class="px-4 py-3 text-body-sm text-[var(--text-muted)]">Couldn't load what needs you.</p>
-            {:else if attentionGroups.length === 0}
-              <p class="px-4 py-3 text-body-sm text-[var(--text-muted)]">
-                Nothing is assigned to you or waiting on you.
+            </ol>
+            {#if agentQueue.length > QUEUE_CAP}
+              <p class="pt-2.5 text-caption text-[var(--text-muted)]">
+                {agentQueue.length - QUEUE_CAP} more ready after these.
               </p>
-            {:else}
+            {/if}
+          {/if}
+        </section>
+
+        <section class="home-aside py-6 min-w-0" data-testid="needs-you">
+          {@render sectionHeading(
+            "Only you",
+            attention ? attentionTotal : undefined,
+            "Assigned to you, marked for a person, or waiting on you.",
+          )}
+          {#if !attention}
+            <p class="text-[0.95rem] text-[var(--text-muted)]">Couldn't load what needs you.</p>
+          {:else if attentionGroups.length === 0}
+            <p class="text-[0.95rem] text-[var(--text-muted)]">Nothing is assigned to you or waiting on you.</p>
+          {:else}
+            <div class="flex flex-col gap-5">
               {#each attentionGroups as group (group.key)}
                 {@const expanded = attentionExpanded.has(group.key)}
                 {@const shown = expanded ? group.items : group.items.slice(0, ATTENTION_CAP)}
-                <div data-attention-group={group.key} class="border-b border-[var(--border)] last:border-b-0">
-                  <div class="flex items-center gap-2 px-4 pt-2.5 pb-1 text-caption font-medium text-[var(--text-muted)]">
+                <div data-attention-group={group.key}>
+                  <div class="flex items-center gap-2 pb-1.5 text-caption font-medium text-[var(--text-muted)]">
                     <group.icon size={13} class="shrink-0 text-[var(--text-faint)]" />
                     <span>{group.label}</span>
-                    <span class="text-micro text-[var(--text-faint)] tabular-nums">{group.items.length}</span>
+                    <span class="text-[var(--text-faint)] tabular-nums">{group.items.length}</span>
                   </div>
-                  {#each shown as issue (issue.id)}
-                    <button
-                      class="w-full flex items-center gap-2.5 px-4 py-2 text-left hover:bg-[var(--bg-subtle)] transition-colors"
-                      data-identifier={issue.identifier}
-                      onclick={() => openIssue(issue)}
-                    >
-                      <StatusIcon status={issue.status} size={14} />
-                      <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
-                        {issue.identifier}
-                      </span>
-                      <span class="text-body-sm text-[var(--text)] truncate flex-1">{issue.title}</span>
-                      <PriorityIcon priority={issue.priority} size={15} />
-                    </button>
-                  {/each}
+                  <div class="flex flex-col border-t border-[var(--border)]">
+                    {#each shown as issue (issue.id)}
+                      <button
+                        class="w-full flex items-center gap-2.5 px-1 py-2 text-left border-b border-[var(--border)]
+                               hover:bg-[var(--chart-hover)] transition-colors"
+                        data-identifier={issue.identifier}
+                        onclick={() => openIssue(issue)}
+                      >
+                        <StatusIcon status={issue.status} size={14} />
+                        <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
+                          {issue.identifier}
+                        </span>
+                        <span class="text-body-sm text-[var(--text)] truncate flex-1">{issue.title}</span>
+                        <PriorityIcon priority={issue.priority} size={15} />
+                      </button>
+                    {/each}
+                  </div>
                   {#if group.items.length > ATTENTION_CAP}
                     <button
-                      class="w-full flex items-center justify-center gap-1 px-4 py-2
-                             text-caption text-[var(--text-muted)] hover:text-[var(--text)]
-                             hover:bg-[var(--bg-subtle)] transition-colors"
+                      class="mt-1.5 text-caption text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
                       onclick={() => toggleAttentionGroup(group.key)}
                     >
                       {expanded ? "Show fewer" : `Show all ${group.items.length}`}
@@ -642,99 +595,128 @@
                   {/if}
                 </div>
               {/each}
-            {/if}
-          </section>
-        </div>
-
-        <!-- ── ACTIVITY, HEATMAP, PINS ──────────────────────── -->
-        <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start">
-          <section class="rounded-xl bg-[var(--surface)] border border-[var(--border)] p-4 min-w-0">
-            <div class="flex items-center justify-between mb-2">
-              <h2 class="text-body-sm font-semibold text-[var(--text)]">Recent activity</h2>
-              {#if realtimeActivityReady}
-                <span
-                  class="text-micro text-[var(--text-faint)] tabular-nums text-right"
-                  title="Websocket activity rate; the day fallback includes the last 24 hours"
-                >
-                  {activityRate.value} {activityRate.unit}
-                </span>
-              {/if}
             </div>
+          {/if}
+        </section>
+      </div>
+
+      <!-- ── FRESHNESS, YOUR WEEKS, ACTIVITY, PINS ─────────── -->
+      <div class="home-split">
+        <section class="pt-6 min-w-0" data-testid="project-freshness">
+          {@render sectionHeading("Project freshness", undefined, "Open work per project, colored by its last change.")}
+          {#if overview}
+            <ProjectFreshness pulses={overview.projects} {projects} {navigate} />
+          {/if}
+        </section>
+
+        <div class="home-aside pt-6 max-xl:mt-6 min-w-0 flex flex-col gap-8">
+          {#if overview}
+            <section>
+              {@render sectionHeading("Your last 12 weeks", undefined, "Issues you and your agents finished.")}
+              <DoneHeatmap days={overview.my_done} />
+            </section>
+          {/if}
+          <section>
+            {@render sectionHeading(
+              "Recent activity",
+              undefined,
+              realtimeActivityReady ? `${activityRate.value} ${activityRate.unit}` : undefined,
+            )}
             {#if activityItems.length === 0}
-              <p class="text-body-sm text-[var(--text-muted)]">No recent activity.</p>
+              <p class="text-[0.95rem] text-[var(--text-muted)]">No recent activity.</p>
             {:else}
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-0.5">
+              <ol class="flex flex-col">
                 {#each activityItems as a (a.id)}
                   {@const dest = activityDest(a)}
                   {@const ident = projectIdent(a.project_id)}
-                  <button
-                    type="button"
-                    disabled={!dest}
-                    class="flex items-start gap-2 px-2 py-1.5 -mx-2 rounded-md text-body-sm leading-snug text-left
-                           {dest ? 'hover:bg-[var(--bg-subtle)]' : ''}
-                           transition-colors disabled:cursor-default min-w-0"
-                    onclick={() => dest && navigate(dest)}
-                  >
-                    {#if a.actor_is_bot}
-                      <Bot size={13} class="shrink-0 mt-0.5 text-[var(--text-faint)]" />
-                    {:else}
-                      <User size={13} class="shrink-0 mt-0.5 text-[var(--text-faint)]" />
-                    {/if}
-                    <span class="flex-1 min-w-0 text-[var(--text-muted)]">
-                      <span class="font-medium text-[var(--text)]">{activityActor(a)}</span>
-                      {activityVerb(a)}
-                      {#if ident}
-                        <span class="font-mono text-caption text-[var(--accent)]">
-                          {a.entity_label ?? `${ident} #${a.entity_id}`}
-                        </span>
-                      {/if}
-                    </span>
-                  </button>
+                  <li>
+                    <button
+                      type="button"
+                      disabled={!dest}
+                      class="w-full flex items-start gap-3 px-1 py-2 rounded-md text-body-sm leading-snug text-left
+                             {dest ? 'hover:bg-[var(--chart-hover)]' : ''}
+                             transition-colors disabled:cursor-default min-w-0"
+                      onclick={() => dest && navigate(dest)}
+                    >
+                      <span class="size-7 shrink-0 rounded-lg bg-[var(--chart-tile)] flex items-center justify-center text-[var(--text-muted)]">
+                        {#if a.actor_is_bot}
+                          <Bot size={14} />
+                        {:else}
+                          <User size={14} />
+                        {/if}
+                      </span>
+                      <span class="flex-1 min-w-0 pt-1 text-[var(--text-muted)]">
+                        <span class="font-medium text-[var(--text)]">{activityActor(a)}</span>
+                        {activityVerb(a)}
+                        {#if ident}
+                          <span class="font-mono text-caption text-[var(--accent)]">
+                            {a.entity_label ?? `${ident} #${a.entity_id}`}
+                          </span>
+                        {/if}
+                      </span>
+                    </button>
+                  </li>
                 {/each}
-              </div>
+              </ol>
             {/if}
           </section>
 
-          <aside class="flex flex-col gap-6 min-w-0">
-            {#if overview}
-              <section class="rounded-xl bg-[var(--surface)] border border-[var(--border)] p-4">
-                <DoneHeatmap days={overview.my_done} />
-              </section>
-            {/if}
-
-            {#if pinnedPages.length > 0}
-              <section>
-                <div class="flex items-center gap-2 mb-2">
-                  <Pin size={12} class="text-[var(--text-faint)]" />
-                  <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-                    Pinned pages
-                  </h2>
-                </div>
-                <div class="flex flex-col gap-0.5">
-                  {#each pinnedPages as page (page.id)}
-                    {@const ident = projectIdent(page.project_id)}
-                    {#if ident}
-                      <button
-                        class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left
-                               hover:bg-[var(--bg-subtle)] transition-colors"
-                        onclick={() => navigate(`/${ident}/pages/${page.id}`)}
-                      >
-                        <FileText size={13} class="shrink-0 text-[var(--text-faint)]" />
-                        <span class="flex-1 min-w-0 text-body-sm text-[var(--text)] truncate">
-                          {page.title}
-                        </span>
-                        <span class="shrink-0 text-micro text-[var(--text-faint)] font-mono">
-                          {ident}
-                        </span>
-                      </button>
-                    {/if}
-                  {/each}
-                </div>
-              </section>
-            {/if}
-          </aside>
+          {#if pinnedPages.length > 0}
+            <section>
+              {@render sectionHeading("Pinned pages", pinnedPages.length)}
+              <div class="flex flex-col border-t border-[var(--border)]">
+                {#each pinnedPages as page (page.id)}
+                  {@const ident = projectIdent(page.project_id)}
+                  {#if ident}
+                    <button
+                      class="w-full flex items-center gap-2.5 px-1 py-2 text-left border-b border-[var(--border)]
+                             hover:bg-[var(--chart-hover)] transition-colors"
+                      onclick={() => navigate(`/${ident}/pages/${page.id}`)}
+                    >
+                      <FileText size={14} class="shrink-0 text-[var(--text-faint)]" />
+                      <span class="flex-1 min-w-0 text-body-sm text-[var(--text)] truncate">{page.title}</span>
+                      <span class="shrink-0 text-micro text-[var(--text-faint)] font-mono">{ident}</span>
+                    </button>
+                  {/if}
+                {/each}
+              </div>
+            </section>
+          {/if}
         </div>
       </div>
     {/if}
   </div>
 </div>
+
+<style>
+  /* Chart ink shared by the Home charts, in the spirit of the agent activity
+     page but built from the theme so accents and light/dark still apply. */
+  .home {
+    --chart-grid: color-mix(in oklab, var(--text) 7%, transparent);
+    --chart-axis: color-mix(in oklab, var(--text) 22%, transparent);
+    --chart-hover: color-mix(in oklab, var(--text) 4.5%, transparent);
+    --chart-tile: color-mix(in oklab, var(--text) 7.5%, transparent);
+  }
+  /* Two columns split by a hairline on wide screens; stacked, the second
+     column gets a rule above it instead. */
+  .home-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .home-aside {
+    border-top: 1px solid var(--border);
+  }
+  @media (min-width: 1280px) {
+    .home-split {
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+    }
+    .home-split > :first-child {
+      padding-right: 2rem;
+    }
+    .home-aside {
+      border-top: 0;
+      border-left: 1px solid var(--border);
+      padding-left: 2rem;
+    }
+  }
+</style>

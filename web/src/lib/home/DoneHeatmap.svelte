@@ -41,22 +41,28 @@
   }
 </script>
 
-<div>
-  <div class="flex items-baseline justify-between gap-2 mb-2.5">
-    <h2 class="text-body-sm font-semibold text-[var(--text)]">Your last 12 weeks</h2>
-    <span class="text-micro text-[var(--text-faint)] tabular-nums">{thisMonth} done this month</span>
-  </div>
+<div class="max-w-[300px]">
   <div class="flex gap-[3px]" role="img" aria-label="Issues you and your agents finished each day">
     {#each columns as col, ci (ci)}
       <div class="flex-1 flex flex-col gap-[3px]">
         {#each col as cell, ri (ri)}
           {#if cell}
-            <span class="block aspect-square rounded-[2px]" style="background: {fill(cell.count)}" title={label(cell)}></span>
+            <span class="block aspect-square" style="background: {fill(cell.count)}" title={label(cell)}></span>
           {:else}
             <span class="block aspect-square"></span>
           {/if}
         {/each}
       </div>
     {/each}
+  </div>
+  <div class="flex items-center justify-between gap-3 mt-2.5 text-caption text-[var(--text-muted)]">
+    <span class="tabular-nums">{thisMonth} done this month</span>
+    <span class="flex items-center gap-1" aria-hidden="true">
+      Less
+      {#each [0, 1, 2, 5, 7] as c (c)}
+        <span class="size-2.5" style="background: {fill(c)}"></span>
+      {/each}
+      More
+    </span>
   </div>
 </div>
