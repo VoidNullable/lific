@@ -996,13 +996,13 @@
       </div>
 
       <!-- Jump-to / command palette trigger -->
-      <div class="sidebar-launcher-wrap px-3">
+      <div class="sidebar-launcher-wrap px-2">
         <button
-          class="sidebar-launcher w-full h-9 flex items-center gap-2 pl-2.5 pr-1.5 rounded-lg transition-colors"
+          class="sidebar-launcher w-full h-10 flex items-center gap-3 pl-[0.6875rem] pr-2 rounded-lg transition-colors"
           onclick={() => palette?.openPalette()}
         >
-          <Search size={14} class="shrink-0" />
-          <span class="flex-1 min-w-0 truncate text-left text-body-sm">Search…</span>
+          <Search size={17} class="shrink-0" />
+          <span class="flex-1 min-w-0 truncate text-left text-body">Search…</span>
           <span class="flex items-center gap-0.5 shrink-0" aria-hidden="true">
             <kbd class="sidebar-key">{modKey}</kbd><kbd class="sidebar-key">K</kbd>
           </span>
@@ -1016,10 +1016,10 @@
         {#snippet workspaceItem(href: string, label: string, Icon: typeof Home, count: number | null, tone: "accent" | "plain", key: string)}
           <a href={`#${href}`} use:navLink={navigate} aria-current={route === href ? "page" : undefined}
             data-workspace={key}
-            class="sidebar-destination sidebar-workspace-item w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md
-                   text-left text-body-sm transition-colors"
+            class="sidebar-destination sidebar-workspace-item w-full h-10 flex items-center gap-3 pl-[0.6875rem] pr-2 rounded-md
+                   text-left text-body transition-colors"
           >
-            <Icon size={14} class="shrink-0" />
+            <Icon size={18} class="shrink-0" />
             <span class="flex-1 min-w-0 truncate">{label}</span>
             {#if count}
               <span class="sidebar-count" data-tone={tone}>{countLabel(count)}</span>
@@ -1044,31 +1044,22 @@
             {@const open = subnavOpen(project)}
             <div
               class="sidebar-row sidebar-project group w-full flex items-center rounded-md
-                     text-left text-body-sm font-medium text-[var(--text)] transition-colors"
+                     text-left text-body font-medium text-[var(--text)] transition-colors"
             >
-              <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--sidebar-hover)]"
-                aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
-                aria-expanded={open} aria-controls={`project-nav-${project.id}`}
-                onclick={() => toggleProject(project)}>
-              <ChevronRight
-                size={13}
-                class="shrink-0 transition-transform
-                       {open ? 'rotate-90' : ''}
-                       {isProjectActive ? 'text-[var(--text-muted)]' : 'text-[var(--text-faint)] group-hover:text-[var(--text-muted)]'}"
-              />
-              </button>
+              <!-- The icon leads the row so it sits where the collapsed rail
+                   draws the same project; the disclosure moves to the end. -->
               <a href={`#/${project.identifier}/overview`} use:navLink={navigate}
                 data-sidebar-project={project.id}
                 aria-current={route === `/${project.identifier}/overview` ? "page" : undefined}
-                title={project.name} class="sidebar-project-link min-w-0 flex-1 flex items-center gap-1.5"
+                title={project.name} class="sidebar-project-link min-w-0 flex-1 flex items-center gap-2.5 pl-2"
                 oncontextmenu={(e) => openProjectMenu(e, project)}>
               {#if project.emoji}
                 <span class="sidebar-project-icon">
-                  <ProjectIcon value={project.emoji} size={16} />
+                  <ProjectIcon value={project.emoji} size={18} />
                 </span>
               {:else}
                 <span
-                  class="sidebar-project-icon sidebar-initials rounded text-micro font-medium tracking-tight"
+                  class="sidebar-project-icon sidebar-initials rounded-md text-caption font-medium tracking-tight"
                 >
                   {project.identifier.slice(0, 2)}
                 </span>
@@ -1077,7 +1068,18 @@
               </a>
               <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
                 aria-label={`Actions for ${project.name}`} aria-haspopup="menu"
-                onclick={(e) => openProjectMenu(e, project)}><Ellipsis size={15} /></button>
+                onclick={(e) => openProjectMenu(e, project)}><Ellipsis size={16} /></button>
+              <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--sidebar-hover)]"
+                aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
+                aria-expanded={open} aria-controls={`project-nav-${project.id}`}
+                onclick={() => toggleProject(project)}>
+              <ChevronRight
+                size={14}
+                class="shrink-0 transition-transform
+                       {open ? 'rotate-90' : ''}
+                       {isProjectActive ? 'text-[var(--text-muted)]' : 'text-[var(--text-faint)] group-hover:text-[var(--text-muted)]'}"
+              />
+              </button>
             </div>
 
               <!-- Sub-nav: indented under the project with a vertical guide
@@ -1086,10 +1088,10 @@
                 {#snippet subItem(href: string, label: string, Icon: typeof List)}
                   {@const active = isActive(href)}
                   <a href={`#${href}`} use:navLink={navigate} aria-current={active ? "page" : undefined}
-                    class="sidebar-destination w-full flex items-center gap-2 px-2 py-1 rounded-md
+                    class="sidebar-destination w-full h-8 flex items-center gap-2.5 px-2 rounded-md
                            text-left text-body-sm transition-colors"
                   >
-                    <Icon size={14} class="shrink-0" />
+                    <Icon size={16} class="shrink-0" />
                     {label}
                   </a>
                 {/snippet}
@@ -1289,10 +1291,10 @@
 
       <!-- Footer: the user identity IS the Settings entry (logout now lives
            inside Settings → Security). A compact theme toggle sits beside it. -->
-      <div class="sidebar-footer p-2">
+      <div class="sidebar-footer p-1.5">
         <div class="sidebar-account-card flex items-center gap-0.5 p-1 rounded-lg">
         <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
-          class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-2.5 px-1.5 py-1.5 rounded-md text-left transition-colors"
+          class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-3 pl-px pr-1.5 py-1 rounded-md text-left transition-colors"
           title="Account settings"
         >
           <div
