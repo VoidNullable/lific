@@ -28,6 +28,8 @@ export interface PaletteAction {
   title: string;
   /** Current value shown faintly (e.g. "active"). */
   hint?: string;
+  /** Keycaps for the shortcut that does the same thing (e.g. ["↵"]). */
+  keys?: string[];
   run?: () => void;
   children?: () => PaletteActionChild[];
   prompt?: {

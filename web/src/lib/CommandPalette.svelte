@@ -32,6 +32,7 @@
     createPage,
     getPage,
     resolveIssue,
+    updateIssue,
     search as searchApi,
     type Project,
     type Module,
@@ -62,6 +63,8 @@
     cachedProject, getProjectModel, peekProjectModel, refreshProjectModel,
   } from "./sync/readModel.svelte";
   import { toast } from "./toast/toast.svelte";
+  import { copyToClipboard } from "./clipboard";
+  import { STATUSES, PRIORITIES } from "./issues/grouping";
   import { getRecents, recentRoute } from "./home/recents";
   import { safeLabelColor } from "./labelColors";
   import { commandPaletteState } from "./commandPaletteState.svelte";
@@ -97,10 +100,18 @@
   // submenu — an action's children (statuses, labels, modules…)
   // prompt  — text input feeding an action (rename)
 
+  // item    — actions on one selected result (Ctrl/⌘ .)
+  //
+  // A submenu or prompt opened from an item's actions remembers that item
+  // as its parent, so Esc steps back one level rather than to the root.
+
+  type RootSnapshot = { query: string; key: string | null; idx: number };
+  type ItemMode = { type: "item"; result: PaletteResult; back: RootSnapshot };
   type Mode =
     | { type: "root" }
-    | { type: "submenu"; action: PaletteAction }
-    | { type: "prompt"; action: PaletteAction };
+    | ItemMode
+    | { type: "submenu"; action: PaletteAction; parent?: ItemMode }
+    | { type: "prompt"; action: PaletteAction; parent?: ItemMode };
 
   let open = $state(false);
   // Phones get a shorter syntax hint: the overlay is full-screen there and
@@ -186,11 +197,26 @@
       hide();
       return;
     }
+    if ((mode.type === "submenu" || mode.type === "prompt") && mode.parent) {
+      mode = mode.parent;
+      query = "";
+      selectedIdx = 0;
+      inputEl?.focus();
+      return;
+    }
+    const back = mode.type === "item" ? mode.back : null;
     mode = { type: "root" };
-    query = "";
-    selectedIdx = 0;
-    void runSearch("");
+    query = back?.query ?? "";
+    runSearch(query);
+    if (back) restoreSelection(back);
     inputEl?.focus();
+  }
+
+  /** Put the cursor back on the row it was on, once the list is rebuilt. */
+  function restoreSelection(snap: RootSnapshot) {
+    selectedIdx = preserveSelection(snap.key, flatItems.map(flatKey), snap.idx);
+    cursorMoved = selectedIdx > 0;
+    scrollSelectedIntoView();
   }
 
   function enterAction(a: PaletteAction) {
@@ -199,9 +225,10 @@
       a.run();
       return;
     }
+    const parent = mode.type === "item" ? mode : undefined;
     if (a.children) {
       cancelSearch(); // a nav response must not land on top of the submenu
-      mode = { type: "submenu", action: a };
+      mode = { type: "submenu", action: a, parent };
       query = "";
       selectedIdx = 0;
       inputEl?.focus();
@@ -209,7 +236,7 @@
     }
     if (a.prompt) {
       cancelSearch();
-      mode = { type: "prompt", action: a };
+      mode = { type: "prompt", action: a, parent };
       query = a.prompt.initial ?? "";
       selectedIdx = 0;
       tick().then(() => inputEl?.select());
@@ -553,6 +580,8 @@
     const raw: Array<{ label: string; items: FlatItem[] }> = [];
     if (mode.type === "submenu") {
       raw.push({ label: "", items: childHits.map((c) => ({ t: "child" as const, c })) });
+    } else if (mode.type === "item") {
+      raw.push({ label: "", items: itemHits.map((a) => ({ t: "action" as const, a })) });
     } else if (mode.type === "root") {
       const actionSection = {
         label: "Actions",
@@ -1172,8 +1201,8 @@
   let debounce: ReturnType<typeof setTimeout> | null = null;
   function onInput() {
     if (mode.type === "prompt") return; // prompt input isn't a search
-    if (mode.type === "submenu") {
-      selectedIdx = 0; // childHits derives from query directly
+    if (mode.type === "submenu" || mode.type === "item") {
+      selectedIdx = 0; // childHits and itemHits derive from query directly
       return;
     }
     cancelSearch();
@@ -1201,6 +1230,131 @@
   let flatItems = $derived<FlatItem[]>(
     sections.flatMap((sec) => sec.entries.map((e) => e.it)),
   );
+
+  // ── Item actions (Ctrl/⌘ .) ──────────────────────────
+
+  function absoluteLink(path: string): string {
+    return `${location.origin}${location.pathname}${location.search}#${path}`;
+  }
+
+  async function issueIdFor(r: PaletteResult): Promise<number | null> {
+    const project = resultProject(r);
+    const want = r.identifier?.toLowerCase();
+    const row = project
+      ? peekProjectModel(project.id)?.issueList.find((i) => i.identifier.toLowerCase() === want)
+      : undefined;
+    if (row) return row.id;
+    if (!r.identifier) return null;
+    const res = await resolveIssue(r.identifier);
+    return res.ok ? res.data.id : null;
+  }
+
+  async function updateResultIssue(r: PaletteResult, patch: { status?: string; priority?: string }) {
+    const id = await issueIdFor(r);
+    if (id === null) {
+      toast(`Couldn't find ${r.identifier}`, { kind: "error" });
+      return;
+    }
+    const res = await updateIssue(id, patch);
+    if (!res.ok) {
+      toast(`Couldn't update ${r.identifier}: ${res.error}`, { kind: "error" });
+      return;
+    }
+    const [field, value] = Object.entries(patch)[0] ?? ["", ""];
+    toast(`${r.identifier} ${field} set to ${value}`, { kind: "info", duration: 2500 });
+    delete fetchedPreview[r.route];
+    refreshProjectModel(resultProject(r)?.id);
+  }
+
+  /** The actions one result offers. Status and priority only for issues;
+   *  the server still decides whether the caller may change them. */
+  function itemActions(r: PaletteResult): PaletteAction[] {
+    const noun = KIND_NOUN[r.kind].toLowerCase();
+    const list: PaletteAction[] = [
+      { id: "item-open", title: "Open", keys: ["↵"], run: () => navigate(r.route) },
+      {
+        id: "item-new-tab",
+        title: "Open in new tab",
+        keys: [`${modKey} ↵`],
+        run: () => openInNewTab(r.route),
+      },
+      {
+        id: "item-copy-link",
+        title: "Copy link",
+        run: () => void copyToClipboard(absoluteLink(r.route), `link to ${r.identifier ?? noun}`),
+      },
+    ];
+    if (r.identifier) {
+      list.push({
+        id: "item-copy-id",
+        title: "Copy identifier",
+        hint: r.identifier,
+        run: () => void copyToClipboard(r.identifier!, r.identifier),
+      });
+    }
+    if (r.kind === "issue" && r.identifier) {
+      const known = modelDetail(r) ?? fetchedPreview[r.route];
+      const status = known?.status ?? r.status;
+      const priority = known?.priority ?? r.priority;
+      list.push(
+        {
+          id: "item-status",
+          title: "Set status…",
+          hint: status,
+          children: () => STATUSES.map((s) => ({
+            title: s,
+            status: s,
+            hint: s === status ? "current" : undefined,
+            run: () => void updateResultIssue(r, { status: s }),
+          })),
+        },
+        {
+          id: "item-priority",
+          title: "Set priority…",
+          hint: priority,
+          children: () => PRIORITIES.map((p) => ({
+            title: p === "none" ? "No priority" : p,
+            priority: p,
+            hint: p === priority ? "current" : undefined,
+            run: () => void updateResultIssue(r, { priority: p }),
+          })),
+        },
+      );
+    }
+    return list;
+  }
+
+  function openItemActions() {
+    if (mode.type !== "root") return;
+    const it = flatItems[selectedIdx];
+    if (it?.t !== "nav") return;
+    cancelSearch();
+    mode = {
+      type: "item",
+      result: it.r,
+      back: { query, key: flatKey(it), idx: selectedIdx },
+    };
+    query = "";
+    selectedIdx = 0;
+    inputEl?.focus();
+  }
+
+  let itemHits = $derived.by(() => {
+    if (mode.type !== "item") return [] as PaletteAction[];
+    const all = itemActions(mode.result);
+    const q = query.trim();
+    if (!q) return all;
+    return all.filter((a) => (fuzzyMatch(q, a.title)?.score ?? 0) >= 0.3);
+  });
+
+  /** Breadcrumb for the input row outside the root list. */
+  let crumb = $derived.by(() => {
+    if (mode.type === "root") return "";
+    const itemLabel = (m: ItemMode) => m.result.identifier ?? m.result.title;
+    if (mode.type === "item") return itemLabel(mode);
+    const title = mode.action.title.replace(/…$/, "");
+    return mode.parent ? `${itemLabel(mode.parent)} · ${title}` : title;
+  });
 
   // ── Preview ──────────────────────────────────────────
   //
@@ -1265,12 +1419,15 @@
   }
 
   let selectedItem = $derived(flatItems[selectedIdx] ?? null);
-  let showPreview = $derived(wide && mode.type === "root" && flatItems.length > 0);
+  let showPreview = $derived(
+    wide && (mode.type === "root" || mode.type === "item") && flatItems.length > 0,
+  );
 
   let preview = $derived.by(() => {
     const it = selectedItem;
-    if (!showPreview || !it || it.t !== "nav") return null;
-    const r = it.r;
+    // An item's action list keeps previewing the item it acts on.
+    const r = mode.type === "item" ? mode.result : it?.t === "nav" ? it.r : null;
+    if (!showPreview || !r) return null;
     const detail =
       r.kind === "issue" || r.kind === "page"
         ? (modelDetail(r) ?? fetchedPreview[r.route] ?? null)
@@ -1369,6 +1526,11 @@
       if (mode.type === "root") cycleScope(e.shiftKey ? -1 : 1);
       return;
     }
+    if (e.key === "." && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      openItemActions();
+      return;
+    }
     if (mode.type === "prompt") {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -1399,7 +1561,7 @@
       }
       const it = flatItems[selectedIdx];
       if (it) pickItem(it, newTab);
-    } else if (e.key === "Backspace" && !query && mode.type === "submenu") {
+    } else if (e.key === "Backspace" && !query && (mode.type === "submenu" || mode.type === "item")) {
       e.preventDefault();
       stepBack();
     }
@@ -1447,15 +1609,9 @@
         {#if mode.type === "root"}
           <Search size={15} class="shrink-0 text-[var(--text-faint)]" />
         {:else}
-          <Zap size={15} class="shrink-0 text-[var(--accent)]" />
-          <!-- Breadcrumb chip: which action's submenu/prompt this is. -->
-          <span
-            class="shrink-0 text-caption font-medium text-[var(--accent)]
-                   bg-[var(--accent-subtle)] px-2 py-0.5 rounded-full
-                   whitespace-nowrap"
-          >
-            {mode.action.title.replace(/…$/, "")}
-          </span>
+          <Zap size={15} class="shrink-0 text-[var(--palette-accent)]" />
+          <!-- Breadcrumb chip: which item, submenu or prompt this is. -->
+          <span class="palette-crumb shrink-0 max-w-[60%] truncate">{crumb}</span>
         {/if}
         <input
           bind:this={inputEl}
@@ -1465,7 +1621,7 @@
                  text-[var(--text)] placeholder:text-[var(--text-faint)]"
           placeholder={mode.type === "prompt"
             ? (mode.action.prompt?.placeholder ?? "Type a value…")
-            : mode.type === "submenu"
+            : mode.type === "submenu" || mode.type === "item"
               ? "Filter…"
               : "Search or jump to…"}
           oninput={onInput}
@@ -1562,9 +1718,16 @@
               <span class="palette-legend">
                 <kbd class="palette-key">{modKey} ↵</kbd> New tab
               </span>
-              <span class="palette-legend">
-                <kbd class="palette-key">Tab</kbd> Scope
-              </span>
+              {#if selectedItem?.t === "nav"}
+                <span class="palette-legend">
+                  <kbd class="palette-key">{modKey} .</kbd> Actions
+                </span>
+              {/if}
+              {#if wide}
+                <span class="palette-legend">
+                  <kbd class="palette-key">Tab</kbd> Scope
+                </span>
+              {/if}
             {/if}
           {/if}
           <span class="palette-legend ml-auto">
@@ -1630,6 +1793,11 @@
       {#if a.hint}
         <span class="shrink-0 max-w-[12rem] truncate text-caption text-[var(--text-faint)] capitalize">
           {a.hint}
+        </span>
+      {/if}
+      {#if a.keys}
+        <span class="palette-legend shrink-0">
+          {#each a.keys as key}<kbd class="palette-key">{key}</kbd>{/each}
         </span>
       {/if}
       {#if a.children}

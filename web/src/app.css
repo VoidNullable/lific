@@ -1250,3 +1250,11 @@ html[data-motion="reduced"] *::after {
   font-weight: 500;
   color: var(--text);
 }
+.palette-crumb {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text);
+}
