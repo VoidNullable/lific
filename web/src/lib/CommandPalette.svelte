@@ -30,12 +30,14 @@
     listPages,
     listPlans,
     createPage,
+    getPage,
     resolveIssue,
     search as searchApi,
     type Project,
     type Module,
     type Folder,
     type Plan,
+    type IssueAssignee,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { mobileNavState } from "./mobileNavState.svelte";
@@ -105,6 +107,8 @@
   // the line has no card to sit in.
   let innerWidth = $state(1024);
   let narrow = $derived(innerWidth < 640);
+  // Room for a preview column beside the results.
+  let wide = $derived(innerWidth >= 1024);
   let mode = $state<Mode>({ type: "root" });
   let query = $state("");
   let inputEl = $state<HTMLInputElement | null>(null);
@@ -1198,6 +1202,143 @@
     sections.flatMap((sec) => sec.entries.map((e) => e.it)),
   );
 
+  // ── Preview ──────────────────────────────────────────
+  //
+  // The selected issue or page, described from the warm read model when it
+  // has the row, otherwise fetched once (debounced, cached per route) so a
+  // server hit from another project still gets a real preview.
+
+  type PreviewDetail = {
+    status?: string;
+    priority?: string;
+    assignees?: IssueAssignee[];
+    needsHuman?: boolean;
+    labels?: string[];
+    text?: string;
+  };
+
+  let fetchedPreview = $state<Record<string, PreviewDetail>>({});
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Markdown flattened to a few readable sentences. */
+  function plainText(markdown: string, cap = 320): string {
+    const flat = markdown
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/^#+\s*/gm, "")
+      .replace(/[*_`>~]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return flat.length > cap ? `${flat.slice(0, cap).trimEnd()}…` : flat;
+  }
+
+  function resultProject(r: PaletteResult): Project | null {
+    const ident = r.route.split("/")[1] ?? "";
+    return projectByIdent(ident) ?? cachedProject(ident);
+  }
+
+  /** What the warm read model knows, or null to fetch. */
+  function modelDetail(r: PaletteResult): PreviewDetail | null {
+    const project = resultProject(r);
+    const model = project ? peekProjectModel(project.id) : null;
+    if (model?.status !== "ready") return null;
+    if (r.kind === "issue" && r.identifier) {
+      const want = r.identifier.toLowerCase();
+      const row = model.issueList.find((i) => i.identifier.toLowerCase() === want);
+      return row
+        ? {
+            status: row.status,
+            priority: row.priority,
+            assignees: row.assignees ?? [],
+            needsHuman: row.needs_human ?? false,
+            labels: row.labels,
+            text: row.preview,
+          }
+        : null;
+    }
+    if (r.kind === "page") {
+      const row = model.pages.get(Number(r.route.split("/").pop()));
+      return row ? { labels: row.labels, text: row.preview } : null;
+    }
+    return null;
+  }
+
+  let selectedItem = $derived(flatItems[selectedIdx] ?? null);
+  let showPreview = $derived(wide && mode.type === "root" && flatItems.length > 0);
+
+  let preview = $derived.by(() => {
+    const it = selectedItem;
+    if (!showPreview || !it || it.t !== "nav") return null;
+    const r = it.r;
+    const detail =
+      r.kind === "issue" || r.kind === "page"
+        ? (modelDetail(r) ?? fetchedPreview[r.route] ?? null)
+        : null;
+    const project = resultProject(r);
+    return {
+      r,
+      projectName: r.kind === "project" ? null : (r.project ?? project?.name ?? null),
+      description: r.kind === "project"
+        ? (catalog.projects.find((p) => p.identifier === r.identifier)?.description ?? "")
+        : "",
+      detail,
+      pending: (r.kind === "issue" || r.kind === "page") && !detail,
+    };
+  });
+
+  // Fetch a preview the model could not answer, once the cursor rests.
+  $effect(() => {
+    const p = preview;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = null;
+    if (!p?.pending) return;
+    const r = p.r;
+    previewTimer = setTimeout(async () => {
+      previewTimer = null;
+      if (r.kind === "issue" && r.identifier) {
+        const res = await resolveIssue(r.identifier);
+        if (!res.ok) return;
+        fetchedPreview[r.route] = {
+          status: res.data.status,
+          priority: res.data.priority,
+          assignees: res.data.assignees ?? [],
+          needsHuman: res.data.needs_human ?? false,
+          labels: res.data.labels,
+          text: plainText(res.data.description ?? ""),
+        };
+      } else if (r.kind === "page") {
+        const res = await getPage(Number(r.route.split("/").pop()));
+        if (!res.ok) return;
+        fetchedPreview[r.route] = { labels: res.data.labels, text: plainText(res.data.content ?? "") };
+      }
+    }, 150);
+    return () => {
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = null;
+    };
+  });
+
+  function capitalize(v: string): string {
+    return v ? v[0].toUpperCase() + v.slice(1) : v;
+  }
+
+  /** Who the issue is for, in the issue view's words. */
+  function assigneeText(d: PreviewDetail): string {
+    const people = (d.assignees ?? []).map((a) => a.display_name || a.username);
+    if (people.length > 0) return people.join(", ");
+    return d.needsHuman ? "Any person" : "Any agent";
+  }
+
+  const KIND_NOUN: Record<PaletteResult["kind"], string> = {
+    issue: "Issue",
+    page: "Page",
+    plan: "Plan",
+    project: "Project",
+    module: "Module",
+    folder: "Folder",
+  };
+
   // ⌘ on Mac, Ctrl elsewhere, for the footer keycaps.
   const isMac =
     typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
@@ -1294,7 +1435,8 @@
       data-command-palette
       class="command-palette w-full h-full flex flex-col bg-[var(--surface)]
              border-[var(--border)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden
-             sm:h-auto sm:max-w-[640px] sm:border sm:rounded-xl"
+             sm:h-auto sm:border sm:rounded-xl
+             {wide && mode.type !== 'prompt' ? 'sm:max-w-[880px]' : 'sm:max-w-[640px]'}"
       onclick={(e) => e.stopPropagation()}
     >
       <!-- Input row -->
@@ -1355,9 +1497,10 @@
 
       <!-- Results -->
       {#if mode.type !== "prompt"}
+      <div class="flex-1 min-h-0 flex sm:flex-none">
       <div
-        class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1
-               pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1 sm:max-h-[420px]"
+        class="flex-1 min-w-0 min-h-0 overflow-y-auto overscroll-contain py-1
+               pb-[env(safe-area-inset-bottom)] sm:pb-1 sm:max-h-[420px]"
         role="listbox"
         aria-label="Results"
         bind:this={listEl}
@@ -1392,6 +1535,10 @@
             {/each}
           {/each}
         {/if}
+      </div>
+      {#if showPreview}
+        {@render previewPane()}
+      {/if}
       </div>
       {/if}
       {#if mode.type === "prompt" || flatItems.length > 0}
@@ -1547,4 +1694,73 @@
 
 {#snippet marked(title: string)}
   {#each titleSegments(title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+{/snippet}
+
+{#snippet previewPane()}
+  <aside
+    data-palette-preview
+    aria-label="Preview"
+    class="w-[300px] shrink-0 border-l border-[var(--border)] px-5 py-4
+           overflow-y-auto sm:max-h-[420px] flex flex-col gap-3"
+  >
+    {#if preview}
+      {@const r = preview.r}
+      {@const d = preview.detail}
+      <div class="flex items-center gap-2 text-caption text-[var(--text-faint)]">
+        {#if r.kind === "project" && r.emoji}
+          <ProjectIcon value={r.emoji} size={14} />
+        {/if}
+        <span class="font-mono">{r.identifier ?? KIND_NOUN[r.kind]}</span>
+        {#if r.identifier}<span>· {KIND_NOUN[r.kind]}</span>{/if}
+      </div>
+      <h2 class="font-display text-heading font-semibold leading-snug text-[var(--text)] break-words line-clamp-4">
+        {r.title}
+      </h2>
+      {#if d?.status || d?.priority || r.status}
+        <div class="flex flex-wrap gap-1.5">
+          {#if d?.status ?? r.status}
+            {@const st = d?.status ?? r.status ?? ""}
+            <span class="palette-pill"><StatusIcon status={st} size={13} />{capitalize(st)}</span>
+          {/if}
+          {#if (d?.priority ?? r.priority) && (d?.priority ?? r.priority) !== "none"}
+            {@const pr = d?.priority ?? r.priority ?? ""}
+            <span class="palette-pill"><PriorityIcon priority={pr} size={13} />{capitalize(pr)}</span>
+          {/if}
+        </div>
+      {/if}
+      <dl class="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1.5 text-body-sm">
+        {#if preview.projectName}
+          <dt class="text-[var(--text-faint)]">Project</dt>
+          <dd class="text-[var(--text)] truncate">{preview.projectName}</dd>
+        {/if}
+        {#if r.kind === "issue" && d}
+          <dt class="text-[var(--text-faint)]">For</dt>
+          <dd class="text-[var(--text)] truncate">{assigneeText(d)}</dd>
+        {/if}
+        {#if d?.labels && d.labels.length > 0}
+          <dt class="text-[var(--text-faint)]">Labels</dt>
+          <dd class="text-[var(--text)] truncate">{d.labels.join(", ")}</dd>
+        {/if}
+      </dl>
+      {#if d?.text || preview.description}
+        <p class="text-body-sm leading-relaxed text-[var(--text-muted)] line-clamp-6 break-words">
+          {d?.text || preview.description}
+        </p>
+      {:else if preview.pending}
+        <p class="text-body-sm text-[var(--text-faint)]">Loading…</p>
+      {/if}
+    {:else if selectedItem?.t === "action"}
+      {@const a = selectedItem.a}
+      <div class="text-caption text-[var(--text-faint)]">Action</div>
+      <h2 class="font-display text-heading font-semibold leading-snug text-[var(--text)]">
+        {a.title}
+      </h2>
+      {#if a.hint}
+        <p class="text-body-sm text-[var(--text-muted)] capitalize">{a.hint}</p>
+      {/if}
+      <p class="text-body-sm text-[var(--text-faint)]">
+        {a.children ? "Opens a list to choose from." : a.prompt ? "Asks for a value." : "Runs right away."}
+      </p>
+    {/if}
+  </aside>
 {/snippet}
