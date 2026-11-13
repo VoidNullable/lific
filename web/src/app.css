@@ -1223,3 +1223,18 @@ html[data-motion="reduced"] *::after {
   border-radius: 0.1875rem;
   box-shadow: 0 0 0 1px var(--palette-match);
 }
+.palette-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.75rem;
+  padding-inline: 0.625rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.palette-scope:hover { color: var(--text); }
+.palette-scope:focus-visible { outline: 2px solid var(--palette-accent); outline-offset: 1px; }

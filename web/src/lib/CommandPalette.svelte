@@ -28,12 +28,14 @@
     listModules,
     listFolders,
     listPages,
+    listPlans,
     createPage,
     resolveIssue,
     search as searchApi,
     type Project,
     type Module,
     type Folder,
+    type Plan,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { mobileNavState } from "./mobileNavState.svelte";
@@ -65,7 +67,7 @@
   import ProjectIcon from "./ProjectIcon.svelte";
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box,
-    Zap, ChevronRight, X, ListChecks, SquarePen, FilePlus, ArrowLeftRight, FolderPlus,
+    Zap, ChevronRight, X, ListChecks, SquarePen, FilePlus, ArrowLeftRight, FolderPlus, ChevronsUpDown,
   } from "lucide-svelte";
   import { tick, untrack } from "svelte";
   import StatusIcon from "./StatusIcon.svelte";
@@ -110,6 +112,35 @@
   let selectedIdx = $state(0);
   let openingGeneration = 0;
 
+  // ── Scope ────────────────────────────────────────────
+  // One chip in the input row narrows the list to a kind. Tab and Shift+Tab
+  // cycle it (focus never leaves the modal anyway), and the empty-input
+  // hint names the key so the model is discoverable.
+  type Scope = "all" | "issue" | "page" | "plan" | "project" | "action";
+  const SCOPES: Array<{ id: Scope; label: string }> = [
+    { id: "all", label: "All" },
+    { id: "issue", label: "Issues" },
+    { id: "page", label: "Pages" },
+    { id: "plan", label: "Plans" },
+    { id: "project", label: "Projects" },
+    { id: "action", label: "Actions" },
+  ];
+  let scope = $state<Scope>("all");
+  let scopeLabel = $derived(SCOPES.find((s) => s.id === scope)?.label ?? "All");
+
+  function cycleScope(step: 1 | -1) {
+    const at = SCOPES.findIndex((s) => s.id === scope);
+    scope = SCOPES[(at + step + SCOPES.length) % SCOPES.length].id;
+    selectedIdx = 0;
+    runSearch(query);
+    inputEl?.focus();
+  }
+
+  /** Only issue and page hits come from the server. */
+  function scopeWantsServer(): boolean {
+    return scope === "all" || scope === "issue" || scope === "page";
+  }
+
   async function show() {
     const generation = ++openingGeneration;
     open = true;
@@ -117,6 +148,7 @@
     cancelSearch();
     mode = { type: "root" };
     query = "";
+    scope = "all";
     selectedIdx = 0;
     await tick();
     if (generation !== openingGeneration || !open) return;
@@ -206,8 +238,9 @@
     projects: Project[];
     modules: Array<Module & { projectIdent: string }>;
     folders: Array<Folder & { projectIdent: string }>;
+    plans: Array<Plan & { projectIdent: string }>;
   };
-  let catalog = $state<Catalog>({ projects: [], modules: [], folders: [] });
+  let catalog = $state<Catalog>({ projects: [], modules: [], folders: [], plans: [] });
   let catalogAt = 0;
   let projectsAt = 0;
   const CATALOG_TTL = 60_000;
@@ -224,7 +257,7 @@
         if (!response.ok) return null;
         const projectsChanged = projectCatalogChanged(catalog.projects, response.data);
         catalog = projectsChanged
-          ? { projects: response.data, modules: [], folders: [] }
+          ? { projects: response.data, modules: [], folders: [], plans: [] }
           : { ...catalog, projects: response.data };
         if (projectsChanged) {
           catalogAt = 0;
@@ -250,19 +283,24 @@
       loadedGeneration = generation;
       const modules: Catalog["modules"] = [];
       const folders: Catalog["folders"] = [];
-      // Bound the fanout: two requests per project, four projects per batch.
+      const plans: Catalog["plans"] = [];
+      // Bound the fanout: three requests per project, four projects per batch.
       for (let start = 0; start < projects.length; start += 4) {
         if (!open || generation !== catalogGeneration) return;
         const batch = await Promise.all(
           projects.slice(start, start + 4).map(async (project) => {
-            const [mods, flds] = await Promise.all([
+            const [mods, flds, plns] = await Promise.all([
               listModules(project.id),
               listFolders(project.id),
+              listPlans(project.id, undefined, 50),
             ]);
-            return { project, mods, flds };
+            return { project, mods, flds, plns };
           }),
         );
-        for (const { project, mods, flds } of batch) {
+        for (const { project, mods, flds, plns } of batch) {
+          if (plns.ok) plans.push(...plns.data
+            .filter((plan) => plan.status !== "archived")
+            .map((plan) => ({ ...plan, projectIdent: project.identifier })));
           if (mods.ok) modules.push(...mods.data.map((mod) => ({
             ...mod, projectIdent: project.identifier,
           })));
@@ -272,9 +310,13 @@
         }
       }
       if (generation !== catalogGeneration) return;
-      catalog = { projects, modules, folders };
+      catalog = { projects, modules, folders, plans };
       catalogAt = Date.now();
-      if (open && mode.type === "root" && query.trim()) refreshCatalogSearch();
+      // A scoped empty query lists catalog rows (projects, plans), so it too
+      // needs a refresh once the catalog lands.
+      if (open && mode.type === "root" && (query.trim() || scope !== "all")) {
+        refreshCatalogSearch();
+      }
     })().finally(() => {
       catalogLoad = null;
       if (open && loadedGeneration !== null && loadedGeneration !== catalogGeneration) {
@@ -450,7 +492,9 @@
   // Actions matched against the query (root mode only). Empty query
   // lists them all.
   let actionHits = $derived.by(() => {
-    if (mode.type !== "root") return [] as PaletteAction[];
+    if (mode.type !== "root" || (scope !== "all" && scope !== "action")) {
+      return [] as PaletteAction[];
+    }
     const q = query.trim();
     if (!q) return allActions;
     // A reference is navigation. Actions list above results, so letting
@@ -510,15 +554,17 @@
         label: "Actions",
         items: actionHits.map((a) => ({ t: "action" as const, a })),
       };
-      const recent = results.filter((r) => r.recent);
+      const inScope = (r: PaletteResult) => scope === "all" || r.kind === scope;
+      const recent = results.filter((r) => r.recent && inScope(r));
       if (!query.trim()) {
         raw.push({ label: "Recent", items: recent.map((r) => ({ t: "nav" as const, r })) });
-        raw.push(actionSection);
-      } else {
-        raw.push(actionSection);
       }
+      raw.push(actionSection);
       for (const g of grouped) {
-        raw.push({ label: g.label, items: g.rs.map((r) => ({ t: "nav" as const, r })) });
+        raw.push({
+          label: g.label,
+          items: g.rs.filter(inScope).map((r) => ({ t: "nav" as const, r })),
+        });
       }
     }
     let flatIdx = 0;
@@ -694,6 +740,19 @@
         });
       }
     }
+    for (const plan of catalog.plans) {
+      const m = fuzzyMatch(q, plan.title);
+      if (m && m.score >= 0.3) {
+        hits.push({
+          kind: "plan",
+          title: plan.title,
+          identifier: plan.identifier,
+          project: projectName(plan.projectIdent),
+          route: `/${plan.projectIdent}/plans/${plan.id}`,
+          score: m.score,
+        });
+      }
+    }
     for (const f of catalog.folders) {
       const m = fuzzyMatch(q, f.name);
       if (m && m.score >= 0.3) {
@@ -799,6 +858,59 @@
 
   const RECENT_CAP = 5;
 
+  /** What a scope lists before anything is typed: the current project's
+   *  latest issues or pages, plans (current project first), or every
+   *  project. "All" and "Actions" browse nothing extra. */
+  function scopeBrowse(): PaletteResult[] {
+    if (scope === "project") {
+      return catalog.projects.map((p) => ({
+        kind: "project" as const,
+        title: p.name,
+        identifier: p.identifier,
+        emoji: p.emoji,
+        route: `/${p.identifier}/overview`,
+        score: 1,
+      }));
+    }
+    const here = activeProject();
+    if (scope === "plan") {
+      const ident = here?.identifier.toLowerCase();
+      return [...catalog.plans]
+        .sort((a, b) =>
+          Number(b.projectIdent.toLowerCase() === ident) -
+            Number(a.projectIdent.toLowerCase() === ident) ||
+          (a.updated_at < b.updated_at ? 1 : -1))
+        .slice(0, GROUP_CAP)
+        .map((plan) => ({
+          kind: "plan" as const,
+          title: plan.title,
+          identifier: plan.identifier,
+          project: projectName(plan.projectIdent),
+          route: `/${plan.projectIdent}/plans/${plan.id}`,
+          score: 1,
+        }));
+    }
+    if ((scope !== "issue" && scope !== "page") || !here) return [];
+    const model = getProjectModel(here.id);
+    if (model.status !== "ready") return [];
+    const rows = scope === "issue" ? model.issueList : model.pageList;
+    return [...rows]
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+      .slice(0, GROUP_CAP)
+      .map((row) => ({
+        kind: row.kind,
+        title: row.title,
+        identifier: row.identifier,
+        project: here.name,
+        status: row.kind === "issue" ? row.status : undefined,
+        priority: row.kind === "issue" ? row.priority : undefined,
+        route: row.kind === "page"
+          ? `/${here.identifier}/pages/${row.id}`
+          : `/${here.identifier}/issues/${row.identifier}`,
+        score: 1,
+      }));
+  }
+
   /** Recently viewed items for the empty palette, minus the one on screen.
    *  Titles and statuses refresh from a warm replica when there is one, and
    *  an item that replica no longer has is dropped as deleted or moved. */
@@ -867,8 +979,11 @@
       pendingLocal = [];
       pendingCatalog = [];
       pendingProjectIdent = activeProjectIdent;
-      // Projects are one "Switch project…" away rather than a wall here.
-      results = recentResults();
+      // Projects are one "Switch project…" away rather than a wall here,
+      // unless a scope asks to browse a kind.
+      const recent = recentResults();
+      const taken = new Set(recent.map(resultKey));
+      results = [...recent, ...scopeBrowse().filter((r) => !taken.has(resultKey(r)))];
       selectedIdx = 0;
       return 0;
     }
@@ -1034,7 +1149,7 @@
     cancelSearch();
     const gen = searchGen;
     const local = runLocal(q);
-    if (!q.trim()) return;
+    if (!q.trim() || !scopeWantsServer()) return;
     void runRemote(q, gen, local < LOCAL_HIT_SERVER_THRESHOLD);
   }
 
@@ -1061,7 +1176,7 @@
     const gen = searchGen;
     const q = query;
     const local = runLocal(q);
-    if (!q.trim()) return;
+    if (!q.trim() || !scopeWantsServer()) return;
     const fire = () => {
       if (debounce) clearTimeout(debounce);
       debounce = null;
@@ -1107,6 +1222,12 @@
   }
 
   function onInputKeydown(e: KeyboardEvent) {
+    if (e.key === "Tab") {
+      // The palette is modal: Tab cycles the scope instead of leaving it.
+      e.preventDefault();
+      if (mode.type === "root") cycleScope(e.shiftKey ? -1 : 1);
+      return;
+    }
     if (mode.type === "prompt") {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -1208,6 +1329,18 @@
           oninput={onInput}
           onkeydown={onInputKeydown}
         />
+        {#if mode.type === "root"}
+          <button
+            type="button"
+            data-palette-scope
+            class="palette-scope shrink-0"
+            title="Change scope (Tab)"
+            aria-label="Scope: {scopeLabel}. Change with Tab"
+            onclick={() => cycleScope(1)}
+          >
+            {scopeLabel}<ChevronsUpDown size={12} aria-hidden="true" />
+          </button>
+        {/if}
         <!-- Esc is in the footer legend; phones have no keyboard, so they get
              a real close control instead (LIF-227). -->
         <button
@@ -1237,7 +1370,8 @@
             class="px-4 pt-1.5 pb-1 text-caption text-[var(--text-faint)] truncate"
           >
             <code class="palette-code">34</code>{#if !narrow} or <code class="palette-code">OMN-156</code>{/if}
-            jumps to an issue, <code class="palette-code">doc 3</code> to a page
+            jumps to an issue, <code class="palette-code">doc 3</code> to a page{#if !narrow},
+              <kbd class="palette-code">Tab</kbd> changes scope{/if}
           </p>
         {/if}
         {#if flatItems.length === 0}
@@ -1280,6 +1414,9 @@
             {#if mode.type === "root"}
               <span class="palette-legend">
                 <kbd class="palette-key">{modKey} ↵</kbd> New tab
+              </span>
+              <span class="palette-legend">
+                <kbd class="palette-key">Tab</kbd> Scope
               </span>
             {/if}
           {/if}
