@@ -26,9 +26,16 @@ import { describePaste, isBigPaste, pasteFileFrom } from "./bigPaste";
 
 export type { ComposerText, UploadSource };
 
+/** Anything with a caret: a textarea, or the body editor's adapter. */
+export interface CaretTarget {
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  focus(): void;
+}
+
 export interface ComposerAttachmentsOptions {
-  /** The live textarea, or null before mount / while the editor is closed. */
-  el: () => HTMLTextAreaElement | null;
+  /** The live textarea (or editor), or null before mount. */
+  el: () => CaretTarget | null;
   /** Read and write the composer's draft. The same object is handed to the
    *  upload controller, so the alt-text prompt rewrites the very reference
    *  this module inserted. */

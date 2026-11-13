@@ -38,7 +38,7 @@ export interface EditorState {
 export type TransformResult = EditorState;
 
 /** Inline markers we support toggling. */
-export type InlineMarker = "**" | "*" | "_" | "`";
+export type InlineMarker = "**" | "*" | "_" | "`" | "~~";
 
 /** Line-prefix kinds we support toggling. */
 export type LinePrefixKind =

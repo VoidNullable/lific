@@ -23,6 +23,9 @@
     radius = "0.75rem",
     dropLabel = "Drop files to attach",
     accept = "image/*,application/pdf,text/plain,text/csv,.csv,.log,application/zip,.docx,.xlsx,.hwp,.hwpx",
+    // The body editor takes drops itself, at the point under the pointer, so
+    // it turns the whole-box overlay off.
+    overlay = true,
     children,
     footer,
   }: {
@@ -30,6 +33,7 @@
     radius?: string;
     dropLabel?: string;
     accept?: string;
+    overlay?: boolean;
     children: Snippet;
     footer?: Snippet;
   } = $props();
@@ -42,7 +46,7 @@
   });
 </script>
 
-<DropOverlay {radius} label={dropLabel} onFiles={(files) => composer.enqueue(files, "drop")}>
+{#snippet body()}
   {@render children()}
 
   <PendingUploads controller={composer.uploads} />
@@ -67,7 +71,15 @@
       </button>
     </div>
   {/if}
-</DropOverlay>
+{/snippet}
+
+{#if overlay}
+  <DropOverlay {radius} label={dropLabel} onFiles={(files) => composer.enqueue(files, "drop")}>
+    {@render body()}
+  </DropOverlay>
+{:else}
+  <div class="ac__plain">{@render body()}</div>
+{/if}
 
 <input
   bind:this={inputEl}
@@ -81,6 +93,9 @@
 <style>
   .ac__file-input {
     display: none;
+  }
+  .ac__plain {
+    position: relative;
   }
 
   /* Anchored to the composer, not the viewport: the offer belongs to the box
