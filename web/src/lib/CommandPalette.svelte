@@ -73,6 +73,7 @@
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box,
     Zap, ChevronRight, X, ListChecks, SquarePen, FilePlus, ArrowLeftRight, FolderPlus, ChevronsUpDown,
+    CornerDownLeft, ExternalLink, Link, Hash, SignalHigh,
   } from "lucide-svelte";
   import { tick, untrack } from "svelte";
   import StatusIcon from "./StatusIcon.svelte";
@@ -534,6 +535,12 @@
     "new-page": FilePlus,
     "switch-project": ArrowLeftRight,
     "new-project": FolderPlus,
+    "item-open": CornerDownLeft,
+    "item-new-tab": ExternalLink,
+    "item-copy-link": Link,
+    "item-copy-id": Hash,
+    "item-status": CircleDot,
+    "item-priority": SignalHigh,
   };
 
   // Context actions (registered by the current route) list first: on a
@@ -1850,11 +1857,15 @@
           {r.identifier}
         </span>
       {/if}
-      <span class="min-w-0 truncate text-body text-[var(--text)] {r.snippet ? 'shrink' : 'flex-1'}">
+      <span
+        class="min-w-0 truncate text-body text-[var(--text)]
+               {r.snippet ? 'shrink max-sm:flex-1' : 'flex-1'}"
+      >
         {@render marked(r.title)}
       </span>
       {#if r.snippet}
-        <span class="flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">
+        <!-- Phones are too narrow for both; the title wins. -->
+        <span class="hidden sm:block flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">
           {#each snippetSegments(r.snippet) as segment}
             {#if segment.highlighted}
               <span class="font-medium text-[var(--text-muted)]">{segment.text}</span>
