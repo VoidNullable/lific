@@ -28,6 +28,7 @@
     listModules,
     listFolders,
     listPages,
+    createPage,
     resolveIssue,
     search as searchApi,
     type Project,
@@ -53,7 +54,10 @@
     searchLocalDocsPerKind,
     type RefQuery,
   } from "./paletteSearch";
-  import { cachedProject, getProjectModel, peekProjectModel } from "./sync/readModel.svelte";
+  import {
+    cachedProject, getProjectModel, peekProjectModel, refreshProjectModel,
+  } from "./sync/readModel.svelte";
+  import { toast } from "./toast/toast.svelte";
   import { getRecents, recentRoute } from "./home/recents";
   import { safeLabelColor } from "./labelColors";
   import { commandPaletteState } from "./commandPaletteState.svelte";
@@ -61,7 +65,7 @@
   import ProjectIcon from "./ProjectIcon.svelte";
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box,
-    Zap, ChevronRight, X, ListChecks,
+    Zap, ChevronRight, X, ListChecks, SquarePen, FilePlus, ArrowLeftRight, FolderPlus,
   } from "lucide-svelte";
   import { tick, untrack } from "svelte";
   import StatusIcon from "./StatusIcon.svelte";
@@ -364,21 +368,87 @@
   let searching = $state(false);
   let searchGen = 0;
 
-  // Universal actions, available from every view. Context actions
-  // (registered by the current route) list first since they're the more
-  // likely intent on a detail page.
-  const globalActions: PaletteAction[] = [
-    {
-      id: "new-project",
-      title: "New project",
-      run: () => navigate("/projects/new"),
-    },
-  ];
+  // Universal actions, available from every view. The first three are the
+  // empty palette's "what next": they stand in for the old wall of projects.
+  let globalActions = $derived.by<PaletteAction[]>(() => {
+    const here = activeProject();
+    const projectChildren = (go: (p: Project) => void): (() => PaletteActionChild[]) =>
+      () => catalog.projects.map((p) => ({
+        title: p.name,
+        emoji: p.emoji ?? "",
+        hint: p.identifier,
+        run: () => go(p),
+      }));
+    return [
+      here
+        ? {
+            id: "new-issue",
+            title: "New issue",
+            hint: here.name,
+            run: () => navigate(`/${here.identifier}/issues/new`),
+          }
+        : {
+            id: "new-issue",
+            title: "New issue…",
+            children: projectChildren((p) => navigate(`/${p.identifier}/issues/new`)),
+          },
+      here
+        ? {
+            id: "new-page",
+            title: "New page…",
+            hint: here.name,
+            prompt: {
+              placeholder: `New page title in ${here.name}`,
+              submit: (title: string) => void createPageIn(here, title),
+            },
+          }
+        : {
+            id: "new-page",
+            title: "New page…",
+            children: projectChildren((p) => navigate(`/${p.identifier}/pages`)),
+          },
+      {
+        id: "switch-project",
+        title: "Switch project…",
+        hint: here?.name,
+        children: () => catalog.projects.map((p) => ({
+          title: p.name,
+          emoji: p.emoji ?? "",
+          hint: p.id === here?.id ? "current" : p.identifier,
+          run: () => navigate(`/${p.identifier}/overview`),
+        })),
+      },
+      {
+        id: "new-project",
+        title: "New project",
+        run: () => navigate("/projects/new"),
+      },
+    ];
+  });
 
+  async function createPageIn(project: Project, title: string) {
+    const res = await createPage({ project_id: project.id, title });
+    if (!res.ok) {
+      toast(`Couldn't create the page: ${res.error}`, { kind: "error" });
+      return;
+    }
+    refreshProjectModel(project.id);
+    navigate(`/${project.identifier}/pages/${res.data.id}`);
+  }
+
+  const ACTION_ICONS: Record<string, typeof Zap> = {
+    "new-issue": SquarePen,
+    "new-page": FilePlus,
+    "switch-project": ArrowLeftRight,
+    "new-project": FolderPlus,
+  };
+
+  // Context actions (registered by the current route) list first: on a
+  // detail page they're the more likely intent.
   let allActions = $derived([...actions, ...globalActions]);
 
   // Actions matched against the query (root mode only). Empty query
-  // lists them all; they render above navigation results.
+  // lists them all.
   let actionHits = $derived.by(() => {
     if (mode.type !== "root") return [] as PaletteAction[];
     const q = query.trim();
@@ -407,9 +477,6 @@
   // matches (especially on detail pages, where Actions already sit on
   // top). GROUP_ORDER only breaks ties.
   let grouped = $derived.by(() => {
-    // Nav results sit after the action list in the flat selection order.
-    let flatIdx = mode.type === "root" ? actionHits.length : 0;
-    const recent = results.filter((r) => r.recent);
     const groups = [false, true].flatMap((remote) => {
       const section = GROUP_ORDER.map((kind, gi) => {
         const rs = results.filter(
@@ -419,7 +486,7 @@
       }).filter((g) => g.rs.length > 0);
       return section.sort((a, b) => b.best - a.best || a.gi - b.gi);
     });
-    const labelled = groups.map((g) => ({
+    return groups.map((g) => ({
       label: g.remote
         ? g.rs.some((r) => r.partial)
           ? `${GROUP_LABEL[g.kind]} (server, partial matches)`
@@ -427,11 +494,40 @@
         : GROUP_LABEL[g.kind],
       rs: g.rs,
     }));
-    if (recent.length > 0) labelled.unshift({ label: "Recent", rs: recent });
-    return labelled.map((g) => ({
-      label: g.label,
-      entries: g.rs.map((r) => ({ r, flatIdx: flatIdx++ })),
-    }));
+  });
+
+  type Section = { label: string; entries: Array<{ it: FlatItem; flatIdx: number }> };
+
+  /** Everything the list shows, in display order, each row numbered in the
+   *  flat keyboard order. An empty query leads with recents and follows
+   *  with actions; a typed one leads with the actions it matched. */
+  let sections = $derived.by<Section[]>(() => {
+    const raw: Array<{ label: string; items: FlatItem[] }> = [];
+    if (mode.type === "submenu") {
+      raw.push({ label: "", items: childHits.map((c) => ({ t: "child" as const, c })) });
+    } else if (mode.type === "root") {
+      const actionSection = {
+        label: "Actions",
+        items: actionHits.map((a) => ({ t: "action" as const, a })),
+      };
+      const recent = results.filter((r) => r.recent);
+      if (!query.trim()) {
+        raw.push({ label: "Recent", items: recent.map((r) => ({ t: "nav" as const, r })) });
+        raw.push(actionSection);
+      } else {
+        raw.push(actionSection);
+      }
+      for (const g of grouped) {
+        raw.push({ label: g.label, items: g.rs.map((r) => ({ t: "nav" as const, r })) });
+      }
+    }
+    let flatIdx = 0;
+    return raw
+      .filter((sec) => sec.items.length > 0)
+      .map((sec) => ({
+        label: sec.label,
+        entries: sec.items.map((it) => ({ it, flatIdx: flatIdx++ })),
+      }));
   });
 
   function projectName(ident: string): string {
@@ -765,23 +861,14 @@
     const trimmed = q.trim();
     cursorMoved = false;
 
-    // Empty query: jump back to something recent, or switch project.
+    // Empty query: jump back to something recent; actions follow.
     if (!trimmed) {
       pendingQuery = "";
       pendingLocal = [];
       pendingCatalog = [];
       pendingProjectIdent = activeProjectIdent;
-      results = [
-        ...recentResults(),
-        ...catalog.projects.map((p) => ({
-          kind: "project" as const,
-          title: p.name,
-          identifier: p.identifier,
-          emoji: p.emoji,
-          route: `/${p.identifier}/overview`,
-          score: 1,
-        })),
-      ];
+      // Projects are one "Switch project…" away rather than a wall here.
+      results = recentResults();
       selectedIdx = 0;
       return 0;
     }
@@ -992,16 +1079,9 @@
     | { t: "nav"; r: PaletteResult }
     | { t: "child"; c: PaletteActionChild };
 
-  let flatItems = $derived.by<FlatItem[]>(() => {
-    if (mode.type === "submenu") {
-      return childHits.map((c) => ({ t: "child" as const, c }));
-    }
-    if (mode.type === "prompt") return [];
-    return [
-      ...actionHits.map((a) => ({ t: "action" as const, a })),
-      ...grouped.flatMap((g) => g.entries.map((e) => ({ t: "nav" as const, r: e.r }))),
-    ];
-  });
+  let flatItems = $derived<FlatItem[]>(
+    sections.flatMap((sec) => sec.entries.map((e) => e.it)),
+  );
 
   // ⌘ on Mac, Ctrl elsewhere, for the footer keycaps.
   const isMac =
@@ -1166,158 +1246,15 @@
               ? "Searching…"
               : query.trim()
                 ? `Nothing matches “${query.trim()}”`
-                : mode.type === "submenu"
-                  ? "Nothing here"
-                  : "No projects yet"}
+                : "Nothing here"}
           </p>
-        {:else if mode.type === "submenu"}
-          {#each childHits as c, i (c.title)}
-            <button
-              class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
-                     rounded-md text-left"
-              role="option"
-              aria-selected={i === selectedIdx}
-              data-flat-idx={i}
-              data-kind="child"
-              onclick={() => pickItem({ t: "child", c })}
-              onmouseenter={() => { selectedIdx = i; }}
-            >
-              <span class="size-4 grid place-items-center shrink-0">
-                {#if c.status !== undefined}
-                  <StatusIcon status={c.status} size={14} />
-                {:else if c.priority !== undefined}
-                  <PriorityIcon priority={c.priority} size={14} />
-                {:else if c.color}
-                  <span
-                    class="size-2.5 rounded-full"
-                    style="background: {safeLabelColor(c.color)}"
-                  ></span>
-                {/if}
-              </span>
-              <span class="flex-1 min-w-0 text-body text-[var(--text)] capitalize truncate">
-                {#each titleSegments(c.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
-              </span>
-              {#if c.hint}
-                <span class="text-caption text-[var(--text-faint)] shrink-0">
-                  {c.hint}
-                </span>
-              {/if}
-            </button>
-          {/each}
         {:else}
-          <!-- Context actions first: on a detail page they're the most
-               likely intent. -->
-          {#if actionHits.length > 0}
-            <div class="palette-section">Actions</div>
-            {#each actionHits as a, i (a.id)}
-              <button
-                class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
-                       rounded-md text-left"
-                role="option"
-                aria-selected={i === selectedIdx}
-                data-flat-idx={i}
-                data-kind="action"
-                onclick={() => pickItem({ t: "action", a })}
-                onmouseenter={() => { selectedIdx = i; }}
-              >
-                <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
-                  <Zap size={14} />
-                </span>
-                <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
-                  {#each titleSegments(a.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
-                </span>
-                {#if a.hint}
-                  <span class="max-w-[12rem] truncate text-caption text-[var(--text-faint)] capitalize shrink-0">
-                    {a.hint}
-                  </span>
-                {/if}
-                {#if a.children}
-                  <ChevronRight size={14} class="shrink-0 text-[var(--text-faint)]" />
-                {/if}
-              </button>
-            {/each}
-          {/if}
-          {#each grouped as group (group.label)}
-            <div class="palette-section">{group.label}</div>
-            {#each group.entries as { r, flatIdx } (r.route + (r.identifier ?? r.title))}
-              <button
-                class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
-                       rounded-md text-left"
-                role="option"
-                aria-selected={flatIdx === selectedIdx}
-                data-flat-idx={flatIdx}
-                data-kind={r.kind}
-                onclick={(e) => pickItem({ t: "nav", r }, e.metaKey || e.ctrlKey)}
-                onmousedown={(e) => { if (e.button === 1) e.preventDefault(); }}
-                onauxclick={(e) => {
-                  if (e.button !== 1) return;
-                  e.preventDefault();
-                  pickItem({ t: "nav", r }, true);
-                }}
-                onmouseenter={() => { selectedIdx = flatIdx; }}
-              >
-                <!-- Kind icon (project/module emoji wins when set) -->
-                <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
-                  {#if r.emoji}
-                    <ProjectIcon value={r.emoji} size={15} />
-                  {:else if r.kind === "issue" && r.status}
-                    <StatusIcon status={r.status} size={14} />
-                  {:else if r.kind === "issue"}
-                    <CircleDot size={14} />
-                  {:else if r.kind === "page"}
-                    <FileText size={14} />
-                  {:else if r.kind === "plan"}
-                    <ListChecks size={14} />
-                  {:else if r.kind === "module"}
-                    <Layers size={14} />
-                  {:else if r.kind === "folder"}
-                    <FolderClosed size={14} />
-                  {:else}
-                    <Box size={14} />
-                  {/if}
-                </span>
-                {#if r.identifier && r.kind !== "project"}
-                  <span
-                    class="shrink-0 min-w-[4.5rem] font-mono text-caption text-[var(--text-faint)]"
-                  >
-                    {r.identifier}
-                  </span>
-                {/if}
-                <span
-                  class="min-w-0 truncate text-body text-[var(--text)]
-                         {r.snippet ? 'shrink' : 'flex-1'}"
-                >
-                  {#each titleSegments(r.title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
-                </span>
-                {#if r.snippet}
-                  <span class="flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">
-                    {#each snippetSegments(r.snippet) as segment}
-                      {#if segment.highlighted}
-                        <span class="font-medium text-[var(--text-muted)]">{segment.text}</span>
-                      {:else}
-                        {segment.text}
-                      {/if}
-                    {/each}
-                  </span>
-                {/if}
-                {#if r.kind === "project" && r.identifier}
-                  <span class="shrink-0 font-mono text-caption text-[var(--text-faint)]">
-                    {r.identifier}
-                  </span>
-                {:else if r.project}
-                  <span
-                    class="hidden sm:block shrink-0 max-w-[9rem] truncate text-caption
-                           text-[var(--text-faint)]"
-                  >
-                    {r.project}
-                  </span>
-                {/if}
-                {#if r.priority && r.priority !== "none"}
-                  <span class="shrink-0 grid place-items-center" title="{r.priority} priority">
-                    <PriorityIcon priority={r.priority} size={13} />
-                  </span>
-                {/if}
-              </button>
+          {#each sections as section, si (section.label + si)}
+            {#if section.label}
+              <div class="palette-section">{section.label}</div>
+            {/if}
+            {#each section.entries as { it, flatIdx } (flatKey(it))}
+              {@render row(it, flatIdx)}
             {/each}
           {/each}
         {/if}
@@ -1355,3 +1292,122 @@
     </div>
   </div>
 {/if}
+
+{#snippet row(it: FlatItem, flatIdx: number)}
+  <button
+    class="palette-row mx-1.5 w-[calc(100%-0.75rem)] h-9 flex items-center gap-2.5 px-2.5
+           rounded-md text-left"
+    role="option"
+    aria-selected={flatIdx === selectedIdx}
+    data-flat-idx={flatIdx}
+    data-kind={it.t === "nav" ? it.r.kind : it.t}
+    onclick={(e) => pickItem(it, it.t === "nav" && (e.metaKey || e.ctrlKey))}
+    onmousedown={(e) => { if (e.button === 1 && it.t === "nav") e.preventDefault(); }}
+    onauxclick={(e) => {
+      if (e.button !== 1 || it.t !== "nav") return;
+      e.preventDefault();
+      pickItem(it, true);
+    }}
+    onmouseenter={() => { selectedIdx = flatIdx; }}
+  >
+    {#if it.t === "child"}
+      {@const c = it.c}
+      <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
+        {#if c.status !== undefined}
+          <StatusIcon status={c.status} size={14} />
+        {:else if c.priority !== undefined}
+          <PriorityIcon priority={c.priority} size={14} />
+        {:else if c.color}
+          <span class="size-2.5 rounded-full" style="background: {safeLabelColor(c.color)}"></span>
+        {:else if c.emoji !== undefined}
+          {#if c.emoji}<ProjectIcon value={c.emoji} size={15} />{:else}<Box size={14} />{/if}
+        {/if}
+      </span>
+      <span
+        class="flex-1 min-w-0 text-body text-[var(--text)] truncate
+               {c.status !== undefined || c.priority !== undefined ? 'capitalize' : ''}"
+      >
+        {@render marked(c.title)}
+      </span>
+      {#if c.hint}
+        <span class="shrink-0 max-w-[12rem] truncate text-caption text-[var(--text-faint)]">
+          {c.hint}
+        </span>
+      {/if}
+    {:else if it.t === "action"}
+      {@const a = it.a}
+      {@const Icon = ACTION_ICONS[a.id] ?? Zap}
+      <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
+        <Icon size={14} />
+      </span>
+      <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
+        {@render marked(a.title)}
+      </span>
+      {#if a.hint}
+        <span class="shrink-0 max-w-[12rem] truncate text-caption text-[var(--text-faint)] capitalize">
+          {a.hint}
+        </span>
+      {/if}
+      {#if a.children}
+        <ChevronRight size={14} class="shrink-0 text-[var(--text-faint)]" />
+      {/if}
+    {:else}
+      {@const r = it.r}
+      <!-- Kind icon (project/module emoji wins when set) -->
+      <span class="size-4 grid place-items-center shrink-0 text-[var(--text-faint)]">
+        {#if r.emoji}
+          <ProjectIcon value={r.emoji} size={15} />
+        {:else if r.kind === "issue" && r.status}
+          <StatusIcon status={r.status} size={14} />
+        {:else if r.kind === "issue"}
+          <CircleDot size={14} />
+        {:else if r.kind === "page"}
+          <FileText size={14} />
+        {:else if r.kind === "plan"}
+          <ListChecks size={14} />
+        {:else if r.kind === "module"}
+          <Layers size={14} />
+        {:else if r.kind === "folder"}
+          <FolderClosed size={14} />
+        {:else}
+          <Box size={14} />
+        {/if}
+      </span>
+      {#if r.identifier && r.kind !== "project"}
+        <span class="shrink-0 min-w-[4.5rem] font-mono text-caption text-[var(--text-faint)]">
+          {r.identifier}
+        </span>
+      {/if}
+      <span class="min-w-0 truncate text-body text-[var(--text)] {r.snippet ? 'shrink' : 'flex-1'}">
+        {@render marked(r.title)}
+      </span>
+      {#if r.snippet}
+        <span class="flex-1 min-w-0 truncate text-caption text-[var(--text-faint)]">
+          {#each snippetSegments(r.snippet) as segment}
+            {#if segment.highlighted}
+              <span class="font-medium text-[var(--text-muted)]">{segment.text}</span>
+            {:else}
+              {segment.text}
+            {/if}
+          {/each}
+        </span>
+      {/if}
+      {#if r.kind === "project" && r.identifier}
+        <span class="shrink-0 font-mono text-caption text-[var(--text-faint)]">{r.identifier}</span>
+      {:else if r.project}
+        <span class="hidden sm:block shrink-0 max-w-[9rem] truncate text-caption text-[var(--text-faint)]">
+          {r.project}
+        </span>
+      {/if}
+      {#if r.priority && r.priority !== "none"}
+        <span class="shrink-0 grid place-items-center" title="{r.priority} priority">
+          <PriorityIcon priority={r.priority} size={13} />
+        </span>
+      {/if}
+    {/if}
+  </button>
+{/snippet}
+
+{#snippet marked(title: string)}
+  {#each titleSegments(title) as seg}{#if seg.hit}<mark class="palette-mark">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+{/snippet}

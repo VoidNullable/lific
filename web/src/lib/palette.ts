@@ -17,6 +17,8 @@ export interface PaletteActionChild {
   priority?: string;
   /** Render a label color dot. */
   color?: string;
+  /** Render a project icon (emoji or `lucide:Name`; "" for the default). */
+  emoji?: string | null;
   run: () => void;
 }
 
