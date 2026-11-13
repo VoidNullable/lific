@@ -127,6 +127,10 @@ class API {
         } else if (path === "/project-groups" && method === "POST") {
           const group = { id: 13, user_id: this.user.id, name: body.name, project_ids: [], sort_order: this.groups.length, created_at: stamp, updated_at: stamp };
           this.groups.push(group); data = group;
+        } else if (path === "/project-groups/assign" && method === "PUT") {
+          for (const g of this.groups) g.project_ids = g.project_ids.filter(id => id !== body.project_id);
+          if (body.group_id !== null) this.groups.find(g => g.id === body.group_id)!.project_ids.push(body.project_id);
+          data = { ok: true };
         } else if (/^\/project-groups\/\d+$/.test(path) && method === "PATCH") {
           const group = this.groups.find(g => g.id === Number(path.split("/").at(-1)))!;
           group.name = body.name; data = group;
@@ -468,7 +472,7 @@ try {
     }));
     const s = await session({ api, observeReveal: true });
     const { page, aside } = s;
-    const nav = aside.locator("nav");
+    const nav = aside.locator(".sidebar-scroll");
     const target = aside.locator('[data-sidebar-project="45"]');
     await settle(s);
     const navBox = (await nav.boundingBox())!;
@@ -485,7 +489,7 @@ try {
     // implicitly scroll the active project back into view on the test's behalf.
     await page.mouse.move(navBox.x + navBox.width / 2, navBox.y + navBox.height / 2);
     await page.mouse.wheel(0, -10_000);
-    await page.waitForFunction(() => document.querySelector("aside nav")!.scrollTop === 0);
+    await page.waitForFunction(() => document.querySelector("aside .sidebar-scroll")!.scrollTop === 0);
     for (const path of ["/P45/issues/P45-1", "/P45/pages"]) {
       await routeTo(page, path);
       await page.evaluate(() => (window as any).fixture.refresh());
@@ -564,7 +568,7 @@ try {
       assert.equal(await actions.evaluate(el => getComputedStyle(el).opacity), "1");
       const actionBox = (await actions.boundingBox())!;
       assert.ok(actionBox.x + actionBox.width <= width, "Long project preserves visible actions");
-      assert.equal(await aside.locator("nav").evaluate(el => el.scrollWidth <= el.clientWidth), true, "No horizontal sidebar scroll");
+      assert.equal(await aside.locator(".sidebar-scroll").evaluate(el => el.scrollWidth <= el.clientWidth), true, "No horizontal sidebar scroll");
     }
     assert.equal(await page.evaluate(() => localStorage.getItem("lific:sidebar:width")), "190");
     await page.reload();
@@ -705,7 +709,7 @@ try {
     const input = aside.getByRole("textbox", { name: "Group name", exact: true });
     for (const mode of ["create", "rename"]) {
       const start = async () => {
-        if (mode === "create") await action(s, "New project or group", "New group");
+        if (mode === "create") await action(s, "Actions for Four", "New group…");
         else await action(s, "Actions for group Work", "Rename");
         await input.waitFor();
       };
@@ -716,7 +720,7 @@ try {
         else await aside.getByRole("button", { name: "Cancel", exact: true }).click();
         await input.waitFor({ state: "hidden" });
         assert.equal(api.calls.filter(c => c.method !== "GET").length, before);
-        const trigger = aside.getByRole("button", { name: mode === "create" ? "New project or group" : "Actions for group Work", exact: true });
+        const trigger = aside.getByRole("button", { name: mode === "create" ? "Actions for Four" : "Actions for group Work", exact: true });
         assert.equal(await trigger.evaluate(el => document.activeElement === el), true, "Cancel restores the edit trigger");
       }
       await start();

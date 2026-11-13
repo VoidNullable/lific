@@ -33,7 +33,7 @@
   import { currentUser, getUserRevision, publishUser } from "./userState";
   import { mobileNavState } from "./mobileNavState.svelte";
   import { navLink } from "./navLink";
-  import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
+  import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
   import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
@@ -1009,8 +1009,9 @@
         </button>
       </div>
 
-      <!-- Navigation -->
-      <nav class="flex-1 px-2 py-1 overflow-y-auto">
+      <!-- Navigation. The workspace views stay put; only the project tree
+           below the rule scrolls. -->
+      <nav class="flex-1 min-h-0 flex flex-col">
         <!-- LIF-538: cross-project views for the signed-in person. Home keeps
              its LIF-237 role as the landing dashboard. -->
         {#snippet workspaceItem(href: string, label: string, Icon: typeof Home, count: number | null, tone: "accent" | "plain", key: string)}
@@ -1026,7 +1027,7 @@
             {/if}
           </a>
         {/snippet}
-        <div class="sidebar-workspace">
+        <div class="sidebar-workspace shrink-0 px-2 pt-1">
           <span class="sidebar-section-label block px-2 pb-1 text-micro font-semibold uppercase text-[var(--text-faint)]">
             Workspace
           </span>
@@ -1035,6 +1036,21 @@
           {@render workspaceItem("/assigned", "Assigned to me", UserCheck, assignedCount, "plain", "assigned")}
           {@render workspaceItem("/agents", "Agent activity", Bot, activeAgents, "plain", "agents")}
         </div>
+        <hr class="sidebar-section-rule shrink-0" />
+
+        <!-- The header renders unconditionally: on a brand-new instance it is
+             the way in. Groups are created from a project's menu. -->
+        <div class="sidebar-new-project shrink-0 px-2">
+          <a href="#/projects/new" use:navLink={navigate}
+            aria-current={route === "/projects/new" ? "page" : undefined}
+            class="sidebar-destination w-full h-9 flex items-center gap-2.5 pl-2 pr-2 rounded-md text-left text-body transition-colors"
+          >
+            <span class="sidebar-project-icon sidebar-new-project-icon rounded-md"><Plus size={15} /></span>
+            <span class="flex-1 min-w-0 truncate">New project</span>
+          </a>
+        </div>
+
+        <div class="sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-1">
 
         <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
              the grouped lists and the ungrouped drag zone below, so a project
@@ -1151,27 +1167,8 @@
               </div>
         {/snippet}
 
-        <!-- The header renders unconditionally: it carries the only affordance
-             for creating a group, so gating it on having projects would make
-             the first group unreachable on a brand-new instance. -->
-        <div class="sidebar-projects-heading flex items-center justify-between px-2 pb-1">
-          <span class="sidebar-section-label text-micro font-semibold uppercase text-[var(--text-faint)]">
-            Projects
-          </span>
-          <button
-            class="size-8 flex items-center justify-center rounded
-                   text-[var(--text-faint)] hover:text-[var(--accent)]
-                   hover:bg-[var(--sidebar-hover)] transition-colors"
-            title="New project or group"
-            aria-label="New project or group" aria-haspopup="menu"
-            onclick={openCreateMenu}
-          >
-            <Plus size={13} />
-          </button>
-        </div>
-
-        <!-- Outside the guard below for the same reason as the header: on an
-             empty instance this input is the whole first-group flow. -->
+        <!-- Outside the guard below: on an empty instance this input is the
+             whole first-group flow. -->
         {#snippet groupNameInput()}
           <!-- Escape cancels from the input or either form button. -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1209,22 +1206,26 @@
             {#if editingGroupId === group.id}
               {@render groupNameInput()}
             {:else}
-            <div class="sidebar-row sidebar-group-heading group flex items-center">
+            <!-- A group is a folder in the tree: folder glyph where a project
+                 draws its icon, open or closed with the group, and a count. -->
+            <div class="sidebar-row sidebar-group-heading group flex items-center rounded-md" data-collapsed={collapsed || undefined}>
             <button
-              class="min-w-0 flex-1 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-md
-                     text-left text-caption font-semibold transition-colors text-[var(--text-muted)]
-                     hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)]"
+              class="sidebar-folder min-w-0 flex-1 flex items-center gap-2.5 pl-2 pr-1 rounded-md
+                     text-left text-body font-medium transition-colors"
               aria-expanded={!collapsed}
               aria-controls={`group-${group.id}`} title={group.name}
               onclick={() => toggleGroup(group.id)}
               oncontextmenu={(e) => openGroupMenu(e, group)}
             >
-              <ChevronRight
-                size={13}
-                class="shrink-0 transition-transform {collapsed ? '' : 'rotate-90'}
-                       text-[var(--text-faint)] group-hover:text-[var(--text-muted)]"
-              />
+              <span class="sidebar-project-icon sidebar-folder-icon">
+                {#if collapsed}
+                  <Folder size={18} />
+                {:else}
+                  <FolderOpen size={18} />
+                {/if}
+              </span>
               <span class="truncate flex-1">{group.name}</span>
+              <span class="sidebar-folder-count text-micro tabular-nums" aria-hidden="true">{projectsIn(group).length}</span>
             </button>
             <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
               data-sidebar-group-actions={group.id}
@@ -1235,7 +1236,7 @@
               <button class="ml-3 max-w-[calc(100%-0.75rem)] truncate text-caption text-[var(--accent)] px-2 py-1"
                 title={`Show ${activeProjectRecord?.name}`} onclick={() => toggleGroup(group.id)}>Current: {activeProjectRecord?.name}</button>
             {/if}
-              <!-- Groups use spacing; only project destinations have a spine. -->
+              <!-- The folder's contents hang off a guide under its icon. -->
               <div id={`group-${group.id}`} hidden={collapsed} class="sidebar-group-projects">
                 {#each projectsIn(group) as project (project.id)}
                   {@render projectEntry(project)}
@@ -1287,6 +1288,7 @@
             </div>
           </div>
         {/if}
+        </div>
       </nav>
 
       <!-- Footer: the user identity IS the Settings entry (logout now lives

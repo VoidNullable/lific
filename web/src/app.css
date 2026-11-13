@@ -476,7 +476,6 @@ html[data-motion="reduced"] *::after {
 }
 .desktop-sidebar .sidebar-brand:hover > .font-display { color: var(--sidebar-accent); }
 .desktop-sidebar .sidebar-launcher-wrap { padding-bottom: 0.75rem; }
-.desktop-sidebar .sidebar-workspace { margin-bottom: var(--sidebar-section-gap); }
 .desktop-sidebar .sidebar-workspace-item + .sidebar-workspace-item { margin-top: 1px; }
 .desktop-sidebar .sidebar-subnav-rule {
   margin: 0.25rem 0.5rem 0.25rem 0.5rem;
@@ -513,10 +512,41 @@ html[data-motion="reduced"] *::after {
   color: var(--chrome);
   box-shadow: 0 4px 12px rgb(0 0 0 / 0.18);
 }
-.desktop-sidebar .sidebar-projects-heading { padding-top: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-section-rule {
+  margin: var(--sidebar-section-gap) 0.75rem;
+  border: 0;
+  border-top: 1px solid var(--sidebar-guide);
+}
+.desktop-sidebar .sidebar-new-project { padding-bottom: 0.125rem; }
+.desktop-sidebar .sidebar-new-project-icon {
+  border: 1px dashed var(--sidebar-guide);
+  color: var(--text-faint);
+}
+.desktop-sidebar .sidebar-new-project .sidebar-destination:hover .sidebar-new-project-icon {
+  border-color: var(--sidebar-accent);
+  color: var(--sidebar-accent);
+}
 .desktop-sidebar .sidebar-group-heading,
 .desktop-sidebar .sidebar-ungrouped { margin-top: var(--sidebar-section-gap); }
-.desktop-sidebar .sidebar-group-projects { padding-left: 0.25rem; }
+.desktop-sidebar .sidebar-group-heading:first-child { margin-top: 0; }
+.desktop-sidebar .sidebar-group-heading:hover { background: var(--sidebar-hover); }
+.desktop-sidebar .sidebar-folder { padding-block: var(--sidebar-project-pad); color: var(--text); }
+.desktop-sidebar .sidebar-folder-icon { color: var(--sidebar-accent); }
+.desktop-sidebar .sidebar-group-heading[data-collapsed] .sidebar-folder-icon { color: var(--text-muted); }
+.desktop-sidebar .sidebar-folder-count {
+  min-width: 1.25rem;
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  text-align: center;
+  color: var(--text-faint);
+  background: var(--sidebar-hover);
+}
+.desktop-sidebar .sidebar-group-projects {
+  /* Same spine as a project's sub-nav: under the folder icon's center. */
+  margin: 0.125rem 0 0.25rem 1.1875rem;
+  padding-left: 0.25rem;
+  border-left: 1px solid var(--sidebar-guide);
+}
 .desktop-sidebar .sidebar-project { margin-top: var(--sidebar-project-gap); }
 .desktop-sidebar .sidebar-project:hover { background: var(--sidebar-hover); }
 .desktop-sidebar .sidebar-project-link { padding-block: var(--sidebar-project-pad); }

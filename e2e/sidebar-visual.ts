@@ -112,10 +112,10 @@ export async function desktopScreenshots(page: Page, directory: string) {
       for (const scale of ["sm", "md", "lg"]) for (const compact of [false, true]) {
         await appearance(page, theme, "indigo", scale, compact);
         await page.mouse.move(900, 100);
-        await page.locator("aside nav").evaluate(el => el.scrollTop = 0);
+        await page.locator("aside .sidebar-scroll").evaluate(el => el.scrollTop = 0);
         await page.locator("#route").click();
         await page.screenshot({ path: resolve(directory, `desktop-${theme}-${width}-${scale}-${compact ? "compact" : "comfortable"}.png`) });
-        assert.ok(await page.locator("aside nav").evaluate(el => el.scrollWidth <= el.clientWidth), "Sidebar must not scroll horizontally");
+        assert.ok(await page.locator("aside .sidebar-scroll").evaluate(el => el.scrollWidth <= el.clientWidth), "Sidebar must not scroll horizontally");
       }
       await appearance(page, theme);
     }
@@ -125,7 +125,7 @@ export async function desktopScreenshots(page: Page, directory: string) {
   for (const theme of ["light", "dark"]) {
     await appearance(page, theme);
     for (const position of ["top", "bottom"]) {
-      await page.locator("aside nav").evaluate((el, position) => el.scrollTop = position === "top" ? 0 : el.scrollHeight, position);
+      await page.locator("aside .sidebar-scroll").evaluate((el, position) => el.scrollTop = position === "top" ? 0 : el.scrollHeight, position);
       await page.screenshot({ path: resolve(directory, `desktop-multiple-expanded-${theme}-${position}.png`) });
     }
   }
