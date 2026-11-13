@@ -64,6 +64,15 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A new Agent activity page (`/agents`) shows what connected tools have been doing over the last hour, day or week: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The data comes from `GET /api/agents/activity`.
 - MCP read tools now record which agent read what, so the page can count reads. Records are buffered and written every few seconds, and the server deletes them after 30 days.
 
+### Command palette
+
+- The palette (Ctrl/⌘ K) is easier to read. The selected row gets a neutral fill and a thin accent marker on its left edge instead of an accent tint, and every row is one line: status or kind icon, identifier, title, then the project and priority. The characters your query matched are highlighted. All palette text meets WCAG AA contrast with every accent in light and dark.
+- An empty palette lists what you opened recently and the next likely actions (New issue, New page, Switch project, New project) instead of every project. Projects show up when you type their name. Syntax tips (`34`, `OMN-156`, `doc 3`) appear only until you start typing.
+- A scope chip next to the input narrows results to issues, pages, plans, projects or actions. Tab and Shift+Tab cycle it. Plans are now searchable.
+- On wide screens a preview column shows the selected issue or page: status, priority, project, who it is for, labels and the first lines of its text.
+- Ctrl/⌘ . opens actions for the selected result: open it, open it in a new tab, copy its link or identifier, and for issues set the status or priority without leaving the palette.
+- The footer shows real keycaps, and reopening the palette within a minute restores your last query and selection.
+
 ### Storage
 
 - Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.
