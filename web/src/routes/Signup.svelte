@@ -4,8 +4,16 @@
   import StatusIcon, { statusCssColor } from "../lib/StatusIcon.svelte";
   import { AlertTriangle, Eye, EyeOff, Check, Lock } from "lucide-svelte";
   import { onMount } from "svelte";
+  import { authRouteFor } from "../lib/loginRedirect";
 
-  let { navigate }: { navigate: (path: string) => void } = $props();
+  let {
+    navigate,
+    next = "/",
+  }: {
+    navigate: (path: string) => void;
+    /** Where to continue once the account exists (the page that sent us here). */
+    next?: string;
+  } = $props();
 
   let username = $state("");
   let email = $state("");
@@ -133,7 +141,7 @@
       saveSession(result.data.token);
       // Tick the first step done (the app's status-change), then enter.
       accountDone = true;
-      setTimeout(() => navigate("/"), 750);
+      setTimeout(() => navigate(next), 750);
     } else {
       error = result.error;
       loading = false;
@@ -144,6 +152,7 @@
 <AuthShell
   mode="signup"
   {navigate}
+  {next}
   {host}
   {instanceName}
   {loginMessage}
@@ -166,7 +175,7 @@
       </div>
       <button
         type="button"
-        onclick={() => navigate("/login")}
+        onclick={() => navigate(authRouteFor("login", next))}
         class="rounded-lg bg-[var(--btn-success)] text-[var(--btn-success-text)]
                text-body-lg font-medium py-2.5 px-5 transition-all duration-200
                hover:bg-[var(--btn-success-hover)] motion-safe:active:scale-[0.98]

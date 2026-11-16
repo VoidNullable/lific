@@ -4,7 +4,14 @@
   import { AlertTriangle, Eye, EyeOff } from "lucide-svelte";
   import { onMount } from "svelte";
 
-  let { navigate }: { navigate: (path: string) => void } = $props();
+  let {
+    navigate,
+    next = "/",
+  }: {
+    navigate: (path: string) => void;
+    /** Where to continue once signed in (the page that sent us here). */
+    next?: string;
+  } = $props();
 
   let identity = $state("");
   let password = $state("");
@@ -65,7 +72,7 @@
 
     if (result.ok) {
       saveSession(result.data.token);
-      navigate("/");
+      navigate(next);
     } else {
       error = result.error;
       loading = false;
@@ -79,6 +86,7 @@
 <AuthShell
   mode="login"
   {navigate}
+  {next}
   {host}
   {instanceName}
   {loginMessage}

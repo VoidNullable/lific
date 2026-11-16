@@ -52,6 +52,7 @@
   import { fade } from "svelte/transition";
   import { onDestroy, onMount, setContext } from "svelte";
   import { routePageTitle, PAGE_TITLE_CONTEXT } from "./lib/pageTitle";
+  import { loginRouteFor, nextRouteFrom } from "./lib/loginRedirect";
 
   // Path-style deep links (LIF-247): external tools (e.g. the Dashboard)
   // link to plain paths like /LIF/overview or /LIF/issues/LIF-42. The server
@@ -249,6 +250,23 @@
     syncRealtimeSocket();
   }
 
+  // An auth bounce replaces the entry it bounces from, so Back from the login
+  // screen does not land on a page that only sends it to login again.
+  function replaceRoute(path: string) {
+    history.replaceState(null, "", appBasePath + "/#" + path);
+    applyRoute(path);
+    syncRealtimeSocket();
+  }
+
+  // The route to come back to after signing in. A path-style deep link with a
+  // comment fragment keeps the fragment in the browser hash rather than in
+  // `route` (see the boot code above), so fold it back in.
+  function routeToResume(): string {
+    const hash = window.location.hash;
+    const target = hash.startsWith("#/") ? null : commentTargetFromHash(hash);
+    return target ? routeWithCommentTarget(route, target) : route;
+  }
+
   // LIF-471: the routes handed to components mounted inside the public shell.
   // Components build ordinary project routes (`/LIF/issues/LIF-42`); this
   // keeps them inside `/public/...` so a reader never falls out of the public
@@ -287,22 +305,16 @@
     if (!bootstrapping) {
       if (hasSession()) {
         // LIF-237: "/" is now a real route (Home) rather than a redirect
-        // target — only /login and /signup bounce once a session exists.
-        if (route === "/login" || route === "/signup") {
-          redirectToDefault();
+        // target. Only /login and /signup bounce once a session exists,
+        // to the page they were opened for (`?next=`) or else Home.
+        if (parsed.type === "auth") {
+          replaceRoute(nextRouteFrom(route));
         }
-      } else if (route !== "/login" && route !== "/signup") {
-        navigate("/login");
+      } else if (parsed.type !== "auth") {
+        replaceRoute(loginRouteFor(routeToResume()));
       }
     }
   });
-
-  // LIF-237: the bare root URL is Home, the "My Work" landing dashboard.
-  // (Project-scoped surfaces are still reached by navigating into a
-  // project.)
-  function redirectToDefault() {
-    navigate("/");
-  }
 
   function socketUrl(): string {
     const url = new URL("/api/events/ws", window.location.origin);
@@ -399,7 +411,7 @@
 
     if (!session.ok && session.status === 401) {
       clearSession();
-      navigate("/login");
+      navigate(loginRouteFor(routeToResume()));
       return;
     }
 
@@ -857,9 +869,11 @@
   </div>
 {:else if parsed.type === "auth"}
   {#if parsed.page === "signup"}
-    <Signup {navigate} />
+    <!-- The auth screens are a stop on the way somewhere, so they replace
+         their own history entry instead of stacking more. -->
+    <Signup navigate={replaceRoute} next={nextRouteFrom(route)} />
   {:else}
-    <Login {navigate} />
+    <Login navigate={replaceRoute} next={nextRouteFrom(route)} />
   {/if}
 {:else if parsed.type === "loading"}
   <div class="min-h-dvh flex items-center justify-center">

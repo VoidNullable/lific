@@ -23,10 +23,12 @@
     type ThemePreference,
   } from "./theme";
   import { LogIn, UserPlus, Sun, Moon, Monitor, ChevronRight } from "lucide-svelte";
+  import { authRouteFor } from "./loginRedirect";
 
   let {
     mode,
     navigate,
+    next = "/",
     host,
     instanceName = null,
     loginMessage = null,
@@ -40,6 +42,8 @@
     /** Which auth surface is active; drives the switcher + breadcrumb. */
     mode: "login" | "signup";
     navigate: (path: string) => void;
+    /** The page to continue to after auth; kept when switching sign in / sign up. */
+    next?: string;
     /** Host of the instance, shown plainly in the breadcrumb. */
     host: string;
     /** Admin-set instance name; replaces the host in the breadcrumb when set. */
@@ -96,7 +100,7 @@
         ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
         : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
       aria-pressed={mode === "login"}
-      onclick={() => navigate("/login")}
+      onclick={() => navigate(authRouteFor("login", next))}
     >
       <LogIn size={11} class="shrink-0" />
       Sign in
@@ -107,7 +111,7 @@
         ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
         : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
       aria-pressed={mode === "signup"}
-      onclick={() => navigate("/signup")}
+      onclick={() => navigate(authRouteFor("signup", next))}
     >
       <UserPlus size={11} class="shrink-0" />
       Create account

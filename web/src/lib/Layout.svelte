@@ -48,6 +48,7 @@
   import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "./autoRefresh.svelte";
   import { loadActiveAgentCount } from "./agents/activeCount"; // LIF-544
+  import { loginRouteFor } from "./loginRedirect";
   import {
     clampSidebarWidth,
     loadSidebarWidthPreference,
@@ -653,7 +654,7 @@
     } else {
       clearSession();
       currentUser.set(null);
-      navigate("/login");
+      navigate(loginRouteFor(route));
       return;
     }
     void refreshCounts(true);
