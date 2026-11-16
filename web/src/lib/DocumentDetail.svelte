@@ -361,7 +361,7 @@
        width so nothing reflows once data lands). -->
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
+      <div class="flex gap-0 min-h-full">
         <!-- LIF-281: match the loaded main-column padding per layout so the
              title/body don't shift on load — two-column uses
              px-4 py-5 sm:px-8 sm:py-6, wide uses px-4 py-6 sm:px-10 sm:py-8. -->
@@ -411,7 +411,7 @@
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">
       {#if layout === "two-column"}
-        <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
+        <div class="flex gap-0 min-h-full">
           <div bind:this={contentEl} class="flex-1 min-w-0 px-4 py-5 sm:px-8 sm:py-6">
             {@render mainColumn()}
           </div>

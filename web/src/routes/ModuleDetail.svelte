@@ -358,13 +358,13 @@
 
 {#if loading}
   <!-- LIF-281: structural skeleton mirroring the loaded module layout — the
-       max-w-[1120px] wrapper, the main column (px-4 py-5 sm:px-8 sm:py-6) with
+       full-width flex wrapper, the main column (px-4 py-5 sm:px-8 sm:py-6) with
        its icon+name header, description block, and issues list, plus the
        docked sidebar at md+. Replaces a bare centered spinner so the frame
        holds steady when the module resolves. -->
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
+      <div class="flex gap-0 min-h-full">
         <!-- Main column -->
         <div class="flex-1 min-w-0 px-4 py-5 sm:px-8 sm:py-6">
           <!-- Icon (size-10 IconPicker box) + name (text-display line). -->
@@ -440,7 +440,7 @@
 {:else if mod}
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
+      <div class="flex gap-0 min-h-full">
         <!-- Main column -->
         <div class="flex-1 min-w-0 px-4 py-5 sm:px-8 sm:py-6">
           <!-- Name + icon. The icon mirrors projects (LIF-124): same
