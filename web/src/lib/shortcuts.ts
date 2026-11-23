@@ -21,7 +21,7 @@ import { shortcutHelpState } from "./shortcutHelpState.svelte";
 import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
 import { mobileNavState } from "./mobileNavState.svelte";
 
-export type ShortcutScope = "global" | "list" | "board" | "peek" | "palette" | "editor";
+export type ShortcutScope = "global" | "list" | "board" | "inbox" | "peek" | "palette" | "editor";
 
 export interface ShortcutEntry {
   /** Display form. Space-separated tokens render as separate <kbd> chips,
@@ -31,12 +31,13 @@ export interface ShortcutEntry {
   scope: ShortcutScope;
 }
 
-export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "peek", "palette", "editor"];
+export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "inbox", "peek", "palette", "editor"];
 
 export const SCOPE_LABEL: Record<ShortcutScope, string> = {
   global: "Global",
   list: "Issue list",
   board: "Board",
+  inbox: "Inbox",
   peek: "Peek panel",
   palette: "Command palette",
   editor: "Markdown editor",
@@ -97,6 +98,17 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "⌘ ⇧ X", label: "Strikethrough", scope: "editor" },
   { keys: "⌘ ⇧ K", label: "Insert link", scope: "editor" },
   { keys: "⌘ Enter", label: "Tick or untick the task on this line", scope: "editor" },
+  // ── Inbox (Inbox.svelte onKeydown) ──────────────────────
+  { keys: "J ↓", label: "Next issue", scope: "inbox" },
+  { keys: "K ↑", label: "Previous issue", scope: "inbox" },
+  { keys: "Enter O", label: "Open the issue", scope: "inbox" },
+  { keys: "U", label: "Mark read or unread", scope: "inbox" },
+  { keys: "E", label: "Mark done", scope: "inbox" },
+  { keys: "L", label: "Put off until tomorrow", scope: "inbox" },
+  { keys: "X", label: "Select or deselect", scope: "inbox" },
+  { keys: "⇧ A", label: "Mark everything shown as read", scope: "inbox" },
+  { keys: "1 … 6", label: "Switch tab", scope: "inbox" },
+  { keys: "/", label: "Search the inbox", scope: "inbox" },
   { keys: "/", label: "Insert a block (heading, list, table…)", scope: "editor" },
   { keys: "Tab ⇧ Tab", label: "Indent or outdent a list item", scope: "editor" },
   { keys: "⌘ S", label: "Save now (saves on its own too)", scope: "editor" },

@@ -49,6 +49,8 @@
   import { startAutoRefresh } from "./autoRefresh.svelte";
   import { loadActiveAgentCount } from "./agents/activeCount"; // LIF-544
   import { loginRouteFor } from "./loginRedirect";
+  import { buildEntries } from "./inbox/inbox";
+  import { ensureServerClock, serverDay } from "./serverClock.svelte";
   import {
     clampSidebarWidth,
     loadSidebarWidthPreference,
@@ -236,7 +238,12 @@
     activeAgents = agents;
     if (!res.ok) return;
     const { assigned, human, waiting } = res.data;
-    inboxCount = new Set([...assigned, ...human, ...waiting].map((i) => i.id)).size;
+    // Only date waits need the server's day; skip the clock read otherwise.
+    if ([...assigned, ...human, ...waiting].some((i) => i.waits?.some((w) => w.kind === "date"))) {
+      ensureServerClock();
+    }
+    // Issues put off until a later day are not counted until they come back.
+    inboxCount = buildEntries(res.data, serverDay(Date.now())).filter((e) => !e.later).length;
     assignedCount = assigned.length;
   }
   function countLabel(n: number): string {
