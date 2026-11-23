@@ -13,6 +13,16 @@ export const STATUSES = ["backlog", "todo", "active", "done", "cancelled"];
 /** Canonical priority order (urgent → none). */
 export const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
 
+/** "Active", "Cancelled". */
+export function statusLabel(status: string): string {
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+/** "Urgent", "No priority". */
+export function priorityLabel(priority: string): string {
+  return priority === "none" ? "No priority" : priority.charAt(0).toUpperCase() + priority.slice(1);
+}
+
 /** Terminal statuses — work that's left the board (no longer actionable). */
 export const TERMINAL_STATUSES = ["done", "cancelled"];
 

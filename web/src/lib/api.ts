@@ -1066,6 +1066,10 @@ export interface UpdateIssueInput {
   /** LIF-147: replaces the assignment. `[]` = any agent, `["human"]` = any
    *  person, usernames = those people. */
   assignees?: string[];
+  /** YYYY-MM-DD; an empty string clears it. */
+  start_date?: string;
+  /** YYYY-MM-DD; an empty string clears it. */
+  target_date?: string;
   /** LIF-441: refuse the write (409) unless the issue still has this seq. */
   expected_seq?: number;
 }
@@ -2012,6 +2016,11 @@ export async function deletePage(id: number) {
   return request<{ deleted: boolean }>(`/pages/${id}`, {
     method: "DELETE",
   });
+}
+
+/** Bring a deleted page back from the trash. */
+export async function restorePage(id: number) {
+  return request<Page>(`/pages/${id}/restore`, { method: "POST" });
 }
 
 export async function downloadPageExport(identifier: string) {

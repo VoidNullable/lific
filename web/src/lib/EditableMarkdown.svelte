@@ -23,6 +23,7 @@
   import type { BodySaveResult, SyncStatus } from "./editor/bodySync";
   import type { BodySync } from "./editor/bodySync";
   import type { AttachmentEntity } from "./api";
+  import { outlineOf } from "./detail/outline";
 
   let {
     value,
@@ -157,13 +158,31 @@
   export function flush() {
     return sync?.flush();
   }
+
+  let renderedEl = $state<HTMLElement | null>(null);
+
+  /** Where each heading of the body sits on screen (px from the viewport
+   *  top), in the order `outlineOf` lists them. The editor measures lines it
+   *  has not drawn yet, so a long page answers for every heading. */
+  export function headingTops(): number[] {
+    const view = editorRef?.getHandle()?.view;
+    if (view) {
+      const doc = view.state.doc;
+      return outlineOf(doc.toString()).map((h) => {
+        const line = doc.line(Math.min(h.line, doc.lines));
+        return view.documentTop + view.lineBlockAt(line.from).top;
+      });
+    }
+    if (!renderedEl) return [];
+    return [...renderedEl.querySelectorAll("h1, h2, h3, h4, h5, h6")].map((el) => el.getBoundingClientRect().top);
+  }
 </script>
 
 <svelte:document onvisibilitychange={onVisibility} />
 <svelte:window onbeforeunload={onBeforeUnload} />
 
 {#if !editable}
-  <div class="em-rendered {proseClass}" style:min-height={proseMinHeight}>
+  <div class="em-rendered {proseClass}" style:min-height={proseMinHeight} bind:this={renderedEl}>
     {#if hasContent}
       <Markdown content={value} />
     {:else}

@@ -29,6 +29,7 @@
     label,
     onDelete,
     confirmBody = "This can't be undone.",
+    confirm = true,
     align = "right",
     items = [],
   }: {
@@ -36,8 +37,11 @@
     noun: string;
     /** Identifier or name shown in the confirm ("Delete LIF-42?"). */
     label: string;
-    onDelete: () => Promise<boolean>;
+    /** Omit for a menu without Delete (someone who may not delete). */
+    onDelete?: () => Promise<boolean>;
     confirmBody?: string;
+    /** False when the delete can be undone from its toast: no confirm step. */
+    confirm?: boolean;
     align?: "left" | "right";
     items?: MenuItem[];
   } = $props();
@@ -52,6 +56,7 @@
   }
 
   async function run() {
+    if (!onDelete) return;
     deleting = true;
     const ok = await onDelete();
     if (!ok) {
@@ -70,6 +75,9 @@
            text-[var(--text-faint)] hover:text-[var(--text)]
            hover:bg-[var(--bg-subtle)] transition-colors"
     title="More actions"
+    aria-label="More actions"
+    aria-haspopup="menu"
+    aria-expanded={menuOpen || confirming}
     onclick={(e) => {
       e.stopPropagation();
       if (confirming) { confirming = false; menuOpen = false; }
@@ -80,15 +88,18 @@
   </button>
 
   {#if menuOpen && !confirming}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
-      class="absolute {align === 'right' ? 'right-0' : 'left-0'} top-full mt-1.5 z-30 w-[180px]
+      role="menu"
+      tabindex="-1"
+      class="popover-in absolute {align === 'right' ? 'right-0 origin-top-right' : 'left-0 origin-top-left'} top-full mt-1.5 z-30 w-[200px]
              bg-[var(--surface)] border border-[var(--border)]
              rounded-md shadow-lg py-1"
       onclick={(e) => e.stopPropagation()}
     >
       {#each items as item (item.label)}
         <button
+          role="menuitem"
           class="w-full flex items-center gap-2 px-3 py-1.5 text-left
                  text-body-sm text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
@@ -103,20 +114,30 @@
           {item.label}
         </button>
       {/each}
-      <button
-        class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-               text-body-sm text-[var(--error)]
-               hover:bg-[var(--error-bg)] transition-colors"
-        onclick={() => { confirming = true; }}
-      >
-        <Trash2 size={14} />
-        Delete {noun}
-      </button>
+      {#if onDelete}
+        {#if items.length}<div class="my-1 h-px bg-[var(--border)]"></div>{/if}
+        <button
+          role="menuitem"
+          class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                 text-body-sm text-[var(--error)]
+                 hover:bg-[var(--error-bg)] transition-colors"
+          onclick={() => {
+            if (confirm) confirming = true;
+            else {
+              menuOpen = false;
+              void run();
+            }
+          }}
+        >
+          <Trash2 size={14} />
+          Delete {noun}
+        </button>
+      {/if}
     </div>
   {/if}
 
   {#if confirming}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="absolute {align === 'right' ? 'right-0' : 'left-0'} top-full mt-1.5 z-30 w-[260px]
              bg-[var(--surface)] border border-[var(--border)]
