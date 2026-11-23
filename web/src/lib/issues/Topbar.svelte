@@ -14,14 +14,14 @@
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDown, ArrowUp, Hash, Clock, History, Check, Zap, PenLine,
     SlidersVertical, Rows3, Layers, MoreHorizontal,
-    Square, SquareMinus, SquareCheck,
+    Square, SquareMinus, SquareCheck, X,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
   import SubTabs, { type SubTab } from "../SubTabs.svelte";
   import Breadcrumbs from "../Breadcrumbs.svelte";
   import StatusIcon from "../StatusIcon.svelte";
-  import Skeleton from "../Skeleton.svelte";
   import FilterModal from "./FilterModal.svelte";
+  import FilterChips from "./FilterChips.svelte";
   import SavedViews from "./SavedViews.svelte";
   import type { SortField } from "./sort";
   import type { GroupBy, Density, LaneBy } from "./grouping";
@@ -52,6 +52,7 @@
     selectionBusy = false,
     onSelectAll = () => {},
     onClearSelection = () => {},
+    boardLeading,
   }: {
     view: IssueListState;
     projectIdentifier: string;
@@ -91,6 +92,9 @@
     selectionBusy?: boolean;
     onSelectAll?: () => void;
     onClearSelection?: () => void;
+    /** Board only: the column-visibility pills, rendered at the start of
+     *  the toolbar tier so the board body doesn't spend a row on them. */
+    boardLeading?: import("svelte").Snippet;
   } = $props();
 
   // Tri-state for the select-all toggle. "all" flips to clear on click;
@@ -133,6 +137,16 @@
       { id: "closed", label: "Closed", count: countFor("done") + countFor("cancelled") },
     ];
   });
+
+  let sortLabel = $derived(
+    view.sortField === "age"
+      ? "Age"
+      : view.sortField === "updated"
+        ? "Updated"
+        : view.sortField === "number"
+          ? "Issue #"
+          : "Priority",
+  );
 
   // Compact controls extend through small tablets (LIF-400), below `md`.
   // The panel is a disclosure region, not a menu. Its contents are composite
@@ -188,187 +202,65 @@
   });
 </script>
 
-<div class="relative flex flex-wrap items-center gap-2 md:gap-3 px-3 md:px-6 py-2 w-full">
+<!-- Two tiers. The first says where you are and holds the two things you
+     reach for most (search and New); the second is the toolbar for shaping
+     the list. A third appears only while filters are active and spells them
+     out as removable chips. -->
+<div class="relative w-full flex flex-col">
 
-  <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
-  <div class="flex items-center gap-2 md:gap-3 shrink-0 min-w-0">
-    <!-- Breadcrumb (LIF-286: shared component). The project segment and its
-         separator still carry `hideBelowSm`, which is what every other
-         detail topbar does; below sm the wrapper hides the trail before
-         that ever matters.
-
-         LIF-350: below sm the trail goes entirely. Since LIF-349 the mobile
-         app header reads "[icon] Project Issues", so the surviving "Issues"
-         / "Board" crumb was pure duplication, and the ~50px it cost (plus
-         its gap) was a big share of what pushed this row onto a second
-         line at 360px. Hidden from the outside rather than by flagging
-         both segments, which would leave an empty <nav> still claiming a
-         gap in the row. `min-w-0` moves onto the wrapper so the trail can
-         still shrink at sm and up exactly as it did. -->
-    <div class="hidden md:block min-w-0">
-      <Breadcrumbs
-        segments={[
-          { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
-          { label: layout === "board" ? "Board" : "Issues" },
-        ]}
-      />
+  <!-- ── TIER 1: identity, view switch, search, primary action ── -->
+  <div class="relative flex items-center gap-2 md:gap-4 px-3 md:px-6 h-12 md:h-[3.25rem]">
+    <div class="hidden md:flex items-baseline gap-2 min-w-0 shrink-0">
+      <a
+        href="#/{projectIdentifier}/overview"
+        class="font-mono text-caption text-[var(--text-faint)] hover:text-[var(--text)] transition-colors"
+      >
+        {projectIdentifier}
+      </a>
+      <span class="text-[var(--text-faint)] opacity-60" aria-hidden="true">/</span>
+      <h1 class="font-display text-heading font-medium tracking-tight text-[var(--text)] leading-none">
+        {layout === "board" ? "Board" : "Issues"}
+      </h1>
+      <span class="min-w-[2ch] text-caption tabular-nums text-[var(--text-faint)]">{countLabel}</span>
     </div>
 
-    <!-- View switcher pill. Anchored directly after the breadcrumb so the
-         toggle never shifts when the per-status tallies (which arrive a
-         frame later, after the counts fetch) render in beside it.
-
-         LIF-350: icon-only below sm. `sr-only` (not `hidden`) keeps both
-         labels in the accessibility tree, so the buttons still announce as
-         "List" / "Board" on a phone, and it takes them out of flow rather
-         than out of the box tree, so they claim neither width nor a flex
-         gap there. `md:not-sr-only` restores them at desktop widths. -->
+    <!-- View switcher. Icon-only below md (the labels stay in the
+         accessibility tree via sr-only). -->
     <div
-      class="flex items-center gap-0.5 p-0.5 rounded-md bg-[var(--bg)]
+      class="flex items-center gap-0.5 p-[3px] rounded-lg bg-[var(--bg)]
              shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
     >
-      <button
-        class="flex items-center gap-1 px-2 py-0.5 rounded
-               text-caption font-medium transition
-               {layout === 'list'
-          ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
-          : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-        aria-pressed={layout === "list"}
-        onclick={() => navigate(`/${projectIdentifier}/issues`)}
-      >
-        <ListIcon size={11} class="shrink-0" />
-        <span class="sr-only md:not-sr-only">List</span>
-      </button>
-      <button
-        class="flex items-center gap-1 px-2 py-0.5 rounded
-               text-caption font-medium transition
-               {layout === 'board'
-          ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
-          : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-        aria-pressed={layout === "board"}
-        onclick={() => navigate(`/${projectIdentifier}/board`)}
-      >
-        <LayoutGrid size={11} class="shrink-0" />
-        <span class="sr-only md:not-sr-only">Board</span>
-      </button>
+      {#each [["list", "List", `/${projectIdentifier}/issues`], ["board", "Board", `/${projectIdentifier}/board`]] as [mode, label, href] (mode)}
+        <button
+          class="flex items-center gap-1.5 h-7 px-2 md:px-2.5 rounded-md
+                 text-body-sm font-medium transition-[background,color,box-shadow] duration-150
+                 {layout === mode
+            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.16),0_1px_1px_rgba(0,0,0,0.10)]'
+            : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          aria-pressed={layout === mode}
+          onclick={() => navigate(href)}
+        >
+          {#if mode === "list"}
+            <ListIcon size={13} class="shrink-0" />
+          {:else}
+            <LayoutGrid size={13} class="shrink-0" />
+          {/if}
+          <span class="sr-only md:not-sr-only">{label}</span>
+        </button>
+      {/each}
     </div>
 
-    <!-- LIF-161: per-status tallies (server truth, immune to the list fetch
-         cap). Clicking one toggles the matching status filter. Gated on at
-         least one non-zero tally. -->
-    {#if countsLoading}
-      <!-- LIF-281: parity with the real tally cluster below — same
-           container (gap-0.5) and same per-chip box (h-6, px-1.5, icon +
-           count), so the tallies don't shift when the counts fetch lands. -->
-      <div class="hidden md:flex items-center gap-0.5">
-        {#each [0, 1, 2] as i (i)}
-          <div class="h-6 flex items-center gap-1 px-1.5 rounded">
-            <Skeleton variant="circle" class="size-3 shrink-0" />
-            <Skeleton variant="bar" class="h-2.5 w-3" />
-          </div>
-        {/each}
-      </div>
-    {:else if statusCounts.some((s) => s.count > 0)}
-      <div class="hidden md:flex items-center gap-0.5">
-        {#each statusCounts as { status, count } (status)}
-          {#if count > 0}
-            <Tooltip
-              content={`${count} ${status}${view.filterStatus.includes(status) ? "  ·  click to remove from filter" : ""}`}
-              placement="bottom"
-            >
-              <button
-                class="h-6 flex items-center gap-1 px-1.5 rounded
-                       text-micro font-medium tabular-nums
-                       transition-colors
-                       {view.filterStatus.includes(status)
-                  ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                onclick={() => view.toggleStatusFilter(status)}
-              >
-                <StatusIcon {status} size={12} />
-                {count}
-              </button>
-            </Tooltip>
-          {/if}
-        {/each}
-      </div>
-    {/if}
-  </div>
+    <div class="flex-1"></div>
 
-  <!-- Separator -->
-  <div class="w-px h-4 bg-[var(--border)]"></div>
-
-  <!-- ── FILTER (unified popover; LIF-222) ────────────────────
-       Replaces the previous row of up to four inline <Select>
-       triggers (Status / Priority / Labels / Modules) plus a
-       standalone Clear button. The popover stacks all four
-       sections vertically with section labels matching the
-       LIF-DOC-14 §7 popover language, and the trigger carries
-       a small accent badge with the count of active filters. -->
-  <div class="relative">
-    <Tooltip content={view.filterOpen ? null : "Filter"} placement="bottom">
-      <button
-        class="h-7 flex items-center gap-1.5 px-2 rounded-md
-               text-caption font-medium transition-colors
-               hover:bg-[var(--bg-subtle)]
-               {view.filterOpen || filterCount > 0
-                 ? 'text-[var(--text)] bg-[var(--bg-subtle)]'
-                 : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-        onclick={(e) => {
-          e.stopPropagation();
-          view.filterOpen = !view.filterOpen;
-          view.sortOpen = false;
-          view.displayOpen = false;
-          view.lanesOpen = false;
-          view.newMenuOpen = false;
-          view.overflowOpen = false;
-        }}
-      >
-        <SlidersVertical size={12} class="shrink-0" />
-        <span>Filter</span>
-        {#if filterCount > 0}
-          <span
-            class="grid place-items-center min-w-[1.05rem] h-[1.05rem] px-1
-                   rounded-full bg-[var(--accent)] text-[var(--accent-text)]
-                   font-mono text-micro leading-none tabular-nums"
-          >
-            {filterCount}
-          </span>
-        {/if}
-      </button>
-    </Tooltip>
-
-  </div>
-
-  <!-- Full filter modal (LIF-222 follow-up). Lives outside the trigger
-       wrapper but is fixed-positioned, so DOM placement is irrelevant. -->
-  <FilterModal {view} {labels} {modules} {assignees} {priorityCssColor} />
-
-  <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
-  <div class="ml-auto flex items-center gap-0.5 shrink-0">
-
-    <!-- ── LIF-153: "changed since your last visit" chip ─────────
-         The list polls every 15s and swaps rows in silently, so this is
-         the only place that says anything happened. Clicking it walks
-         keyboard focus to the next changed row and marks that row seen,
-         so the count ticks down as the user works through it.
-
-         List-only: the chip's whole payload is moving row focus, and
-         focus is a list-mode concept (board cards have no focused state;
-         see the `listOnly` gate in IssueList's key handler).
-
-         Below sm it is a dot plus the number: no label, `px-1.5` instead
-         of `px-2`. The sub-sm topbar row had 58.33px of slack after
-         LIF-350 and this is the only thing added to it. At sm and up the
-         word "updated" comes back, which is also where the chip stops
-         being ambiguous next to the total-count number beside it. -->
+    <!-- LIF-153: "changed since your last visit" chip. List only: its whole
+         payload is moving row focus, which the board doesn't have. -->
     {#if layout === "list" && changedCount > 0}
       <Tooltip
         content={`${changedCount} updated since you last looked  ·  click to step through`}
         placement="bottom"
       >
         <button
-          class="h-7 flex items-center gap-1 px-1.5 md:px-2 md:mr-1 rounded-md
+          class="h-7 flex items-center gap-1.5 px-2 md:px-2.5 rounded-full
                  text-caption font-medium tabular-nums
                  text-[var(--accent)] bg-[var(--accent-subtle)]
                  hover:bg-[var(--accent)] hover:text-[var(--accent-text)]
@@ -380,403 +272,114 @@
             onCycleChanged();
           }}
         >
-          <span
-            class="block size-1.5 shrink-0 rounded-full bg-current"
-            aria-hidden="true"
-          ></span>
+          <span class="relative flex size-1.5 shrink-0" aria-hidden="true">
+            <span class="changed-ping absolute inset-0 rounded-full bg-current"></span>
+            <span class="relative size-1.5 rounded-full bg-current"></span>
+          </span>
           <span>{changedLabel}</span>
           <span class="hidden md:inline">updated</span>
         </button>
       </Tooltip>
     {/if}
 
-    <!-- Issue count. Reserved min-width so the brief load frame can't reflow.
-         Hidden below sm to save horizontal room on phones. -->
-    <span
-      class="hidden md:inline mr-1.5 min-w-[2ch] text-right text-micro tabular-nums
-             font-medium text-[var(--text-faint)]"
-    >
-      {countLabel}
-    </span>
-    <div class="hidden md:block w-px h-4 bg-[var(--border)] mr-1"></div>
-
-    <!-- ── LIF-350 / LIF-400: sub-`md` overflow group ────────────
-         Saved views, sort and display/swimlanes cost ~88px of a 360px
-         phone row that has none to spare, and they are the three least
-          load-bearing controls here. Below md they fold behind one 28px
-         button and stack vertically inside its popover.
-
-          Both wrappers go `display: contents` at md and up, which deletes
-         them from layout outright: the three controls become direct flex
-         children of the right zone again, in the same order, with the same
-         `gap-0.5`, so the desktop row is untouched. The popover is
-         `absolute` under the button (the topbar row clips nothing), and
-         each control keeps its own popover — re-anchored `left-0` below
-          md so a 220-260px panel opens rightward into the viewport instead
-         of leftward off the edge of it.
-
-         The children keep their original indentation: this file already
-         wraps controls in `{#if layout === ...}` without indenting them
-         (see the swimlane and display blocks below), and re-indenting
-         ~160 untouched lines would bury the actual change. -->
-    <div class="max-md:relative md:contents">
+    <!-- Search. A real field from md up (no more hunting for the icon);
+         below md an icon that opens the field over the whole tier. -->
+    {#if !view.searchExpanded}
       <button
-        class="md:hidden touch-target size-7 flex items-center justify-center rounded-md
+        aria-label="Search issues"
+        class="md:hidden touch-target size-8 flex items-center justify-center rounded-md
                text-[var(--text-muted)] hover:text-[var(--text)]
-               hover:bg-[var(--bg-subtle)] transition-colors
-               {view.overflowOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
-        aria-label="View options"
-        aria-expanded={view.overflowOpen}
-        aria-controls={OVERFLOW_PANEL_ID}
-        bind:this={overflowTriggerEl}
-        onclick={(e) => {
-          e.stopPropagation();
-          view.overflowOpen = !view.overflowOpen;
-          view.sortOpen = false;
-          view.displayOpen = false;
-          view.lanesOpen = false;
-          view.filterOpen = false;
-          view.newMenuOpen = false;
-        }}
+               hover:bg-[var(--bg-subtle)] transition-colors"
+        onclick={(e) => { e.stopPropagation(); view.overflowOpen = false; onOpenSearch(); }}
       >
-        <MoreHorizontal size={14} />
+        <Search size={15} />
       </button>
-      <div
-        id={OVERFLOW_PANEL_ID}
-        bind:this={overflowPanelEl}
-        class="md:contents max-md:absolute max-md:right-0 max-md:top-full max-md:mt-1.5
-               max-md:z-30 max-md:w-[212px] max-md:flex-col max-md:gap-0.5 max-md:p-1
-               max-md:rounded-lg max-md:border max-md:border-[var(--border)]
-               max-md:bg-[var(--surface)] max-md:shadow-lg
-               {view.overflowOpen ? 'max-md:flex' : 'max-md:hidden'}"
-      >
-
-    <!-- LIF-242: saved views. Self-contained — hides itself when /api/me
-         fails (logged out / OAuth-token-only / legacy key). -->
-    <SavedViews {view} {projectIdentifier} {layout} {navigate} />
-
-    <!-- Sort button + popover. The `[&>span]` rule below sm stretches the
-         Tooltip's `inline-flex` wrapper so the trigger fills the overflow
-         panel's width instead of hugging its label; no-op at sm and up. -->
-    <div class="relative max-md:[&>span]:w-full">
-      <Tooltip
-        content={view.sortOpen
-          ? null
-          : `Sort: ${view.sortField === "age" ? "Age" : view.sortField === "updated" ? "Updated" : view.sortField === "number" ? "Issue #" : "Priority"} ${view.sortDir === "asc" ? "ascending" : "descending"}`}
-        placement="bottom"
-      >
-        <button
-          class="h-7 flex items-center gap-1 px-2 rounded-md
-                 text-caption font-medium
-                 text-[var(--text-muted)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors
-                 {view.sortOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
-          onclick={(e) => {
-            e.stopPropagation();
-            view.sortOpen = !view.sortOpen;
-            view.displayOpen = false;
-            view.lanesOpen = false;
-          }}
-        >
-          {#if view.sortDir === "asc"}
-            <ArrowUp size={12} class="shrink-0" />
-          {:else}
-            <ArrowDown size={12} class="shrink-0" />
-          {/if}
-          <!-- LIF-350: label no longer `hidden sm:inline` — below sm this
-               trigger renders inside the overflow panel, where an unlabeled
-               arrow says nothing. Flex child either way, so sm and up is
-               unchanged. The "Sort:" qualifier only appears in the panel,
-               where a row reading just "Priority" would be indistinguishable
-               from a grouping choice; in the row it would be noise. -->
-          <span class="md:hidden">Sort:</span>
-          <span>
-            {view.sortField === "age"
-              ? "Age"
-              : view.sortField === "updated"
-                ? "Updated"
-                : view.sortField === "number"
-                  ? "Issue #"
-                  : "Priority"}
-          </span>
-        </button>
-      </Tooltip>
-      {#if view.sortOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-        <div
-          class="absolute right-0 top-full mt-1.5 z-30 w-[220px]
-                 max-md:right-auto max-md:left-0
-                 bg-[var(--surface)] border border-[var(--border)]
-                 rounded-lg shadow-lg py-1.5 text-body-sm"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <div class="px-3 pt-1 pb-1.5 text-[var(--text-faint)]
-                      text-micro uppercase tracking-widest
-                      font-semibold">
-            Sort by
-          </div>
-          {#snippet sortRow(field: SortField, label: string, Icon: typeof Hash)}
-            {@const active = view.sortField === field}
-            <button
-              class="w-full flex items-center justify-between gap-2
-                     px-3 py-1.5 text-left transition-colors
-                     {active
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => view.selectSort(field)}
-            >
-              <span class="flex items-center gap-2">
-                <Icon size={13} class="shrink-0" />
-                {label}
-              </span>
-              {#if active}
-                <span class="text-[var(--accent)] flex items-center">
-                  {#if view.sortDir === "asc"}
-                    <ArrowUp size={13} />
-                  {:else}
-                    <ArrowDown size={13} />
-                  {/if}
-                </span>
-              {/if}
-            </button>
-          {/snippet}
-          {@render sortRow("priority", "Priority", Signal)}
-          {@render sortRow("age", "Age", Clock)}
-          {@render sortRow("updated", "Updated", History)}
-          {@render sortRow("number", "Issue number", Hash)}
-          <div class="px-3 pt-2 pb-1 mt-1 text-micro
-                      text-[var(--text-faint)] border-t
-                      border-[var(--border)] leading-snug">
-            Click the active row to flip direction.
-          </div>
-        </div>
-      {/if}
-    </div>
-
-    <!-- LIF-241: Swimlane picker. Board view only — splits the board into
-         horizontal bands (module / priority) on top of the status columns. -->
-    {#if layout === "board"}
-    <div class="relative max-md:[&>span]:w-full">
-      <Tooltip content={view.lanesOpen ? null : "Swimlanes"} placement="bottom">
-        <button
-          class="h-7 flex items-center gap-1 px-2 rounded-md
-                 text-caption font-medium
-                 text-[var(--text-muted)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors
-                 {view.lanesOpen || view.laneBy !== 'none' ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
-          onclick={(e) => {
-            e.stopPropagation();
-            view.lanesOpen = !view.lanesOpen;
-            view.sortOpen = false;
-            view.newMenuOpen = false;
-            view.filterOpen = false;
-          }}
-        >
-          <Rows3 size={12} class="shrink-0" />
-          <!-- LIF-350: see the sort trigger — labels stay on below sm now
-               that these live in the overflow panel. -->
-          <span>
-            {view.laneBy === "none" ? "Lanes" : view.laneBy === "module" ? "Module" : "Priority"}
-          </span>
-        </button>
-      </Tooltip>
-      {#if view.lanesOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-        <div
-          class="absolute right-0 top-full mt-1.5 z-30 w-[188px]
-                 max-md:right-auto max-md:left-0
-                 bg-[var(--surface)] border border-[var(--border)]
-                 rounded-lg shadow-lg py-1.5 text-body-sm"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <div class="px-3 pt-1 pb-1.5 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold">
-            Group rows by
-          </div>
-          {#snippet laneRow(val: LaneBy, label: string, Icon: typeof Layers | null)}
-            {@const active = view.laneBy === val}
-            <button
-              class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
-                     {active
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => { view.setLaneBy(projectIdentifier, val); }}
-            >
-              <span class="flex items-center gap-2">
-                {#if Icon}<Icon size={13} class="shrink-0" />{:else}<span class="size-[13px] shrink-0"></span>{/if}
-                {label}
-              </span>
-              {#if active}<Check size={13} class="text-[var(--accent)]" />{/if}
-            </button>
-          {/snippet}
-          {@render laneRow("none", "None", null)}
-          {@render laneRow("module", "Module", Layers)}
-          {@render laneRow("priority", "Priority", Signal)}
-          <div class="px-3 pt-2 pb-1 mt-1 text-micro
-                      text-[var(--text-faint)] border-t
-                      border-[var(--border)] leading-snug">
-            Rows always show, even at zero — drag a card in to assign it.
-          </div>
-        </div>
-      {/if}
-    </div>
     {/if}
-
-    <!-- LIF-191: Display options — group-by + density. List view only. -->
-    {#if layout !== "board"}
-    <div class="relative max-md:[&>span]:w-full">
-      <Tooltip content={view.displayOpen ? null : "Display options"} placement="bottom">
-        <!-- LIF-350: a bare 28px square in the row at sm and up; a labeled,
-             full-width row inside the overflow panel below it. The `max-sm:`
-             utilities all sit inside the breakpoint's media query, so the
-             `size-7` square is exactly what it was on desktop. -->
-        <button
-          class="touch-target size-7 flex items-center justify-center rounded-md
-                 max-md:w-full max-md:justify-start max-md:gap-1.5 max-md:px-2
-                 text-caption font-medium
-                 text-[var(--text-muted)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors
-                 {view.displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
-          onclick={(e) => { e.stopPropagation(); view.displayOpen = !view.displayOpen; view.sortOpen = false; view.newMenuOpen = false; }}
-        >
-          <SlidersHorizontal size={14} class="shrink-0" />
-          <span class="md:hidden">Display</span>
-        </button>
-      </Tooltip>
-      {#if view.displayOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-        <div
-          class="absolute right-0 top-full mt-1.5 z-30 w-[224px]
-                 max-md:right-auto max-md:left-0
-                 bg-[var(--surface)] border border-[var(--border)]
-                 rounded-lg shadow-lg py-1.5 text-body-sm"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <div class="px-3 pt-1 pb-1.5 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold">
-            Group by
-          </div>
-          {#each [["status", "Status"], ["priority", "Priority"], ["module", "Module"], ["none", "None"]] as [val, label]}
-            <button
-              class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
-                     {view.groupBy === val
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => { view.groupBy = val as GroupBy; }}
-            >
-              {label}
-              {#if view.groupBy === val}<Check size={13} class="text-[var(--accent)]" />{/if}
-            </button>
-          {/each}
-
-          <div class="px-3 pt-2.5 pb-1.5 mt-1 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold border-t border-[var(--border)]">
-            Density
-          </div>
-          {#each [["compact", "Compact"], ["comfortable", "Comfortable"]] as [val, label]}
-            <button
-              class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
-                     {view.density === val
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              onclick={() => { view.density = val as Density; }}
-            >
-              {label}
-              {#if view.density === val}<Check size={13} class="text-[var(--accent)]" />{/if}
-            </button>
-          {/each}
+    <div
+      class="{view.searchExpanded ? 'max-md:flex' : 'max-md:hidden'}
+             max-md:absolute max-md:inset-0 max-md:z-20 max-md:bg-[var(--chrome)]
+             max-md:items-center max-md:px-3"
+    >
+      <div class="relative w-full md:w-auto group/search">
+        <div class="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]
+                    group-focus-within/search:text-[var(--accent)] transition-colors">
+          <Search size={13} />
         </div>
-      {/if}
-    </div>
-    {/if}
-      </div>
-    </div>
-    <!-- ── end sub-`sm` overflow group ──────────────────────────── -->
-
-    <!-- Search: collapsed to icon, expands inline on click or `/`.
-         Below sm the expanded field can't join the row — the row is already
-         full of shrink-0 controls, and adding a fixed-width input pushes the
-         row's min width past the viewport (LIF-271: the whole list appeared
-         "zoomed out"). Instead it overlays the entire topbar row. -->
-    {#if view.searchExpanded}
-      <div
-        class="max-md:absolute max-md:inset-0 max-md:z-20 max-md:bg-[var(--chrome)]
-               max-md:flex max-md:items-center max-md:px-3 max-md:py-1.5"
-      >
-        <div class="relative w-full md:w-auto">
-          <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
-            <Search size={12} />
-          </div>
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            type="text"
-            placeholder="Search issues..."
-            enterkeyhint="search"
-            bind:this={searchInputEl}
-            bind:value={view.searchQuery}
-            onblur={onMaybeCollapseSearch}
-            onkeydown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                view.searchQuery = "";
-                view.searchExpanded = false;
-                (e.currentTarget as HTMLInputElement).blur();
-              }
-            }}
-            class="w-full md:w-[200px] pl-7 pr-2 py-1 text-body-sm rounded-md
-                   border border-[var(--border)] bg-[var(--surface)]
-                   text-[var(--text)] placeholder:text-[var(--text-faint)]
-                   focus:border-[var(--accent)]
-                   focus:shadow-[0_0_0_3px_var(--accent-subtle)]
-                   outline-none transition-colors"
-          />
-        </div>
-      </div>
-    {:else}
-      <Tooltip content="Search  ·  /" placement="bottom">
-        <button
+        <input
+          type="text"
+          placeholder="Search issues..."
+          enterkeyhint="search"
           aria-label="Search issues"
-          class="touch-target size-7 flex items-center justify-center rounded-md
-                 text-[var(--text-muted)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors"
-          onclick={(e) => { e.stopPropagation(); view.overflowOpen = false; onOpenSearch(); }}
-        >
-          <Search size={14} />
-        </button>
-      </Tooltip>
-    {/if}
+          bind:this={searchInputEl}
+          bind:value={view.searchQuery}
+          onblur={onMaybeCollapseSearch}
+          onkeydown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              view.searchQuery = "";
+              view.searchExpanded = false;
+              (e.currentTarget as HTMLInputElement).blur();
+            }
+          }}
+          class="peer w-full h-8 md:w-[220px] md:focus:w-[300px] pl-8 pr-8 text-body-sm rounded-lg
+                 border border-[var(--border)] bg-[var(--bg)]
+                 text-[var(--text)] placeholder:text-[var(--text-faint)]
+                 hover:border-[var(--text-faint)]
+                 focus:border-[var(--accent)] focus:bg-[var(--surface)]
+                 focus:shadow-[0_0_0_3px_var(--accent-subtle)]
+                 outline-none transition-[width,border-color,box-shadow,background] duration-200
+                 {view.searchQuery ? 'md:w-[300px]' : ''}"
+        />
+        {#if view.searchQuery}
+          <button
+            class="absolute right-1.5 top-1/2 -translate-y-1/2 size-5 grid place-items-center rounded
+                   text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
+            aria-label="Clear search"
+            onmousedown={(e) => e.preventDefault()}
+            onclick={(e) => { e.stopPropagation(); view.searchQuery = ""; searchInputEl?.focus(); }}
+          >
+            <X size={12} />
+          </button>
+        {:else}
+          <kbd
+            class="hidden md:grid absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none
+                   place-items-center min-w-[1.15rem] h-[1.15rem] px-1 rounded
+                   border border-[var(--border)] font-mono text-micro text-[var(--text-faint)]
+                   peer-focus:opacity-0 transition-opacity"
+          >/</kbd>
+        {/if}
+      </div>
+    </div>
 
-    <!-- LIF-245: opens the shared Shortcut Help overlay (Layout.svelte),
-         sourced from the lib/shortcuts.ts registry — no longer a
-         topbar-local popover with its own hand-maintained list. Hidden
-         below md since there's no keyboard to shortcut with on touch. -->
+    <!-- LIF-245: shared Shortcut Help overlay. Hidden below md (no keyboard). -->
     <div class="relative hidden md:block">
       <Tooltip content="Shortcuts  ·  ?" placement="bottom">
         <button
-          class="size-7 flex items-center justify-center rounded-md
+          class="size-8 flex items-center justify-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Keyboard shortcuts"
           onclick={(e) => { e.stopPropagation(); toggleShortcutHelp(); }}
         >
-          <HelpCircle size={14} />
+          <HelpCircle size={15} />
         </button>
       </Tooltip>
     </div>
 
-    <!-- Separator -->
+    <!-- Primary action: New issue. Split button: the main segment opens the
+         inline composer; the caret reveals the other ways in. Hidden for
+         viewers (LIF-234). -->
     {#if canEdit}
-    <div class="w-px h-4 bg-[var(--border)] mx-1.5"></div>
-
-    <!-- Primary action: New issue. Split button — main segment opens the
-         inline quick-create row; the caret reveals alternative paths.
-         Hidden for viewers (LIF-234) — creation is maintainer-gated. -->
     <div class="relative">
       <div
-        class="flex items-stretch h-7 rounded-md overflow-hidden shadow-sm
+        class="flex items-stretch h-8 rounded-lg overflow-hidden
+               shadow-[0_1px_2px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.18)]
                focus-within:ring-2 focus-within:ring-[var(--btn-success)]
                focus-within:ring-offset-1
                focus-within:ring-offset-[var(--chrome)]"
       >
-        <!-- Main segment: quick-create -->
         <button
-          class="group flex items-center gap-1.5 px-2 md:pl-2.5 md:pr-2
+          class="group flex items-center gap-1.5 px-2.5 md:pl-3 md:pr-2.5
                  text-body-sm font-medium text-[var(--btn-success-text)]
                  bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
                  transition-colors focus:outline-none
@@ -790,20 +393,19 @@
           }}
         >
           <Plus
-            size={14}
-            class="motion-safe:transition-transform
+            size={15}
+            class="motion-safe:transition-transform motion-safe:duration-300
                    motion-safe:group-hover:rotate-90"
           />
-          <span class="hidden md:inline">New</span>
+          <span class="hidden md:inline">New issue</span>
           <kbd
-            class="hidden md:grid ml-0.5 place-items-center min-w-[1.05rem] h-[1.05rem]
-                   rounded bg-white/20 font-mono text-micro leading-none"
+            class="hidden md:grid ml-0.5 place-items-center min-w-[1.1rem] h-[1.1rem]
+                   rounded bg-black/10 font-mono text-micro leading-none"
           >
             C
           </kbd>
         </button>
-        <div class="w-px bg-white/25"></div>
-        <!-- Caret segment: alternative create paths -->
+        <div class="w-px bg-black/15"></div>
         <button
           class="flex items-center justify-center px-1.5
                  text-[var(--btn-success-text)] bg-[var(--btn-success)]
@@ -823,9 +425,7 @@
         >
           <ChevronDown
             size={14}
-            class="motion-safe:transition-transform {view.newMenuOpen
-              ? 'rotate-180'
-              : ''}"
+            class="motion-safe:transition-transform {view.newMenuOpen ? 'rotate-180' : ''}"
           />
         </button>
       </div>
@@ -835,14 +435,14 @@
         <div
           role="menu"
           tabindex="-1"
-          class="absolute right-0 top-full mt-1.5 z-30 w-[208px]
+          class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[220px]
                  bg-[var(--surface)] border border-[var(--border)]
-                 rounded-lg shadow-lg py-1.5"
+                 rounded-xl shadow-lg p-1"
           onclick={(e) => e.stopPropagation()}
         >
           <button
             role="menuitem"
-            class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+            class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-left
                    text-body-sm text-[var(--text)]
                    hover:bg-[var(--bg-subtle)] transition-colors"
             onclick={() => {
@@ -862,7 +462,7 @@
           </button>
           <button
             role="menuitem"
-            class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+            class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-left
                    text-body-sm text-[var(--text)]
                    hover:bg-[var(--bg-subtle)] transition-colors"
             onclick={() => {
@@ -874,9 +474,9 @@
             <span class="flex-1">Open full editor</span>
           </button>
 
-          <div class="my-1 h-px bg-[var(--border)]"></div>
+          <div class="my-1 mx-1 h-px bg-[var(--border)]"></div>
           <div
-            class="px-3 pb-1 pt-0.5 text-micro uppercase tracking-widest
+            class="px-2.5 pb-1 pt-1 text-micro uppercase tracking-widest
                    font-semibold text-[var(--text-faint)]"
           >
             New in status
@@ -884,7 +484,7 @@
           {#each ["backlog", "todo", "active"] as s}
             <button
               role="menuitem"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
+              class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-left
                      text-body-sm capitalize text-[var(--text)]
                      hover:bg-[var(--bg-subtle)] transition-colors"
               onclick={() => {
@@ -902,58 +502,369 @@
     {/if}
   </div>
 
-  <!-- LIF-308: like Pages' LIF-305 strip, the list's content slices own a
-       full bottom row so the existing issue toolbar remains unchanged. -->
-  {#if layout === "list"}
-    <div class="basis-full">
-      <SubTabs
-        tabs={issueSubTabs}
-        active={view.issueSubTab}
-        onselect={(id) => view.selectIssueSubTab(id)}
-      >
-        {#snippet trailing()}
-          {#if canEdit && selectableCount > 0}
-            <!-- Select-all lives at the right end of the tab strip rather
-                 than on its own full-width row. Desktop only (`hidden
-                 sm:flex`): below sm the rows are tapped one at a time and
-                 the bulk bar handles the rest. Styled as a sibling of the
-                 Display / Filter buttons above, with a lucide tri-state
-                 glyph instead of a native checkbox. -->
-            <Tooltip
-              content={selectionState === "all"
-                ? "Clear selection  ·  Esc"
-                : "Select all visible issues  ·  Ctrl+A"}
-              placement="bottom"
+  <!-- ── TIER 2: slices (list) or columns (board), then the view tools ── -->
+  <div class="flex items-stretch gap-3 px-3 md:px-6 h-11 border-b border-[var(--border)]">
+    <div class="min-w-0 flex-1 flex items-end">
+      {#if layout === "list"}
+        <SubTabs
+          tabs={issueSubTabs}
+          active={view.issueSubTab}
+          onselect={(id) => view.selectIssueSubTab(id)}
+          border={false}
+        />
+      {:else if boardLeading}
+        <div class="self-center min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {@render boardLeading()}
+        </div>
+      {/if}
+    </div>
+
+    <div class="shrink-0 flex items-center gap-1">
+      <!-- Unified filter (LIF-222). The chips tier below says what's on. -->
+      <Tooltip content={view.filterOpen ? null : "Filter  ·  F"} placement="bottom">
+        <button
+          class="h-7 flex items-center gap-1.5 px-2 rounded-md
+                 text-caption font-medium transition-colors
+                 hover:bg-[var(--bg-subtle)]
+                 {view.filterOpen || filterCount > 0
+                   ? 'text-[var(--text)] bg-[var(--bg-subtle)]'
+                   : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+          onclick={(e) => {
+            e.stopPropagation();
+            view.filterOpen = !view.filterOpen;
+            view.sortOpen = false;
+            view.displayOpen = false;
+            view.lanesOpen = false;
+            view.newMenuOpen = false;
+            view.overflowOpen = false;
+          }}
+        >
+          <SlidersVertical size={13} class="shrink-0" />
+          <span class="sr-only sm:not-sr-only">Filter</span>
+          {#if filterCount > 0}
+            <span
+              class="grid place-items-center min-w-[1.05rem] h-[1.05rem] px-1
+                     rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+                     font-mono text-micro leading-none tabular-nums"
             >
-              <button
-                type="button"
-                aria-pressed={selectionState === "all"}
-                class="hidden sm:flex h-7 items-center gap-1.5 px-2 rounded-md
-                       text-caption font-medium transition-colors
-                       disabled:opacity-50 disabled:cursor-not-allowed
-                       {selectionState === 'none'
-                  ? 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'
-                  : 'text-[var(--text)] bg-[var(--bg-subtle)]'}"
-                disabled={selectionBusy}
-                onclick={() => selectionState === "all" ? onClearSelection() : onSelectAll()}
-              >
-                {#if selectionState === "all"}
-                  <SquareCheck size={14} class="shrink-0 text-[var(--accent)]" />
-                {:else if selectionState === "some"}
-                  <SquareMinus size={14} class="shrink-0 text-[var(--accent)]" />
-                {:else}
-                  <Square size={14} class="shrink-0" />
-                {/if}
-                <span>{selectionState === "all" ? "All selected" : "Select all"}</span>
-                <span class="text-micro tabular-nums font-normal
-                             {selectionState === 'none' ? 'text-[var(--text-faint)]' : 'text-[var(--text-muted)]'}">
-                  {selectionState === "some" ? `${selectedCount}/${selectableCount}` : selectableCount}
-                </span>
-              </button>
-            </Tooltip>
+              {filterCount}
+            </span>
           {/if}
-        {/snippet}
-      </SubTabs>
+        </button>
+      </Tooltip>
+
+      <FilterModal {view} {labels} {modules} {assignees} {priorityCssColor} />
+
+      <!-- LIF-350 / LIF-400: below md, saved views, sort and display fold
+           behind one button; at md and up both wrappers are
+           `display: contents`, so the controls sit in this row directly. -->
+      <div class="max-md:relative md:contents">
+        <button
+          class="md:hidden touch-target size-7 flex items-center justify-center rounded-md
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors
+                 {view.overflowOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+          aria-label="View options"
+          aria-expanded={view.overflowOpen}
+          aria-controls={OVERFLOW_PANEL_ID}
+          bind:this={overflowTriggerEl}
+          onclick={(e) => {
+            e.stopPropagation();
+            view.overflowOpen = !view.overflowOpen;
+            view.sortOpen = false;
+            view.displayOpen = false;
+            view.lanesOpen = false;
+            view.filterOpen = false;
+            view.newMenuOpen = false;
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+        <div
+          id={OVERFLOW_PANEL_ID}
+          bind:this={overflowPanelEl}
+          class="md:contents max-md:absolute max-md:right-0 max-md:top-full max-md:mt-1.5
+                 max-md:z-30 max-md:w-[212px] max-md:flex-col max-md:gap-0.5 max-md:p-1
+                 max-md:rounded-xl max-md:border max-md:border-[var(--border)]
+                 max-md:bg-[var(--surface)] max-md:shadow-lg
+                 {view.overflowOpen ? 'max-md:flex' : 'max-md:hidden'}"
+        >
+
+    <SavedViews {view} {projectIdentifier} {layout} {navigate} />
+
+    <div class="relative max-md:[&>span]:w-full">
+      <Tooltip
+        content={view.sortOpen ? null : `Sort: ${sortLabel} ${view.sortDir === "asc" ? "ascending" : "descending"}`}
+        placement="bottom"
+      >
+        <button
+          class="h-7 flex items-center gap-1 px-2 rounded-md
+                 text-caption font-medium
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors
+                 {view.sortOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+          onclick={(e) => {
+            e.stopPropagation();
+            view.sortOpen = !view.sortOpen;
+            view.displayOpen = false;
+            view.lanesOpen = false;
+          }}
+        >
+          <span class="flex motion-safe:transition-transform motion-safe:duration-200 {view.sortDir === 'asc' ? '' : 'rotate-180'}">
+            <ArrowUp size={12} class="shrink-0" />
+          </span>
+          <span class="md:hidden">Sort:</span>
+          <span>{sortLabel}</span>
+        </button>
+      </Tooltip>
+      {#if view.sortOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div
+          class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[220px]
+                 max-md:right-auto max-md:left-0
+                 bg-[var(--surface)] border border-[var(--border)]
+                 rounded-xl shadow-lg p-1 text-body-sm"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="px-2.5 pt-1.5 pb-1 text-[var(--text-faint)]
+                      text-micro uppercase tracking-widest font-semibold">
+            Sort by
+          </div>
+          {#snippet sortRow(field: SortField, label: string, Icon: typeof Hash)}
+            {@const active = view.sortField === field}
+            <button
+              class="w-full flex items-center justify-between gap-2
+                     px-2.5 h-8 rounded-md text-left transition-colors
+                     {active
+                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+              onclick={() => view.selectSort(field)}
+            >
+              <span class="flex items-center gap-2">
+                <Icon size={13} class="shrink-0" />
+                {label}
+              </span>
+              {#if active}
+                <span class="text-[var(--accent)] flex items-center gap-1 text-micro font-medium">
+                  {view.sortDir === "asc" ? "Asc" : "Desc"}
+                  {#if view.sortDir === "asc"}
+                    <ArrowUp size={13} />
+                  {:else}
+                    <ArrowDown size={13} />
+                  {/if}
+                </span>
+              {/if}
+            </button>
+          {/snippet}
+          {@render sortRow("priority", "Priority", Signal)}
+          {@render sortRow("age", "Age", Clock)}
+          {@render sortRow("updated", "Updated", History)}
+          {@render sortRow("number", "Issue number", Hash)}
+          <div class="px-2.5 pt-2 pb-1.5 mt-1 text-micro
+                      text-[var(--text-faint)] border-t
+                      border-[var(--border)] leading-snug">
+            Click the active row to flip direction.
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <!-- LIF-241: swimlane picker. Board only. -->
+    {#if layout === "board"}
+    <div class="relative max-md:[&>span]:w-full">
+      <Tooltip content={view.lanesOpen ? null : "Swimlanes"} placement="bottom">
+        <button
+          class="h-7 flex items-center gap-1 px-2 rounded-md
+                 text-caption font-medium
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors
+                 {view.lanesOpen || view.laneBy !== 'none' ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+          onclick={(e) => {
+            e.stopPropagation();
+            view.lanesOpen = !view.lanesOpen;
+            view.sortOpen = false;
+            view.newMenuOpen = false;
+            view.filterOpen = false;
+          }}
+        >
+          <Rows3 size={12} class="shrink-0" />
+          <span>
+            {view.laneBy === "none" ? "Lanes" : view.laneBy === "module" ? "Module" : "Priority"}
+          </span>
+        </button>
+      </Tooltip>
+      {#if view.lanesOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div
+          class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[200px]
+                 max-md:right-auto max-md:left-0
+                 bg-[var(--surface)] border border-[var(--border)]
+                 rounded-xl shadow-lg p-1 text-body-sm"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="px-2.5 pt-1.5 pb-1 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold">
+            Group rows by
+          </div>
+          {#snippet laneRow(val: LaneBy, label: string, Icon: typeof Layers | null)}
+            {@const active = view.laneBy === val}
+            <button
+              class="w-full flex items-center justify-between gap-2 px-2.5 h-8 rounded-md text-left transition-colors
+                     {active
+                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+              onclick={() => { view.setLaneBy(projectIdentifier, val); }}
+            >
+              <span class="flex items-center gap-2">
+                {#if Icon}<Icon size={13} class="shrink-0" />{:else}<span class="size-[13px] shrink-0"></span>{/if}
+                {label}
+              </span>
+              {#if active}<Check size={13} class="text-[var(--accent)]" />{/if}
+            </button>
+          {/snippet}
+          {@render laneRow("none", "None", null)}
+          {@render laneRow("module", "Module", Layers)}
+          {@render laneRow("priority", "Priority", Signal)}
+          <div class="px-2.5 pt-2 pb-1.5 mt-1 text-micro
+                      text-[var(--text-faint)] border-t
+                      border-[var(--border)] leading-snug">
+            Rows always show, even at zero. Drag a card in to assign it.
+          </div>
+        </div>
+      {/if}
+    </div>
+    {/if}
+
+    <!-- LIF-191: display options (group-by + density). List only. -->
+    {#if layout !== "board"}
+    <div class="relative max-md:[&>span]:w-full">
+      <Tooltip content={view.displayOpen ? null : "Display options"} placement="bottom">
+        <button
+          class="touch-target h-7 flex items-center gap-1.5 px-2 rounded-md
+                 max-md:w-full max-md:justify-start
+                 text-caption font-medium
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors
+                 {view.displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+          onclick={(e) => { e.stopPropagation(); view.displayOpen = !view.displayOpen; view.sortOpen = false; view.newMenuOpen = false; }}
+        >
+          <SlidersHorizontal size={13} class="shrink-0" />
+          <span>Display</span>
+        </button>
+      </Tooltip>
+      {#if view.displayOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div
+          class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[260px]
+                 max-md:right-auto max-md:left-0
+                 bg-[var(--surface)] border border-[var(--border)]
+                 rounded-xl shadow-lg p-3 text-body-sm"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <div class="pb-2 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold">
+            Group by
+          </div>
+          <div class="grid grid-cols-2 gap-1">
+            {#each [["status", "Status"], ["priority", "Priority"], ["module", "Module"], ["none", "None"]] as [val, label]}
+              <button
+                class="h-8 flex items-center justify-center gap-1.5 rounded-md border transition-colors
+                       {view.groupBy === val
+                  ? 'border-[var(--accent)] text-[var(--text)] bg-[var(--accent-subtle)] font-medium'
+                  : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                aria-pressed={view.groupBy === val}
+                onclick={() => { view.groupBy = val as GroupBy; }}
+              >
+                {label}
+              </button>
+            {/each}
+          </div>
+
+          <div class="pt-3.5 pb-2 text-[var(--text-faint)] text-micro uppercase tracking-widest font-semibold">
+            Density
+          </div>
+          <div class="grid grid-cols-2 gap-1">
+            {#each [["compact", "Compact"], ["comfortable", "Comfortable"]] as [val, label]}
+              <button
+                class="flex flex-col items-center gap-1.5 py-2 rounded-md border transition-colors
+                       {view.density === val
+                  ? 'border-[var(--accent)] text-[var(--text)] bg-[var(--accent-subtle)] font-medium'
+                  : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                aria-pressed={view.density === val}
+                onclick={() => { view.density = val as Density; }}
+              >
+                <!-- A tiny picture of the rows, so the choice is visible. -->
+                <span class="flex flex-col w-10 {val === 'compact' ? 'gap-[3px]' : 'gap-[6px]'}" aria-hidden="true">
+                  {#each [0, 1, 2] as n (n)}
+                    <span class="h-[3px] rounded-full bg-current opacity-50 {n === 1 ? 'w-3/4' : 'w-full'}"></span>
+                  {/each}
+                </span>
+                {label}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+    {/if}
+        </div>
+      </div>
+
+      <!-- Select all (LIF-149). Desktop only: below sm rows are tapped one
+           at a time and the bulk bar handles the rest. -->
+      {#if layout === "list" && canEdit && selectableCount > 0}
+        <div class="hidden sm:block w-px h-4 bg-[var(--border)] mx-1"></div>
+        <Tooltip
+          content={selectionState === "all"
+            ? "Clear selection  ·  Esc"
+            : "Select all visible issues  ·  Ctrl+A"}
+          placement="bottom"
+        >
+          <button
+            type="button"
+            aria-pressed={selectionState === "all"}
+            class="hidden sm:flex h-7 items-center gap-1.5 px-2 rounded-md
+                   text-caption font-medium transition-colors
+                   disabled:opacity-50 disabled:cursor-not-allowed
+                   {selectionState === 'none'
+              ? 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'
+              : 'text-[var(--text)] bg-[var(--bg-subtle)]'}"
+            disabled={selectionBusy}
+            onclick={() => selectionState === "all" ? onClearSelection() : onSelectAll()}
+          >
+            {#if selectionState === "all"}
+              <SquareCheck size={14} class="shrink-0 text-[var(--accent)]" />
+            {:else if selectionState === "some"}
+              <SquareMinus size={14} class="shrink-0 text-[var(--accent)]" />
+            {:else}
+              <Square size={14} class="shrink-0" />
+            {/if}
+            <span>{selectionState === "all" ? "All selected" : "Select all"}</span>
+            <span class="text-micro tabular-nums font-normal
+                         {selectionState === 'none' ? 'text-[var(--text-faint)]' : 'text-[var(--text-muted)]'}">
+              {selectionState === "some" ? `${selectedCount}/${selectableCount}` : selectableCount}
+            </span>
+          </button>
+        </Tooltip>
+      {/if}
+    </div>
+  </div>
+
+  <!-- ── TIER 3: what the filters are doing, only while they do something ── -->
+  {#if view.hasActiveFilters()}
+    <div class="tier-in px-3 md:px-6 py-2 border-b border-[var(--border)]">
+      <FilterChips {view} {labels} {modules} includeSearch={false} />
     </div>
   {/if}
 </div>
+
+<style>
+  @keyframes ping {
+    75%,
+    100% {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+  }
+  .changed-ping {
+    animation: ping 1.6s cubic-bezier(0, 0, 0.2, 1) 3;
+  }
+</style>

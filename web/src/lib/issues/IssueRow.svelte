@@ -36,6 +36,7 @@
     isFocused,
     isSelected,
     isChanged = false,
+    isFlashing = false,
     hitSnippet,
     statusOpen,
     priorityOpen,
@@ -79,6 +80,9 @@
      *  taken the last time the user looked at this project's list. Renders
      *  the accent dot in the identifier gutter. */
     isChanged?: boolean;
+    /** The row just changed (a mutation here, a create, or a realtime
+     *  update) and glows once so the eye can find it. */
+    isFlashing?: boolean;
     /** Search snippet to show under the title, if this row matched on body. */
     hitSnippet: string | null;
     /** This row's inline status dropdown is open. */
@@ -159,14 +163,18 @@
 
 <div
   class="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-6 text-left
-         {density === 'comfortable' ? 'py-3' : 'py-2.5'}
-         {isLast ? '' : 'border-b border-[var(--border)]'}
-         border-l-2 transition-colors group
+         {density === 'comfortable' ? 'min-h-[3.75rem] py-2.5' : 'min-h-[2.875rem] py-1.5'}
+         {isLast ? '' : 'border-b border-[color-mix(in_srgb,var(--border)_65%,transparent)]'}
+         border-l-2 transition-colors duration-100 group
          {isFocused ? 'border-l-[var(--accent)]' : 'border-l-transparent'}
-         {isSelected || isFocused
+         {isSelected
     ? 'bg-[var(--accent-subtle)]'
-    : 'hover:bg-[var(--bg-subtle)]'}"
+    : isFocused
+      ? 'bg-[color-mix(in_srgb,var(--accent-subtle)_70%,transparent)]'
+      : 'hover:bg-[var(--bg-subtle)]'}
+         {isFlashing ? 'row-flash' : ''}"
   data-issue-index={idx}
+  data-issue-id={issue.id}
   role="group"
   aria-label={issue.identifier}
   tabindex="-1"
@@ -198,11 +206,12 @@
   <!-- Keep selection visible and distinct from the circular status icon. -->
   {#if editable}
   <button
-    class="size-4 shrink-0 rounded border flex items-center justify-center
-           transition
+    class="size-4 shrink-0 rounded-[5px] border-[1.5px] flex items-center justify-center
+           transition-[background,border-color,color,transform] duration-150
+           motion-safe:active:scale-90
            {isSelected
       ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-text)]'
-      : 'border-[var(--text-muted)] text-transparent hover:border-[var(--text)]'}
+      : 'border-[var(--text-faint)] text-transparent hover:border-[var(--text)] hover:text-[var(--text-faint)]'}
            cursor-pointer"
     title={isSelected ? "Deselect" : "Select  ·  X"}
     role="checkbox"
@@ -224,15 +233,16 @@
   <!-- Status indicator (clickable to pick). Tooltip suppressed while the
        status picker is open for this row, otherwise it'd hover-fight with
        the dropdown. -->
-  <div class="relative shrink-0">
+  <div class="relative shrink-0 flex">
     <Tooltip
       content={statusOpen
         ? null
         : issue.status[0].toUpperCase() + issue.status.slice(1)}
     >
       <button
-        class="size-4 flex items-center justify-center transition-colors
-               {editable ? 'hover:text-[var(--accent)]' : 'cursor-default'}"
+        class="size-6 -m-1 flex items-center justify-center rounded-full transition-[background,transform]
+               {editable ? 'hover:bg-[var(--bg-subtle)] motion-safe:hover:scale-110' : 'cursor-default'}
+               {isFlashing ? 'status-pop' : ''}"
         aria-label={`Status: ${issue.status}`}
         onclick={(e) => {
           e.stopPropagation();
@@ -246,14 +256,14 @@
     {#if statusOpen && editable}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
       <div
-        class="absolute left-0 top-full mt-1.5 z-30 w-[160px]
+        class="popover-in origin-top-left absolute left-0 top-full mt-2 z-30 w-[176px]
                bg-[var(--surface)] border border-[var(--border)]
-               rounded-lg shadow-lg py-1.5"
+               rounded-xl shadow-lg p-1"
         onclick={(e) => e.stopPropagation()}
       >
         {#each STATUSES as s, si}
           <button
-            class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+            class="w-full flex items-center gap-2 px-2.5 h-8 rounded-md text-left
                    text-body-sm transition-colors capitalize
                    {si === statusPickerIdx
               ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
@@ -262,7 +272,8 @@
             onmouseenter={() => onHoverStatusOption(si)}
           >
             <StatusIcon status={s} size={14} />
-            {s}
+            <span class="flex-1">{s}</span>
+            {#if s === issue.status}<Check size={13} class="text-[var(--accent)]" />{/if}
           </button>
         {/each}
       </div>
@@ -292,7 +303,7 @@
         <span class="sr-only">Updated since you last looked</span>
       {/if}
     </span>
-    <button class="text-body-sm text-left text-[var(--text-faint)] hover:text-[var(--accent)] cursor-pointer font-mono w-[52px] sm:w-[72px] truncate"
+    <button class="hidden sm:block text-caption tabular-nums text-left text-[var(--text-faint)] hover:text-[var(--accent)] cursor-pointer font-mono w-[64px] truncate transition-colors"
       onclick={(e) => {
         if (e.shiftKey || e.ctrlKey || e.metaKey) return;
         e.stopPropagation();
@@ -313,13 +324,28 @@
         e.stopPropagation();
         onOpen(issue);
       }}
-      class="text-body text-left self-start max-w-full cursor-pointer hover:underline text-[var(--text)] truncate
+      class="text-body text-left self-start max-w-full cursor-pointer truncate
+             max-sm:whitespace-normal max-sm:line-clamp-2 max-sm:leading-snug
+             hover:underline underline-offset-[3px] decoration-[var(--text-faint)]
              {issue.status === 'done' || issue.status === 'cancelled'
-        ? 'line-through text-[var(--text-muted)]'
-        : ''}"
+        ? 'line-through decoration-[var(--text-faint)] text-[var(--text-muted)]'
+        : 'text-[var(--text)]'}"
     >
       {issue.title}
     </button>
+    <!-- Phones: the identifier and module move under the title, which gets
+         the whole width and two lines instead of a sliver of one. -->
+    <span class="sm:hidden flex items-center gap-1.5 min-w-0 text-micro text-[var(--text-faint)]">
+      <span class="font-mono tabular-nums shrink-0">{issue.identifier}</span>
+      {#if mod}
+        <span aria-hidden="true">·</span>
+        <span class="truncate">{mod.name}</span>
+      {/if}
+      {#if issue.labels.length > 0}
+        <span aria-hidden="true">·</span>
+        <span class="truncate">{issue.labels.join(", ")}</span>
+      {/if}
+    </span>
     {#if hitSnippet}
       <span class="text-caption text-[var(--text-muted)] truncate">
         {hitSnippet}
@@ -343,14 +369,16 @@
   <!-- Labels. Hidden below sm — secondary metadata that would otherwise
        crush the title on a phone (LIF-229). -->
   {#if issue.labels.length > 0}
-    <div class="hidden sm:flex items-center gap-1 shrink-0">
+    <div class="hidden md:flex items-center gap-1 shrink-0">
       {#each issue.labels.slice(0, 2) as lbl}
         {@const labelObj = labels.find((l) => l.name === lbl)}
+        {@const c = labelObj ? safeLabelColor(labelObj.color) : "var(--text-faint)"}
         <span
-          class="text-micro font-medium px-1.5 py-0.5 rounded-full
-                 border border-[var(--border)]"
-          style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
+          class="inline-flex items-center gap-1.5 h-5 pl-1.5 pr-2 rounded-full
+                 text-micro font-medium text-[var(--text-muted)]"
+          style="background: color-mix(in srgb, {c} 13%, transparent)"
         >
+          <span class="size-1.5 rounded-full shrink-0" style="background: {c}"></span>
           {lbl}
         </span>
       {/each}
@@ -387,8 +415,9 @@
     {:else}
     <Tooltip content={moduleOpen ? null : mod ? mod.name : "Set module"}>
       <button
-        class="max-w-[130px] flex items-center gap-1 text-micro
-               text-[var(--text-muted)] transition-opacity hover:text-[var(--text)]
+        class="max-w-[140px] h-5 flex items-center gap-1 px-1.5 rounded-md text-micro
+               text-[var(--text-muted)] transition-[opacity,background,color] hover:text-[var(--text)]
+               hover:bg-[var(--bg-subtle)]
                {mod ? '' : 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100'}"
         onclick={(e) => {
           e.stopPropagation();
@@ -406,13 +435,13 @@
     {#if moduleOpen}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
       <div
-        class="absolute left-0 top-full mt-1.5 z-30 w-[180px] max-h-[240px]
+        class="popover-in origin-top-left absolute left-0 top-full mt-1.5 z-30 w-[196px] max-h-[260px]
                overflow-y-auto bg-[var(--surface)] border border-[var(--border)]
-               rounded-lg shadow-lg py-1.5"
+               rounded-xl shadow-lg p-1"
         onclick={(e) => e.stopPropagation()}
       >
         <button
-          class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+          class="w-full flex items-center gap-2 px-2.5 h-8 rounded-md text-left
                  text-body-sm transition-colors
                  {modulePickerIdx === 0
             ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
@@ -425,7 +454,7 @@
         </button>
         {#each modules as m, mi}
           <button
-            class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+            class="w-full flex items-center gap-2 px-2.5 h-8 rounded-md text-left
                    text-body-sm transition-colors truncate
                    {mi + 1 === modulePickerIdx
               ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
@@ -466,7 +495,8 @@
           : issue.priority[0].toUpperCase() + issue.priority.slice(1)}
     >
       <button
-        class="size-6 flex items-center justify-end transition-opacity hover:opacity-100
+        class="size-7 flex items-center justify-center rounded-md transition-[opacity,background] hover:opacity-100
+               hover:bg-[var(--bg-subtle)]
                {issue.priority === 'none' ? 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100' : ''}"
         onclick={(e) => {
           e.stopPropagation();
@@ -483,14 +513,14 @@
     {#if priorityOpen}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
       <div
-        class="absolute right-0 top-full mt-1.5 z-30 w-[150px]
+        class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[168px]
                bg-[var(--surface)] border border-[var(--border)]
-               rounded-lg shadow-lg py-1.5"
+               rounded-xl shadow-lg p-1"
         onclick={(e) => e.stopPropagation()}
       >
         {#each PRIORITIES as p, pi}
           <button
-            class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+            class="w-full flex items-center gap-2 px-2.5 h-8 rounded-md text-left
                    text-body-sm capitalize transition-colors
                    {pi === priorityPickerIdx
               ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
@@ -499,7 +529,8 @@
             onmouseenter={() => onHoverPriorityOption(pi)}
           >
             <span class="w-4 flex justify-center"><PriorityIcon priority={p} size={15} /></span>
-            {p}
+            <span class="flex-1">{p}</span>
+            {#if p === issue.priority}<Check size={13} class="text-[var(--accent)]" />{/if}
           </button>
         {/each}
       </div>
@@ -529,7 +560,7 @@
   </Tooltip>
 
   <!-- Updated time. Hidden below sm to give the title room (LIF-229). -->
-  <span class="hidden sm:block text-caption text-[var(--text-faint)] shrink-0 w-[60px] text-right">
+  <span class="hidden sm:block text-caption tabular-nums text-[var(--text-faint)] shrink-0 w-[64px] text-right">
     <TimeAgo date={issue.updated_at} />
   </span>
 </div>

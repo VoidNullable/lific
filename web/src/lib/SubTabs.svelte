@@ -19,6 +19,7 @@
     active,
     onselect,
     trailing,
+    border = true,
   }: {
     tabs: SubTab[];
     active: string;
@@ -27,6 +28,9 @@
      *  list's select-all toggle). Rendered outside the tablist semantics so
      *  it is not announced as a tab. */
     trailing?: import("svelte").Snippet;
+    /** Draw the strip's own bottom rule. Off when a parent row already
+     *  draws one and the tabs sit on it. */
+    border?: boolean;
   } = $props();
 </script>
 
@@ -35,7 +39,7 @@
      the right edge (and misalign anything pinned there). Hide the strip's
      scrollbars; it still pans horizontally by touch/wheel. -->
 <div
-  class="flex items-center gap-5 border-b border-[var(--border)] overflow-x-auto
+  class="flex items-center gap-5 overflow-x-auto {border ? 'border-b border-[var(--border)]' : ''}
          [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 >
   <div class="flex items-center gap-5 shrink-0" role="tablist">

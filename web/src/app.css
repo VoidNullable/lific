@@ -871,6 +871,55 @@ html[data-motion="reduced"] *::after {
   animation: reveal 0.5s var(--ease-out-expo) forwards;
 }
 
+/* Small popovers grow out of their trigger instead of blinking in. */
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+.popover-in {
+  animation: popover-in 140ms var(--ease-out-expo);
+}
+
+/* A toolbar tier that appears (the active-filter chips) eases in. */
+@keyframes tier-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+.tier-in {
+  animation: tier-in 180ms var(--ease-out-expo);
+}
+
+/* An issue row that just changed (here or elsewhere) glows once, so the eye
+   finds what moved after a status change, a create, or a realtime update. */
+@keyframes row-flash {
+  0%,
+  25% {
+    background-color: color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 2px 0 0 transparent;
+  }
+}
+.row-flash {
+  animation: row-flash 1.4s ease-out;
+}
+
+/* Status icon gives a small pop when the status it shows changes. */
+@keyframes status-pop {
+  0% { transform: scale(0.6); }
+  60% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+.status-pop {
+  animation: status-pop 320ms var(--ease-out-expo);
+}
+
 .delay-100 { animation-delay: 0.1s; }
 .delay-150 { animation-delay: 0.15s; }
 .delay-250 { animation-delay: 0.25s; }

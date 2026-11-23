@@ -66,6 +66,9 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "⇧ P", label: "Cycle priority", scope: "list" },
   { keys: "M", label: "Open the module picker", scope: "list" },
   { keys: "C", label: "New issue", scope: "list" },
+  { keys: "Enter", label: "In the composer: create and start the next one", scope: "list" },
+  { keys: "⌘ Enter", label: "In the composer: create and open it", scope: "list" },
+  { keys: "F", label: "Open filters", scope: "list" },
   { keys: "/", label: "Focus search", scope: "list" },
   { keys: "Esc", label: "Clear focus / selection / close a popover", scope: "list" },
 
@@ -74,6 +77,7 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "⌘/Ctrl Click", label: "Peek card", scope: "board" },
   { keys: "Drag", label: "Move between columns and lanes", scope: "board" },
   { keys: "C", label: "New issue", scope: "board" },
+  { keys: "F", label: "Open filters", scope: "board" },
   { keys: "/", label: "Focus search", scope: "board" },
 
   // ── Peek panel (PeekPanel.svelte) ─────────────────────────

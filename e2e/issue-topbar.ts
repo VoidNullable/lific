@@ -57,13 +57,21 @@ try {
     await page.goto(server.resolvedUrls!.local[0]);
     await page.getByRole('button', { name: 'Filter', exact: true }).waitFor();
     await page.evaluate(() => document.fonts.ready);
+    // Two tiers by design: identity + primary action on top, the toolbar
+    // below. Neither tier may wrap internally.
     const list = await page.getByRole('button', { name: 'List', exact: true }).boundingBox();
     const filter = await page.getByRole('button', { name: 'Filter', exact: true }).boundingBox();
     const create = await page.getByRole('button', { name: 'More create options', exact: true }).boundingBox();
-    const ys = [list!, filter!, create!].map(box => box.y + box.height / 2);
-    const spread = Math.max(...ys) - Math.min(...ys);
-    measurements.push({ width, centerSpread: spread, documentWidth: await page.evaluate(() => document.documentElement.scrollWidth) });
-    assert.ok(spread <= 1, `Toolbar wrapped at ${width}px: ${JSON.stringify(measurements)}`);
+    const more = width < 768
+      ? await page.getByRole('button', { name: 'View options', exact: true }).boundingBox()
+      : await page.getByRole('button', { name: 'Display', exact: true }).boundingBox();
+    const center = (box: { y: number; height: number }) => box.y + box.height / 2;
+    const spread = Math.abs(center(list!) - center(create!));
+    const toolbarSpread = Math.abs(center(filter!) - center(more!));
+    measurements.push({ width, centerSpread: spread, toolbarSpread, documentWidth: await page.evaluate(() => document.documentElement.scrollWidth) });
+    assert.ok(spread <= 1, `Top tier wrapped at ${width}px: ${JSON.stringify(measurements)}`);
+    assert.ok(toolbarSpread <= 1, `Toolbar tier wrapped at ${width}px: ${JSON.stringify(measurements)}`);
+    assert.ok(filter!.y >= list!.y + list!.height, `Toolbar must sit below the top tier at ${width}px`);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width);
     if (width < 768) {
       await page.getByRole('button', { name: 'View options', exact: true }).click();
@@ -77,13 +85,17 @@ try {
     assert.equal(await page.evaluate(() => (window as any).createCount), 1);
     await page.getByRole('button', { name: 'New issue', exact: true }).click();
     assert.equal(await page.evaluate(() => (window as any).createCount), 2);
-    await page.getByRole('button', { name: 'Search issues', exact: true }).click();
+    // Below md search is an icon that opens a field over the top tier; from
+    // md up the field is always there.
+    if (width < 768) await page.getByRole('button', { name: 'Search issues', exact: true }).click();
+    else assert.equal(await page.getByRole('button', { name: 'Search issues', exact: true }).count(), 0);
     const search = page.getByPlaceholder('Search issues...');
     await search.fill('example');
     const box = (await search.boundingBox())!;
     assert.ok(box.x >= 0 && box.x + box.width <= width);
     await search.press('Escape');
-    await search.waitFor({ state: 'hidden' });
+    if (width < 768) await search.waitFor({ state: 'hidden' });
+    else assert.equal(await search.inputValue(), '');
     if (width === 640 && process.env.E2E_SCREENSHOT) await page.screenshot({ path: process.env.E2E_SCREENSHOT });
   }
   assert.deepEqual(errors, []);

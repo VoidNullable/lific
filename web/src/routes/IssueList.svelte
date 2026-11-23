@@ -14,7 +14,7 @@
   import { Plus, ChevronRight, Layers, PanelLeftClose, PanelLeftOpen } from "lucide-svelte";
   import Tooltip from "../lib/Tooltip.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
-  import StatusIcon from "../lib/StatusIcon.svelte";
+  import StatusIcon, { statusCssColor } from "../lib/StatusIcon.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
@@ -23,7 +23,9 @@
   import { flip } from "svelte/animate";
   import { slide } from "svelte/transition";
   import { motionReduced } from "../lib/theme";
-  import { getContext } from "svelte";
+  import { getContext, tick, untrack } from "svelte";
+  import { toast } from "../lib/toast/toast.svelte";
+  import FilterChips from "../lib/issues/FilterChips.svelte";
   // LIF-442: rows come from the per-project delta read model, not from a
   // per-route fetch + poll. No autoRefresh, no lific:realtime listener here.
   import {
@@ -234,26 +236,43 @@
     }
   }
 
-  // LIF-186: project-wide breakdowns for the right sidebar. Computed from the
-  // unfiltered `issues` so the distribution and per-module counts reflect the
-  // whole project, not the currently filtered view.
-  let sidebarStats = $derived.by(() => {
-    const prio: Record<string, number> = { urgent: 0, high: 0, medium: 0, low: 0, none: 0 };
-    const byModule = new Map<number, number>();
-    let noModule = 0;
-    for (const i of issues) {
-      prio[i.priority] = (prio[i.priority] ?? 0) + 1;
-      if (i.module_id == null) noModule++;
-      else byModule.set(i.module_id, (byModule.get(i.module_id) ?? 0) + 1);
+  // ── Rows that just changed glow once ─────────────────
+  // Diff every row's `updated_at` against the previous render of the same
+  // project: anything new or bumped flashes, whether the change came from
+  // this tab (a picker, a drop, the composer) or from the realtime stream.
+  // A burst larger than a handful is a resync, not news, so it stays quiet.
+  let flashIds = $state<Set<number>>(new Set());
+  let prevStamps: Map<number, string> | null = null;
+  let stampProject: string | null = null;
+  const FLASH_MS = 1400;
+  const FLASH_BURST = 8;
+
+  $effect(() => {
+    const list = issues;
+    const proj = projectIdentifier;
+    if (loading) return;
+    const next = new Map(list.map((i) => [i.id, i.updated_at]));
+    const prev = prevStamps;
+    const sameProject = stampProject === proj;
+    prevStamps = next;
+    stampProject = proj;
+    if (!prev || !sameProject) return;
+    const changed: number[] = [];
+    for (const [id, stamp] of next) {
+      if (prev.get(id) !== stamp) changed.push(id);
     }
-    return {
-      prio,
-      byModule,
-      noModule,
-      total: issueCounts?.total ?? issues.length,
-      active: issueCounts?.active ?? 0,
-    };
+    if (changed.length === 0 || changed.length > FLASH_BURST) return;
+    untrack(() => flash(changed));
   });
+
+  function flash(ids: number[]) {
+    flashIds = new Set([...flashIds, ...ids]);
+    setTimeout(() => {
+      const keep = new Set(flashIds);
+      for (const id of ids) keep.delete(id);
+      flashIds = keep;
+    }, FLASH_MS);
+  }
 
   // ── Persisted list/board view state ──────────────────
   // Filters, search, and sort are remembered per-project so navigating
@@ -756,6 +775,12 @@
   let inlineCreateStatusOpen = $state(false);
   let inlineCreateTitle = $state("");
   let inlineCreateSaving = $state(false);
+  /** Presets carried by the composer when it was opened from a group
+   *  header's "+", so the new issue lands in the group it was made in. */
+  let inlineCreatePriority = $state("none");
+  let inlineCreateModuleId = $state<number | null>(null);
+  /** How many issues this composer session has made, for its hint line. */
+  let inlineCreateMade = $state(0);
   let inlineCreateTitleEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
 
@@ -1351,11 +1376,13 @@
       case "c":
         if (!canEdit) break; // LIF-234: creation is maintainer-gated
         e.preventDefault();
-        inlineCreateActive = true;
-        inlineCreateStatus = "backlog";
-        inlineCreateStatusOpen = true;
-        view.inlineCreateStatusIdx = 0;
-        inlineCreateTitle = "";
+        openComposer({}, true);
+        break;
+      case "f":
+        if (e.ctrlKey || e.metaKey || e.altKey) break;
+        e.preventDefault();
+        view.closePopovers();
+        view.filterOpen = true;
         break;
       case "/":
         // Expand the topbar search and focus it.
@@ -1498,31 +1525,91 @@
     }
   }
 
-  // Empty-state CTA: open the inline quick-create row (mirrors the `c`
-  // shortcut) and drop focus straight into the title input.
-  function startInlineCreateFromEmpty() {
+  /** Open the inline composer. `pickStatus` starts on the status picker
+   *  (the `c` flow); otherwise focus goes straight to the title. */
+  function openComposer(
+    preset: { status?: string; priority?: string; moduleId?: number | null },
+    pickStatus = false,
+  ) {
     if (!canEdit) return; // LIF-234: creation is maintainer-gated
+    if (layout === "board") {
+      // The board has no composer row; its quick path is the full editor.
+      navigate(`/${projectIdentifier}/issues/new?status=${preset.status ?? "backlog"}`);
+      return;
+    }
     inlineCreateActive = true;
-    inlineCreateStatus = "backlog";
-    inlineCreateStatusOpen = false;
+    inlineCreateStatus = preset.status ?? "backlog";
+    inlineCreatePriority = preset.priority ?? "none";
+    inlineCreateModuleId = preset.moduleId ?? null;
+    inlineCreateMade = 0;
     inlineCreateTitle = "";
-    requestAnimationFrame(() => inlineCreateTitleEl?.focus());
+    inlineCreateStatusOpen = pickStatus;
+    view.inlineCreateStatusIdx = Math.max(0, STATUSES.indexOf(inlineCreateStatus));
+    if (!pickStatus) tick().then(() => inlineCreateTitleEl?.focus());
   }
 
-  async function submitInlineCreate() {
+  function closeComposer() {
+    inlineCreateActive = false;
+    inlineCreateStatusOpen = false;
+    inlineCreateTitle = "";
+  }
+
+  // Empty-state CTA and the topbar's New button.
+  function startInlineCreateFromEmpty() {
+    openComposer({});
+  }
+
+  /** Group header "+": a composer pre-set to that group's value. */
+  function quickAddToGroup(kind: string, key: string) {
+    if (kind === "status") openComposer({ status: key });
+    else if (kind === "priority") openComposer({ priority: key });
+    else if (kind === "module") openComposer({ moduleId: key === "none" ? null : Number(key) });
+  }
+
+  /** Enter creates and keeps the composer open for the next one, so a
+   *  burst of issues is a burst of typing; Ctrl/Cmd+Enter creates and opens
+   *  it, the old behavior, for when the description matters now. */
+  async function submitInlineCreate(open = false) {
     if (!project || !inlineCreateTitle.trim() || inlineCreateSaving) return;
     inlineCreateSaving = true;
-    const res = await createIssue({
+    const input: Parameters<typeof createIssue>[0] = {
       project_id: project.id,
       title: inlineCreateTitle.trim(),
       status: inlineCreateStatus,
-    });
+    };
+    if (inlineCreatePriority !== "none") input.priority = inlineCreatePriority;
+    if (inlineCreateModuleId != null) input.module_id = inlineCreateModuleId;
+    const res = await createIssue(input);
     inlineCreateSaving = false;
-    if (res.ok) {
-      inlineCreateActive = false;
-      inlineCreateTitle = "";
-      navigate(`/${projectIdentifier}/issues/${res.data.identifier}`);
+    if (!res.ok) {
+      toast(`Couldn't create the issue: ${res.error}`, { kind: "error" });
+      requestAnimationFrame(() => inlineCreateTitleEl?.focus());
+      return;
     }
+    const created = res.data;
+    // You made it, so it isn't news to you: no "updated" dot or chip.
+    markIssueSeen(created);
+    if (open) {
+      closeComposer();
+      navigate(`/${projectIdentifier}/issues/${created.identifier}`);
+      return;
+    }
+    inlineCreateTitle = "";
+    inlineCreateMade++;
+    requestAnimationFrame(() => inlineCreateTitleEl?.focus());
+    toast(`Created ${created.identifier}`, {
+      kind: "success",
+      action: {
+        label: "Open",
+        fn: () => navigate(`/${projectIdentifier}/issues/${created.identifier}`),
+      },
+    });
+    // Bring the new row in now rather than on the next realtime event, then
+    // show the user where it landed. The diff effect makes it glow.
+    await trackMutation(Promise.resolve());
+    await tick();
+    const row = listEl?.querySelector(`[data-issue-id="${created.id}"]`);
+    row?.scrollIntoView({ block: "nearest", behavior: motionReduced() ? "auto" : "smooth" });
   }
 
   // ── Row interaction handlers (fed to <IssueRow> as callbacks) ─────────
@@ -1697,7 +1784,44 @@
     selectionBusy={bulkBusy}
     onSelectAll={selectAll}
     onClearSelection={clearSelection}
+    boardLeading={layout === "board" ? boardColumns : undefined}
   />
+{/snippet}
+
+<!-- Board column visibility, rendered by the Topbar's toolbar tier. Visible
+     columns sit raised; hidden ones sit recessed in the track. -->
+{#snippet boardColumns()}
+  <div
+    class="flex items-center gap-0.5 p-0.5 rounded-lg
+           bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
+    role="group"
+    aria-label="Visible columns"
+  >
+    {#each STATUSES as status (status)}
+      {@const visible = !view.hiddenStatuses.has(status)}
+      {@const count = sortedIssues.filter((i) => i.status === status).length}
+      <Tooltip
+        content={`${visible ? "Hide" : "Show"} the ${status} column`}
+        placement="bottom"
+      >
+        <button
+          class="flex items-center gap-1.5 h-7 px-2 rounded-md
+                 text-caption font-medium transition-[background,color,box-shadow]
+                 {visible
+            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
+            : 'text-[var(--text-faint)] hover:text-[var(--text-muted)]'}"
+          aria-pressed={visible}
+          onclick={() => view.toggleStatusVisibility(projectIdentifier, status)}
+        >
+          <span class={visible ? "" : "opacity-50"}><StatusIcon {status} size={12} /></span>
+          <span class="capitalize hidden sm:inline">{status}</span>
+          <span class="tabular-nums text-micro {visible ? 'text-[var(--text-muted)]' : 'text-[var(--text-faint)]'}">
+            {count}
+          </span>
+        </button>
+      </Tooltip>
+    {/each}
+  </div>
 {/snippet}
 
 <div class="h-full flex">
@@ -1709,56 +1833,8 @@
        pills below). Within a column, cards honor the active sort.
        v1 = click-card-to-open; drag-and-drop tracked in LIF-100. -->
   <div class="h-full flex flex-col">
-    <!-- Status visibility pills. Click a pill to hide/show that column.
-         Visible columns sit "raised" (chrome bg + soft shadow); hidden
-         ones sit recessed against the bg-subtle track, like the
-         unselected segment of an iOS-style control. -->
-    <div
-      class="shrink-0 flex items-center gap-3 px-6 pt-3 pb-2"
-    >
-      <span
-        class="text-micro font-semibold uppercase tracking-widest
-               text-[var(--text-faint)]"
-      >
-        Columns
-      </span>
-      <div
-        class="flex items-center gap-0.5 p-0.5 rounded-md
-               bg-[var(--bg-subtle)] border border-[var(--border)]"
-      >
-        {#each STATUSES as status (status)}
-          {@const visible = !view.hiddenStatuses.has(status)}
-          {@const count = sortedIssues.filter((i) => i.status === status).length}
-          <Tooltip
-            content={`${visible ? "Hide" : "Show"} ${status[0].toUpperCase() + status.slice(1)}`}
-            placement="bottom"
-          >
-            <button
-              class="flex items-center gap-1.5 px-2 py-1 rounded
-                     text-caption font-medium transition-colors
-                     {visible
-                ? 'bg-[var(--chrome)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-                : 'text-[var(--text-faint)] hover:text-[var(--text-muted)]'}"
-              aria-pressed={visible}
-              onclick={() => view.toggleStatusVisibility(projectIdentifier, status)}
-            >
-              <StatusIcon status={status} size={12} />
-              <span class="capitalize">{status}</span>
-              <span
-                class="tabular-nums text-micro
-                       {visible
-                  ? 'text-[var(--text-muted)]'
-                  : 'text-[var(--text-faint)]'}"
-              >
-                {count}
-              </span>
-            </button>
-          </Tooltip>
-        {/each}
-      </div>
-    </div>
-
-    <!-- Board body -->
+    <!-- Board body. Column visibility lives in the Topbar's toolbar tier
+         (the boardColumns snippet below). -->
     {#if loading}
       <!-- LIF-281: board skeleton with shape+position parity to the loaded
            flat board. Column widths now match the loaded snap panels
@@ -2060,93 +2136,117 @@
 {:else}
 
 <div class="h-full flex flex-col">
-  <!-- Inline create row (sticky above scrollable list) -->
+  <!-- Inline composer. A card rather than a tinted strip: it names where the
+       new issue will land (status, and the group preset it came from), and
+       its footer says what Enter and Ctrl+Enter do. Enter keeps it open for
+       the next one. -->
   {#if inlineCreateActive}
+    {@const presetModule = inlineCreateModuleId == null ? null : modules.find((m) => m.id === inlineCreateModuleId)}
+    <div class="composer-in shrink-0 px-3 sm:px-6 pt-3 pb-2 border-b border-[var(--border)] bg-[var(--bg)]">
       <div
-        class="shrink-0 flex items-center gap-3 px-6 py-2.5
-               border-b border-[var(--border)] border-l-2 border-l-[var(--accent)]
-               bg-[var(--accent-subtle)]"
+        class="rounded-xl border border-[var(--accent)] bg-[var(--surface)]
+               shadow-[0_0_0_3px_var(--accent-subtle),0_4px_14px_rgba(0,0,0,0.08)]"
       >
-        <!-- Status picker -->
-        <div class="relative shrink-0">
-          <button
-            class="size-4 flex items-center justify-center transition-colors
-                   hover:text-[var(--accent)]"
-            title="Set status"
-            onclick={(e) => { e.stopPropagation(); inlineCreateStatusOpen = !inlineCreateStatusOpen; }}
-          >
-            <StatusIcon status={inlineCreateStatus} size={16} />
-          </button>
-          {#if inlineCreateStatusOpen}
-            <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-            <div
-              class="absolute left-0 top-full mt-1.5 z-30 w-[160px]
-                     bg-[var(--surface)] border border-[var(--border)]
-                     rounded-lg shadow-lg py-1.5"
-              onclick={(e) => e.stopPropagation()}
+        <div class="flex items-center gap-3 px-3 h-11">
+          <div class="relative shrink-0 flex">
+            <button
+              class="h-7 flex items-center gap-1.5 pl-1.5 pr-2 rounded-md text-caption font-medium capitalize
+                     text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+              title="Set status"
+              onclick={(e) => { e.stopPropagation(); inlineCreateStatusOpen = !inlineCreateStatusOpen; }}
             >
-              {#each STATUSES as s, si}
-                <button
-                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                         text-body-sm transition-colors capitalize
-                         {si === view.inlineCreateStatusIdx
-                    ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
-                    : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                  onclick={() => {
-                    inlineCreateStatus = s;
-                    inlineCreateStatusOpen = false;
-                    requestAnimationFrame(() => inlineCreateTitleEl?.focus());
-                  }}
-                  onmouseenter={() => { view.inlineCreateStatusIdx = si; }}
-                >
-                  <StatusIcon status={s} size={14} />
-                  {s}
-                </button>
-              {/each}
-            </div>
+              <StatusIcon status={inlineCreateStatus} size={15} />
+              {inlineCreateStatus}
+            </button>
+            {#if inlineCreateStatusOpen}
+              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+              <div
+                class="popover-in origin-top-left absolute left-0 top-full mt-1.5 z-30 w-[176px]
+                       bg-[var(--surface)] border border-[var(--border)]
+                       rounded-xl shadow-lg p-1"
+                onclick={(e) => e.stopPropagation()}
+              >
+                {#each STATUSES as s, si}
+                  <button
+                    class="w-full flex items-center gap-2 px-2.5 h-8 rounded-md text-left
+                           text-body-sm transition-colors capitalize
+                           {si === view.inlineCreateStatusIdx
+                      ? 'text-[var(--accent)] bg-[var(--accent-subtle)] font-medium'
+                      : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                    onclick={() => {
+                      inlineCreateStatus = s;
+                      inlineCreateStatusOpen = false;
+                      requestAnimationFrame(() => inlineCreateTitleEl?.focus());
+                    }}
+                    onmouseenter={() => { view.inlineCreateStatusIdx = si; }}
+                  >
+                    <StatusIcon status={s} size={14} />
+                    {s}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            type="text"
+            bind:this={inlineCreateTitleEl}
+            bind:value={inlineCreateTitle}
+            class="flex-1 min-w-0 text-body-lg bg-transparent text-[var(--text)]
+                   placeholder:text-[var(--text-faint)] outline-none border-none"
+            placeholder="What needs doing?"
+            aria-label="New issue title"
+            autofocus={!inlineCreateStatusOpen}
+            readonly={inlineCreateSaving}
+            onkeydown={(e) => {
+              if (e.key === "Enter" && inlineCreateTitle.trim()) {
+                e.preventDefault();
+                submitInlineCreate(e.ctrlKey || e.metaKey);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                closeComposer();
+              }
+            }}
+            onblur={() => {
+              // Small delay so clicking the status picker doesn't close it,
+              // and a refocus after a create doesn't either.
+              setTimeout(() => {
+                if (document.activeElement === inlineCreateTitleEl) return;
+                if (!inlineCreateTitle.trim() && !inlineCreateStatusOpen) closeComposer();
+              }, 150);
+            }}
+          />
+          {#if inlineCreateSaving}
+            <span class="size-4 shrink-0 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" aria-label="Creating"></span>
           {/if}
         </div>
-
-        <span class="text-body-sm text-[var(--text-faint)] font-mono shrink-0 w-[72px]">
-          {projectIdentifier}-...
-        </span>
-        <!-- svelte-ignore a11y_autofocus -->
-        <input
-          type="text"
-          bind:this={inlineCreateTitleEl}
-          bind:value={inlineCreateTitle}
-          class="flex-1 text-body bg-transparent text-[var(--text)]
-                 placeholder:text-[var(--text-faint)] outline-none border-none"
-          placeholder="Issue title..."
-          autofocus={!inlineCreateStatusOpen}
-          disabled={inlineCreateSaving}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && inlineCreateTitle.trim()) {
-              e.preventDefault();
-              submitInlineCreate();
-            }
-            if (e.key === "Escape") {
-              e.preventDefault();
-              e.stopPropagation();
-              inlineCreateActive = false;
-              inlineCreateStatusOpen = false;
-              inlineCreateTitle = "";
-            }
-          }}
-          onblur={() => {
-            // Small delay to allow clicking the status picker without closing
-            setTimeout(() => {
-              if (!inlineCreateTitle.trim() && !inlineCreateStatusOpen) {
-                inlineCreateActive = false;
-                inlineCreateTitle = "";
-              }
-            }, 150);
-          }}
-        />
-        {#if inlineCreateSaving}
-          <span class="text-caption text-[var(--text-faint)]">Creating...</span>
-        {/if}
+        <div
+          class="flex items-center gap-2 px-3 h-8 border-t border-[var(--border)]
+                 text-micro text-[var(--text-faint)]"
+        >
+          {#if inlineCreatePriority !== "none"}
+            <span class="inline-flex items-center gap-1 h-5 px-1.5 rounded-md bg-[var(--bg-subtle)] text-[var(--text-muted)] capitalize">
+              <PriorityIcon priority={inlineCreatePriority} size={11} /> {inlineCreatePriority}
+            </span>
+          {/if}
+          {#if presetModule}
+            <span class="inline-flex items-center gap-1 h-5 px-1.5 rounded-md bg-[var(--bg-subtle)] text-[var(--text-muted)]">
+              <Layers size={11} /> {presetModule.name}
+            </span>
+          {/if}
+          {#if inlineCreateMade > 0}
+            <span class="text-[var(--success)] font-medium">{inlineCreateMade} created</span>
+          {/if}
+          <span class="flex-1"></span>
+          <span class="hidden sm:inline"><kbd class="composer-kbd">Enter</kbd> create &amp; next</span>
+          <span class="hidden sm:inline"><kbd class="composer-kbd">Ctrl Enter</kbd> create &amp; open</span>
+          <span><kbd class="composer-kbd">Esc</kbd> done</span>
+        </div>
       </div>
+    </div>
   {/if}
 
   <!-- Issue list. The select-all toggle lives in the Topbar's sub-tab
@@ -2170,8 +2270,8 @@
             <!-- Group header — mirrors the real button at IssueList's
                  grouped view: sticky, px-6 py-2, border-b. -->
             <div
-              class="w-full sticky top-0 z-10 flex items-center gap-2 px-6 py-2
-                     bg-[var(--surface)] border-b border-[var(--border)]"
+              class="w-full sticky top-0 z-10 flex items-center gap-2 px-3 sm:px-6 h-10
+                     group-head border-b border-[var(--border)]"
             >
               <Skeleton variant="bar" class="size-3.5 shrink-0" />
               <Skeleton variant="circle" class="size-3.5 shrink-0" />
@@ -2184,8 +2284,8 @@
                    transparent left border keeps the row's horizontal
                    metrics identical to the loaded border-l-2 rows. -->
               <div
-                class="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2.5
-                       border-b border-[var(--border)] last:border-b-0
+                class="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-6 min-h-[2.875rem] py-1.5
+                       border-b border-[color-mix(in_srgb,var(--border)_65%,transparent)] last:border-b-0
                        border-l-2 border-l-transparent"
               >
                 <!-- Selection checkbox slot (size-4, always reserved). -->
@@ -2193,11 +2293,11 @@
                 <!-- Status icon. -->
                 <Skeleton variant="circle" class="size-4 shrink-0" />
                 <!-- Identifier. -->
-                <Skeleton variant="bar" class="h-3 w-[52px] sm:w-[72px] shrink-0" />
+                <Skeleton variant="bar" class="hidden sm:block h-3 w-[64px] shrink-0" />
                 <!-- Title (flexes like the loaded title column). -->
                 <Skeleton variant="bar" class="h-3.5 flex-1 min-w-0 max-w-[420px]" />
                 <!-- Updated time — hidden below sm, w-[60px], like the row. -->
-                <Skeleton variant="bar" class="hidden sm:block h-3 w-[60px] shrink-0" />
+                <Skeleton variant="bar" class="hidden sm:block h-3 w-[64px] shrink-0" />
               </div>
             {/each}
           </div>
@@ -2220,20 +2320,32 @@
       </ErrorState>
     {:else if subTabIssues.length === 0}
       {#if view.hasActiveFilters() || view.searchQuery || view.issueSubTab !== "all"}
-        <!-- Filtered-empty: work exists, it's just hidden behind a
-             filter/search, so we keep the recovery affordance. -->
-        <div class="flex flex-col items-center justify-center py-20 gap-3">
+        <!-- Filtered-empty: the work exists, something is hiding it. Say
+             how much and what, and make each cause one click to undo. -->
+        {@const hidden = issues.length}
+        <div class="flex flex-col items-center justify-center py-16 px-6 gap-4 text-center animate-reveal">
           <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.16} />
-          <p class="text-[var(--text-muted)] text-body-lg">
-            No issues match your filters
-          </p>
-          <button
-            class="text-body-sm text-[var(--accent)]
-                   hover:underline transition-colors"
-          onclick={() => view.clearFilters()}
-          >
-            Clear filters
-          </button>
+          <div class="flex flex-col gap-1">
+            <p class="text-[var(--text)] text-heading font-medium">Nothing matches</p>
+            <p class="text-[var(--text-muted)] text-body">
+              {#if view.issueSubTab !== "all" && !view.hasActiveFilters() && !view.searchQuery.trim()}
+                No {view.issueSubTab} issues in this project yet.
+              {:else}
+                {hidden} {hidden === 1 ? "issue is" : "issues are"} hidden by what's below.
+              {/if}
+            </p>
+          </div>
+          <div class="flex flex-col items-center gap-3">
+            <FilterChips {view} {labels} {modules} size="md" />
+            {#if view.issueSubTab !== "all"}
+              <button
+                class="text-body-sm font-medium text-[var(--accent)] hover:underline underline-offset-2"
+                onclick={() => view.selectIssueSubTab("all")}
+              >
+                Show all issues instead of {view.issueSubTab}
+              </button>
+            {/if}
+          </div>
         </div>
       {:else if !inlineCreateActive}
         <!-- Truly-empty: nothing to do. Hidden while the inline create
@@ -2282,33 +2394,69 @@
       {#each groups as g, _gi (g.key)}
         {@const collapsed = view.isGroupCollapsed(g.key)}
         {@const groupOffset = groups.slice(0, _gi).reduce((n, gg) => n + (view.isGroupCollapsed(gg.key) ? 0 : gg.issues.length), 0)}
+        {@const mix = g.kind === "status" ? null : STATUSES.map((s) => [s, g.issues.filter((i) => i.status === s).length] as const).filter(([, n]) => n > 0)}
         <div class="border-b border-[var(--border)] last:border-b-0" data-group-key={g.key}>
-          <button
-            class="w-full sticky top-0 z-10 flex items-center gap-2 px-6 py-2
-                   bg-[var(--surface)] border-b border-[var(--border)]
-                   hover:bg-[var(--bg-subtle)] transition-colors text-left"
-            onclick={() => view.toggleGroupCollapsed(projectIdentifier, g.key)}
+          <!-- Header: the toggle is its own button so the quick-add "+" can
+               sit beside it (buttons can't nest). -->
+          <div
+            class="group/gh sticky top-0 z-10 flex items-center pr-3 sm:pr-5
+                   group-head border-b border-[var(--border)]"
           >
-            <ChevronRight
-              size={13}
-              class="shrink-0 text-[var(--text-faint)] transition-transform {collapsed ? '' : 'rotate-90'}"
-            />
-            {#if g.kind === "status"}
-              <StatusIcon status={g.key} size={14} />
-            {:else if g.kind === "priority"}
-              <PriorityIcon priority={g.key} size={14} />
-            {:else if g.kind === "module"}
-              {#if g.module?.emoji}
-                <ProjectIcon value={g.module.emoji} size={14} class="text-[var(--text-muted)]" />
-              {:else}
-                <Layers size={14} class="text-[var(--text-faint)]" />
+            <button
+              class="flex-1 min-w-0 flex items-center gap-2.5 pl-3 sm:pl-6 h-10 text-left"
+              aria-expanded={!collapsed}
+              onclick={() => view.toggleGroupCollapsed(projectIdentifier, g.key)}
+            >
+              <ChevronRight
+                size={14}
+                class="shrink-0 text-[var(--text-faint)] group-hover/gh:text-[var(--text)]
+                       motion-safe:transition-transform motion-safe:duration-200 {collapsed ? '' : 'rotate-90'}"
+              />
+              {#if g.kind === "status"}
+                <StatusIcon status={g.key} size={15} />
+              {:else if g.kind === "priority"}
+                <span class="w-[15px] flex justify-center"><PriorityIcon priority={g.key} size={15} /></span>
+              {:else if g.kind === "module"}
+                {#if g.module?.emoji}
+                  <ProjectIcon value={g.module.emoji} size={15} class="text-[var(--text-muted)]" />
+                {:else}
+                  <Layers size={15} class="text-[var(--text-faint)]" />
+                {/if}
               {/if}
+              <span class="text-body-sm font-semibold text-[var(--text)] truncate {g.kind === 'module' ? '' : 'capitalize'}">
+                {g.kind === "priority" && g.key === "none" ? "No priority" : g.label}
+              </span>
+              <span
+                class="min-w-[1.4rem] h-5 px-1.5 grid place-items-center rounded-full
+                       bg-[var(--bg-subtle)] text-micro font-medium tabular-nums text-[var(--text-muted)]"
+              >{g.issues.length}</span>
+            </button>
+            {#if mix && mix.length > 0}
+              <!-- Status mix of a priority or module group, at a glance. -->
+              <span
+                class="hidden sm:flex w-20 h-1.5 rounded-full overflow-hidden gap-px mr-2 bg-[var(--border)]"
+                title={mix.map(([s, n]) => `${n} ${s}`).join(" · ")}
+              >
+                {#each mix as [s, n] (s)}
+                  <span class="h-full" style="flex-grow: {n}; background: {statusCssColor(s)}; opacity: {s === 'cancelled' ? 0.4 : 1}"></span>
+                {/each}
+              </span>
             {/if}
-            <span class="text-caption font-semibold uppercase tracking-widest text-[var(--text-muted)] truncate">
-              {g.label}
-            </span>
-            <span class="text-caption text-[var(--text-faint)] tabular-nums">{g.issues.length}</span>
-          </button>
+            {#if canEdit}
+              <Tooltip content="New issue in {g.kind === 'priority' && g.key === 'none' ? 'No priority' : g.label}" placement="left">
+                <button
+                  class="size-7 grid place-items-center rounded-md text-[var(--text-faint)]
+                         hover:text-[var(--accent)] hover:bg-[var(--bg-subtle)]
+                         opacity-0 group-hover/gh:opacity-100 focus-visible:opacity-100
+                         pointer-coarse:opacity-100 transition-[opacity,color,background]"
+                  aria-label="New issue in {g.label}"
+                  onclick={(e) => { e.stopPropagation(); quickAddToGroup(g.kind, g.key); }}
+                >
+                  <Plus size={15} />
+                </button>
+              </Tooltip>
+            {/if}
+          </div>
           {#if !collapsed}
             <div transition:slide={slideParams()}>
               {#each g.issues as issue, si (issue.id)}
@@ -2330,6 +2478,44 @@
       {/each}
     {/if}
   </div>
+
+  <!-- Keyboard hint bar: what the keys do right now, for whoever is on a
+       keyboard (hover-capable, md and up). Gives way to the bulk bar. -->
+  {#if !loading && !error && view.selectedIds.size === 0}
+    {@const focused = view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length}
+    <div
+      class="hint-bar hidden md:[@media(hover:hover)]:flex shrink-0 items-center gap-4 px-6 h-8
+             overflow-hidden whitespace-nowrap
+             border-t border-[var(--border)] bg-[var(--bg)] text-micro text-[var(--text-faint)]"
+      aria-hidden="true"
+    >
+      {#if inlineCreateActive}
+        <span><kbd class="hint-kbd">Enter</kbd> create &amp; next</span>
+        <span><kbd class="hint-kbd">Ctrl Enter</kbd> create &amp; open</span>
+        <span><kbd class="hint-kbd">Esc</kbd> close the composer</span>
+      {:else if focused}
+        <span><kbd class="hint-kbd">Enter</kbd> open</span>
+        <span><kbd class="hint-kbd">Space</kbd> peek</span>
+        {#if canEdit}
+          <span><kbd class="hint-kbd">S</kbd> status</span>
+          <span><kbd class="hint-kbd">P</kbd> priority</span>
+          <span><kbd class="hint-kbd">M</kbd> module</span>
+          <span><kbd class="hint-kbd">X</kbd> select</span>
+        {/if}
+        <span><kbd class="hint-kbd">Esc</kbd> unfocus</span>
+      {:else}
+        <span><kbd class="hint-kbd">J</kbd><kbd class="hint-kbd">K</kbd> move</span>
+        {#if canEdit}<span><kbd class="hint-kbd">C</kbd> new issue</span>{/if}
+        <span><kbd class="hint-kbd">F</kbd> filter</span>
+        <span><kbd class="hint-kbd">/</kbd> search</span>
+        <span><kbd class="hint-kbd">?</kbd> all shortcuts</span>
+      {/if}
+      <span class="ml-auto pl-4 tabular-nums hidden lg:inline">
+        {flatIssues.length} shown
+        · {view.searchQuery.trim() ? "by relevance" : view.issueSubTab === "recent" ? "most recent first" : `by ${view.sortField === "number" ? "issue number" : view.sortField}`}
+      </span>
+    </div>
+  {/if}
 
   <!-- LIF-149: floating bulk-action bar (component in lib/issues). Appears
        while anything is selected. bulkMenu is bound so the parent's Escape
@@ -2356,19 +2542,11 @@
 {/if}
  </div>
 
- <!-- LIF-186: persistent right sidebar — project-wide issue context.
-      Shown on lg+ and collapsible to an edge tab; mirrors the Pages sidebar. Breakdowns
-       come from the unfiltered `issues`, and every row is a one-click
-      filter shortcut into the existing filter state. -->
+ <!-- LIF-186: the project pulse sidebar. Shown from xl up (below that the
+      rows need the width more) and collapsible to an edge tab. Breakdowns
+      come from the unfiltered `issues`; every row is a filter toggle. -->
  {#if layout !== "board" && !loading && !error}
-   <RightSidebar
-      stats={sidebarStats}
-      {modules}
-      filterPriority={view.filterPriority}
-      filterModule={view.filterModule}
-      onTogglePriority={(p) => view.togglePriorityFilter(p)}
-     onToggleModule={(name) => view.toggleModuleFilter(name)}
-   />
+   <RightSidebar {issues} {modules} {labels} {view} onPeek={peekIssue} />
  {/if}
 </div>
 
@@ -2385,6 +2563,7 @@
     isFocused={idx === view.focusedIndex}
     isSelected={view.selectedIds.has(issue.id)}
     isChanged={changedIds.has(issue.id)}
+    isFlashing={flashIds.has(issue.id)}
     hitSnippet={issueSearchScores.get(issue.id)?.snippet ?? null}
     statusOpen={view.statusDropdownId === issue.id}
     priorityOpen={view.priorityDropdownId === issue.id}
@@ -2408,3 +2587,44 @@
     onHoverModuleOption={(mi) => { view.modulePickerIdx = mi; }}
   />
 {/snippet}
+
+<style>
+  /* Sticky group headers: opaque (rows scroll under them) but a step off
+     the list floor, so they read as dividers rather than as rows. */
+  .group-head {
+    background: color-mix(in srgb, var(--bg-subtle) 55%, var(--bg));
+  }
+
+  @keyframes composer-in {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+  }
+  .composer-in {
+    animation: composer-in 180ms var(--ease-out-expo);
+  }
+
+  .composer-kbd,
+  .hint-kbd {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.15rem;
+    height: 1.15rem;
+    padding: 0 0.3rem;
+    margin-right: 0.3rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    line-height: 1;
+  }
+  .hint-kbd + .hint-kbd {
+    margin-left: -0.15rem;
+  }
+  .hint-bar > span {
+    flex-shrink: 0;
+  }
+</style>
