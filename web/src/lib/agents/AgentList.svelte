@@ -1,9 +1,10 @@
 <script lang="ts">
-  // LIF-543: the agent roster. One row per bot: a generic Bot glyph (never a
-  // vendor logo), name and owner, status pill, a sparkline of the window,
-  // and the four action counts, all on one line at desktop widths.
+  // LIF-543: the agent roster. One row per bot: its tool's mark (a generic Bot
+  // glyph for tools without one), name and owner, status pill, a sparkline of
+  // the window, and the four action counts, all on one line at desktop widths.
 
   import { Bot } from "lucide-svelte";
+  import ToolIcon from "../ToolIcon.svelte";
   import type { AgentSummary, AgentWindow } from "../api";
   import { now } from "../now.svelte";
   import Sparkline from "./Sparkline.svelte";
@@ -36,7 +37,7 @@
                {agent.status === 'inactive' ? 'text-[var(--aa-text-2)]' : 'text-[var(--aa-text)]'}"
         style="grid-area: icon"
       >
-        <Bot size={22} strokeWidth={1.75} />
+        <ToolIcon tool={agent.tool_id} size={20} fallback={Bot} />
       </span>
 
       <div class="min-w-0" style="grid-area: who">

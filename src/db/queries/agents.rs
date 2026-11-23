@@ -188,6 +188,10 @@ pub struct AgentSummary {
     pub user_id: i64,
     pub username: String,
     pub display_name: String,
+    /// The connected tool this bot stands for (`opencode`, `claude-desktop`,
+    /// `import-github`, ...), so the UI can show its mark. Bots minted before
+    /// `tool_id` existed get it from the `{tool}-{owner}` username convention.
+    pub tool_id: Option<String>,
     pub owner: Option<Owner>,
     /// `active`, `idle` or `inactive`, from `last_seen` alone.
     pub status: &'static str,
@@ -242,6 +246,7 @@ pub struct ActivityInput<'a> {
 struct Bot {
     username: String,
     display_name: String,
+    tool_id: Option<String>,
     owner_id: Option<i64>,
     is_active: bool,
     owner: Option<Owner>,
@@ -400,6 +405,7 @@ pub fn activity(conn: &Connection, input: &ActivityInput) -> Result<AgentActivit
                 user_id: id,
                 username: bot.username.clone(),
                 display_name: bot.display_name.clone(),
+                tool_id: bot.tool_id.clone(),
                 owner: bot.owner.clone(),
                 status: status(seen, now),
                 last_seen: seen.map(rfc3339),
@@ -467,7 +473,7 @@ fn status_rank(status: &str) -> u8 {
 fn bots(conn: &Connection) -> Result<HashMap<i64, Bot>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT b.id, b.username, b.display_name, b.owner_id, b.is_active,
-                o.id, o.username, o.display_name
+                o.id, o.username, o.display_name, b.tool_id
            FROM users b LEFT JOIN users o ON o.id = b.owner_id
           WHERE b.is_bot = 1",
     )?;
@@ -480,11 +486,20 @@ fn bots(conn: &Connection) -> Result<HashMap<i64, Bot>, LificError> {
             }),
             None => None,
         };
+        let username: String = row.get(1)?;
+        let tool_id = row.get::<_, Option<String>>(8)?.or_else(|| {
+            let owner = owner.as_ref()?;
+            username
+                .strip_suffix(&format!("-{}", owner.username))
+                .filter(|tool| !tool.is_empty())
+                .map(str::to_string)
+        });
         Ok((
             row.get::<_, i64>(0)?,
             Bot {
-                username: row.get(1)?,
+                username,
                 display_name: row.get(2)?,
+                tool_id,
                 owner_id: row.get(3)?,
                 is_active: row.get(4)?,
                 owner,

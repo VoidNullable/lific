@@ -5,11 +5,14 @@
   //
   // Most marks are SimpleIcons (CC0) on a 24×24 viewBox. Codex and Pi are the
   // vendors' own marks; Pi ships on an 800×800 grid, so each icon carries its
-  // own viewBox and may have multiple paths. Anything unknown falls back to a
-  // wrench.
+  // own viewBox and may have multiple paths. Anything unknown falls back to
+  // `fallback` (a wrench unless the caller picks another glyph).
   import { Wrench } from "lucide-svelte";
-
-  let { tool, size = 20 }: { tool: string; size?: number } = $props();
+  let {
+    tool,
+    size = 20,
+    fallback = Wrench,
+  }: { tool: string | null; size?: number; fallback?: typeof Wrench } = $props();
 
   type Icon = { viewBox: string; paths: string[]; evenodd?: boolean };
 
@@ -34,6 +37,8 @@
     "M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z";
   const ZED =
     "M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z";
+  const GITHUB =
+    "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12";
 
   const ICONS: Record<string, Icon> = {
     opencode: { viewBox: "0 0 24 24", paths: [OPENCODE] },
@@ -44,9 +49,18 @@
     pi: { viewBox: "0 0 800 800", paths: [PI_1, PI_2], evenodd: true },
     vscode: { viewBox: "0 0 24 24", paths: [VSCODE] },
     zed: { viewBox: "0 0 24 24", paths: [ZED] },
+    github: { viewBox: "0 0 24 24", paths: [GITHUB] },
   };
 
-  const icon = $derived(ICONS[tool]);
+  // Bot tool ids that differ from the registry key: `lific connect` mints
+  // Claude Desktop as `claude-desktop`, and importers as `import-{source}`.
+  const ALIASES: Record<string, string> = {
+    "claude-desktop": "claude",
+    "import-github": "github",
+  };
+
+  const icon = $derived(tool ? ICONS[ALIASES[tool] ?? tool] : undefined);
+  const Fallback = $derived(fallback);
 </script>
 
 {#if icon}
@@ -64,5 +78,5 @@
     {/each}
   </svg>
 {:else}
-  <Wrench {size} />
+  <Fallback {size} />
 {/if}

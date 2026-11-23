@@ -2702,6 +2702,8 @@ export interface AgentSummary {
   user_id: number;
   username: string;
   display_name: string;
+  /** Connected tool id (`opencode`, `claude-desktop`, `import-github`), for its mark. */
+  tool_id: string | null;
   owner: AgentOwner | null;
   status: AgentStatus;
   /** Most recent visible action of any age, RFC 3339 UTC; null if never. */

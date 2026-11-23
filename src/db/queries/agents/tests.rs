@@ -478,6 +478,35 @@ fn people_are_not_agents() {
 }
 
 #[test]
+fn agents_carry_their_tool_even_when_minted_before_tool_id() {
+    let pool = db();
+    let conn = pool.write().unwrap();
+    let owner = user(&conn, "blake", None);
+    let legacy = user(&conn, "opencode-blake", Some(owner));
+    let current = user(&conn, "claude-desktop-blake", Some(owner));
+    conn.execute(
+        "UPDATE users SET tool_id = 'claude-desktop' WHERE id = ?1",
+        params![current],
+    )
+    .unwrap();
+    let orphan = user(&conn, "stray", Some(owner));
+    let t = ago(1, 0);
+    for bot in [legacy, current, orphan] {
+        read_row(&conn, bot, &t, None, None);
+    }
+
+    let out = activity(&conn, &input(Window::Hour)).unwrap();
+    let tools: HashMap<&str, Option<&str>> = out
+        .agents
+        .iter()
+        .map(|a| (a.username.as_str(), a.tool_id.as_deref()))
+        .collect();
+    assert_eq!(tools["opencode-blake"], Some("opencode"));
+    assert_eq!(tools["claude-desktop-blake"], Some("claude-desktop"));
+    assert_eq!(tools["stray"], None);
+}
+
+#[test]
 fn an_unknown_window_is_a_bad_request() {
     assert!(matches!(
         Window::parse(Some("30d")),
