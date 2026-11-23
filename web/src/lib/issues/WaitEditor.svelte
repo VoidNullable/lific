@@ -51,9 +51,9 @@
   );
 
   const TONE = {
-    holding: "bg-[color-mix(in_srgb,var(--warn)_10%,transparent)]",
-    due: "bg-[var(--accent-subtle)]",
-    overdue: "bg-[var(--error-bg)]",
+    holding: "border-[var(--warn)] bg-[color-mix(in_srgb,var(--warn)_6%,transparent)]",
+    due: "border-[var(--accent)] bg-[var(--accent-subtle)]",
+    overdue: "border-[var(--error)] bg-[var(--error-bg)]",
   } as const;
   const HEADLINE_TONE = {
     holding: "text-[var(--text)]",
@@ -114,7 +114,7 @@
       {#each waits as wait (wait.id)}
         {@const described = describeWait(wait, today)}
         <li
-          class="wait-item flex items-start gap-2 rounded-md px-2 py-1.5 -mx-2 {TONE[described.state]}"
+          class="wait-item flex items-start gap-2 rounded-r-md border-l-2 pl-2 pr-1 py-1 -mx-2 {TONE[described.state]}"
           data-wait-kind={wait.kind}
           data-wait-state={described.state}
         >
@@ -130,7 +130,7 @@
             {/if}
           </span>
           <div class="flex-1 min-w-0">
-            <p class="m-0 text-body-sm leading-snug break-words {HEADLINE_TONE[described.state]}">
+            <p class="m-0 text-caption leading-snug break-words {HEADLINE_TONE[described.state]}">
               {described.headline}
             </p>
             {#if wait.note}

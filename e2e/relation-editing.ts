@@ -73,7 +73,7 @@ async function holdFirst(page: Page, url: string | RegExp) {
 
 async function openAddRelation(page: Page, kind: string) {
   await page.getByRole("button", { name: "Add relation" }).click();
-  await page.locator(".issue-meta-relations").getByRole("button", { name: kind, exact: true }).click();
+  await page.locator(".issue-meta-relations").getByRole("menuitem", { name: kind, exact: true }).click();
 }
 
 export async function checkRelationEditing(context: BrowserContext, base: string) {

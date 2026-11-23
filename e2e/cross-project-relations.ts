@@ -102,7 +102,7 @@ function relationField(page: Page, label: string) {
 
 async function openAddRelation(page: Page, kind: string) {
   await page.getByRole("button", { name: "Add relation" }).click();
-  await page.locator(".issue-meta-relations").getByRole("button", { name: kind, exact: true }).click();
+  await page.locator(".issue-meta-relations").getByRole("menuitem", { name: kind, exact: true }).click();
   await page.getByPlaceholder(/Search issues in any project/).waitFor();
 }
 

@@ -18,7 +18,6 @@
     type Issue,
     type Module,
     type Label,
-    type Comment,
     type Activity,
     type AuthUser,
   } from "../lib/api";
@@ -38,32 +37,25 @@
   } from "../lib/issues/relations";
   import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
   import AssigneeField from "../lib/issues/AssigneeField.svelte"; // LIF-147
-  import { assignmentNames, sameNames, type Person } from "../lib/issues/assignees";
+  import { assignmentKind, assignmentNames, personName, sameNames, type Person } from "../lib/issues/assignees";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon, { statusCssColor } from "../lib/StatusIcon.svelte";
-  import { formatDate } from "../lib/format";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import { recordRecent } from "../lib/home/recents"; // LIF-237
   import { updateIssueWithUndo } from "../lib/issues/state.svelte"; // LIF-243
   import { scheduleDelete } from "../lib/issues/deferredDelete.svelte"; // LIF-283
   import { openPeek } from "../lib/issues/peek.svelte"; // LIF-248
   import { loadLayout } from "../lib/issues/persistence"; // LIF-434
+  import { PRIORITIES, STATUSES, TERMINAL_STATUSES, priorityLabel, statusLabel } from "../lib/issues/grouping";
+  import { formatDay, localDay } from "../lib/issues/waits";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
+  import { shortcutsSuppressed } from "../lib/shortcuts";
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
-  import {
-    COMMENT_WINDOW_RETRY_LIMIT,
-    commentOpIsCurrent,
-    commentWindowOutcome,
-    loadCommentWindow,
-    olderCursor,
-    prependOlderComments,
-    reconcileCommentWindow,
-    removeComment,
-    upsertComment,
-  } from "../lib/commentState";
-  import { ArrowUpRight, ChevronDown, FolderInput, Plus, X } from "lucide-svelte";
-  import { untrack, getContext } from "svelte";
+  import { CommentThread } from "../lib/detail/commentThread.svelte";
+  import { ArrowUpRight, CalendarDays, ChevronDown, FolderInput, Plus, Tag, X } from "lucide-svelte";
+  import { getContext } from "svelte";
   import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
 
@@ -76,21 +68,18 @@
     navigate: (path: string) => void;
     projectIdentifier: string;
     issueIdentifier: string;
-    /** Optional hard override (peek panel passes false). When omitted, the
-     *  caller's project role drives it — a viewer is read-only (LIF-234). */
+    /** Optional hard override. When omitted, the caller's project role
+     *  drives it: a viewer is read-only (LIF-234). */
     editable?: boolean;
   } = $props();
 
-  // LIF-234: content edits (title/description/status/priority/module/labels/
-  // delete) require maintainer+ once enforcement is on. `editableProp` lets a
-  // caller force read-only regardless (unused today; kept for parity with the
-  // prop's prior meaning). Commenting stays available for viewers.
+  // LIF-234: content edits require maintainer+ once enforcement is on;
+  // commenting stays available for viewers.
   const editable = $derived(editableProp ?? projectRole.canEdit);
   const canComment = $derived(projectRole.canComment);
 
-  // Back-arrow destination mirrors whichever list layout the user was
-  // last viewing for this project (set by IssueList). Falling back to
-  // the flat issues list preserves prior behavior when nothing's stored.
+  // The list this issue was opened from: whichever layout the user last
+  // used for this project (set by IssueList).
   function backHref(): string {
     return loadLayout(projectIdentifier) === "board"
       ? `/${projectIdentifier}/board`
@@ -103,148 +92,91 @@
   let issue = $state<Issue | null>(null);
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
+  let activity = $state<Activity[]>([]);
+  let currentUser = $state<AuthUser | null>(null);
+  let loading = $state(true);
+  let error = $state("");
+  // Bumped on every routed navigation. Anything in flight from before the
+  // bump belongs to an issue the reader has left, and is discarded.
+  let loadGen = 0;
+  // Orders the reads that replace `issue` within one route (the initial
+  // load, refreshes, reloads after a relation change): only the latest
+  // started may land.
+  let issueRead = 0;
 
-  // Tab title: upgrade the route's default (`NEWS-18 · NEWS · Lific`) with
-  // the real title once the issue lands. Nothing to clear — App resets the
-  // slot on route change.
+  // Tab title: the real title once the issue lands.
   const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
   $effect(() => {
     if (!issue) return;
     titleCtx?.set(pageTitle(issue.identifier, issue.title, projectIdentifier));
   });
-  let comments = $state<Comment[]>([]);
-  // The thread on screen is a contiguous run ending at the newest comment.
-  // The cursor for the page before it comes from `comments[0]`, never from a
-  // row count: offsets move under a thread that is still being written to.
-  let hasOlderComments = $state(false);
-  let loadingOlderComments = $state(false);
-  let currentUser = $state<AuthUser | null>(null);
-  let activity = $state<Activity[]>([]);
-  let loading = $state(true);
-  let error = $state("");
-  // Bumped on every routed navigation. Anything in flight from before the bump
-  // belongs to an issue the reader has already left, and is discarded.
-  let loadGen = 0;
-  // Orders the operations that all replace or extend `comments` within one
-  // route: the initial window, a background refresh, a manual older page, and
-  // the local fold after a mutation. Last started wins; see
-  // `commentOpIsCurrent`.
-  let commentOp = 0;
-  // Orders the reads that replace `issue` within one route: the initial load,
-  // automatic refreshes, and the reloads after a relation change. Those can
-  // overlap (two quick removals), so only the latest-started read may land.
-  let issueRead = 0;
-
-  // Bumped by every successful local create, edit or delete. A replacement
-  // refresh captures it when it starts and refuses to land if it changed,
-  // because that refresh read the thread before the edit existed and applying
-  // it now would undo work the user just did and watched succeed.
-  let commentMutationEpoch = 0;
-
-  /** Take ownership of the comment window for a new operation.
-   *
-   *  Only the two operations that rewrite or extend the whole window claim it:
-   *  a replacement refresh and a manual older page. Claiming cancels whatever
-   *  held it, which is why the spinner comes down here, since the superseded
-   *  operation is forbidden from touching it. Mutations deliberately do not
-   *  claim: they are surgical, idempotent, and must never cancel a page the
-   *  reader asked for. */
-  function claimCommentOp(): number {
-    loadingOlderComments = false;
-    commentOp += 1;
-    return commentOp;
-  }
 
   void me().then((res) => {
     if (res.ok) currentUser = res.data;
   });
 
-  // Sidebar dropdown states (issue-specific).
-  let statusOpen = $state(false);
-  // LIF-359: the topbar's status chip is its own picker. It shares STATUSES
-  // and setStatus with the sidebar field but needs a separate open flag so
-  // the two menus can't be open at once.
-  let headerStatusOpen = $state(false);
-  let priorityOpen = $state(false);
-  let moduleOpen = $state(false);
-  let labelsOpen = $state(false);
-  let relationMenuOpen = $state(false);
-  // What the open picker will link, captured when it opens: the picker resolves
-  // the chosen issue asynchronously, and by then the reader may be on another
-  // issue. `gen` lets that late selection be recognised and dropped.
+  const thread = new CommentThread({
+    list: (id, before, size) => listComments(id, before, size),
+    create: createComment,
+    update: updateComment,
+    remove: deleteComment,
+    gen: () => loadGen,
+    currentId: () => issue?.id ?? null,
+    isCurrent: (id) => issue?.id === id,
+    onMutated: () => void refreshActivity(),
+  });
+
+  // One menu open at a time, by name. Every picker in the view reads this.
+  type Menu = "status" | "header-status" | "priority" | "module" | "labels" | "relation" | "start" | "due";
+  let openMenu = $state<Menu | null>(null);
+  function toggleMenu(menu: Menu, e?: Event) {
+    e?.stopPropagation();
+    if (!editable) return;
+    openMenu = openMenu === menu ? null : menu;
+  }
+
+  // What the open relation picker will link, captured when it opens: the
+  // picker resolves the chosen issue asynchronously, and by then the reader
+  // may be on another issue. `gen` lets that late selection be dropped.
   let addingRelation = $state<{ kind: RelationKind; source: string; gen: number } | null>(null);
   let relationPickerOpen = $state(false);
 
-  // Save indicator
+  /** The issues this one links to, for their titles and status. */
+  let related = $state<Map<string, Issue>>(new Map());
+
   let saving = $state(false);
-  let lastSaved = $state<string | null>(null);
+  let savedAt = $state<number | null>(null);
 
-  // Export
   let exportError = $state("");
-  let exporting = $state(false);
-  // LIF-488: "Move to project" modal, opened from the kebab menu or palette.
+  let exporting = false;
+  // LIF-488: "Move to project", from the menu or the palette.
   let moveOpen = $state(false);
-  let canMove = $derived(editable && !inPublicScope());
-
-  const STATUSES = [
-    { value: "backlog", label: "Backlog" },
-    { value: "todo", label: "Todo" },
-    { value: "active", label: "Active" },
-    { value: "done", label: "Done" },
-    { value: "cancelled", label: "Cancelled" },
-  ];
-
-  const PRIORITIES = [
-    { value: "urgent", label: "Urgent" },
-    { value: "high", label: "High" },
-    { value: "medium", label: "Medium" },
-    { value: "low", label: "Low" },
-    { value: "none", label: "None" },
-  ];
+  const canMove = $derived(editable && !inPublicScope());
 
   $effect(() => {
     const id = issueIdentifier;
-    statusOpen = false;
-    headerStatusOpen = false;
-    priorityOpen = false;
-    moduleOpen = false;
-    labelsOpen = false;
-    relationMenuOpen = false;
+    openMenu = null;
     relationPickerOpen = false;
     addingRelation = null;
-    lastSaved = null;
-    // Claim the route synchronously, before any await can start. Everything
-    // in flight for the previous issue is now stale, and every field it could
-    // still write into is cleared here rather than left to be overwritten
-    // later: a slow response for LIF-9 must never paint over LIF-10, and the
-    // gap in between must not show LIF-9's comments under LIF-10's title.
+    savedAt = null;
+    // Claim the route synchronously, before any await: a slow response for
+    // LIF-9 must never paint over LIF-10.
     loadGen += 1;
-    claimCommentOp();
+    thread.reset();
     issue = null;
     modules = [];
     labels = [];
-    comments = [];
-    hasOlderComments = false;
     activity = [];
+    related = new Map();
     loadIssue(id, false, loadGen);
   });
 
   $effect(() =>
     startAutoRefresh({
-      // Rides the current generation rather than claiming a new one, so a
-      // navigation that starts mid-refresh wins and this result is dropped.
+      // Rides the current generation, so a navigation mid-refresh wins.
       refresh: () => loadIssue(issueIdentifier, true, loadGen),
-      // The description editor merges refreshes into what is being typed,
-      // so editing it does not hold refreshes back.
-      isBusy: () =>
-        saving ||
-        loading ||
-        statusOpen ||
-        priorityOpen ||
-        moduleOpen ||
-        labelsOpen ||
-        relationMenuOpen ||
-        relationPickerOpen,
+      // The description editor merges refreshes into what is being typed.
+      isBusy: () => saving || loading || openMenu !== null || relationPickerOpen,
       intervalMs: 0,
       shouldRefresh: (event) =>
         event.type === "resync.required" ||
@@ -255,30 +187,11 @@
     }),
   );
 
-  /// `gen` is the route generation this load belongs to. A navigation bumps
-  /// `loadGen`, which makes every result still in flight stale, so each of
-  /// them is dropped rather than written into the new issue's state. A
-  /// background refresh rides the *current* generation without claiming it:
-  /// it must lose to a navigation that starts while it is running.
   async function loadIssue(identifier: string, background: boolean, gen: number) {
     if (!background) {
       loading = true;
       error = "";
     }
-    // A refresh replaces the whole window, so any manual older page in flight
-    // is obsolete from here on. The mutation epoch is captured rather than
-    // claimed: this read reflects the thread as it is now, and any edit the
-    // user makes while it is in flight is newer truth than it holds.
-    const op = claimCommentOp();
-    const epoch = commentMutationEpoch;
-    // `untrack` is load-bearing, not a tidy-up. The route effect clears
-    // `comments` and then calls this function synchronously, so a tracked read
-    // here makes that effect depend on the very state it just wrote: Svelte
-    // re-runs it, it clears and reads again, and the route dies with
-    // `effect_update_depth_exceeded` before anything paints. Only a background
-    // refresh uses this count, and it wants the rows on screen right now, not a
-    // subscription to them.
-    const loadedRows = untrack(() => comments.length);
     const read = ++issueRead;
     const res = await resolveIssue(identifier);
     if (gen !== loadGen || read !== issueRead) return;
@@ -288,115 +201,42 @@
       return;
     }
     issue = res.data;
-    loadProjectRole(issue.project_id); // LIF-234: prime role gating for this project
+    loadProjectRole(issue.project_id); // LIF-234
     recordRecent({ type: "issue", routeId: issue.identifier, identifier: issue.identifier, title: issue.title, project: projectIdentifier }); // LIF-237
 
-    const issueId = issue.id;
-    const [modRes, lblRes, cmtRes, actRes] = await Promise.all([
-      listModules(issue.project_id),
-      listLabels(issue.project_id),
-      // A background refresh reconciles every page the reader has loaded, not
-      // just the newest, so a comment someone else edited or deleted further
-      // up the thread stops being frozen at the moment it first arrived.
-      loadCommentWindow(
-        (before, size) => listComments(issueId, before, size),
-        background ? loadedRows : 0,
-      ),
-      listIssueActivity(issueId),
+    const current = issue;
+    const [modRes, lblRes, actRes] = await Promise.all([
+      listModules(current.project_id),
+      listLabels(current.project_id),
+      listIssueActivity(current.id),
+      // A refresh reconciles every comment page the reader has loaded.
+      thread.load(current.id, gen, background),
+      loadRelated(current, gen),
     ]);
     if (gen !== loadGen || read !== issueRead) return;
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
-    // The comment window is guarded separately, so the rest of the issue still
-    // updates even when the thread has moved on: a manual older page may have
-    // taken the window over, or a mutation may have landed an edit this read
-    // predates.
-    if (cmtRes.ok) {
-      const outcome = commentWindowOutcome(
-        { route: gen, op, epoch },
-        loadGen,
-        commentOp,
-        commentMutationEpoch,
-      );
-      if (outcome === "apply") {
-        // Anything the reader loaded past the refresh's row budget sits below
-        // the refreshed window and is kept rather than discarded.
-        const merged = reconcileCommentWindow(
-          { items: comments, hasOlder: hasOlderComments },
-          cmtRes.data,
-        );
-        comments = merged.items;
-        hasOlderComments = merged.hasOlder;
-      } else if (outcome === "retry") {
-        // Fired, not awaited: `loading` must come down on schedule below.
-        void restabilizeCommentWindow(issueId, gen);
-      }
-    }
     if (actRes.ok) activity = actRes.data.items;
-
     loading = false;
   }
 
-  /// Re-read the newest window after a mutation landed while a replacement was
-  /// already in flight.
-  ///
-  /// That read predates the edit, so it cannot be applied, but discarding it
-  /// outright is what leaves a thread showing nothing but the row the mutation
-  /// folded in: navigate away and back with a write still pending and the
-  /// replacement for the second visit is invalidated by that write. Read again
-  /// against the epoch the mutation established.
-  ///
-  /// An async loop, never recursion on the synchronous stack, and capped: if
-  /// mutations keep landing faster than a window can be read, the locally
-  /// folded rows stay visible and the next focus or realtime refresh
-  /// reconciles them. Giving up is the correct end state, storming is not.
-  async function restabilizeCommentWindow(parentId: number, gen: number) {
-    for (let attempt = 0; attempt < COMMENT_WINDOW_RETRY_LIMIT; attempt += 1) {
-      if (gen !== loadGen || issue?.id !== parentId) return;
-      const token = { route: gen, op: claimCommentOp(), epoch: commentMutationEpoch };
-      const loadedRows = comments.length;
-      const res = await loadCommentWindow(
-        (before, size) => listComments(parentId, before, size),
-        loadedRows,
-      );
-      if (!res.ok) return;
-      const outcome = commentWindowOutcome(token, loadGen, commentOp, commentMutationEpoch);
-      if (outcome === "abandon") return;
-      if (outcome === "retry") continue;
-      const merged = reconcileCommentWindow(
-        { items: comments, hasOlder: hasOlderComments },
-        res.data,
-      );
-      comments = merged.items;
-      hasOlderComments = merged.hasOlder;
+  /** Fetch the linked issues so relations read as titles, not bare ids. */
+  async function loadRelated(source: Issue, gen: number) {
+    const ids = [...new Set(RELATION_KINDS.flatMap((k) => relationsOf(source, k)))].slice(0, 40);
+    if (ids.length === 0) {
+      related = new Map();
       return;
     }
+    const found = await Promise.all(ids.map((id) => resolveIssue(id)));
+    if (gen !== loadGen) return;
+    const next = new Map<string, Issue>();
+    found.forEach((r, i) => {
+      if (r.ok) next.set(ids[i], r.data);
+    });
+    related = next;
   }
 
-  async function loadOlderComments() {
-    const current = issue;
-    if (!current || loadingOlderComments || !hasOlderComments) return;
-    const gen = loadGen;
-    const op = claimCommentOp();
-    loadingOlderComments = true;
-    // Keyed on the oldest comment on screen, so a comment posted while this
-    // request is in flight cannot shift what "the previous page" means.
-    const res = await listComments(current.id, olderCursor(comments));
-    // Token first. A page that arrives after the reader navigated, or after a
-    // refresh took the window over, must not clear the newer operation's
-    // loading flag, let alone prepend this issue's comments to another thread.
-    if (!commentOpIsCurrent({ route: gen, op }, loadGen, commentOp)) return;
-    loadingOlderComments = false;
-    if (!res.ok) {
-      toast(`Couldn't load older comments: ${res.error}`, { kind: "error" });
-      return;
-    }
-    comments = prependOlderComments(comments, res.data.items);
-    hasOlderComments = res.data.hasMore;
-  }
-
-  // Re-pull the timeline after any mutation so the user's own edit shows
-  // up in Activity immediately (it was just audited server-side).
+  // Re-pull the timeline after any mutation so the user's own edit shows.
   async function refreshActivity() {
     if (!issue) return;
     const gen = loadGen;
@@ -405,55 +245,33 @@
     if (res.ok) activity = res.data.items;
   }
 
-  // Close sidebar dropdowns on outside click. (LabelEditor + the topbar
-  // DeleteMenu manage their own outside-click close.)
-  function handleWindowClick() {
-    statusOpen = false;
-    headerStatusOpen = false;
-    priorityOpen = false;
-    moduleOpen = false;
-    labelsOpen = false;
-    relationMenuOpen = false;
+  function markSaved() {
+    savedAt = Date.now();
+    void refreshActivity();
   }
 
-  function closeOtherDropdowns() {
-    statusOpen = false;
-    headerStatusOpen = false;
-    priorityOpen = false;
-    moduleOpen = false;
-    relationMenuOpen = false;
-  }
+  // ── Saving ───────────────────────────────────────────
 
-  // ── Save helpers ─────────────────────────────────────
-
-  async function saveField(field: string, value: unknown) {
+  async function saveField(patch: Record<string, unknown>) {
     if (!issue) return;
+    const id = issue.id;
     saving = true;
-    const res = await updateIssue(issue.id, { [field]: value });
-    if (res.ok) {
-      issue = res.data;
-      lastSaved = new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      refreshActivity();
-    } else {
-      // Error-only: title/description/labels are high-frequency inline edits
-      // with optimistic UI, so no success toast — but a failed save must not
-      // vanish silently (LIF-284).
-      toast(`Couldn't save ${issue.identifier}: ${res.error}`, { kind: "error" });
-    }
+    const res = await updateIssue(id, patch);
     saving = false;
+    if (!res.ok) {
+      // Inline edits are optimistic and quiet on success, never on failure.
+      toast(`Couldn't save ${issue?.identifier ?? "the issue"}: ${res.error}`, { kind: "error" });
+      return;
+    }
+    if (issue?.id === id) {
+      issue = res.data;
+      markSaved();
+    }
   }
 
-  async function saveTitle(next: string) {
-    await saveField("title", next);
-  }
-
-  /** Save the description. Guarded by `expected_seq`, so a description
-   *  changed elsewhere since the editor last synced is merged or reported as a
-   *  conflict by the editor, never overwritten. `issueId` is the issue the
-   *  editor was opened for, which may no longer be the one on screen. */
+  /** Save the description, guarded by `expected_seq`: a description changed
+   *  elsewhere is merged or reported as a conflict by the editor, never
+   *  overwritten. `issueId` is the issue the editor was opened for. */
   async function saveDescription(
     next: string,
     expectedSeq: number | null,
@@ -471,8 +289,7 @@
     if (res.ok) {
       if (onScreen()) {
         issue = res.data;
-        lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        refreshActivity();
+        markSaved();
       }
       return { ok: true, body: res.data.description, seq: res.data.seq ?? null };
     }
@@ -483,106 +300,77 @@
         return { ok: false, conflict: { body: fresh.data.description, seq: fresh.data.seq ?? null } };
       }
     }
-    // The editor shows the failure and retries on its own.
     return { ok: false, error: res.error };
   }
 
-  // ── Metadata updates ─────────────────────────────────
-  // LIF-243: status/priority/module are one-click reversible, so they skip
-  // the plain `saveField` path in favor of `saveFieldWithUndo`, which shows
-  // a toast with a single-shot Undo. Title/description/labels stay on
-  // `saveField` — editing text isn't a "one value flips to another" action
-  // undo makes sense for.
-
-  /** Shares saveField's saving/lastSaved/activity-refresh side effects, but
-   *  routes the mutation through updateIssueWithUndo for the toast + Undo
-   *  affordance. `onApplied` fires both after the forward save and — if the
-   *  user clicks Undo later, possibly from a different route entirely —
-   *  after the reverting save; guarding on `issue.id` keeps it a no-op if
-   *  the sidebar has since loaded a different issue. */
-  async function saveFieldWithUndo(
+  /** LIF-243: one-click values (status, priority, module, assignee) save
+   *  with an Undo toast. `onApplied` also runs after an Undo, possibly from
+   *  another route, so it only touches the issue it was for. */
+  async function saveWithUndo(
     patch: Record<string, unknown>,
     prevPatch: Record<string, unknown>,
     people?: Person[],
   ) {
     if (!issue) return;
     const id = issue.id;
-    const identifier = issue.identifier;
     saving = true;
     await updateIssueWithUndo({
       id,
-      identifier,
+      identifier: issue.identifier,
       patch,
       prevPatch,
       modules,
       people,
       onApplied: (applied, updated) => {
         if (issue && issue.id === id) {
-          // LIF-147: an assignment is sent as names but read back as
-          // people, so take those fields from the server's copy.
+          // LIF-147: an assignment is sent as names but read back as people.
           issue =
             "assignees" in applied
-              ? {
-                  ...issue,
-                  needs_human: updated.needs_human,
-                  assignees: updated.assignees,
-                  seq: updated.seq,
-                }
+              ? { ...issue, needs_human: updated.needs_human, assignees: updated.assignees, seq: updated.seq }
               : { ...issue, ...(applied as Partial<Issue>) };
         }
-        lastSaved = new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        refreshActivity();
+        markSaved();
       },
     });
     saving = false;
   }
 
   async function setStatus(value: string) {
-    statusOpen = false;
-    headerStatusOpen = false;
-    if (issue && value !== issue.status) {
-      await saveFieldWithUndo({ status: value }, { status: issue.status });
-    }
+    openMenu = null;
+    if (issue && value !== issue.status) await saveWithUndo({ status: value }, { status: issue.status });
   }
 
   async function setPriority(value: string) {
-    priorityOpen = false;
-    if (issue && value !== issue.priority) {
-      await saveFieldWithUndo({ priority: value }, { priority: issue.priority });
-    }
+    openMenu = null;
+    if (issue && value !== issue.priority) await saveWithUndo({ priority: value }, { priority: issue.priority });
   }
 
   async function setModule(id: number | null) {
-    moduleOpen = false;
-    if (!issue) return;
-    if (id !== issue.module_id) {
-      await saveFieldWithUndo({ module_id: id }, { module_id: issue.module_id });
-    }
+    openMenu = null;
+    if (issue && id !== issue.module_id) await saveWithUndo({ module_id: id }, { module_id: issue.module_id });
   }
 
-  /** LIF-147: replace who the issue is for. Undoable like status. */
+  /** LIF-147: replace who the issue is for. */
   async function setAssignees(names: string[], people: Person[]) {
     if (!issue) return;
     const prev = assignmentNames(issue);
     if (sameNames(names, prev)) return;
-    await saveFieldWithUndo({ assignees: names }, { assignees: prev }, people);
+    await saveWithUndo({ assignees: names }, { assignees: prev }, people);
+  }
+
+  async function setDate(field: "start_date" | "target_date", day: string) {
+    openMenu = null;
+    if (!issue || (issue[field] ?? "") === day) return;
+    await saveField({ [field]: day });
   }
 
   async function toggleLabel(name: string) {
     if (!issue) return;
-    const current = [...issue.labels];
-    const idx = current.indexOf(name);
-    if (idx >= 0) current.splice(idx, 1);
-    else current.push(name);
-    await saveField("labels", current);
+    const next = issue.labels.includes(name) ? issue.labels.filter((l) => l !== name) : [...issue.labels, name];
+    await saveField({ labels: next });
   }
 
-  // Inline label creation from the picker (label management). Creates the
-  // project label, folds it into the local `labels` list, and attaches it to
-  // this issue. Returns success so LabelEditor can reset its create form.
+  /** Create a project label from the picker and attach it. */
   async function createLabelInline(name: string, color: string): Promise<boolean> {
     if (!issue) return false;
     const res = await createLabel({ project_id: issue.project_id, name, color });
@@ -595,35 +383,28 @@
     return true;
   }
 
-  // LIF-248: shared by every relation chip (blocked-by / blocks / related)
-  // below — shift-click peeks instead of navigating, mirroring
-  // Markdown.svelte's identifier links and IssueCard's shift-click.
+  // ── Relations ────────────────────────────────────────
+
+  /** LIF-248: shift-click previews instead of navigating. A related issue
+   *  may live in another project (LIF-504), so route by its own code. */
   function openRelation(e: MouseEvent, rel: string) {
     if (e.shiftKey) {
       e.preventDefault();
       openPeek(rel);
       return;
     }
-    // A related issue may live in another project (LIF-504): route by its
-    // own project code so that project's context loads with it.
     navigate(`/${projectCodeOf(rel)}/issues/${rel}`);
   }
 
-  // ── Relations ────────────────────────────────────────
-
   function startAddRelation(kind: RelationKind) {
     if (!issue) return;
-    relationMenuOpen = false;
+    openMenu = null;
     addingRelation = { kind, source: issue.identifier, gen: loadGen };
     relationPickerOpen = true;
   }
 
-  // Reloads ride the current route generation, so a navigation made while
-  // the link request is in flight wins over this refresh.
   async function addRelation(other: Issue) {
     const pending = addingRelation;
-    // A selection that resolves after the reader left the issue it was made
-    // on is dropped rather than linked to whatever issue is showing now.
     if (!pending || pending.gen !== loadGen) return;
     const req = linkRequest(pending.kind, pending.source, other.identifier);
     const res = await linkIssues(req.source, req.target, req.relation_type);
@@ -635,7 +416,7 @@
   }
 
   // The API has no per-type unlink: this drops every relation between the
-  // two issues, so a pair linked twice (e.g. blocks + related) loses both.
+  // two issues, so a pair linked twice (blocks + related) loses both.
   async function removeRelation(other: string) {
     if (!issue) return;
     const res = await unlinkIssues(issue.identifier, other);
@@ -646,73 +427,7 @@
     await loadIssue(issueIdentifier, true, loadGen);
   }
 
-  // ── Comments / export / delete ───────────────────────
-
-  // Each mutation captures the thread it belongs to before it sends, by parent
-  // id rather than by route generation. Those differ: a failed load retried,
-  // or a navigation away and back to the same issue, bumps the generation
-  // while leaving the thread on screen exactly the one the write was for.
-  // Gating on identity means such a write still lands, which is the coherent
-  // answer, and a write for a different parent is dropped.
-  //
-  // On success the mutation epoch is bumped and the result folded in
-  // unconditionally, so a comment the user just posted, edited or deleted is
-  // visible immediately. `upsertComment` and `removeComment` are idempotent
-  // and order-preserving, so the same row arriving later through a refresh
-  // cannot duplicate it or move it.
-  //
-  // Bumping the epoch is what protects the fold. A replacement refresh
-  // captured the old epoch when it started, so it can no longer land and undo
-  // this edit; the next refresh captures the new one and reconciles normally.
-  // A manual older page needs no such guard: it returns rows strictly below a
-  // cursor these mutations never touch.
-  async function handleNewComment(content: string) {
-    const parentId = issue?.id;
-    if (parentId === undefined) return null;
-    const res = await createComment(parentId, content);
-    if (!res.ok) {
-      toast(`Couldn't add comment: ${res.error}`, { kind: "error" });
-      return null;
-    }
-    if (issue?.id === parentId) {
-      commentMutationEpoch += 1;
-      comments = upsertComment(comments, res.data);
-      refreshActivity();
-    }
-    return res.data;
-  }
-
-  async function handleUpdateComment(id: number, content: string) {
-    const parentId = issue?.id;
-    if (parentId === undefined) return null;
-    const res = await updateComment(id, content);
-    if (!res.ok) {
-      toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
-      return null;
-    }
-    if (issue?.id === parentId) {
-      commentMutationEpoch += 1;
-      comments = upsertComment(comments, res.data);
-      refreshActivity();
-    }
-    return res.data;
-  }
-
-  async function handleDeleteComment(id: number): Promise<boolean> {
-    const parentId = issue?.id;
-    if (parentId === undefined) return false;
-    const res = await deleteComment(id);
-    if (!res.ok) {
-      toast(`Couldn't delete comment: ${res.error}`, { kind: "error" });
-      return false;
-    }
-    if (issue?.id === parentId) {
-      commentMutationEpoch += 1;
-      comments = removeComment(comments, id);
-      refreshActivity();
-    }
-    return true;
-  }
+  // ── Export / delete / move ───────────────────────────
 
   async function exportMarkdown() {
     if (!issue || exporting) return;
@@ -725,29 +440,55 @@
 
   async function handleDelete(): Promise<boolean> {
     if (!issue) return false;
-    // LIF-283: deferred delete with Undo. Navigate away immediately (the
-    // detail view of a "deleted" issue makes no sense to keep open) and defer
-    // the API call. Undo — the toast survives navigation — brings the user
-    // back to this issue and cancels the delete. Capture the identifier now
-    // so the Undo closure doesn't depend on `issue` still being set.
+    // LIF-283: leave at once and delete after the Undo window. Undo (the
+    // toast survives navigation) brings the reader back here.
     const captured = issue;
     const detailHref = `/${projectIdentifier}/issues/${captured.identifier}`;
     navigate(backHref());
-    scheduleDelete([captured], {
-      onRestore: () => navigate(detailHref),
-    });
+    scheduleDelete([captured], { onRestore: () => navigate(detailHref) });
     return true;
   }
 
-  function moduleName(id: number | null): string {
-    if (!id) return "None";
-    return modules.find((m) => m.id === id)?.name ?? "Unknown";
+  /** LIF-488: the issue now lives under another identifier; follow it. */
+  function handleMoved(moved: import("../lib/api").MovedIssue) {
+    toast(moveNotice(moved));
+    const next = moved.issue.identifier;
+    navigate(`/${projectCodeOf(next)}/issues/${next}`);
+  }
+
+  const currentModule = $derived(issue?.module_id ? modules.find((m) => m.id === issue!.module_id) : undefined);
+
+  // ── Dates ────────────────────────────────────────────
+
+  const DATE_FIELDS = [
+    { field: "start_date", label: "Start", menu: "start" },
+    { field: "target_date", label: "Due", menu: "due" },
+  ] as const;
+
+  const today = localDay();
+  function dueState(i: Issue): "overdue" | "today" | "soon" | null {
+    const due = i.target_date;
+    if (!due || TERMINAL_STATUSES.includes(i.status)) return null;
+    if (due < today) return "overdue";
+    if (due === today) return "today";
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 3);
+    return due <= localDay(soon) ? "soon" : null;
+  }
+
+  // ── Keyboard: S status, P priority, M module, L labels, D due date ──
+
+  function onKeydown(e: KeyboardEvent) {
+    if (!issue || !editable || shortcutsSuppressed() || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (window.matchMedia("(max-width: 767px)").matches) return;
+    const menu = ({ s: "status", p: "priority", m: "module", l: "labels", d: "due" } as const)[e.key];
+    if (!menu || (menu === "module" && modules.length === 0)) return;
+    e.preventDefault();
+    openMenu = openMenu === menu ? null : menu;
   }
 
   // ── LIF-159: palette actions ─────────────────────────
-  // Specialized commands for the issue view, surfaced through cmd+k /
-  // ctrl+p. Derived so hints (current status/priority/…) stay live.
-  let paletteActions = $derived.by<import("../lib/palette").PaletteAction[]>(() => {
+  const paletteActions = $derived.by<import("../lib/palette").PaletteAction[]>(() => {
     if (!issue) return [];
     const i = issue;
     return [
@@ -757,10 +498,10 @@
         hint: i.status,
         children: () =>
           STATUSES.map((s) => ({
-            title: s.label,
-            status: s.value,
-            hint: s.value === i.status ? "current" : undefined,
-            run: () => void setStatus(s.value),
+            title: statusLabel(s),
+            status: s,
+            hint: s === i.status ? "current" : undefined,
+            run: () => void setStatus(s),
           })),
       },
       {
@@ -769,10 +510,10 @@
         hint: i.priority,
         children: () =>
           PRIORITIES.map((p) => ({
-            title: p.label,
-            priority: p.value,
-            hint: p.value === i.priority ? "current" : undefined,
-            run: () => void setPriority(p.value),
+            title: priorityLabel(p),
+            priority: p,
+            hint: p === i.priority ? "current" : undefined,
+            run: () => void setPriority(p),
           })),
       },
       ...(modules.length > 0
@@ -780,13 +521,9 @@
             {
               id: "set-module",
               title: "Set module…",
-              hint: moduleName(i.module_id),
+              hint: currentModule?.name ?? "None",
               children: () => [
-                {
-                  title: "None",
-                  hint: i.module_id === null ? "current" : undefined,
-                  run: () => void setModule(null),
-                },
+                { title: "None", hint: i.module_id === null ? "current" : undefined, run: () => void setModule(null) },
                 ...modules.map((m) => ({
                   title: m.name,
                   hint: m.id === i.module_id ? "current" : undefined,
@@ -812,26 +549,37 @@
             },
           ]
         : []),
-      ...(canMove
-        ? [{ id: "move-project", title: "Move to project…", run: () => (moveOpen = true) }]
-        : []),
+      {
+        id: "set-due",
+        title: "Set due date…",
+        hint: i.target_date ? formatDay(i.target_date) : undefined,
+        prompt: {
+          placeholder: "YYYY-MM-DD, or empty to clear",
+          initial: i.target_date ?? "",
+          submit: (v) => {
+            const day = v.trim();
+            if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+              toast("Use a date like 2026-12-31", { kind: "error" });
+              return;
+            }
+            void setDate("target_date", day);
+          },
+        },
+      },
+      ...(canMove ? [{ id: "move-project", title: "Move to project…", run: () => (moveOpen = true) }] : []),
     ];
   });
 
-  /** LIF-488: the issue now lives under another identifier; follow it. */
-  function handleMoved(moved: import("../lib/api").MovedIssue) {
-    toast(moveNotice(moved));
-    const next = moved.issue.identifier;
-    navigate(`/${projectCodeOf(next)}/issues/${next}`);
-  }
-
-  function moduleEmoji(id: number | null): string | null {
-    if (!id) return null;
-    return modules.find((m) => m.id === id)?.emoji ?? null;
-  }
+  const readOnlyNote = $derived(
+    projectRole.enforced
+      ? inPublicScope()
+        ? "Read-only. This is the public view of the project; sign in to edit or comment."
+        : "You're a viewer on this project. You can still comment."
+      : null,
+  );
 </script>
 
-<svelte:window onclick={handleWindowClick} />
+<svelte:window onclick={() => (openMenu = null)} onkeydown={onKeydown} />
 
 <DocumentDetail
   {navigate}
@@ -845,17 +593,16 @@
   backLabel={backText()}
   breadcrumbSegments={[
     { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
-    // Collapsed below sm: since LIF-349 the app header already reads
-    // "<project>  Issues", so this crumb is duplicated text on a phone and
-    // the detail topbar has no room to spare.
+    // Collapsed below sm: the app header already names the section.
     { label: backText(), href: `#${backHref()}`, hideBelowSm: true },
     { label: issue?.identifier ?? issueIdentifier, mono: true, copy: issue?.identifier ?? issueIdentifier },
   ]}
   {editable}
   {canComment}
+  {readOnlyNote}
   title={issue?.title ?? ""}
   titleSize="md"
-  onSaveTitle={saveTitle}
+  onSaveTitle={(next) => saveField({ title: next })}
   body={issue?.description ?? ""}
   bodySeq={issue?.seq ?? null}
   bodyDocId={issue?.id ?? null}
@@ -866,22 +613,22 @@
   onSaveBody={saveDescription}
   autofocusWhenEmpty
   {saving}
-  {lastSaved}
+  {savedAt}
   onExport={inPublicScope() ? undefined : exportMarkdown}
-  {exporting}
   {exportError}
   deleteNoun="issue"
   deleteLabel={issue?.identifier ?? ""}
+  deleteUndoable
   onDelete={handleDelete}
   menuItems={canMove ? [{ label: "Move to project…", icon: FolderInput, run: () => (moveOpen = true) }] : []}
-  {comments}
-  onNewComment={handleNewComment}
+  comments={thread.comments}
+  onNewComment={(c) => thread.create(c)}
   {currentUser}
-  onUpdateComment={handleUpdateComment}
-  onDeleteComment={handleDeleteComment}
-  {hasOlderComments}
-  {loadingOlderComments}
-  onLoadOlderComments={loadOlderComments}
+  onUpdateComment={(id, c) => thread.update(id, c)}
+  onDeleteComment={(id) => thread.remove(id)}
+  hasOlderComments={thread.hasOlder}
+  loadingOlderComments={thread.loadingOlder}
+  onLoadOlderComments={() => thread.loadOlder()}
   commentParentKey={`issue:${issueIdentifier}`}
   mentionProjectId={issue?.project_id ?? null}
   {activity}
@@ -891,305 +638,242 @@
   {#snippet breadcrumbExtra()}
     {#if issue}
       <span class="text-[var(--text-faint)]">/</span>
-      <!-- LIF-359: everywhere else in the app a visible status is also the
-           control that changes it, so this chip is a picker rather than a
-           read-only echo of the sidebar field. Viewers keep the plain chip. -->
+      <!-- LIF-359: a visible status is also the control that changes it. -->
       <div class="relative shrink-0">
         <button
-          class="flex items-center gap-1.5 text-body-sm rounded-md px-1.5 py-0.5 -mx-1.5
-                 transition-colors
+          class="flex items-center gap-1.5 text-body-sm rounded-md px-1.5 py-0.5 -mx-1.5 transition-colors
                  {editable ? 'hover:bg-[var(--bg-subtle)] cursor-pointer' : 'cursor-default'}"
           aria-haspopup={editable ? "menu" : undefined}
-          aria-expanded={editable ? headerStatusOpen : undefined}
+          aria-expanded={editable ? openMenu === "header-status" : undefined}
           title={editable ? "Change status" : `Status: ${issue.status}`}
-          onclick={(e) => {
-            if (!editable) return;
-            e.stopPropagation();
-            headerStatusOpen = !headerStatusOpen;
-            statusOpen = false;
-            priorityOpen = false;
-            moduleOpen = false;
-            labelsOpen = false;
-            relationMenuOpen = false;
-          }}
+          onclick={(e) => toggleMenu("header-status", e)}
         >
           <StatusIcon status={issue.status} size={13} />
-          <span class="capitalize" style="color: {statusCssColor(issue.status)}">
-            {issue.status}
-          </span>
+          <span style="color: {statusCssColor(issue.status)}">{statusLabel(issue.status)}</span>
           {#if editable}
             <ChevronDown size={11} class="text-[var(--text-faint)] shrink-0" />
           {/if}
         </button>
-        {#if headerStatusOpen}
-          <div
-            class="absolute left-0 top-full mt-1.5 z-30 w-[180px]
-                   bg-[var(--surface)] border border-[var(--border)]
-                   rounded-md shadow-lg py-1"
-            role="presentation"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => e.stopPropagation()}
-          >
-            {@render statusOptions()}
-          </div>
+        {#if openMenu === "header-status"}
+          {@render menuPanel(statusOptions)}
         {/if}
       </div>
-      {#if !editable && projectRole.enforced}
-        <!-- LIF-234: viewer read-only cue, in the topbar breadcrumb. -->
-        <span class="text-micro font-medium px-1.5 py-0.5 rounded-full text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-              title={inPublicScope()
-                ? "Read-only. This is the public view of the project; sign in to edit or comment."
-                : "Read-only — you're a viewer on this project. You can still comment."}>
-          Read-only
-        </span>
-      {/if}
+    {/if}
+  {/snippet}
+
+  {#snippet belowTitle(openDetails)}
+    {#if issue}
+      <!-- On a phone the sidebar is a drawer: this strip shows what it holds
+           at a glance and opens it. -->
+      <button
+        type="button"
+        class="md:hidden -mt-1 mb-4 flex flex-wrap items-center gap-1.5 text-left"
+        aria-label="Open issue properties"
+        onclick={openDetails}
+      >
+        <span class="strip-chip"><StatusIcon status={issue.status} size={12} />{statusLabel(issue.status)}</span>
+        <span class="strip-chip"><PriorityIcon priority={issue.priority} size={12} />{priorityLabel(issue.priority)}</span>
+        {#if assignmentKind(issue) === "people"}
+          <span class="strip-chip">{(issue.assignees ?? []).map(personName).join(", ")}</span>
+        {/if}
+        {#if issue.target_date}
+          <span class="strip-chip {dueState(issue) === 'overdue' ? 'text-[var(--error)]' : ''}">
+            <CalendarDays size={12} />{formatDay(issue.target_date)}
+          </span>
+        {/if}
+        {#if issue.labels.length}
+          <span class="strip-chip"><Tag size={12} />{issue.labels.length}</span>
+        {/if}
+      </button>
     {/if}
   {/snippet}
 
   {#snippet sidebar()}
     {#if issue}
       <div class="issue-meta-aside">
-        <div class="issue-meta-field">
-          {@render sidebarField("Status")}
-          <div class="relative">
-            <button
-              class="flex items-center gap-2 text-body-sm rounded-md
-                     px-2 py-1 -mx-2 transition-colors w-full text-left
-                     {editable ? 'hover:bg-[var(--bg-subtle)] cursor-pointer' : 'cursor-default'}"
-              onclick={(e) => {
-                if (!editable) return;
-                e.stopPropagation();
-                statusOpen = !statusOpen;
-                priorityOpen = false;
-                moduleOpen = false;
-                labelsOpen = false;
-                relationMenuOpen = false;
-              }}
-            >
-              <StatusIcon status={issue.status} size={14} />
-              <span class="capitalize text-[var(--text)]">{issue.status}</span>
-            </button>
-            {#if statusOpen}
-              <div
-                class="absolute left-0 top-full mt-1 z-20 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                role="presentation"
-                onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-              >
-                {@render statusOptions()}
-              </div>
-            {/if}
+        <div class="issue-props">
+          <div class="issue-meta-field">
+            <p class="issue-meta-field-label">Status</p>
+            <div class="relative">
+              <button class="prop-trigger" class:prop-trigger-edit={editable} aria-haspopup={editable ? "menu" : undefined}
+                      aria-expanded={editable ? openMenu === "status" : undefined}
+                      title={editable ? "Change status (S)" : undefined}
+                      onclick={(e) => toggleMenu("status", e)}>
+                <StatusIcon status={issue.status} size={14} />
+                <span class="text-[var(--text)]">{statusLabel(issue.status)}</span>
+              </button>
+              {#if openMenu === "status"}{@render menuPanel(statusOptions)}{/if}
+            </div>
           </div>
-        </div>
 
-        <div class="issue-meta-field">
-          {@render sidebarField("Priority")}
-          <div class="relative">
-            <button
-              class="flex items-center gap-2 flex-nowrap text-body-sm rounded-md
-                     px-2 py-1 -mx-2 transition-colors w-full text-left
-                     {editable ? 'hover:bg-[var(--bg-subtle)] cursor-pointer' : 'cursor-default'}"
-              onclick={(e) => {
-                if (!editable) return;
-                e.stopPropagation();
-                priorityOpen = !priorityOpen;
-                statusOpen = false;
-                moduleOpen = false;
-                labelsOpen = false;
-                relationMenuOpen = false;
-              }}
-            >
-              <PriorityIcon priority={issue.priority} />
-              <span class={priorityTextClass(issue.priority)}>
-                {issue.priority === "none" ? "No priority" : issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1)}
-              </span>
-            </button>
-            {#if priorityOpen}
-              <div
-                class="absolute left-0 top-full mt-1 z-20 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                role="presentation"
-                onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-              >
-                {#each PRIORITIES as p}
-                  <button
-                    class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                           text-body-sm transition-colors
-                           {p.value === issue.priority
-                      ? 'text-[var(--accent)] bg-[var(--accent-subtle)]'
-                      : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                    onclick={() => setPriority(p.value)}
-                  >
-                    <PriorityIcon priority={p.value} />
-                    {p.label}
-                  </button>
-                {/each}
-              </div>
-            {/if}
+          <div class="issue-meta-field">
+            <p class="issue-meta-field-label">Priority</p>
+            <div class="relative">
+              <button class="prop-trigger" class:prop-trigger-edit={editable} aria-haspopup={editable ? "menu" : undefined}
+                      aria-expanded={editable ? openMenu === "priority" : undefined}
+                      title={editable ? "Change priority (P)" : undefined}
+                      onclick={(e) => toggleMenu("priority", e)}>
+                <PriorityIcon priority={issue.priority} />
+                <span class={priorityTextClass(issue.priority)}>{priorityLabel(issue.priority)}</span>
+              </button>
+              {#if openMenu === "priority"}{@render menuPanel(priorityOptions)}{/if}
+            </div>
           </div>
-        </div>
 
-        <div class="issue-meta-field">
-          {@render sidebarField("Module")}
-          <div class="relative">
-            <!-- Trigger opens the assignment dropdown; the arrow jumps to
-                 the module's detail page (LIF-121). -->
-            <div class="flex items-center -mx-2">
-              <button
-                class="flex items-center gap-2 text-body-sm rounded-md
-                       px-2 py-1 transition-colors flex-1 text-left
-                       {editable ? 'hover:bg-[var(--bg-subtle)] cursor-pointer' : 'cursor-default'}"
-                onclick={(e) => {
-                  if (!editable) return;
-                  e.stopPropagation();
-                  moduleOpen = !moduleOpen;
-                  statusOpen = false;
-                  priorityOpen = false;
-                  labelsOpen = false;
-                  relationMenuOpen = false;
-                }}
-              >
-                {#if moduleEmoji(issue.module_id)}
-                  <ProjectIcon value={moduleEmoji(issue.module_id)} size={14} class="text-[var(--text-muted)] shrink-0" />
+          <div class="issue-meta-field">
+            <p class="issue-meta-field-label">Module</p>
+            <div class="relative flex items-center min-w-0">
+              <button class="prop-trigger flex-1" class:prop-trigger-edit={editable} aria-haspopup={editable ? "menu" : undefined}
+                      aria-expanded={editable ? openMenu === "module" : undefined}
+                      title={editable ? "Change module (M)" : undefined}
+                      onclick={(e) => toggleMenu("module", e)}>
+                {#if currentModule?.emoji}
+                  <ProjectIcon value={currentModule.emoji} size={14} class="text-[var(--text-muted)] shrink-0" />
                 {/if}
-                <span class={issue.module_id ? "text-[var(--text)]" : "text-[var(--text-faint)]"}>
-                  {moduleName(issue.module_id)}
+                <span class="truncate {currentModule ? 'text-[var(--text)]' : 'text-[var(--text-faint)]'}">
+                  {currentModule?.name ?? "None"}
                 </span>
               </button>
-              {#if issue.module_id}
-                {@const targetModuleId = issue.module_id}
+              {#if currentModule}
+                {@const target = currentModule.id}
                 <button
-                  class="size-6 flex items-center justify-center rounded
-                         text-[var(--text-faint)] hover:text-[var(--accent)]
-                         hover:bg-[var(--bg-subtle)] transition-colors shrink-0"
+                  class="size-6 flex items-center justify-center rounded text-[var(--text-faint)]
+                         hover:text-[var(--accent)] hover:bg-[var(--bg-subtle)] transition-colors shrink-0"
                   onclick={(e) => {
                     e.stopPropagation();
-                    navigate(`/${projectIdentifier}/modules/${targetModuleId}`);
+                    navigate(`/${projectIdentifier}/modules/${target}`);
                   }}
                   title="Open module"
+                  aria-label="Open module"
                 >
                   <ArrowUpRight size={13} />
                 </button>
               {/if}
+              {#if openMenu === "module"}{@render menuPanel(moduleOptions)}{/if}
             </div>
-            {#if moduleOpen}
-              <div
-                class="absolute left-0 top-full mt-1 z-20 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                role="presentation"
-                onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-              >
-                <button
-                  class="w-full px-3 py-1.5 text-left text-body-sm
-                         text-[var(--text-faint)] hover:bg-[var(--bg-subtle)]
-                         transition-colors"
-                  onclick={() => setModule(null)}
-                >
-                  None
-                </button>
-                {#each modules as mod}
-                  <button
-                    class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                           text-body-sm transition-colors
-                           {mod.id === issue.module_id
-                      ? 'text-[var(--accent)] bg-[var(--accent-subtle)]'
-                      : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                    onclick={() => setModule(mod.id)}
-                  >
-                    {#if mod.emoji}
-                      <ProjectIcon value={mod.emoji} size={14} class="shrink-0" />
+          </div>
+
+          <!-- LIF-147: who must do it. -->
+          <AssigneeField {issue} {editable} onApply={setAssignees} onOpen={() => (openMenu = null)} />
+
+          <div class="issue-meta-field">
+            <p class="issue-meta-field-label">Labels</p>
+            <LabelEditor
+              attached={issue.labels}
+              all={labels}
+              {editable}
+              onToggle={toggleLabel}
+              onCreate={editable ? createLabelInline : undefined}
+              bind:open={() => openMenu === "labels", (v) => (openMenu = v ? "labels" : openMenu === "labels" ? null : openMenu)}
+            />
+          </div>
+
+          {#each DATE_FIELDS as { field, label, menu } (field)}
+            {@const day = issue[field]}
+            {@const due = field === "target_date" ? dueState(issue) : null}
+            {#if day || editable}
+              <div class="issue-meta-field">
+                <p class="issue-meta-field-label">{label}</p>
+                <div class="relative">
+                  <button class="prop-trigger" class:prop-trigger-edit={editable}
+                          aria-haspopup={editable ? "dialog" : undefined}
+                          aria-expanded={editable ? openMenu === menu : undefined}
+                          title={editable ? (field === "target_date" ? "Set the due date (D)" : "Set the start date") : undefined}
+                          onclick={(e) => toggleMenu(menu, e)}>
+                    <CalendarDays size={14} class={due === "overdue" ? "text-[var(--error)]" : due ? "text-[var(--warn)]" : "text-[var(--text-faint)]"} />
+                    {#if day}
+                      <span class={due === "overdue" ? "text-[var(--error)] font-medium" : "text-[var(--text)]"}>{formatDay(day)}</span>
+                      {#if due === "overdue"}<span class="text-micro text-[var(--error)]">overdue</span>
+                      {:else if due === "today"}<span class="text-micro text-[var(--warn-text)]">today</span>{/if}
+                    {:else}
+                      <span class="text-[var(--text-faint)]">None</span>
                     {/if}
-                    {mod.name}
                   </button>
-                {/each}
+                  {#if openMenu === menu}
+                    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+                    <div class="prop-menu p-2 w-[220px]" role="dialog" aria-label="{label} date" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+                      <input
+                        type="date"
+                        class="w-full h-8 px-2 rounded-md text-body-sm bg-[var(--bg)] border border-[var(--border)] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+                        value={day ?? ""}
+                        aria-label="{label} date"
+                        onchange={(e) => setDate(field, (e.currentTarget as HTMLInputElement).value)}
+                        onkeydown={(e) => {
+                          if (e.key === "Escape") {
+                            e.stopPropagation();
+                            openMenu = null;
+                          }
+                        }}
+                      />
+                      {#if day}
+                        <button class="mt-1.5 w-full text-left px-2 py-1 rounded-md text-caption text-[var(--text-muted)] hover:bg-[var(--bg-subtle)]"
+                                onclick={() => setDate(field, "")}>
+                          Clear the {label.toLowerCase()} date
+                        </button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
               </div>
             {/if}
-          </div>
+          {/each}
         </div>
 
-        <div class="issue-meta-field">
-          {@render sidebarField("Labels")}
-          <LabelEditor
-            attached={issue.labels}
-            all={labels}
-            {editable}
-            onToggle={toggleLabel}
-            onCreate={editable ? createLabelInline : undefined}
-            bind:open={labelsOpen}
-            onOpen={closeOtherDropdowns}
-          />
-        </div>
-
-        <!-- LIF-147: who must do it. Viewers see it read-only. -->
-        <AssigneeField
-          {issue}
-          {editable}
-          onApply={setAssignees}
-          onOpen={() => {
-            closeOtherDropdowns();
-            labelsOpen = false;
-          }}
-        />
-
-        <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
-
-        <!-- LIF-485: user and date blockers. Viewers see the field only when
-             the issue actually waits on something. -->
+        <!-- LIF-485: user and date blockers. -->
         {#if issue.waits?.length || editable}
-          <WaitEditor
-            issueId={issue.id}
-            projectId={issue.project_id}
-            waits={issue.waits ?? []}
-            {editable}
-            onChange={(next) => {
-              if (!issue) return;
-              issue = { ...issue, waits: next };
-              refreshActivity();
-            }}
-          />
-
-          <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
+          <div class="meta-section">
+            <WaitEditor
+              issueId={issue.id}
+              projectId={issue.project_id}
+              waits={issue.waits ?? []}
+              {editable}
+              onChange={(next) => {
+                if (!issue) return;
+                issue = { ...issue, waits: next };
+                void refreshActivity();
+              }}
+            />
+          </div>
         {/if}
 
         {#if editable || hasRelations(issue)}
-          <div class="issue-meta-relations">
+          <div class="issue-meta-relations meta-section">
             {#each RELATION_KINDS as kind (kind.field)}
               {@const rels = relationsOf(issue, kind)}
               {#if rels.length > 0}
                 <div class="issue-meta-field">
-                  {@render sidebarField(kind.label)}
-                  <div class="flex flex-wrap gap-1.5">
+                  <p class="issue-meta-field-label">{kind.label}</p>
+                  <ul class="flex flex-col gap-0.5 m-0 p-0 list-none -mx-2">
                     {#each rels as rel (rel)}
-                      <span
-                        class="inline-flex items-center rounded text-caption font-mono
-                               {relationChipClass(kind.field)}"
-                      >
+                      {@const other = related.get(rel)}
+                      <li class="group/rel flex items-center gap-2 rounded-md px-2 py-1 hover:bg-[var(--bg-subtle)] transition-colors min-w-0">
+                        {#if other}
+                          <StatusIcon status={other.status} size={13} />
+                        {/if}
                         <button
-                          class="px-1.5 py-0.5 hover:underline"
-                          title="{rel}  ·  Shift-click to preview"
+                          class="flex-1 min-w-0 flex items-baseline gap-2 text-left"
+                          aria-label={rel}
+                          title="{rel}{other ? `: ${other.title}` : ''}  ·  Shift-click to preview"
                           onclick={(e) => openRelation(e, rel)}
                         >
-                          {rel}
+                          <span class="shrink-0 text-caption font-mono {relationIdClass(kind.field)}">{rel}</span>
+                          {#if other}
+                            <span class="truncate text-caption {TERMINAL_STATUSES.includes(other.status) ? 'text-[var(--text-faint)] line-through' : 'text-[var(--text-muted)]'}">{other.title}</span>
+                          {/if}
                         </button>
                         {#if editable}
                           <button
-                            class="pr-1 py-0.5 opacity-60 hover:opacity-100 transition-opacity"
+                            class="shrink-0 opacity-0 group-hover/rel:opacity-100 focus-visible:opacity-100 text-[var(--text-faint)] hover:text-[var(--error)] transition-opacity"
                             title="Remove every relation with {rel}"
                             aria-label="Remove relation with {rel}"
                             onclick={() => removeRelation(rel)}
                           >
-                            <X size={11} />
+                            <X size={12} />
                           </button>
                         {/if}
-                      </span>
+                      </li>
                     {/each}
-                  </div>
+                  </ul>
                 </div>
               {/if}
             {/each}
@@ -1198,59 +882,23 @@
               <div class="relative">
                 <button
                   class="flex items-center gap-1.5 text-body-sm rounded-md px-2 py-1 -mx-2
-                         text-[var(--text-faint)] hover:text-[var(--text)]
-                         hover:bg-[var(--bg-subtle)] transition-colors"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    const next = !relationMenuOpen;
-                    closeOtherDropdowns();
-                    labelsOpen = false;
-                    relationMenuOpen = next;
-                  }}
+                         text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                  aria-haspopup="menu"
+                  aria-expanded={openMenu === "relation"}
+                  onclick={(e) => toggleMenu("relation", e)}
                 >
                   <Plus size={13} />
                   Add relation
                 </button>
-                {#if relationMenuOpen}
-                  <div
-                    class="absolute left-0 top-full mt-1 z-20 w-[180px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg py-1"
-                    role="presentation"
-                    onclick={(e) => e.stopPropagation()}
-                    onkeydown={(e) => e.stopPropagation()}
-                  >
-                    {#each RELATION_KINDS as kind (kind.field)}
-                      <button
-                        class="w-full px-3 py-1.5 text-left text-body-sm
-                               text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-                        onclick={() => startAddRelation(kind)}
-                      >
-                        {kind.label}
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
+                {#if openMenu === "relation"}{@render menuPanel(relationOptions)}{/if}
               </div>
             {/if}
           </div>
-
-          <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
         {/if}
 
-        <div class="issue-meta-dates">
-          <div class="issue-meta-field">
-            {@render sidebarField("Created")}
-            <p class="text-body-sm text-[var(--text-muted)] leading-snug m-0">
-              {formatDate(issue.created_at)}
-            </p>
-          </div>
-          <div class="issue-meta-field">
-            {@render sidebarField("Updated")}
-            <p class="text-body-sm text-[var(--text-muted)] leading-snug m-0">
-              {formatDate(issue.updated_at)}
-            </p>
-          </div>
+        <div class="meta-section flex flex-col gap-1 text-caption text-[var(--text-faint)]">
+          <span>Created <TimeAgo date={issue.created_at.replace(" ", "T")} class="text-[var(--text-muted)]" /></span>
+          <span>Updated <TimeAgo date={issue.updated_at.replace(" ", "T")} class="text-[var(--text-muted)]" /></span>
         </div>
       </div>
     {/if}
@@ -1269,34 +917,56 @@
   <MoveIssueModal bind:open={moveOpen} {issue} onMoved={handleMoved} />
 {/if}
 
-{#snippet sidebarField(label: string)}
-  <p class="issue-meta-field-label">{label}</p>
+<!-- One popover shell for every picker in the view. -->
+{#snippet menuPanel(options: import("svelte").Snippet)}
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <div class="prop-menu py-1 w-[190px]" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+    {@render options()}
+  </div>
 {/snippet}
 
-<!-- LIF-359: one option list, rendered into both the topbar chip's menu and
-     the sidebar field's menu, so the two pickers can't drift apart. -->
 {#snippet statusOptions()}
-  {#each STATUSES as s (s.value)}
-    <button
-      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-             text-body-sm transition-colors
-             {s.value === issue?.status
-        ? 'text-[var(--accent)] bg-[var(--accent-subtle)]'
-        : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-      onclick={() => setStatus(s.value)}
-    >
-      <StatusIcon status={s.value} size={14} />
-      {s.label}
+  {#each STATUSES as s (s)}
+    <button role="menuitem" class="menu-item" class:menu-item-on={s === issue?.status} onclick={() => setStatus(s)}>
+      <StatusIcon status={s} size={14} />
+      {statusLabel(s)}
     </button>
   {/each}
 {/snippet}
 
+{#snippet priorityOptions()}
+  {#each PRIORITIES as p (p)}
+    <button role="menuitem" class="menu-item" class:menu-item-on={p === issue?.priority} onclick={() => setPriority(p)}>
+      <PriorityIcon priority={p} />
+      {priorityLabel(p)}
+    </button>
+  {/each}
+{/snippet}
+
+{#snippet moduleOptions()}
+  <button role="menuitem" class="menu-item text-[var(--text-faint)]" class:menu-item-on={issue?.module_id === null} onclick={() => setModule(null)}>
+    None
+  </button>
+  {#each modules as mod (mod.id)}
+    <button role="menuitem" class="menu-item" class:menu-item-on={mod.id === issue?.module_id} onclick={() => setModule(mod.id)}>
+      {#if mod.emoji}<ProjectIcon value={mod.emoji} size={14} class="shrink-0" />{/if}
+      <span class="truncate">{mod.name}</span>
+    </button>
+  {/each}
+{/snippet}
+
+{#snippet relationOptions()}
+  {#each RELATION_KINDS as kind (kind.field)}
+    <button role="menuitem" class="menu-item" onclick={() => startAddRelation(kind)}>{kind.label}</button>
+  {/each}
+{/snippet}
+
 <script lang="ts" module>
-  function relationChipClass(field: string): string {
+  function relationIdClass(field: string): string {
     switch (field) {
-      case "blocked_by": return "text-[var(--error)] bg-[var(--error-bg)]";
-      case "blocks": return "text-[var(--accent)] bg-[var(--accent-subtle)]";
-      default: return "text-[var(--text-muted)] bg-[var(--bg-subtle)]";
+      case "blocked_by": return "text-[var(--error)]";
+      case "blocks": return "text-[var(--accent)]";
+      default: return "text-[var(--text-muted)]";
     }
   }
 
@@ -1309,3 +979,97 @@
     }
   }
 </script>
+
+<style>
+  /* Properties read as label / value rows. */
+  .issue-props {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+  .issue-props :global(> .issue-meta-field) {
+    display: grid;
+    grid-template-columns: 4.75rem minmax(0, 1fr);
+    align-items: start;
+    gap: 0.5rem;
+  }
+  .issue-props :global(> .issue-meta-field > .issue-meta-field-label) {
+    padding-top: 0.4rem;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: var(--text-caption);
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+  .meta-section {
+    border-top: 1px solid var(--border);
+    margin: 0 -1.25rem;
+    padding: 1.125rem 1.25rem 0;
+  }
+  .prop-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+    font-size: var(--text-body-sm);
+    border-radius: 0.375rem;
+    padding: 0.25rem 0.5rem;
+    margin: 0 -0.5rem;
+    cursor: default;
+    transition: background-color 120ms;
+  }
+  .prop-trigger-edit {
+    cursor: pointer;
+  }
+  .prop-trigger-edit:hover,
+  .prop-trigger-edit[aria-expanded="true"] {
+    background: var(--bg-subtle);
+  }
+  .prop-menu {
+    position: absolute;
+    left: -0.5rem;
+    top: 100%;
+    margin-top: 0.25rem;
+    z-index: 30;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 24px -8px rgb(0 0 0 / 0.35);
+    animation: popover-in 140ms var(--ease-out-expo);
+  }
+  .menu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.75rem;
+    text-align: left;
+    font-size: var(--text-body-sm);
+    color: var(--text);
+    transition: background-color 100ms;
+  }
+  .menu-item:hover {
+    background: var(--bg-subtle);
+  }
+  .menu-item-on {
+    color: var(--accent);
+    background: var(--accent-subtle);
+  }
+  .strip-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    height: 1.6rem;
+    padding: 0 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: var(--text-caption);
+    color: var(--text-muted);
+    max-width: 14rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+</style>

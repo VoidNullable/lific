@@ -21,7 +21,7 @@ import { shortcutHelpState } from "./shortcutHelpState.svelte";
 import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
 import { mobileNavState } from "./mobileNavState.svelte";
 
-export type ShortcutScope = "global" | "list" | "board" | "inbox" | "peek" | "palette" | "editor";
+export type ShortcutScope = "global" | "list" | "board" | "inbox" | "detail" | "peek" | "palette" | "editor";
 
 export interface ShortcutEntry {
   /** Display form. Space-separated tokens render as separate <kbd> chips,
@@ -31,13 +31,14 @@ export interface ShortcutEntry {
   scope: ShortcutScope;
 }
 
-export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "inbox", "peek", "palette", "editor"];
+export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "inbox", "detail", "peek", "palette", "editor"];
 
 export const SCOPE_LABEL: Record<ShortcutScope, string> = {
   global: "Global",
   list: "Issue list",
   board: "Board",
   inbox: "Inbox",
+  detail: "Issue and page view",
   peek: "Peek panel",
   palette: "Command palette",
   editor: "Markdown editor",
@@ -80,6 +81,16 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "C", label: "New issue", scope: "board" },
   { keys: "F", label: "Open filters", scope: "board" },
   { keys: "/", label: "Focus search", scope: "board" },
+
+  // ── Issue and page view (DocumentDetail.svelte, IssueDetail.svelte) ──
+  { keys: "E", label: "Edit the description", scope: "detail" },
+  { keys: "C", label: "Write a comment", scope: "detail" },
+  { keys: "S", label: "Change status (issues)", scope: "detail" },
+  { keys: "P", label: "Change priority (issues)", scope: "detail" },
+  { keys: "M", label: "Change module (issues)", scope: "detail" },
+  { keys: "L", label: "Edit labels (issues)", scope: "detail" },
+  { keys: "D", label: "Set the due date (issues)", scope: "detail" },
+  { keys: "Esc", label: "Back to the list", scope: "detail" },
 
   // ── Peek panel (PeekPanel.svelte) ─────────────────────────
   { keys: "Esc", label: "Close preview", scope: "peek" },

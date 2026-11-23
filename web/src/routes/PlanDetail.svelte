@@ -65,7 +65,7 @@
   let error = $state("");
   let notice = $state("");
   let saving = $state(false);
-  let lastSaved = $state<string | null>(null);
+  let savedAt = $state<number | null>(null);
 
   // Inline UI state.
   let mutating = $state(false);
@@ -145,7 +145,7 @@
   }
 
   function markSaved() {
-    lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    savedAt = Date.now();
   }
 
   // ── Plan-level ──
@@ -375,7 +375,7 @@
   onSaveTitle={saveTitle}
   body=""
   {saving}
-  {lastSaved}
+  {savedAt}
   deleteNoun="plan"
   deleteLabel={plan?.identifier ?? ""}
   onDelete={removePlan}

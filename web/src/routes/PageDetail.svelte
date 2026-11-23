@@ -3,6 +3,7 @@
     getPage,
     updatePage,
     deletePage,
+    restorePage,
     downloadPageExport,
     listPageComments,
     createPageComment,
@@ -13,7 +14,6 @@
     listFolders,
     listPageActivity,
     type Page,
-    type Comment,
     type Label,
     type Folder,
     type Activity,
@@ -23,7 +23,7 @@
   import type { BodySaveResult } from "../lib/editor/bodySync";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import Select from "../lib/Select.svelte";
-  import { formatDate } from "../lib/format";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import { recordRecent } from "../lib/home/recents"; // LIF-237
   import { getContext } from "svelte";
   import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
@@ -31,27 +31,11 @@
   import { projectRole, loadProjectRole, ensureMeAdmin } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
-  import {
-    COMMENT_WINDOW_RETRY_LIMIT,
-    commentOpIsCurrent,
-    commentWindowOutcome,
-    loadCommentWindow,
-    olderCursor,
-    prependOlderComments,
-    reconcileCommentWindow,
-    removeComment,
-    upsertComment,
-  } from "../lib/commentState";
-  import {
-    PenLine,
-    CircleDot,
-    CheckCircle2,
-    Archive,
-    Pin,
-  } from "lucide-svelte";
+  import { CommentThread } from "../lib/detail/commentThread.svelte";
+  import { readingMinutes, wordCount } from "../lib/detail/outline";
+  import { PenLine, CircleDot, CheckCircle2, Archive, Pin } from "lucide-svelte";
 
-  // LIF-112: page lifecycle statuses. Icon + label per value, used by
-  // the status picker in the belowTitle strip.
+  // LIF-112: page lifecycle statuses.
   const PAGE_STATUSES = [
     { value: "draft", label: "Draft", icon: PenLine },
     { value: "active", label: "Active", icon: CircleDot },
@@ -59,10 +43,7 @@
     { value: "archived", label: "Archived", icon: Archive },
   ] as const;
 
-  const statusOptions = PAGE_STATUSES.map((s) => ({
-    value: s.value,
-    label: s.label,
-  }));
+  const statusOptions = PAGE_STATUSES.map((s) => ({ value: s.value, label: s.label }));
 
   function statusMeta(value: string) {
     return PAGE_STATUSES.find((s) => s.value === value) ?? PAGE_STATUSES[0];
@@ -82,41 +63,25 @@
 
   let page = $state<Page | null>(null);
 
-  // Tab title: real page title once loaded; nothing to clear — App resets the slot on route change.
   const titleCtx = getContext<{ set: (title?: string) => void } | undefined>(PAGE_TITLE_CONTEXT);
   $effect(() => {
     if (!page) return;
     titleCtx?.set(pageTitle(page.identifier, page.title, projectIdentifier));
   });
 
-  // LIF-234: role-aware gating. A page with a project follows that project's
-  // role (maintainer+ edits, viewer read-only, viewer may still comment). A
-  // workspace page (project_id === null) is admin-only once enforcement is
-  // on, mirroring the server (authz::require_workspace_admin). `editableProp`
-  // remains an optional hard override.
+  // LIF-234: a project page follows that project's role; a workspace page
+  // (no project) is admin-only once enforcement is on.
   const isWorkspacePage = $derived(page != null && page.project_id === null);
   const editable = $derived(
-    editableProp ??
-      (isWorkspacePage ? projectRole.canEditWorkspacePage : projectRole.canEdit),
+    editableProp ?? (isWorkspacePage ? projectRole.canEditWorkspacePage : projectRole.canEdit),
   );
-  const canComment = $derived(
-    isWorkspacePage ? projectRole.canEditWorkspacePage : projectRole.canComment,
-  );
+  const canComment = $derived(isWorkspacePage ? projectRole.canEditWorkspacePage : projectRole.canComment);
 
-  let comments = $state<Comment[]>([]);
-  // The thread on screen is a contiguous run ending at the newest comment.
-  // The cursor for the page before it comes from `comments[0]`, never from a
-  // row count: offsets move under a thread that is still being written to.
-  let hasOlderComments = $state(false);
-  let loadingOlderComments = $state(false);
   let currentUser = $state<AuthUser | null>(null);
   let activity = $state<Activity[]>([]);
-  // LIF-105: project labels available for attachment. Stays empty for
-  // workspace pages (project_id === null) — labels are project-scoped.
+  // LIF-105: project labels; empty for workspace pages.
   let labels = $state<Label[]>([]);
-  // LIF-286: project folders, fetched only when this page lives in one, so the
-  // breadcrumb can show PROJ › Pages › Folder › Title. Workspace pages (no
-  // project) and root pages skip the fetch.
+  // LIF-286: folders, only to name this page's folder in the breadcrumb.
   let folders = $state<Folder[]>([]);
   let loading = $state(true);
   let error = $state("");
@@ -125,176 +90,54 @@
     if (res.ok) currentUser = res.data;
   });
 
-  // Save indicator
   let saving = $state(false);
-  let lastSaved = $state<string | null>(null);
+  let savedAt = $state<number | null>(null);
 
-  // Export
   let exportError = $state("");
-  let exporting = $state(false);
+  let exporting = false;
 
-  // Request-generation guard. Bumped on every navigation (pageId change);
-  // any load/refresh started under an older generation discards its result
-  // so a slow response can't stomp a newer page's data. This is what kills
-  // the "switching pages loads the wrong/old page" race.
+  // Bumped on every navigation; a load started under an older generation
+  // drops its result, so a slow response can't paint over a newer page.
   let loadGen = 0;
-  // Orders the operations that all replace or extend `comments` within one
-  // route: the initial window, a background refresh, a manual older page, and
-  // the local fold after a mutation. Last started wins; see
-  // `commentOpIsCurrent`.
-  let commentOp = 0;
 
-  // Bumped by every successful local create, edit or delete. A replacement
-  // refresh captures it when it starts and refuses to land if it changed,
-  // because that refresh read the thread before the edit existed and applying
-  // it now would undo work the user just did and watched succeed.
-  let commentMutationEpoch = 0;
-
-  /** Take ownership of the comment window for a new operation.
-   *
-   *  Only the two operations that rewrite or extend the whole window claim it:
-   *  a replacement refresh and a manual older page. Claiming cancels whatever
-   *  held it, which is why the spinner comes down here, since the superseded
-   *  operation is forbidden from touching it. Mutations deliberately do not
-   *  claim: they are surgical, idempotent, and must never cancel a page the
-   *  reader asked for. */
-  function claimCommentOp(): number {
-    loadingOlderComments = false;
-    commentOp += 1;
-    return commentOp;
+  /** Whether `parentId` is still the page on screen. Both halves matter:
+   *  `pageId` flips the instant the reader navigates, while `page` keeps
+   *  the previous document until the next one resolves. */
+  function isCurrentPage(parentId: number): boolean {
+    return pageId === parentId && page?.id === parentId;
   }
+
+  const thread = new CommentThread({
+    list: (id, before, size) => listPageComments(id, before, size),
+    create: createPageComment,
+    update: updateComment,
+    remove: deleteComment,
+    gen: () => loadGen,
+    currentId: () => page?.id ?? null,
+    isCurrent: isCurrentPage,
+  });
 
   $effect(() => {
     const id = pageId;
-    lastSaved = null;
+    savedAt = null;
     loadPage(id);
   });
 
-  // ── LIF-129: auto-refresh ────────────────────────────
-  // Focus-only (no interval): the page body is an inline editor, so a
-  // periodic poll mid-read is more disruptive than it's worth. Refetching
-  // when the tab regains focus covers the real case — the agent edited a
-  // page while you were elsewhere. The body editor merges a refreshed body
-  // into whatever is being typed; refreshes only wait out a save in flight.
-
-  // Refresh the page *currently routed to* (pageId), not whatever `page`
-  // happens to hold — and drop the result if navigation moved on while
-  // the request was in flight.
+  // LIF-129: focus and realtime refresh, no interval. The body editor merges
+  // a refreshed body into whatever is being typed.
   async function refreshPage() {
     const gen = loadGen;
-    // Pin the routed id for the whole refresh, so every request and the retry
-    // below all name the same page even though `pageId` is reactive.
-    const parentId = pageId;
-    // A refresh replaces the whole window, so any manual older page in flight
-    // is obsolete from here on. The mutation epoch is captured rather than
-    // claimed: this read reflects the thread as it is now, and any edit the
-    // user makes while it is in flight is newer truth than it holds.
-    const op = claimCommentOp();
-    const epoch = commentMutationEpoch;
-    const loadedRows = comments.length;
-    const [res, commentsRes, actRes] = await Promise.all([
-      getPage(parentId),
-      // Reconcile every loaded page, not only the newest, so an older comment
-      // edited or deleted elsewhere stops being frozen on screen.
-      loadCommentWindow((before, size) => listPageComments(parentId, before, size), loadedRows),
-      listPageActivity(parentId),
-    ]);
-    if (gen !== loadGen) return; // navigated away mid-flight — discard
+    const id = pageId;
+    const [res, , actRes] = await Promise.all([getPage(id), thread.load(id, gen, true), listPageActivity(id)]);
+    if (gen !== loadGen) return;
     if (res.ok) page = res.data;
-    // The comment window is guarded separately, so the rest of the page still
-    // updates even when the thread has moved on: a manual older page may have
-    // taken the window over, or a mutation may have landed an edit this read
-    // predates.
-    if (commentsRes.ok) {
-      const outcome = commentWindowOutcome(
-        { route: gen, op, epoch },
-        loadGen,
-        commentOp,
-        commentMutationEpoch,
-      );
-      if (outcome === "apply") {
-        // Anything the reader loaded past the refresh's row budget sits below
-        // the refreshed window and is kept rather than discarded.
-        const merged = reconcileCommentWindow(
-          { items: comments, hasOlder: hasOlderComments },
-          commentsRes.data,
-        );
-        comments = merged.items;
-        hasOlderComments = merged.hasOlder;
-      } else if (outcome === "retry") {
-        void restabilizeCommentWindow(parentId, gen);
-      }
-    }
     if (actRes.ok) activity = actRes.data.items;
-  }
-
-  /// Re-read the newest window after a mutation landed while a replacement was
-  /// already in flight.
-  ///
-  /// That read predates the edit, so it cannot be applied, but discarding it
-  /// outright is what leaves a thread showing nothing but the row the mutation
-  /// folded in: navigate away and back with a write still pending and the
-  /// replacement for the second visit is invalidated by that write. Read again
-  /// against the epoch the mutation established.
-  ///
-  /// An async loop, never recursion on the synchronous stack, and capped: if
-  /// mutations keep landing faster than a window can be read, the locally
-  /// folded rows stay visible and the next focus or realtime refresh
-  /// reconciles them. Giving up is the correct end state, storming is not.
-  async function restabilizeCommentWindow(parentId: number, gen: number) {
-    for (let attempt = 0; attempt < COMMENT_WINDOW_RETRY_LIMIT; attempt += 1) {
-      if (gen !== loadGen || !isCurrentPage(parentId)) return;
-      const token = { route: gen, op: claimCommentOp(), epoch: commentMutationEpoch };
-      const loadedRows = comments.length;
-      const res = await loadCommentWindow(
-        (before, size) => listPageComments(parentId, before, size),
-        loadedRows,
-      );
-      if (!res.ok) return;
-      const outcome = commentWindowOutcome(token, loadGen, commentOp, commentMutationEpoch);
-      if (outcome === "abandon") return;
-      if (outcome === "retry") continue;
-      const merged = reconcileCommentWindow(
-        { items: comments, hasOlder: hasOlderComments },
-        res.data,
-      );
-      comments = merged.items;
-      hasOlderComments = merged.hasOlder;
-      return;
-    }
-  }
-
-  async function loadOlderComments() {
-    const current = page;
-    if (!current || loadingOlderComments || !hasOlderComments) return;
-    const gen = loadGen;
-    const op = claimCommentOp();
-    loadingOlderComments = true;
-    // Keyed on the oldest comment on screen, so a comment posted while this
-    // request is in flight cannot shift what "the previous page" means.
-    const res = await listPageComments(current.id, olderCursor(comments));
-    // Token first. A page that arrives after the reader navigated, or after a
-    // refresh took the window over, must not clear the newer operation's
-    // loading flag, let alone prepend this page's comments to another thread.
-    if (!commentOpIsCurrent({ route: gen, op }, loadGen, commentOp)) return;
-    loadingOlderComments = false;
-    if (!res.ok) {
-      toast(`Couldn't load older comments: ${res.error}`, { kind: "error" });
-      return;
-    }
-    comments = prependOlderComments(comments, res.data.items);
-    hasOlderComments = res.data.hasMore;
   }
 
   $effect(() =>
     startAutoRefresh({
       refresh: refreshPage,
-      // Also skip while a navigation load is running (loading) so a focus
-      // event can't fire a redundant fetch on top of the mount load.
-      // The body editor merges refreshes into what is being typed, so
-      // editing does not hold them back.
       isBusy: () => saving || loading,
-      // Focus-only — no background interval for the page editor.
       intervalMs: 0,
       shouldRefresh: (event) =>
         event.type === "resync.required" ||
@@ -306,104 +149,70 @@
 
   async function loadPage(id: number) {
     const gen = ++loadGen;
-    const op = claimCommentOp();
-    const epoch = commentMutationEpoch;
+    thread.reset();
     loading = true;
     error = "";
-    comments = [];
-    hasOlderComments = false;
     activity = [];
     labels = [];
     folders = [];
     const res = await getPage(id);
-    if (gen !== loadGen) return; // a newer navigation superseded this load
-    if (!res.ok) { error = res.error; loading = false; return; }
+    if (gen !== loadGen) return;
+    if (!res.ok) {
+      error = res.error;
+      loading = false;
+      return;
+    }
     page = res.data;
-    // LIF-234: prime role gating — a project page reads that project's role;
-    // a workspace page needs the workspace-admin flag instead.
     if (page.project_id !== null) loadProjectRole(page.project_id);
     else ensureMeAdmin();
     recordRecent({ type: "page", routeId: String(page.id), identifier: page.identifier, title: page.title, project: projectIdentifier }); // LIF-237
 
-    // Load page comments and (project) labels in parallel. Workspace
-    // pages skip the labels fetch — they can't carry any (LIF-105).
-    const commentParentId = page.id;
+    const p = page;
     const tasks: Promise<unknown>[] = [
-      loadCommentWindow((before, size) =>
-        listPageComments(commentParentId, before, size),
-      ).then((r) => {
-        if (!r.ok) return;
-        const outcome = commentWindowOutcome(
-          { route: gen, op, epoch },
-          loadGen,
-          commentOp,
-          commentMutationEpoch,
-        );
-        if (outcome === "abandon") return;
-        if (outcome === "retry") {
-          // Fired, not awaited: this task must settle so `loading` comes down.
-          void restabilizeCommentWindow(commentParentId, gen);
-          return;
-        }
-        comments = r.data.items;
-        hasOlderComments = r.data.hasOlder;
+      thread.load(p.id, gen),
+      listPageActivity(p.id).then((r) => {
+        if (gen === loadGen && r.ok) activity = r.data.items;
       }),
-      listPageActivity(page.id).then((r) => { if (gen === loadGen && r.ok) activity = r.data.items; }),
     ];
-    if (page.project_id !== null) {
-      tasks.push(
-        listLabels(page.project_id).then((r) => { if (gen === loadGen && r.ok) labels = r.data; }),
-      );
-      // Only need folder names to render the breadcrumb's folder segment.
-      if (page.folder_id !== null) {
-        tasks.push(
-          listFolders(page.project_id).then((r) => { if (gen === loadGen && r.ok) folders = r.data; }),
-        );
+    if (p.project_id !== null) {
+      tasks.push(listLabels(p.project_id).then((r) => { if (gen === loadGen && r.ok) labels = r.data; }));
+      if (p.folder_id !== null) {
+        tasks.push(listFolders(p.project_id).then((r) => { if (gen === loadGen && r.ok) folders = r.data; }));
       }
     }
     await Promise.all(tasks);
-
     if (gen !== loadGen) return;
     loading = false;
   }
 
   // ── Save ─────────────────────────────────────────────
 
-  async function saveField(field: string, value: unknown) {
+  function markSaved(id: number) {
+    savedAt = Date.now();
+    void listPageActivity(id).then((r) => {
+      if (r.ok && page?.id === id) activity = r.data.items;
+    });
+  }
+
+  async function saveField(patch: Record<string, unknown>) {
     if (!page) return;
+    const id = page.id;
     saving = true;
-    const res = await updatePage(page.id, { [field]: value });
-    if (res.ok) {
-      page = res.data;
-      lastSaved = new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      // Surface the edit in the Activity timeline immediately.
-      listPageActivity(page.id).then((r) => {
-        if (r.ok) activity = r.data.items;
-      });
-    } else {
-      // Error-only: title/content/status/labels are optimistic inline edits;
-      // a failed save must still surface (LIF-284).
-      toast(`Couldn't save ${page.identifier}: ${res.error}`, { kind: "error" });
-    }
+    const res = await updatePage(id, patch);
     saving = false;
+    if (!res.ok) {
+      toast(`Couldn't save ${page?.identifier ?? "the page"}: ${res.error}`, { kind: "error" });
+      return;
+    }
+    if (page?.id === id) {
+      page = res.data;
+      markSaved(id);
+    }
   }
 
-  async function saveTitle(next: string) {
-    await saveField("title", next);
-  }
-
-  /** Save the body. Guarded by `expected_seq`, so a page changed elsewhere
-   *  since the editor last synced is merged or reported as a conflict by the
-   *  editor, never overwritten. `docId` is the page the editor was opened
-   *  for, which may no longer be the one on screen. */
-  async function saveBody(
-    next: string,
-    expectedSeq: number | null,
-    docId: number | null,
-  ): Promise<BodySaveResult> {
+  /** Save the body, guarded by `expected_seq` (merged or reported as a
+   *  conflict by the editor, never overwritten). */
+  async function saveBody(next: string, expectedSeq: number | null, docId: number | null): Promise<BodySaveResult> {
     const id = docId ?? page?.id;
     if (id == null) return { ok: false, error: "No page loaded" };
     const onScreen = () => page?.id === id;
@@ -416,10 +225,7 @@
     if (res.ok) {
       if (onScreen()) {
         page = res.data;
-        lastSaved = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        listPageActivity(id).then((r) => {
-          if (r.ok && page?.id === id) activity = r.data.items;
-        });
+        markSaved(id);
       }
       return { ok: true, body: res.data.content, seq: res.data.seq ?? null };
     }
@@ -430,128 +236,22 @@
         return { ok: false, conflict: { body: fresh.data.content, seq: fresh.data.seq ?? null } };
       }
     }
-    // The editor shows the failure and retries on its own.
     return { ok: false, error: res.error };
   }
 
-  // LIF-112: persist a lifecycle status change. The Select binds to a
-  // local mirror so the dropdown reflects the new value immediately. The
-  // effect below syncs the mirror down from the loaded page, and persists
-  // up when the user picks a different value — `lastStatus` guards against
-  // the load-sync re-triggering a save.
-  let statusValue = $state("draft");
-  let lastStatus = $state("draft");
-  $effect(() => {
-    // Sync down whenever the loaded page's status changes (page switch
-    // or server refresh). Update lastStatus together so the persistence
-    // branch doesn't fire on this server-driven change.
-    const serverStatus = page?.status ?? "draft";
-    if (serverStatus !== lastStatus && serverStatus !== statusValue) {
-      statusValue = serverStatus;
-      lastStatus = serverStatus;
-    }
-  });
-  $effect(() => {
-    // Persist up when the user picks a new value via the Select.
-    if (statusValue !== lastStatus) {
-      lastStatus = statusValue;
-      saveStatus(statusValue);
-    }
-  });
-
-  async function saveStatus(next: string) {
-    if (!page || next === page.status) return;
-    await saveField("status", next);
+  function setStatus(next: string) {
+    if (page && next !== page.status) void saveField({ status: next });
   }
 
-  // LIF-105: toggle a label name on/off, then persist the full set
-  // (backend does delete-all + reinsert, so we send the entire array).
+  function togglePin() {
+    if (page) void saveField({ pinned: !page.pinned });
+  }
+
+  // LIF-105: the backend replaces the whole set, so send all of it.
   async function toggleLabel(name: string) {
     if (!page) return;
-    const current = [...page.labels];
-    const idx = current.indexOf(name);
-    if (idx >= 0) current.splice(idx, 1);
-    else current.push(name);
-    await saveField("labels", current);
-  }
-
-  // ── Comments / export / delete ───────────────────────
-
-  /** Whether `parentId` is still the page on screen.
-   *
-   *  Both halves are load-bearing. `pageId` is the routed prop and flips the
-   *  instant the reader navigates; `page` keeps the previous document until
-   *  the new one resolves, because `loadPage` cannot clear it without
-   *  blanking the view on every reload. Checking only the loaded copy would
-   *  leave an interval where a write for the page just left folds into a
-   *  thread that has already been emptied for the next one. Checking only the
-   *  routed prop would accept a write while the matching page is still
-   *  loading, against comments that are not there yet. */
-  function isCurrentPage(parentId: number): boolean {
-    return pageId === parentId && page?.id === parentId;
-  }
-
-  // Each mutation captures the thread it belongs to before it sends, by parent
-  // id rather than by route generation. Those differ: a failed load retried,
-  // or a navigation away and back to the same page, bumps the generation
-  // while leaving the thread on screen exactly the one the write was for.
-  // Gating on identity means such a write still lands, which is the coherent
-  // answer, and a write for a different parent is dropped.
-  //
-  // On success the mutation epoch is bumped and the result folded in
-  // unconditionally, so a comment the user just posted, edited or deleted is
-  // visible immediately. `upsertComment` and `removeComment` are idempotent
-  // and order-preserving, so the same row arriving later through a refresh
-  // cannot duplicate it or move it.
-  //
-  // Bumping the epoch is what protects the fold. A replacement refresh
-  // captured the old epoch when it started, so it can no longer land and undo
-  // this edit; the next refresh captures the new one and reconciles normally.
-  // A manual older page needs no such guard: it returns rows strictly below a
-  // cursor these mutations never touch.
-  async function handleNewComment(content: string) {
-    const parentId = page?.id;
-    if (parentId === undefined) return null;
-    const res = await createPageComment(parentId, content);
-    if (!res.ok) {
-      toast(`Couldn't add comment: ${res.error}`, { kind: "error" });
-      return null;
-    }
-    if (isCurrentPage(parentId)) {
-      commentMutationEpoch += 1;
-      comments = upsertComment(comments, res.data);
-    }
-    return res.data;
-  }
-
-  async function handleUpdateComment(id: number, content: string) {
-    const parentId = page?.id;
-    if (parentId === undefined) return null;
-    const res = await updateComment(id, content);
-    if (!res.ok) {
-      toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
-      return null;
-    }
-    if (isCurrentPage(parentId)) {
-      commentMutationEpoch += 1;
-      comments = upsertComment(comments, res.data);
-    }
-    return res.data;
-  }
-
-  async function handleDeleteComment(id: number): Promise<boolean> {
-    const parentId = page?.id;
-    if (parentId === undefined) return false;
-    const res = await deleteComment(id);
-    if (!res.ok) {
-      toast(`Couldn't delete comment: ${res.error}`, { kind: "error" });
-      return false;
-    }
-    if (isCurrentPage(parentId)) {
-      commentMutationEpoch += 1;
-      comments = removeComment(comments, id);
-    }
-    return true;
+    const next = page.labels.includes(name) ? page.labels.filter((l) => l !== name) : [...page.labels, name];
+    await saveField({ labels: next });
   }
 
   async function exportMarkdown() {
@@ -563,43 +263,52 @@
     exporting = false;
   }
 
+  /** Delete, leave, and offer Undo: a deleted page waits in the trash. */
   async function handleDelete(): Promise<boolean> {
     if (!page) return false;
-    const res = await deletePage(page.id);
-    if (res.ok) {
-      navigate(`/${projectIdentifier}/pages`);
-      return true;
+    const { id, identifier } = page;
+    const res = await deletePage(id);
+    if (!res.ok) {
+      toast(`Couldn't delete ${identifier}: ${res.error}`, { kind: "error" });
+      return false;
     }
-    toast(`Couldn't delete ${page.identifier}: ${res.error}`, { kind: "error" });
-    return false;
+    navigate(`/${projectIdentifier}/pages`);
+    toast(`Deleted ${identifier}`, {
+      kind: "success",
+      action: {
+        label: "Undo",
+        fn: async () => {
+          const back = await restorePage(id);
+          if (!back.ok) {
+            toast(`Couldn't restore ${identifier}: ${back.error}`, { kind: "error" });
+            return;
+          }
+          navigate(`/${projectIdentifier}/pages/${id}`);
+        },
+      },
+    });
+    return true;
   }
 
-  // LIF-286: breadcrumb trail — PROJ › Pages › (Folder ›) LIF-DOC-N. The
-  // folder segment appears only when the page is filed under one; its name is
-  // resolved from the folders fetched in loadPage. PageList has no per-folder
-  // route, so the folder crumb links to the flat pages list. The trail ends
-  // with the page identifier in mono, matching IssueDetail's convention: the
-  // title already reads as the document heading directly below, while the
-  // identifier (the handle used in MCP tools, exports, and cross-references)
-  // otherwise never surfaced in the shell.
-  let breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
+  // LIF-286: PROJ › Pages › (Folder ›) LIF-DOC-N.
+  const breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
     const crumbs: import("../lib/Breadcrumbs.svelte").Crumb[] = [
       { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
-      // Collapsed below sm — the app header already states the section.
       { label: "Pages", href: `#/${projectIdentifier}/pages`, hideBelowSm: true },
     ];
     if (page?.folder_id != null) {
       const name = folders.find((f) => f.id === page!.folder_id)?.name;
       if (name) crumbs.push({ label: name, href: `#/${projectIdentifier}/pages` });
     }
-    // `copy` stays unset until the page loads, so nobody can copy the
-    // placeholder "Page" label.
+    // `copy` stays unset until the page loads.
     crumbs.push({ label: page?.identifier || "Page", mono: true, copy: page?.identifier });
     return crumbs;
   });
 
+  const words = $derived(page ? wordCount(page.content) : 0);
+
   // ── LIF-159: palette actions ─────────────────────────
-  let paletteActions = $derived.by<import("../lib/palette").PaletteAction[]>(() => {
+  const paletteActions = $derived.by<import("../lib/palette").PaletteAction[]>(() => {
     if (!page) return [];
     const p = page;
     return [
@@ -611,10 +320,10 @@
           PAGE_STATUSES.map((s) => ({
             title: s.label,
             hint: s.value === p.status ? "current" : undefined,
-            // Setting the local mirror persists via the LIF-112 effect.
-            run: () => { statusValue = s.value; },
+            run: () => setStatus(s.value),
           })),
       },
+      { id: "toggle-pin", title: p.pinned ? "Unpin page" : "Pin page", run: togglePin },
       ...(p.project_id !== null && labels.length > 0
         ? [
             {
@@ -633,6 +342,16 @@
         : []),
     ];
   });
+
+  const readOnlyNote = $derived(
+    (isWorkspacePage ? projectRole.globalEnforced : projectRole.enforced)
+      ? inPublicScope()
+        ? "Read-only. This is the public view of the project; sign in to edit or comment."
+        : isWorkspacePage
+          ? "Workspace pages can only be edited by an admin."
+          : "You're a viewer on this project. You can still comment."
+      : null,
+  );
 </script>
 
 <DocumentDetail
@@ -648,9 +367,10 @@
   {breadcrumbSegments}
   {editable}
   {canComment}
+  {readOnlyNote}
   title={page?.title ?? ""}
   titleSize="lg"
-  onSaveTitle={saveTitle}
+  onSaveTitle={(next) => saveField({ title: next })}
   body={page?.content ?? ""}
   bodySeq={page?.seq ?? null}
   bodyDocId={page?.id ?? null}
@@ -660,137 +380,105 @@
   bodyProseMinHeight="120px"
   onSaveBody={saveBody}
   {saving}
-  {lastSaved}
+  {savedAt}
   onExport={inPublicScope() ? undefined : exportMarkdown}
-  {exporting}
   {exportError}
   deleteNoun="page"
   deleteLabel={page?.identifier ?? ""}
+  deleteUndoable
   onDelete={handleDelete}
-  {comments}
-  onNewComment={handleNewComment}
+  comments={thread.comments}
+  onNewComment={(c) => thread.create(c)}
   {currentUser}
-  onUpdateComment={handleUpdateComment}
-  onDeleteComment={handleDeleteComment}
-  {hasOlderComments}
-  {loadingOlderComments}
-  onLoadOlderComments={loadOlderComments}
+  onUpdateComment={(id, c) => thread.update(id, c)}
+  onDeleteComment={(id) => thread.remove(id)}
+  hasOlderComments={thread.hasOlder}
+  loadingOlderComments={thread.loadingOlder}
+  onLoadOlderComments={() => thread.loadOlder()}
   commentParentKey={`page:${pageId}`}
   mentionProjectId={page?.project_id ?? null}
   {activity}
   {paletteActions}
   layout="wide"
+  outline
 >
-  {#snippet breadcrumbExtra()}
-    {#if !editable && (isWorkspacePage ? projectRole.globalEnforced : projectRole.enforced)}
-      <!-- LIF-234: read-only cue for a viewer (project page) or non-admin
-           (workspace page). Commenting stays available on project pages. -->
-      <span class="text-micro font-medium px-1.5 py-0.5 rounded-full text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-            title={inPublicScope()
-              ? "Read-only. This is the public view of the project; sign in to edit or comment."
-              : isWorkspacePage
-                ? "Read-only — workspace pages can only be edited by an admin."
-                : "Read-only — you're a viewer on this project. You can still comment."}>
-        Read-only
-      </span>
-    {/if}
-  {/snippet}
-
   {#snippet belowTitle()}
-    <!-- LIF-112 + LIF-105: lifecycle status picker and labels strip. Both
-         sit between title and body, mirroring the issue sidebar's UX but
-         laid out horizontally since pages have no sidebar. -->
+    <!-- LIF-112 + LIF-105 + LIF-183: status, pin and labels, then how long
+         the page is and when it last changed. -->
     {#if page}
-      <div class="mb-6 flex flex-wrap items-center gap-4">
-        <!-- LIF-183: pin toggle. Pinned pages surface in a section atop the
-             page list regardless of folder. -->
-        {#if editable}
-          <button
-            class="flex items-center gap-1.5 text-body-sm font-medium
-                   px-2 py-1 rounded-md border transition-colors
-                   {page.pinned
-              ? 'text-[var(--accent)] border-[var(--accent)] bg-[var(--accent-subtle)]'
-              : 'text-[var(--text-muted)] border-[var(--border)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]'}"
-            title={page.pinned ? "Unpin this page" : "Pin to top of the page list"}
-            onclick={() => { if (page) saveField("pinned", !page.pinned); }}
-            disabled={saving}
-          >
-            <Pin size={13} class={page.pinned ? "fill-current" : ""} />
-            {page.pinned ? "Pinned" : "Pin"}
-          </button>
-        {/if}
+      <div class="mb-7 flex flex-col gap-2.5">
+        <div class="flex flex-wrap items-center gap-2">
+          {#if editable}
+            <Select options={statusOptions} value={page.status} onchange={(o) => setStatus(String(o.value))} size="sm" class="w-auto">
+              {#snippet renderSelected(opt)}
+                {@const meta = statusMeta(String(opt.value))}
+                <span class="flex items-center gap-1.5 text-body-sm text-[var(--text)]">
+                  <meta.icon size={13} class="shrink-0 text-[var(--text-muted)]" />
+                  {meta.label}
+                </span>
+              {/snippet}
+              {#snippet renderOption(opt, isSelected)}
+                {@const meta = statusMeta(String(opt.value))}
+                <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
+                  <meta.icon size={13} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
+                  <span class={isSelected ? "text-[var(--accent)]" : "text-[var(--text)]"}>{meta.label}</span>
+                </span>
+              {/snippet}
+            </Select>
+            <button
+              class="size-8 grid place-items-center rounded-md border transition-colors
+                     {page.pinned
+                ? 'text-[var(--accent)] border-[var(--accent)] bg-[var(--accent-subtle)]'
+                : 'text-[var(--text-muted)] border-[var(--border)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]'}"
+              title={page.pinned ? "Pinned to the top of the page list. Click to unpin." : "Pin to the top of the page list"}
+              aria-label={page.pinned ? "Unpin page" : "Pin page"}
+              aria-pressed={page.pinned}
+              onclick={togglePin}
+              disabled={saving}
+            >
+              <Pin size={14} class={page.pinned ? "fill-current" : ""} />
+            </button>
+          {:else}
+            {@const meta = statusMeta(page.status)}
+            <span class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]">
+              <meta.icon size={13} class="shrink-0" />
+              {meta.label}
+            </span>
+            {#if page.pinned}
+              <span class="flex items-center gap-1 text-caption text-[var(--accent)]"><Pin size={12} class="fill-current" /> Pinned</span>
+            {/if}
+          {/if}
 
-        <!-- LIF-112: status picker. Available for every page (workspace
-             pages included — status isn't project-scoped). -->
-        {#if editable}
-          <Select
-            options={statusOptions}
-            bind:value={statusValue}
-            size="sm"
-            class="w-auto"
-          >
-            {#snippet renderSelected(opt)}
-              {@const meta = statusMeta(String(opt.value))}
-              <span class="flex items-center gap-1.5 text-body-sm text-[var(--text)]">
-                <meta.icon size={13} class="shrink-0 text-[var(--text-muted)]" />
-                {meta.label}
-              </span>
-            {/snippet}
-            {#snippet renderOption(opt, isSelected)}
-              {@const meta = statusMeta(String(opt.value))}
-              <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-                <meta.icon size={13} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
-                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{meta.label}</span>
-              </span>
-            {/snippet}
-          </Select>
-        {:else}
-          {@const meta = statusMeta(page.status)}
-          <span class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]">
-            <meta.icon size={13} class="shrink-0" />
-            {meta.label}
-          </span>
-        {/if}
-
-        <!-- LIF-105: labels strip. Workspace pages skip it — labels are
-             project-scoped. -->
-        {#if page.project_id !== null}
-          <LabelEditor
-            attached={page.labels}
-            all={labels}
-            {editable}
-            onToggle={toggleLabel}
-            emptyText="No labels"
-            emptyItalic
-            hideEmptyWhenEditable
-            popoverWidth="w-[200px]"
-            emptyPickerText="No labels defined in this project."
-          />
-        {/if}
-      </div>
-    {/if}
-  {/snippet}
-
-  {#snippet metaFooter()}
-    {#if page}
-      <div class="mt-10 pt-6 border-t border-[var(--border)] flex gap-8">
-        <div>
-          <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
-            Created
-          </span>
-          <span class="text-body-sm text-[var(--text-muted)]">
-            {formatDate(page.created_at)}
-          </span>
+          {#if page.project_id !== null}
+            <LabelEditor
+              attached={page.labels}
+              all={labels}
+              {editable}
+              onToggle={toggleLabel}
+              emptyText="No labels"
+              emptyItalic
+              hideEmptyWhenEditable
+              popoverWidth="w-[200px]"
+              emptyPickerText="No labels defined in this project."
+            />
+          {/if}
         </div>
-        <div>
-          <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
-            Updated
-          </span>
-          <span class="text-body-sm text-[var(--text-muted)]">
-            {formatDate(page.updated_at)}
-          </span>
-        </div>
+        <p class="page-meta m-0 flex flex-wrap items-center text-caption text-[var(--text-faint)]" data-testid="page-meta">
+          <span>Updated <TimeAgo date={page.updated_at.replace(" ", "T")} class="text-[var(--text-muted)]" /></span>
+          <span>Created <TimeAgo date={page.created_at.replace(" ", "T")} /></span>
+          {#if words > 0}
+            <span>{words.toLocaleString()} {words === 1 ? "word" : "words"}</span>
+            <span>{readingMinutes(words)} min read</span>
+          {/if}
+        </p>
       </div>
     {/if}
   {/snippet}
 </DocumentDetail>
+
+<style>
+  .page-meta > span + span::before {
+    content: "·";
+    margin: 0 0.45em;
+  }
+</style>
