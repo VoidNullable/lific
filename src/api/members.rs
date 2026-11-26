@@ -72,9 +72,11 @@ pub(super) async fn my_project_role(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
 
-    let enforced = authz::authz_enforced(&db)?;
+    // An anonymous reader of a published project can change nothing,
+    // whatever the authorization mode, so it is always told it is gated.
+    let enforced = identity.is_none() || authz::authz_enforced(&db)?;
     let (role, is_admin) = with_read(&db, |conn| {
         let auth_user = identity.as_ref().map(|i| i.user.clone());
         let effective = authz::effective_user(conn, &auth_user);

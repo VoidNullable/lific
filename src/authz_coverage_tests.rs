@@ -22,7 +22,11 @@ use std::collections::HashMap;
 /// gates so the manifest below reads as "which function guards this."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gate {
-    /// `authz::require_role(.., Role::Viewer)` (read access).
+    /// `authz::require_read` (LIF-583): a published project is readable by
+    /// everyone, anything else needs Viewer.
+    Read,
+    /// `authz::require_role(.., Role::Viewer)` (member-only read, and the
+    /// floor for commenting and per-user saved views).
     Viewer,
     /// `authz::require_role(.., Role::Maintainer)` (content mutation).
     Maintainer,
@@ -41,8 +45,8 @@ enum Classification {
     /// legacy branch) reproduces pre-LIF-194 behavior — see `authz.rs`.
     Gated(Gate),
     /// Cross-project read: never denies, filters via
-    /// `authz::visible_project_ids` instead (LIF-DOC-7's "visibility
-    /// primitive").
+    /// `authz::readable_project_ids` (reads) or `authz::visible_project_ids`
+    /// (the caller's own work) instead (LIF-DOC-7's "visibility primitive").
     Filtered,
     /// One handler/tool multiplexes several sub-operations (REST: none;
     /// MCP: `delete`, `list_resources`, `manage_resource` dispatch on an
@@ -212,9 +216,9 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             Exempt("instance-admin roster: restore an account, require_admin"),
         ),
         // ── Comments: Viewer to read/create (project resolved from parent) ──
-        (("GET", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
+        (("GET", "/api/issues/{issue_id}/comments"), Gated(Read)),
         (("POST", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
-        (("GET", "/api/pages/{page_id}/comments"), Gated(Viewer)),
+        (("GET", "/api/pages/{page_id}/comments"), Gated(Read)),
         (("POST", "/api/pages/{page_id}/comments"), Gated(Viewer)),
         // LIF-410: mutating a comment takes the same Viewer gate reading one
         // does, checked *before* the author-or-admin ownership test on top of
@@ -227,7 +231,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("DELETE", "/api/comments/{id}"), Gated(Viewer)),
         // ── Attachments (LIF-262) ──
         // The list endpoint gates on the owning entity's project at Viewer.
-        (("GET", "/api/attachments"), Gated(Viewer)),
+        (("GET", "/api/attachments"), Gated(Read)),
         // Upload is open to any authenticated user (per-user rate-limited); the
         // blob only becomes project-visible once linked into an entity, so
         // there's no project to gate at upload time.
@@ -243,7 +247,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (
             ("GET", "/api/attachments/{id}"),
             Exempt(
-                "read gated at Viewer on any linked project, or uploader/admin when still unlinked — dynamic, see api::attachments::authorize_read (LIF-262)",
+                "read gated by authz::require_read on any linked project (so a published one is readable by everyone), or uploader/admin when still unlinked: dynamic, see api::attachments::authorize_read (LIF-262)",
             ),
         ),
         (
@@ -283,7 +287,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // project to gate on. Viewer, checked before the project is touched at
         // all so a non-member cannot tell an existing project from a
         // nonexistent one.
-        (("GET", "/api/projects/{id}/attachments"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}/attachments"), Gated(Read)),
         (
             ("GET", "/api/projects/{id}/attachments/orphans"),
             Gated(Viewer),
@@ -302,7 +306,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
                 "per-user ordering; fresh caller and project visibility checked in one transaction",
             ),
         ),
-        (("GET", "/api/projects/{id}"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}"), Gated(Read)),
         (("PUT", "/api/projects/{id}"), Gated(Lead)),
         (("DELETE", "/api/projects/{id}"), Gated(ProjectDelete)),
         // ── Sidebar project groups (per-user) ──
@@ -333,10 +337,10 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
                 "per-user ordering; fresh caller and group ownership checked in one transaction",
             ),
         ),
-        (("GET", "/api/projects/{id}/board"), Gated(Viewer)),
-        (("GET", "/api/projects/{id}/issue-counts"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}/board"), Gated(Read)),
+        (("GET", "/api/projects/{id}/issue-counts"), Gated(Read)),
         // Dependency graph edges (LIF-363).
-        (("GET", "/api/projects/{id}/relations"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}/relations"), Gated(Read)),
         (("POST", "/api/projects/{id}/import/github"), Gated(Lead)),
         // ── Membership management (LIF-199, REST/web-only) ──
         (("GET", "/api/projects/{id}/members"), Gated(Viewer)),
@@ -351,7 +355,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         // LIF-234: caller's own effective role — Viewer-gated, drives
         // role-aware UI affordances.
-        (("GET", "/api/projects/{id}/my-role"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}/my-role"), Gated(Read)),
         // @mention autocomplete candidates (LIF-263) — Viewer-gated, and
         // member-scoped in the query layer when enforcement is on.
         (
@@ -384,7 +388,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // LIF-542: agent activity, filtered to visible projects.
         (("GET", "/api/agents/activity"), Filtered),
         (("POST", "/api/issues"), Gated(Maintainer)),
-        (("GET", "/api/issues/{id}"), Gated(Viewer)),
+        (("GET", "/api/issues/{id}"), Gated(Read)),
         (("PUT", "/api/issues/{id}"), Gated(Maintainer)),
         (("DELETE", "/api/issues/{id}"), Gated(Maintainer)),
         // LIF-438: undoing a soft delete is the same authority as performing
@@ -392,13 +396,16 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/issues/{id}/restore"), Gated(Maintainer)),
         // LIF-487: Maintainer on the source and on the target project.
         (("POST", "/api/issues/{id}/move"), Gated(Maintainer)),
-        (("GET", "/api/issues/resolve/{identifier}"), Gated(Viewer)),
+        (("GET", "/api/issues/resolve/{identifier}"), Gated(Read)),
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),
-        (("GET", "/api/issues/{id}/waits"), Gated(Viewer)),
+        (("GET", "/api/issues/{id}/waits"), Gated(Read)),
         (
             ("GET", "/api/clock"),
-            Exempt("server calendar day and UTC offset for any signed-in caller; no project data"),
+            Exempt(
+                "server calendar day and UTC offset; no project data, so open to anonymous \
+                 readers of a published project (LIF-583)",
+            ),
         ),
         (("POST", "/api/issues/{id}/waits"), Gated(Maintainer)),
         (
@@ -407,17 +414,17 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         (("POST", "/api/issues/reverse"), Gated(Maintainer)),
         // ── Activity / export (all read-side, Viewer) ──
-        (("GET", "/api/issues/{id}/activity"), Gated(Viewer)),
-        (("GET", "/api/pages/{id}/activity"), Gated(Viewer)),
-        (("GET", "/api/projects/{id}/activity"), Gated(Viewer)),
-        (("GET", "/api/projects/{id}/activity/actors"), Gated(Viewer)),
-        (("GET", "/api/projects/{id}/insights"), Gated(Viewer)),
+        (("GET", "/api/issues/{id}/activity"), Gated(Read)),
+        (("GET", "/api/pages/{id}/activity"), Gated(Read)),
+        (("GET", "/api/projects/{id}/activity"), Gated(Read)),
+        (("GET", "/api/projects/{id}/activity/actors"), Gated(Read)),
+        (("GET", "/api/projects/{id}/insights"), Gated(Read)),
         // ── Delta sync (LIF-439) — read-side, Viewer ──
-        (("GET", "/api/projects/{id}/changes"), Gated(Viewer)),
-        (("GET", "/api/projects/{id}/index"), Gated(Viewer)),
-        (("GET", "/api/export/issues/{identifier}"), Gated(Viewer)),
-        (("GET", "/api/export/pages/{identifier}"), Gated(Viewer)),
-        (("GET", "/api/export/projects/{identifier}"), Gated(Viewer)),
+        (("GET", "/api/projects/{id}/changes"), Gated(Read)),
+        (("GET", "/api/projects/{id}/index"), Gated(Read)),
+        (("GET", "/api/export/issues/{identifier}"), Gated(Read)),
+        (("GET", "/api/export/pages/{identifier}"), Gated(Read)),
+        (("GET", "/api/export/projects/{identifier}"), Gated(Read)),
         // ── Project archives (LIF-467) ──
         // Export is the project's whole history including tombstones and the
         // audit log, so it sits at Lead rather than Viewer. Import creates a
@@ -449,25 +456,25 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             Exempt("instance admin; creates a project, like an archive import"),
         ),
         // ── Structure: modules / labels / folders ──
-        (("GET", "/api/modules"), Gated(Viewer)),
+        (("GET", "/api/modules"), Gated(Read)),
         (("POST", "/api/modules"), Gated(StructureRole)),
-        (("GET", "/api/modules/{id}"), Gated(Viewer)),
+        (("GET", "/api/modules/{id}"), Gated(Read)),
         (("PUT", "/api/modules/{id}"), Gated(StructureRole)),
         (("DELETE", "/api/modules/{id}"), Gated(StructureRole)),
-        (("GET", "/api/labels"), Gated(Viewer)),
+        (("GET", "/api/labels"), Gated(Read)),
         (("POST", "/api/labels"), Gated(StructureRole)),
         (("PUT", "/api/labels/{id}"), Gated(StructureRole)),
         (("DELETE", "/api/labels/{id}"), Gated(StructureRole)),
         (("POST", "/api/labels/{id}/merge"), Gated(StructureRole)),
-        (("GET", "/api/folders"), Gated(Viewer)),
+        (("GET", "/api/folders"), Gated(Read)),
         (("POST", "/api/folders"), Gated(StructureRole)),
         (("PUT", "/api/folders/{id}"), Gated(StructureRole)),
         (("DELETE", "/api/folders/{id}"), Gated(StructureRole)),
         // ── Pages ──
         (("GET", "/api/pages"), Filtered),
         (("POST", "/api/pages"), Gated(Maintainer)),
-        (("GET", "/api/pages/resolve/{identifier}"), Gated(Viewer)),
-        (("GET", "/api/pages/{id}"), Gated(Viewer)),
+        (("GET", "/api/pages/resolve/{identifier}"), Gated(Read)),
+        (("GET", "/api/pages/{id}"), Gated(Read)),
         (("PUT", "/api/pages/{id}"), Gated(Maintainer)),
         (("DELETE", "/api/pages/{id}"), Gated(Maintainer)),
         // LIF-438: same authority as the delete it undoes.
@@ -475,11 +482,11 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Plans ──
         (("GET", "/api/plans"), Filtered),
         (("POST", "/api/plans"), Gated(Maintainer)),
-        (("GET", "/api/plans/{id}"), Gated(Viewer)),
+        (("GET", "/api/plans/{id}"), Gated(Read)),
         (("PUT", "/api/plans/{id}"), Gated(Maintainer)),
         (("DELETE", "/api/plans/{id}"), Gated(Maintainer)),
-        (("GET", "/api/plans/resolve/{identifier}"), Gated(Viewer)),
-        (("GET", "/api/plans/{id}/activity"), Gated(Viewer)),
+        (("GET", "/api/plans/resolve/{identifier}"), Gated(Read)),
+        (("GET", "/api/plans/{id}/activity"), Gated(Read)),
         (("POST", "/api/plans/{id}/steps"), Gated(Maintainer)),
         (
             ("PUT", "/api/plans/{plan_id}/steps/{step_id}"),
@@ -583,6 +590,53 @@ fn rest_manifest_has_no_stale_entries() {
     );
 }
 
+/// LIF-583: every route a credential-less caller may reach is a `GET` whose
+/// handler is a read gate or a read filter. A write, or a member-only read,
+/// on the anonymous allowlist fails here with the offending pattern.
+#[test]
+fn the_anonymous_allowlist_holds_only_read_gated_routes() {
+    // Exempt routes whose handler is still a read gate, spelled out rather
+    // than inferred from the reason text.
+    const DYNAMIC_READS: [&str; 5] = [
+        "/api/attachments/{}",
+        "/api/attachments/{}/thumbnail",
+        "/api/attachments/{}/preview",
+        "/api/attachments/{}/links",
+        "/api/clock",
+    ];
+    let shape = |path: &str| {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "{}"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let manifest: HashMap<(String, String), Classification> = rest_manifest()
+        .into_iter()
+        .map(|((method, path), class)| ((method.to_string(), shape(path)), class))
+        .collect();
+    for pattern in crate::api::anonymous::anonymous_read_patterns() {
+        let key = ("GET".to_string(), shape(pattern));
+        let class = manifest
+            .get(&key)
+            .unwrap_or_else(|| panic!("anonymous route {pattern} is not a registered GET route"));
+        let read = match class {
+            Classification::Gated(Gate::Read) | Classification::Filtered => true,
+            Classification::Exempt(_) => DYNAMIC_READS.contains(&key.1.as_str()),
+            _ => false,
+        };
+        assert!(
+            read,
+            "anonymous route {pattern} is {class:?}, not a read gate"
+        );
+    }
+}
+
 #[test]
 fn rest_manifest_exempt_reasons_are_non_empty() {
     for ((method, path), classification) in rest_manifest() {
@@ -609,20 +663,20 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
 
     HashMap::from([
         ("search", Filtered),
-        ("get_activity", Gated(Viewer)),
+        ("get_activity", Gated(Read)),
         ("get_briefing", Gated(Viewer)),
-        ("list_issues", Gated(Viewer)),
-        ("get_issue", Gated(Viewer)),
-        ("export", Gated(Viewer)),
+        ("list_issues", Gated(Read)),
+        ("get_issue", Gated(Read)),
+        ("export", Gated(Read)),
         ("create_issue", Gated(Maintainer)),
         ("update_issue", Gated(Maintainer)),
         ("move_issue", Gated(Maintainer)),
         ("bulk_update", Gated(Maintainer)),
         ("edit_issue", Gated(Maintainer)),
-        ("get_board", Gated(Viewer)),
+        ("get_board", Gated(Read)),
         ("link_issues", Gated(Maintainer)),
         ("unlink_issues", Gated(Maintainer)),
-        ("get_page", Gated(Viewer)),
+        ("get_page", Gated(Read)),
         ("create_page", Gated(Maintainer)),
         ("update_page", Gated(Maintainer)),
         ("edit_page", Gated(Maintainer)),
@@ -637,9 +691,9 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
         (
             "list_resources",
             Mixed(
-                "dispatches on resource_type: project = Filtered (visible_project_ids); \
-                 module/label/folder/issue/plan = Viewer; page = Viewer when project given, \
-                 else Filtered",
+                "dispatches on resource_type: project = Filtered (readable_project_ids, with \
+                 rosters kept to visible_project_ids); module/label/folder/issue/plan = Read; \
+                 page = Read when project given, else Filtered (readable_project_ids)",
             ),
         ),
         (
@@ -651,7 +705,7 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
             ),
         ),
         ("add_comment", Gated(Viewer)),
-        ("list_comments", Gated(Viewer)),
+        ("list_comments", Gated(Read)),
         // LIF-143: mirror REST PUT/DELETE /api/comments/{id} — author-or-admin
         // ownership check, not a project-role gate.
         (
@@ -681,9 +735,9 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
                  REST GET /api/attachments/{id}",
             ),
         ),
-        ("list_attachments", Gated(Viewer)),
+        ("list_attachments", Gated(Read)),
         ("create_plan", Gated(Maintainer)),
-        ("get_plan", Gated(Viewer)),
+        ("get_plan", Gated(Read)),
         ("edit_plan_step", Gated(Maintainer)),
         ("update_plan_step", Gated(Maintainer)),
     ])

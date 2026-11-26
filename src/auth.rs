@@ -862,6 +862,18 @@ pub async fn require_api_key(
             return crate::actor::scope(actor, next.run(request)).await;
         }
 
+        // LIF-583: a published project is readable without an account. A
+        // credential-less read on one of the routes that allows it runs with
+        // no identity under the anonymous budgets; everything else is a 401.
+        if let Some(reads) = request
+            .extensions()
+            .get::<std::sync::Arc<crate::api::AnonymousReads>>()
+            .cloned()
+            && crate::api::is_anonymous_read(request.method(), request.uri().path())
+        {
+            return crate::api::serve_anonymous(reads, request, next).await;
+        }
+
         if is_mcp_request {
             info!("/mcp rejected: no Authorization header (discovery probe or dropped token)");
         }

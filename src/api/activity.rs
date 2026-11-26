@@ -10,7 +10,7 @@ use crate::authz;
 use crate::db::queries::activity::{ActivityScope, actor_stats, list_activity};
 use crate::db::{
     DbPool,
-    models::{ActivityFeed, ActorStat, Role},
+    models::{ActivityFeed, ActorStat},
 };
 use crate::error::LificError;
 
@@ -37,10 +37,7 @@ fn require_scope_viewer(
         }
         ActivityScope::Project(id) => Some(id),
     };
-    match project_id {
-        Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
-        None => authz::require_workspace_admin(db, identity),
-    }
+    authz::require_read_or_workspace(db, identity, project_id)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -107,7 +104,7 @@ pub(super) async fn project_activity_actors(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<ActorStat>>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     with_read(&db, |conn| actor_stats(conn, id)).map(Json)
 }
 

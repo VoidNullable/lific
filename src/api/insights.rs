@@ -10,10 +10,7 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::insights::{clamp_weeks, get_insights};
-use crate::db::{
-    DbPool,
-    models::{InsightsPayload, Role},
-};
+use crate::db::{DbPool, models::InsightsPayload};
 use crate::error::LificError;
 
 use super::with_read;
@@ -32,7 +29,7 @@ pub(super) async fn project_insights(
     Path(id): Path<i64>,
     Query(q): Query<InsightsQuery>,
 ) -> Result<Json<InsightsPayload>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     let weeks = clamp_weeks(q.weeks);
     with_read(&db, |conn| get_insights(conn, id, weeks)).map(Json)
 }

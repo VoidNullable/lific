@@ -1827,11 +1827,32 @@ fn visible_project_ids_mcp(
     crate::authz::visible_project_ids(db, &super::current_identity(db)).map_err(|e| e.to_string())
 }
 
+/// LIF-583: the read gate. A published project is readable by every key;
+/// anything else needs `Viewer`. Writes keep [`require_role_mcp`].
+fn require_read_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
+    crate::authz::require_read(db, &super::current_identity(db), project_id)
+        .map_err(|e| e.to_string())
+}
+
+/// [`require_read_mcp`] for an entity that may be a workspace-level page.
+fn require_page_read_mcp(db: &Arc<DbPool>, project_id: Option<i64>) -> Result<(), String> {
+    crate::authz::require_read_or_workspace(db, &super::current_identity(db), project_id)
+        .map_err(|e| e.to_string())
+}
+
+/// LIF-583: the cross-project read filter, [`visible_project_ids_mcp`] plus
+/// every published project. "My work" views keep the narrower filter.
+fn readable_project_ids_mcp(
+    db: &Arc<DbPool>,
+) -> Result<Option<std::collections::HashSet<i64>>, String> {
+    crate::authz::readable_project_ids(db, &super::current_identity(db)).map_err(|e| e.to_string())
+}
+
 impl LificMcp {
     /// LIF-488: drop relation identifiers into projects this caller cannot
     /// view, before any issue row or detail is rendered.
     fn retain_visible_relations(&self, issues: &mut [models::Issue]) -> Result<(), String> {
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         self.read(|conn| {
             queries::retain_visible_relations(conn, issues, visible.as_ref());
             Ok(())
@@ -1865,17 +1886,14 @@ impl LificMcp {
             .unwrap_or_else(|| "No results found.".into())
     }
 
-    /// Gate for comment read/create: Viewer (or Maintainer, for edges that
-    /// need it) on the comment parent's project, falling back to
-    /// workspace-admin for a page with no project. Mirrors the REST comment
-    /// handlers' Viewer gate.
-    fn require_comment_role_mcp(
+    /// LIF-583: reading a comment thread follows its parent's read access,
+    /// so a published project's comments are readable by every key.
+    fn require_comment_read_mcp(
         &self,
         parent: queries::comments::CommentParent,
-        minimum_role: models::Role,
     ) -> Result<(), String> {
         let project_id = self.read(|conn| parent.project_id(conn))?;
-        require_page_role_mcp(&self.db, project_id, minimum_role)
+        require_page_read_mcp(&self.db, project_id)
     }
 
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
@@ -1951,7 +1969,7 @@ impl LificMcp {
         log: &mut ReadLog,
     ) -> Result<(String, outputs::SearchResults), String> {
         let empty = |text: String| (text, outputs::SearchResults::default());
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         let project_id = match &input.project {
             Some(p) => {
                 let conn = self.read_conn()?;
@@ -2177,7 +2195,7 @@ impl LificMcp {
 
         // LIF-198: resolve the scope's project (Viewer gate); workspace
         // pages (project_id None) fall back to admin-only.
-        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+        require_page_read_mcp(&self.db, project_id)?;
         let (entity_type, entity_id) = match scope {
             queries::activity::ActivityScope::Issue(id) => ("issue", id),
             queries::activity::ActivityScope::Page(id) => ("page", id),
@@ -2340,7 +2358,7 @@ impl LificMcp {
             None => {
                 let conn = self.read_conn()?;
                 let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 IssueScope {
                     project_id: Some(pid),
                     project_ids: None,
@@ -2673,7 +2691,7 @@ No issues found."
         // Validate the comment-trail mode up front so a typo errors instead of
         // silently defaulting.
         let comment_mode = get_issue_comment_mode(input.include_comments.as_deref())?;
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         let (issue, module_name, rels, aliases) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let mut issue = queries::get_issue(conn, id)?;
@@ -2717,7 +2735,7 @@ No issues found."
             let aliases = queries::issue_move::issue_aliases(conn, issue.id)?;
             Ok((issue, module_name, rels, aliases))
         })?;
-        require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
+        require_read_mcp(&self.db, issue.project_id)?;
         let context = current_issue_link_context();
         // Load exactly the rows the chosen mode renders, never the whole
         // thread. `none` reads no comment rows at all, `recent` reads three,
@@ -2941,25 +2959,25 @@ No issues found."
                 let id = queries::resolve_page_identifier(conn, ident)?;
                 Ok((id, queries::page_project_id(conn, id)?))
             })?;
-            require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+            require_page_read_mcp(&self.db, project_id)?;
             (Kind::Page, project_id, page_id)
         } else if let Ok((issue_id, project_id)) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, ident)?;
             Ok((id, queries::issue_project_id(conn, id)?))
         }) {
-            require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+            require_read_mcp(&self.db, project_id)?;
             (Kind::Issue, Some(project_id), issue_id)
         } else {
             let project_id = resolve_project(&*self.read_conn()?, ident)
                 .map_err(|_| unknown_identifier(ident))?;
-            require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+            require_read_mcp(&self.db, project_id)?;
             (Kind::Project, Some(project_id), project_id)
         };
 
         // Resolved here, on the request's own task: the identity does not
         // follow the blocking worker. Relations to issues the caller cannot
         // see are left out of the frontmatter; pages render none.
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         let slot = self
             .db
             .acquire_export_slot()
@@ -3850,7 +3868,7 @@ No issues found."
             &*self.read_conn()?,
             self.project_or_bound(input.project.as_deref())?,
         )?;
-        require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+        require_read_mcp(&self.db, pid)?;
         log.scope(Some(pid));
         const BOARD_CAP: i64 = 500;
         let board = self.read(|conn| {
@@ -4126,7 +4144,7 @@ No issues found."
             };
             Ok((page, folder_name, before))
         })?;
-        require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer)?;
+        require_page_read_mcp(&self.db, page.project_id)?;
         // LIF-479: oversized pages come back as an outline plus their
         // opening; `section` and `outline` read them piece by piece.
         // LIF-480: `since_seq` returns only the content diff.
@@ -4556,11 +4574,11 @@ No issues found."
             "plan" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 log.scope(Some(pid));
                 // No clamp here: list_plans applies the shared one, and its
                 // default (50) is this branch's documented default.
-                let plans = self.read(|conn| {
+                let mut plans = self.read(|conn| {
                     queries::plans::list_plans(
                         conn,
                         &models::ListPlansQuery {
@@ -4572,6 +4590,11 @@ No issues found."
                         },
                     )
                 })?;
+                let identity = super::current_identity(&self.db);
+                for plan in &mut plans {
+                    crate::authz::hide_unreadable_plan_issue_refs(&self.db, &identity, plan)
+                        .map_err(|e| e.to_string())?;
+                }
                 if plans.is_empty() {
                     return Ok(empty("No plans found.".into()));
                 }
@@ -4628,13 +4651,14 @@ No issues found."
                 let only = match input.project.as_deref() {
                     Some(project) => {
                         let pid = resolve_project(&*self.read_conn()?, project)?;
-                        require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                        require_read_mcp(&self.db, pid)?;
                         Some(pid)
                     }
                     None => None,
                 };
                 log.scope(only);
                 let visible = visible_project_ids_mcp(&self.db)?;
+                let readable = readable_project_ids_mcp(&self.db)?;
                 let identity = super::current_identity(&self.db).map(|identity| identity.user);
                 let (ps, stats, mut rosters, caller, counts, team) = self.read(|conn| {
                     Ok((
@@ -4650,7 +4674,12 @@ No issues found."
                 })?;
                 // A single-person instance's roster is always just its owner.
                 let show_roster = team || show_members.is_some();
-                let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
+                // LIF-583: a published project is listed to everyone, but its
+                // roster stays with its members, as the REST member list does.
+                if let Some(visible) = &visible {
+                    rosters.retain(|project_id, _| visible.contains(project_id));
+                }
+                let mut ps = filter_visible(ps, &readable, |p| Some(p.id));
                 if let Some(pid) = only {
                     ps.retain(|project| project.id == pid);
                 }
@@ -4734,7 +4763,7 @@ No issues found."
             "issue" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 log.scope(Some(pid));
                 // This branch publishes a bigger default page than list_issues
                 // (100 against 50); the cap is the shared one.
@@ -4798,10 +4827,10 @@ No issues found."
                 // scope item 2) — a workspace page (project_id None) is
                 // excluded for any non-admin once enforcement is on.
                 let visible = if let Some(pid) = project_id {
-                    require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                    require_read_mcp(&self.db, pid)?;
                     None
                 } else {
-                    visible_project_ids_mcp(&self.db)?
+                    readable_project_ids_mcp(&self.db)?
                 };
                 log.scope(project_id);
                 let folder_id = match (&input.folder, project_id) {
@@ -4908,7 +4937,7 @@ No issues found."
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let resolver = self.read_conn()?;
                 let pid = resolve_project(&resolver, proj)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 log.scope(Some(pid));
                 let canonical_project = canonical_project_identifier(&resolver, pid)?;
                 let modules = queries::list_modules(&resolver, pid).map_err(|e| e.to_string())?;
@@ -4942,7 +4971,7 @@ No issues found."
             "label" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 log.scope(Some(pid));
                 let labels = self.read(|conn| queries::list_labels(conn, pid))?;
                 let items = labels
@@ -4964,7 +4993,7 @@ No issues found."
             "folder" => {
                 let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
-                require_role_mcp(&self.db, pid, models::Role::Viewer)?;
+                require_read_mcp(&self.db, pid)?;
                 log.scope(Some(pid));
                 let folders = self.read(|conn| queries::list_folders(conn, pid))?;
                 let items = folders
@@ -5326,7 +5355,7 @@ No issues found."
     ) -> Result<String, String> {
         let (parent, parent_identifier, parent_project) =
             resolve_comment_parent(self, &input.identifier)?;
-        self.require_comment_role_mcp(parent, models::Role::Viewer)?;
+        self.require_comment_read_mcp(parent)?;
         match parent {
             queries::comments::CommentParent::Issue(id) => {
                 log.entity(parent_project, "issue", id, parent_identifier.as_str());
@@ -5699,11 +5728,17 @@ No issues found."
     }
 
     fn get_plan_inner(&self, input: GetPlanInput, log: &mut ReadLog) -> Result<String, String> {
-        let plan = self.read(|conn| {
+        let mut plan = self.read(|conn| {
             let id = queries::plans::resolve_plan_identifier(conn, &input.plan)?;
             queries::plans::get_plan(conn, id)
         })?;
-        require_role_mcp(&self.db, plan.project_id, models::Role::Viewer)?;
+        require_read_mcp(&self.db, plan.project_id)?;
+        crate::authz::hide_unreadable_plan_issue_refs(
+            &self.db,
+            &super::current_identity(&self.db),
+            &mut plan,
+        )
+        .map_err(|e| e.to_string())?;
         log.entity(
             Some(plan.project_id),
             "plan",
@@ -6506,7 +6541,7 @@ No issues found."
     /// project it is linked into that the caller can see, or none while it is
     /// unlinked.
     fn attachment_read_project(&self, attachment_id: i64) -> Result<Option<i64>, String> {
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         self.read(|conn| {
             for (entity, entity_id) in queries::attachments::links_for(conn, attachment_id)? {
                 if let Some((_, Some(project_id))) = attachment_link_label(conn, entity, entity_id)?
@@ -6543,7 +6578,7 @@ No issues found."
                 let project_id =
                     crate::api::attachments::resolve_entity_project(&self.db, entity, entity_id)
                         .map_err(sanitize_error)?;
-                require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                require_page_read_mcp(&self.db, project_id)?;
                 // `resolve_attachment_entity` yields only issues and pages.
                 let entity_type = if matches!(entity, models::AttachmentEntity::Page) {
                     "page"
@@ -6557,7 +6592,7 @@ No issues found."
             }
             (None, Some(ident)) => {
                 let project_id = resolve_project(&*self.read_conn()?, ident)?;
-                require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                require_read_mcp(&self.db, project_id)?;
                 log.scope(Some(project_id));
                 let listed =
                     self.read(|conn| queries::attachments::list_for_project(conn, project_id))?;
@@ -6696,7 +6731,7 @@ No issues found."
         &self,
         attachments: &[models::Attachment],
     ) -> Result<Vec<AttachmentRow>, String> {
-        let visible = visible_project_ids_mcp(&self.db)?;
+        let visible = readable_project_ids_mcp(&self.db)?;
         let is_visible = |project_id: Option<i64>| match (&visible, project_id) {
             (None, _) => true,
             (Some(_), None) => false,
@@ -17560,6 +17595,84 @@ mod authz_gating_tests {
             }))
         });
         assert!(allowed.contains("secret.txt"), "viewer list: {allowed}");
+    }
+
+    // ── LIF-583: a published project is readable by every key ───
+
+    #[test]
+    fn a_non_member_key_reads_a_published_project_but_cannot_write() {
+        let (m, _admin, _lead, maintainer, _viewer, non_member, project_id, _guard) =
+            setup_membership_mcp();
+        as_user(&maintainer, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: Some("MEM".into()),
+                title: "Readable target".into(),
+                ..Default::default()
+            }))
+        });
+        let read = || {
+            as_user(&non_member, || {
+                m.get_issue(Parameters(GetIssueInput {
+                    identifier: "MEM-1".into(),
+                    ..Default::default()
+                }))
+            })
+        };
+        assert!(is_forbidden(&read()), "unpublished: {}", read());
+
+        m.db.write()
+            .unwrap()
+            .execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [project_id],
+            )
+            .unwrap();
+
+        let issue = read();
+        assert!(issue.contains("Readable target"), "{issue}");
+        let comments = as_user(&non_member, || {
+            m.list_comments(Parameters(ListCommentsInput {
+                identifier: "MEM-1".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(!is_forbidden(&comments), "{comments}");
+        let board = as_user(&non_member, || {
+            m.get_board(Parameters(GetBoardInput {
+                project: Some("MEM".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(board.contains("MEM-1"), "{board}");
+        let projects = as_user(&non_member, || {
+            m.list_resources(Parameters(ListResourcesInput {
+                resource_type: "project".into(),
+                show_members: Some(vec!["lead".into(), "maintainer".into(), "viewer".into()]),
+                ..Default::default()
+            }))
+            .text
+        });
+        assert!(projects.contains("MEM"), "{projects}");
+        assert!(
+            !projects.contains(&maintainer.username),
+            "the roster stays with the members: {projects}"
+        );
+
+        let comment = as_user(&non_member, || {
+            m.add_comment(Parameters(AddCommentInput {
+                identifier: "MEM-1".into(),
+                content: "drive-by".into(),
+            }))
+        });
+        assert!(is_forbidden(&comment), "{comment}");
+        let update = as_user(&non_member, || {
+            m.update_issue(Parameters(UpdateIssueInput {
+                identifier: "MEM-1".into(),
+                title: Some("defaced".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(is_forbidden(&update), "{update}");
     }
 
     fn text_of_result(result: &rmcp::model::CallToolResult) -> String {

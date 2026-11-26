@@ -381,6 +381,140 @@ pub(crate) fn require_project_or_workspace_role_conn(
     }
 }
 
+// ── Read access to published projects (LIF-583) ─────────────────
+
+/// Require read access to `project_id`.
+///
+/// A published project is readable by everyone: an anonymous visitor, any
+/// signed-in account, any API key. Anything else needs at least `Viewer`.
+/// Only reads may use this gate; a write keeps its membership role, so a
+/// published project never lets a non-member change anything.
+///
+/// An anonymous caller (`None`) reads published projects and nothing else,
+/// whatever the authorization mode.
+pub fn require_read(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+    project_id: i64,
+) -> Result<(), LificError> {
+    let conn = db.read()?;
+    require_read_conn(&conn, identity, project_id)
+}
+
+pub(crate) fn require_read_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+    project_id: i64,
+) -> Result<(), LificError> {
+    if queries::is_published(conn, project_id)? {
+        return Ok(());
+    }
+    if identity.is_none() {
+        return Err(insufficient_role(Role::Viewer));
+    }
+    require_role_conn(conn, identity, project_id, Role::Viewer)
+}
+
+/// [`require_read`] for an entity that may be a workspace-level page
+/// (`project_id = None`). Workspace pages are never published, so they keep
+/// the workspace gate and stay closed to anonymous callers.
+pub(crate) fn require_read_or_workspace_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+    project_id: Option<i64>,
+) -> Result<(), LificError> {
+    match project_id {
+        Some(project_id) => require_read_conn(conn, identity, project_id),
+        None if identity.is_none() => Err(insufficient_role(Role::Viewer)),
+        None => require_workspace_admin_conn(conn, identity),
+    }
+}
+
+/// [`require_read_or_workspace_conn`] on a pooled read connection.
+pub fn require_read_or_workspace(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+    project_id: Option<i64>,
+) -> Result<(), LificError> {
+    let conn = db.read()?;
+    require_read_or_workspace_conn(&conn, identity, project_id)
+}
+
+/// Whether the caller may read `project_id`, as a yes or no.
+pub(crate) fn can_read_project(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+    project_id: i64,
+) -> Result<bool, LificError> {
+    match require_read(db, identity, project_id) {
+        Ok(()) => Ok(true),
+        Err(LificError::Forbidden(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// A plan can anchor on, and link steps to, issues in other projects. Drop
+/// the identifier and status of every such issue the caller cannot read, so
+/// a published plan does not name issues in a private project.
+pub(crate) fn hide_unreadable_plan_issue_refs(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+    plan: &mut crate::db::models::Plan,
+) -> Result<(), LificError> {
+    let Some(readable) = readable_project_ids(db, identity)? else {
+        return Ok(());
+    };
+    let conn = db.read()?;
+    let hidden = |issue_id: i64| -> bool {
+        queries::get_issue(&conn, issue_id)
+            .ok()
+            .is_none_or(|issue| !readable.contains(&issue.project_id))
+    };
+    if let Some(issue_id) = plan.issue_id
+        && hidden(issue_id)
+    {
+        plan.issue_id = None;
+        plan.anchor_identifier = None;
+    }
+    fn walk(steps: &mut [crate::db::models::PlanStepNode], hidden: &dyn Fn(i64) -> bool) {
+        for step in steps {
+            if step.issue_id.is_some_and(hidden) {
+                step.issue_id = None;
+                step.issue_identifier = None;
+                step.issue_status = None;
+            }
+            walk(&mut step.children, hidden);
+        }
+    }
+    walk(&mut plan.steps, &hidden);
+    Ok(())
+}
+
+/// The cross-project read filter: [`visible_project_ids`] plus every
+/// published project.
+///
+/// For reads only (search, project and issue listings, relation filtering).
+/// The workspace views that mean "my work" (home, inbox, agent activity,
+/// briefings) keep [`visible_project_ids`], so publishing a project does not
+/// fill a stranger's own dashboard with it.
+pub fn readable_project_ids(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+) -> Result<Option<HashSet<i64>>, LificError> {
+    if identity.is_none() {
+        let conn = db.read()?;
+        return Ok(Some(queries::published_project_ids(&conn)?));
+    }
+    match visible_project_ids(db, identity)? {
+        None => Ok(None),
+        Some(mut ids) => {
+            let conn = db.read()?;
+            ids.extend(queries::published_project_ids(&conn)?);
+            Ok(Some(ids))
+        }
+    }
+}
+
 // ── visible_project_ids ──────────────────────────────────────────
 
 /// The cross-project read filter for search / project listing / any

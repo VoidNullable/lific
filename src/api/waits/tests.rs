@@ -207,7 +207,9 @@ async fn the_clock_reports_the_servers_day_and_utc_offset() {
 }
 
 #[tokio::test]
-async fn the_clock_needs_a_signed_in_caller() {
+async fn the_clock_answers_an_anonymous_reader() {
+    // LIF-583: it carries no project data, and a reader of a published
+    // project needs it to show waits as a member sees them.
     let (db, ..) = setup_membership_test();
     let anonymous = with_client_ip_test_layers(
         crate::api::router(db, &[]).layer(axum::Extension(
@@ -217,6 +219,6 @@ async fn the_clock_needs_a_signed_in_caller() {
     );
     assert_eq!(
         json_get(&anonymous, "/api/clock").await.status(),
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
 }

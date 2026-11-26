@@ -40,6 +40,23 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Whether `project_id` names a published project. A missing project is not
+/// published, so callers cannot tell the two apart from this answer.
+pub fn is_published(conn: &Connection, project_id: i64) -> Result<bool, LificError> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM projects WHERE id = ?1 AND is_public = 1")?
+        .exists(params![project_id])?)
+}
+
+/// The ids of every published project.
+pub fn published_project_ids(conn: &Connection) -> Result<HashSet<i64>, LificError> {
+    let mut stmt = conn.prepare_cached("SELECT id FROM projects WHERE is_public = 1")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Stored personal ranks precede projects the user has not ordered yet.
 /// This is unfiltered, like `list_projects`; callers must apply visibility.
 pub fn list_projects_for_user(conn: &Connection, user_id: i64) -> Result<Vec<Project>, LificError> {

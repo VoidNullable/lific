@@ -16,10 +16,12 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::queries::changes::{clamp_changes_limit, get_index, list_changes};
+use crate::db::queries::changes::{
+    clamp_changes_limit, get_index, get_project_index, list_changes,
+};
 use crate::db::{
     DbPool,
-    models::{ChangesPage, IndexSnapshot, Role},
+    models::{ChangesPage, IndexSnapshot},
 };
 use crate::error::LificError;
 
@@ -42,7 +44,7 @@ pub(super) async fn project_changes(
     Path(id): Path<i64>,
     Query(q): Query<ChangesQuery>,
 ) -> Result<Json<ChangesPage>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     let limit = clamp_changes_limit(q.limit);
     let since = q.since.unwrap_or(0);
     with_read(&db, |conn| list_changes(conn, id, since, limit)).map(Json)
@@ -54,7 +56,17 @@ pub(super) async fn project_index(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<IndexSnapshot>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
+    // An anonymous reader gets the project's own watermark rather than the
+    // instance-wide counter, so polling a published project cannot be used to
+    // watch how often private projects are written to.
+    if identity.is_none() {
+        return with_read(&db, |conn| {
+            let tx = conn.unchecked_transaction()?;
+            get_project_index(&tx, id)
+        })
+        .map(Json);
+    }
     with_read(&db, |conn| get_index(conn, id)).map(Json)
 }
 

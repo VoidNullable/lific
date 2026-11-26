@@ -1,11 +1,16 @@
 mod activity;
 mod agents;
+// LIF-583: budgets and boundary for reading published projects without an
+// account. Entered from the auth middleware.
+pub(crate) mod anonymous;
 mod archived_projects;
 /// LIF-418: the MCP attachment tools reuse this module's authorization gates
 /// and filename hygiene verbatim rather than growing a second copy, so the
 /// module is crate-visible even though its handlers stay `pub(super)`.
 pub(crate) mod attachments;
 mod auth;
+#[cfg(test)]
+mod publication_tests;
 // `pub` only for the three comment paging header names, which the global CORS
 // layer in `server` has to expose by the same names this module sets them by.
 pub mod comments;
@@ -20,8 +25,6 @@ mod plans;
 mod project_archives;
 mod project_groups;
 mod projects;
-// Mounted separately from the authenticated API by server::build_app.
-pub mod public;
 mod repo_bindings;
 mod resources;
 mod sync;
@@ -53,6 +56,8 @@ use crate::authz::filter_visible;
 use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 
+pub use anonymous::AnonymousReads;
+pub(crate) use anonymous::{is_anonymous_read, serve as serve_anonymous};
 pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
 
 /// Build the full API router.
@@ -467,13 +472,44 @@ fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<D
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn events_ws(
     State(db): State<DbPool>,
     Extension(realtime): Extension<crate::realtime::RealtimeHub>,
     Extension(allowed_origins): Extension<Vec<String>>,
+    anonymous: Option<Extension<std::sync::Arc<AnonymousReads>>>,
+    auth_config: Option<Extension<crate::config::AuthConfig>>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, LificError> {
+    // LIF-583: no session cookie at all is an anonymous reader, who may follow
+    // published projects. A cookie that is present but invalid is still the
+    // 403 below, so a signed-out tab learns its session is gone.
+    if websocket_origin_allowed(&headers, &allowed_origins)
+        && websocket_session_token(&headers).is_none()
+        && auth_config.is_some_and(|Extension(config)| config.required)
+        && let Some(Extension(reads)) = anonymous
+    {
+        reads.admit(
+            peer.map(|Extension(axum::extract::ConnectInfo(addr))| addr),
+            &headers,
+        )?;
+        let Some(permit) = realtime.try_acquire_anonymous_socket() else {
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "websocket connection limit reached" })),
+            )
+                .into_response());
+        };
+        return Ok(upgrade_events_socket(
+            ws,
+            realtime,
+            db,
+            crate::realtime::SocketViewer::Anonymous,
+            permit,
+        ));
+    }
     let validated = validate_websocket_request(&db, &headers, &allowed_origins)?;
     let Some(permit) = realtime.try_acquire_socket(validated.user.id) else {
         return Ok((
@@ -482,25 +518,36 @@ async fn events_ws(
         )
             .into_response());
     };
+    Ok(upgrade_events_socket(
+        ws,
+        realtime,
+        db,
+        crate::realtime::SocketViewer::Session {
+            token: validated.session_token,
+            user: validated.user,
+        },
+        permit,
+    ))
+}
+
+fn upgrade_events_socket(
+    ws: WebSocketUpgrade,
+    realtime: crate::realtime::RealtimeHub,
+    db: DbPool,
+    viewer: crate::realtime::SocketViewer,
+    permit: crate::realtime::SocketPermit,
+) -> Response {
     // Realtime is server-pushed; clients send only heartbeats and bounded
     // activity-baseline requests. Cap application data far below
-    // Axum/Tungstenite's 64 MiB default so an authenticated peer cannot force
-    // large discarded message allocations.
-    Ok(ws
-        .read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
+    // Axum/Tungstenite's 64 MiB default so a peer cannot force large
+    // discarded message allocations.
+    ws.read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
         .max_message_size(crate::realtime::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
         .on_upgrade(move |socket| {
-            crate::realtime::serve_socket(
-                socket,
-                realtime,
-                db,
-                validated.session_token,
-                validated.user,
-                permit,
-            )
+            crate::realtime::serve_socket(socket, realtime, db, viewer, permit)
         })
-        .into_response())
+        .into_response()
 }
 
 struct ValidatedWebSocket {
@@ -661,7 +708,7 @@ fn retain_visible_relations(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     issues: &mut [Issue],
 ) -> Result<(), LificError> {
-    let visible = crate::authz::visible_project_ids(db, identity)?;
+    let visible = crate::authz::readable_project_ids(db, identity)?;
     with_read(db, |conn| {
         queries::retain_visible_relations(conn, issues, visible.as_ref());
         Ok(())
@@ -785,7 +832,7 @@ async fn search(
     //
     // LIF-476: when no hit contains every word, the results are the ranked
     // any-word fallback and each carries `partial_match: true`.
-    let visible = crate::authz::visible_project_ids(&db, &identity)?;
+    let visible = crate::authz::readable_project_ids(&db, &identity)?;
     let results = with_read(&db, |conn| {
         queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
     })?;
@@ -2954,6 +3001,117 @@ mod authz_gating_tests {
         // told its view is stale to resync against the stale number.
         assert_eq!(request_activity_baseline(&mut socket).await, initial + 1);
         server.abort();
+    }
+
+    // ── LIF-583: anonymous sockets on published projects ─────────
+
+    async fn anonymous_websocket_server(
+        db: crate::db::DbPool,
+        realtime: crate::realtime::RealtimeHub,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut auth = crate::config::Config::default().auth;
+        auth.required = true;
+        let app = super::router(db, &[])
+            .layer(axum::Extension(realtime))
+            .layer(axum::Extension(auth))
+            .layer(axum::Extension(std::sync::Arc::new(
+                super::AnonymousReads::new(std::sync::Arc::from(Vec::new())),
+            )));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("ws://{address}/api/events/ws"), server)
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_socket_follows_published_projects_only() {
+        let db = crate::db::open_memory().expect("test db");
+        let (published, private) = {
+            let conn = db.write().unwrap();
+            let project = |identifier: &str| {
+                crate::db::queries::create_project(
+                    &conn,
+                    &crate::db::models::CreateProject {
+                        name: identifier.into(),
+                        identifier: identifier.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id
+            };
+            let (published, private) = (project("PUB"), project("PRIV"));
+            conn.execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [published],
+            )
+            .unwrap();
+            (published, private)
+        };
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = anonymous_websocket_server(db, realtime.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .expect("a visitor with no cookie opens a socket");
+        // The baseline round trip proves the socket loop is running before
+        // anything is sent.
+        request_activity_baseline(&mut socket).await;
+
+        // One at a time, each followed by a baseline round trip: an event the
+        // socket forwarded would arrive before the baseline answer.
+        let hidden = [
+            (
+                crate::realtime::RealtimeEvent::ProjectUpdated {
+                    project_id: private,
+                },
+                None,
+            ),
+            (
+                crate::realtime::RealtimeEvent::ProjectCreated {
+                    project_id: published,
+                },
+                Some(vec![1]),
+            ),
+        ];
+        for (event, users) in hidden {
+            match users {
+                Some(users) => realtime.send_to_users(event, users),
+                None => realtime.send(event),
+            }
+            socket
+                .send(Message::Text(ACTIVITY_BASELINE_REQUEST.into()))
+                .await
+                .unwrap();
+            let next = next_realtime_event(&mut socket).await;
+            assert_eq!(next["type"], "activity.baseline", "{next}");
+        }
+        realtime.send(crate::realtime::RealtimeEvent::ProjectUpdated {
+            project_id: published,
+        });
+        let event = next_realtime_event(&mut socket).await;
+        assert_eq!(event["type"], "project.updated", "{event}");
+        assert_eq!(event["project_id"], published, "{event}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anonymous_sockets_share_one_bounded_budget() {
+        let hub = crate::realtime::RealtimeHub::new();
+        let held: Vec<_> = (0..crate::realtime::MAX_ANONYMOUS_SOCKETS)
+            .map(|_| hub.try_acquire_anonymous_socket().expect("within budget"))
+            .collect();
+        assert!(hub.try_acquire_anonymous_socket().is_none());
+        // Signed-in users are not crowded out.
+        assert!(hub.try_acquire_socket(1).is_some());
+        drop(held);
+        assert!(hub.try_acquire_anonymous_socket().is_some());
     }
 
     // ── LIF-440: WebSocket event replay ──────────────────────────
