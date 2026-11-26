@@ -1046,7 +1046,10 @@ pub struct Comment {
 
 /// What a comment is (migration 056). The string forms match the column's
 /// CHECK constraint exactly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[schemars(crate = "rmcp::schemars")]
 #[serde(rename_all = "lowercase")]
 pub enum CommentKind {
     #[default]

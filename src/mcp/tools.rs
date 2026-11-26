@@ -181,6 +181,37 @@ fn bounded_comment_response(
     }
 }
 
+fn decision_section(
+    decisions: &queries::comments::DecisionSummaries,
+    identifier: &str,
+    available: usize,
+) -> Result<String, String> {
+    if decisions.total == 0 {
+        return Ok(String::new());
+    }
+    const DECISION_BYTES: usize = 32 * 1024;
+    let budget = available.min(DECISION_BYTES);
+    let envelope = encoded_tool_result_bytes("")?;
+    for shown in (0..=decisions.items.len()).rev() {
+        let mut section = String::from("\nDecisions:\n");
+        for (id, summary) in decisions.items[..shown].iter().rev() {
+            writeln!(section, "- #{id}: {summary}").map_err(|error| error.to_string())?;
+        }
+        let omitted = decisions.total - shown as i64;
+        if omitted > 0 {
+            writeln!(
+                section,
+                "- ({omitted} earlier decisions not shown: list_comments identifier={identifier} kind=decision)"
+            ).map_err(|error| error.to_string())?;
+        }
+        // Even with no summary room, the pointer fits the response overhead reserve.
+        if shown == 0 || encoded_tool_result_bytes(&section)? - envelope <= budget {
+            return Ok(section);
+        }
+    }
+    unreachable!("the zero-summary pointer always fits the overhead reserve")
+}
+
 /// LIF-376: the single place a tool's `Err` becomes its returned text. Every
 /// `*_inner` returns the bare message; this stamps the `Error: ` prefix every
 /// MCP tool response has always carried, so the wrappers stay one-liners and
@@ -2803,14 +2834,6 @@ No issues found."
                 .map(|_| ())
         })
         .map_err(|error| format!("failed to format response: {error}"))?;
-        let decisions = self.read(|conn| queries::comments::decision_summaries(conn, issue.id))?;
-        if !decisions.is_empty() {
-            preamble.push_str("\nDecisions:\n");
-            for (id, summary) in decisions {
-                writeln!(preamble, "- #{id}: {summary}")
-                    .map_err(|error| format!("failed to format response: {error}"))?;
-            }
-        }
         // An issue too big to render before a single comment is refused by
         // name rather than served as a truncated document. Nothing here is
         // silently cut.
@@ -2819,6 +2842,16 @@ No issues found."
             &issue.identifier,
         )
         .map_err(|error| error.to_string())?;
+        let decisions = self.read(|conn| queries::comments::decision_summaries(conn, issue.id))?;
+        let has_decisions = decisions.total > 0;
+        let section = decision_section(
+            &decisions,
+            &issue.identifier,
+            allowance.saturating_sub(1024),
+        )?;
+        let section_bytes = encoded_tool_result_bytes(&section)? - encoded_tool_result_bytes("")?;
+        preamble.push_str(&section);
+        let allowance = allowance.saturating_sub(section_bytes);
 
         // Authorization already passed, so a failure here is a real database
         // fault and must surface rather than silently render a comment-less
@@ -2827,6 +2860,7 @@ No issues found."
             let total = queries::comments::count_comments(conn, parent, None)?;
             let (comments, budget_limited) = match window {
                 None => (Vec::new(), false),
+                Some(_) if has_decisions && allowance == 0 => (Vec::new(), true),
                 Some(limit) => {
                     // Newest-first off the index, then flipped: the display
                     // order is chronological, the *selection* is the tail.
@@ -2840,79 +2874,92 @@ No issues found."
                         Some(limit),
                         Some(0),
                         allowance,
-                    )?;
-                    let mut newest = page.items;
-                    newest.reverse();
-                    (newest, page.budget_limited)
+                    );
+                    match page {
+                        Ok(page) => {
+                            let mut newest = page.items;
+                            newest.reverse();
+                            (newest, page.budget_limited)
+                        }
+                        Err(crate::error::LificError::PayloadTooLarge(_)) if has_decisions => {
+                            (Vec::new(), true)
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             };
             Ok((total, comments, budget_limited))
         })?;
-        let response = bounded_comment_response(
-            comments.len(),
-            || {
-                format!(
-                    "{} and its newest comment cannot fit the encoded response budget. Use list_comments to read the thread separately.",
-                    issue.identifier
-                )
-            },
-            |shown, encoded_limit| {
-                let comments = &comments[comments.len() - shown..];
-                let budget_limited = budget_limited || encoded_limit;
-                let mut output = preamble.clone();
-                let result = (|output: &mut String| {
-                    // `none` is a request for the count, so it answers with the count
-                    // even when that count is zero: "0, omitted" is the fact the
-                    // caller asked for, and suppressing it means the one mode whose
-                    // entire job is reporting the number silently reports nothing.
-                    // `recent` and `all` are requests for comments, and an issue with
-                    // none of those keeps its clean, header-free output.
-                    if total == 0 && comment_mode != "none" {
-                        return Ok(());
-                    }
-                    let shown = comments.len() as i64;
-                    match comment_mode {
-                        "none" => writeln!(
-                            output,
-                            "\n--- Comments ({total}, omitted — use list_comments) ---"
-                        )?,
-                        "recent" if shown < total => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
-                        )?,
-                        // `all` past the cap, or past the response-byte budget. Say
-                        // plainly that this is a window, not the thread, and name the
-                        // tool that pages the rest. When bytes rather than rows ended
-                        // it, say so: "3 of 40" is otherwise unexplainable next to a
-                        // 500-row cap, and an agent has no way to tell whether asking
-                        // again would help.
-                        _ if shown < total && budget_limited => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing the most recent {shown}; \
+        let render = |shown: usize, encoded_limit: bool| {
+            let comments = &comments[comments.len() - shown..];
+            let budget_limited = budget_limited || encoded_limit;
+            let mut output = preamble.clone();
+            let result = (|output: &mut String| {
+                // `none` is a request for the count, so it answers with the count
+                // even when that count is zero: "0, omitted" is the fact the
+                // caller asked for, and suppressing it means the one mode whose
+                // entire job is reporting the number silently reports nothing.
+                // `recent` and `all` are requests for comments, and an issue with
+                // none of those keeps its clean, header-free output.
+                if total == 0 && comment_mode != "none" {
+                    return Ok(());
+                }
+                let shown = comments.len() as i64;
+                match comment_mode {
+                    "none" => writeln!(
+                        output,
+                        "\n--- Comments ({total}, omitted — use list_comments) ---"
+                    )?,
+                    "recent" if shown < total => writeln!(
+                        output,
+                        "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
+                    )?,
+                    // `all` past the cap, or past the response-byte budget. Say
+                    // plainly that this is a window, not the thread, and name the
+                    // tool that pages the rest. When bytes rather than rows ended
+                    // it, say so: "3 of 40" is otherwise unexplainable next to a
+                    // 500-row cap, and an agent has no way to tell whether asking
+                    // again would help.
+                    _ if shown < total && budget_limited => writeln!(
+                        output,
+                        "\n--- Comments ({total}, showing the most recent {shown}; \
                      the rest did not fit the response size budget — \
                      use list_comments to page them) ---"
-                        )?,
-                        _ if shown < total => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing the most recent {shown}; \
-                     use list_comments to page the rest) ---"
-                        )?,
-                        _ => writeln!(output, "\n--- Comments ({total}) ---")?,
-                    }
-                    write!(
+                    )?,
+                    _ if shown < total => writeln!(
                         output,
-                        "{}",
-                        CommentLines {
-                            comments,
-                            parent_identifier: &issue.identifier,
-                            parent,
-                            context: context.as_deref(),
-                        }
-                    )
-                })(&mut output);
-                finish_response(output, result)
-            },
-        );
+                        "\n--- Comments ({total}, showing the most recent {shown}; \
+                     use list_comments to page the rest) ---"
+                    )?,
+                    _ => writeln!(output, "\n--- Comments ({total}) ---")?,
+                }
+                write!(
+                    output,
+                    "{}",
+                    CommentLines {
+                        comments,
+                        parent_identifier: &issue.identifier,
+                        parent,
+                        context: context.as_deref(),
+                    }
+                )
+            })(&mut output);
+            finish_response(output, result)
+        };
+        let response = bounded_comment_response(
+            comments.len(),
+            || format!(
+                "{} and its newest comment cannot fit the encoded response budget. Use list_comments to read the thread separately.",
+                issue.identifier
+            ),
+            render,
+        ).or_else(|error| {
+            if has_decisions {
+                bounded_comment_response(0, || error, |_, _| render(0, true))
+            } else {
+                Err(error)
+            }
+        });
         if response.is_ok() {
             log.entity(
                 Some(issue.project_id),
@@ -5365,27 +5412,23 @@ No issues found."
             }
         };
 
-        // This response is comments plus one header line and one continuation
-        // line, both of which are still bytes the 2 MiB budget promised. They
-        // cannot be rendered before their own counts are known, so what they
-        // will cost is reserved instead: the two lines are a fixed template
-        // around a parent identifier and a rendered URL, and this reserve is
-        // an order of magnitude past the longest either can be.
-        const HEADING_RESERVE: usize = 4 * 1024;
-        let allowance = queries::comments::remaining_budget(HEADING_RESERVE, &parent_identifier)
-            .map_err(|error| error.to_string())?;
-
         let (page, total) = self.read(|conn| {
-            let comments = queries::comments::list_comments_page_within(
+            let comments = queries::comments::list_comments_by_kind(
                 conn,
                 parent,
                 input.author.as_deref(),
                 Some(order),
                 Some(limit),
                 Some(offset),
-                allowance,
+                None,
+                input.kind,
             )?;
-            let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
+            let total = queries::comments::count_comments_by_kind(
+                conn,
+                parent,
+                input.author.as_deref(),
+                input.kind,
+            )?;
             Ok((comments, total))
         })?;
         let comments = page.items;
@@ -5406,7 +5449,7 @@ No issues found."
             comments.len(),
             || {
                 format!(
-                    "Comment #{} cannot fit the encoded response budget. To deliberately skip it, call list_comments with the same author/order and offset={}.",
+                    "Comment #{} cannot fit the encoded response budget. To deliberately skip it, call list_comments with the same kind/author/order and offset={}.",
                     comments[0].id,
                     offset + 1
                 )
@@ -5469,12 +5512,12 @@ No issues found."
                     if budget_limited {
                         writeln!(
                             output,
-                            "\n... {remaining} more comment(s) — this page stopped at the response size budget, not the row limit; call again with the same author/order/limit and offset={next_offset}"
+                            "\n... {remaining} more comment(s): this page stopped at the response size budget, not the row limit; call again with the same kind/author/order/limit and offset={next_offset}"
                         )
                     } else {
                         writeln!(
                             output,
-                            "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}"
+                            "\n... {remaining} more comment(s): call again with the same kind/author/order/limit and offset={next_offset}"
                         )
                     }
                 })
@@ -10459,7 +10502,7 @@ mod tests {
         assert!(result.starts_with("Error: "), "{}", &result[..80]);
         assert!(result.contains("PRJ-1"), "the refusal names the issue");
         assert!(
-            result.contains("comments=none"),
+            result.contains("/api/issues/resolve/PRJ-1"),
             "and a way to read it anyway"
         );
     }
@@ -10760,7 +10803,7 @@ mod tests {
             "got: {result}"
         );
         assert!(
-            result.contains("call again with the same author/order/limit and offset=3"),
+            result.contains("call again with the same kind/author/order/limit and offset=3"),
             "got: {result}"
         );
         // Explicit asc, so the first 3 are the oldest: 1,2,3.
@@ -10813,7 +10856,7 @@ mod tests {
         assert!(!result.contains("comment number 2"), "got: {result}");
         assert!(!result.contains("comment number 5"), "got: {result}");
         assert!(
-            result.contains("call again with the same author/order/limit and offset=4"),
+            result.contains("call again with the same kind/author/order/limit and offset=4"),
             "got: {result}"
         );
         assert!(
@@ -10881,7 +10924,7 @@ mod tests {
         assert!(!result.contains("comment number 5\n"), "got: {result}");
         assert!(
             result.contains(&format!(
-                "call again with the same author/order/limit and offset={}",
+                "call again with the same kind/author/order/limit and offset={}",
                 queries::DEFAULT_PAGE_LIMIT
             )),
             "got: {result}"
@@ -12467,6 +12510,7 @@ mod tests {
         }));
 
         let mine = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: Some("testuser".into()),
             order: None,
@@ -12476,6 +12520,7 @@ mod tests {
         assert!(mine.contains("Mine"), "got: {mine}");
 
         let ghost = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: Some("ghost".into()),
             order: None,
@@ -12510,12 +12555,14 @@ mod tests {
             order: Some("desc".into()),
             limit: None,
             offset: None,
+            kind: None,
         }));
         let second = listing.find("second").unwrap();
         let first = listing.find("first").unwrap();
         assert!(second < first, "desc must list newest first: {listing}");
 
         let bad = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: None,
             order: Some("newest".into()),

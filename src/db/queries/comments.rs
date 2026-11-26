@@ -354,46 +354,73 @@ pub fn list_comments(
     list_comments_exhaustive(conn, parent, author, order, None, None)
 }
 
-/// Decision summaries bypass the comment window without loading full bodies.
+pub struct DecisionSummaries {
+    pub items: Vec<(i64, String)>,
+    pub total: i64,
+}
+
+/// Read only the newest candidates. The renderer applies the encoded byte budget.
 pub fn decision_summaries(
     conn: &Connection,
     issue_id: i64,
-) -> Result<Vec<(i64, String)>, LificError> {
-    decision_summaries_within(conn, issue_id, row_budget())
-}
-
-fn decision_summaries_within(
-    conn: &Connection,
-    issue_id: i64,
-    budget: usize,
-) -> Result<Vec<(i64, String)>, LificError> {
+) -> Result<DecisionSummaries, LificError> {
+    let total = count_comments_by_kind(
+        conn,
+        CommentParent::Issue(issue_id),
+        None,
+        Some(CommentKind::Decision),
+    )?;
     let mut statement = conn.prepare_cached(
-        "SELECT id, substr(trim(content, char(10) || char(13) || char(9) || ' '), 1, 321)
+        "SELECT id, substr(content, 1, 4096)
          FROM comments WHERE issue_id = ?1 AND kind = 'decision' AND deleted_at IS NULL
-         ORDER BY created_at, id",
+         ORDER BY created_at DESC, id DESC LIMIT 50",
     )?;
     let rows = statement.query_map([issue_id], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     })?;
-    let mut summaries = Vec::new();
-    let mut bytes = 0;
+    let mut items = Vec::new();
     for row in rows {
         let (id, text) = row?;
-        let line = text.lines().next().unwrap_or("").trim();
+        items.push((id, decision_summary(&text)));
+    }
+    Ok(DecisionSummaries { items, total })
+}
+
+fn decision_summary(text: &str) -> String {
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some((marker, width)) = fence {
+            if line.chars().take_while(|c| *c == marker).count() >= width
+                && line.trim_matches(marker).trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker @ ('`' | '~')) = line.chars().next() {
+            let width = line.chars().take_while(|c| *c == marker).count();
+            if width >= 3 {
+                fence = Some((marker, width));
+                continue;
+            }
+        }
+        let heading = line.chars().take_while(|c| *c == '#').count();
+        if line.is_empty()
+            || (1..=6).contains(&heading)
+                && line[heading..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        {
+            continue;
+        }
         let mut summary: String = line.chars().take(320).collect();
         if line.chars().count() > 320 {
             summary.push('…');
         }
-        bytes += summary.len() + 64;
-        if bytes > budget {
-            return Err(LificError::PayloadTooLarge(
-                "Decision summaries exceed the response budget. Read decisions with list_comments."
-                    .into(),
-            ));
-        }
-        summaries.push((id, summary));
+        return summary;
     }
-    Ok(summaries)
+    "No prose in preview; read the full comment.".into()
 }
 
 /// Count comments for an issue or page after applying the same optional
@@ -402,6 +429,15 @@ pub fn count_comments(
     conn: &Connection,
     parent: CommentParent,
     author: Option<&str>,
+) -> Result<i64, LificError> {
+    count_comments_by_kind(conn, parent, author, None)
+}
+
+pub fn count_comments_by_kind(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    kind: Option<CommentKind>,
 ) -> Result<i64, LificError> {
     let (parent_col, id) = match parent {
         CommentParent::Issue(id) => ("c.issue_id", id),
@@ -413,9 +449,10 @@ pub fn count_comments(
                 "SELECT COUNT(*) FROM comments c
                  LEFT JOIN users u ON u.id = c.user_id
                  WHERE {parent_col} = ?1 AND c.deleted_at IS NULL
-                   AND COALESCE(c.imported_author, u.username) = ?2 COLLATE NOCASE"
+                    AND COALESCE(c.imported_author, u.username) = ?2 COLLATE NOCASE
+                    AND (?3 IS NULL OR c.kind = ?3)"
             ),
-            params![id, username],
+            params![id, username, kind],
             |row| row.get(0),
         )
         .map_err(Into::into)
@@ -423,9 +460,10 @@ pub fn count_comments(
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM comments c
-                 WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
+                  WHERE {parent_col} = ?1 AND c.deleted_at IS NULL
+                    AND (?2 IS NULL OR c.kind = ?2)"
             ),
-            params![id],
+            params![id, kind],
             |row| row.get(0),
         )
         .map_err(Into::into)
@@ -650,8 +688,9 @@ pub fn remaining_budget(spent: usize, subject: &str) -> Result<usize, LificError
         .ok_or_else(|| {
             LificError::PayloadTooLarge(format!(
                 "{subject} is {spent} bytes before any comments, past the \
-             {budget}-byte response budget. Read it in narrower pieces \
-             (get_issue with comments=none, then list_comments)."
+             {budget}-byte response budget. Read the full issue through REST \
+             GET /api/issues/resolve/{subject}, or shorten its description. \
+             Use list_comments identifier={subject} to read its discussion separately."
             ))
         })
 }
@@ -1502,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_summaries_bound_unicode_lines_and_refuse_partial_results() {
+    fn decision_summaries_bound_unicode_lines_and_skip_markdown_scaffolding() {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
         for text in [
@@ -1519,20 +1558,24 @@ mod tests {
             .unwrap();
         }
         let summaries = decision_summaries(&conn, issue_id).unwrap();
-        assert_eq!(summaries[0].1, "界".repeat(320));
-        assert_eq!(summaries[1].1, format!("{}…", "界".repeat(320)));
-        let exact = summaries
-            .iter()
-            .map(|(_, summary)| summary.len() + 64)
-            .sum::<usize>();
+        assert_eq!(summaries.total, 2);
+        assert_eq!(summaries.items[1].1, "界".repeat(320));
+        assert_eq!(summaries.items[0].1, format!("{}…", "界".repeat(320)));
+        for text in [
+            "## Decision\n\nUse SQLite.\nRationale",
+            "```rust\nlet db = 1;\n```\n\nUse SQLite.",
+            "### Decision\n~~~~text\n```\ncode\n~~~~\nUse SQLite.",
+        ] {
+            assert_eq!(decision_summary(text), "Use SQLite.");
+        }
         assert_eq!(
-            decision_summaries_within(&conn, issue_id, exact)
-                .unwrap()
-                .len(),
-            2
+            decision_summary("## Decision\n```sql\nSELECT 1;"),
+            "No prose in preview; read the full comment."
         );
-        let error = decision_summaries_within(&conn, issue_id, exact - 1).unwrap_err();
-        assert!(matches!(error, LificError::PayloadTooLarge(_)));
+        assert_eq!(
+            decision_summary("#123 is a comment reference."),
+            "#123 is a comment reference."
+        );
     }
 
     #[test]

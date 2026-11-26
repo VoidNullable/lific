@@ -112,7 +112,7 @@ Lists return one page, not the whole set, because a single comment can be 256 Ki
 
 `list_resources` returns every project, module, label or folder at once and ignores `limit` for them. `list_attachments` is not paged. `get_briefing` is not paged: its cut sections name the list call that shows everything.
 
-`get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones. Every mode includes a separate Decisions section with each decision comment's first-line summary. Record a choice with `add_comment(kind="decision")`; put its rationale below the first line.
+`get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones. Every mode includes a separate Decisions section, capped at the newest 50 entries and 32 KiB. If earlier decisions are omitted, follow its `list_comments(kind="decision")` pointer. Record a choice with `add_comment(kind="decision")`; put its rationale below the first prose line.
 
 ## Read the error text
 

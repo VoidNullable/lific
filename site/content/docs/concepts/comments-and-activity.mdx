@@ -17,7 +17,9 @@ A comment has a kind: `comment` (the default), `decision`, or `verification` whe
 
 Use `add_comment` with `kind: "decision"`, pass the same field when posting a comment over REST, or run `lific comment add APP-1 --content "Use SQLite" --kind decision`. In the web composer, check **Record as decision** before posting. Decision comments carry a **Decision** badge; **Decisions only** filters the whole thread, including older pages.
 
-`get_issue` always includes a **Decisions** section when the issue has decisions, even with `include_comments: "none"` or when the comment trail is trimmed. Each entry names the comment id and shows its first nonblank line, shortened to 320 characters with an ellipsis if necessary. Keep that first line useful on its own and put the rationale below it. Deleted decisions disappear from the section. If the summaries cannot fit the response budget, the read fails explicitly rather than silently dropping decisions.
+`get_issue` always includes a **Decisions** section when the issue has decisions, even with `include_comments: "none"` or when the comment trail is trimmed. It shows the newest decisions within 50 entries and 32 KiB, using less space when the issue's description needs it. A final line counts earlier decisions not shown and points to `list_comments identifier=APP-1 kind=decision`. Decisions cannot make the issue read fail because their summaries are too large.
+
+Each summary names the comment id and shows its first prose line, skipping leading Markdown headings and fenced code blocks. The line is shortened to 320 characters with an ellipsis when necessary. If the first 4,096 characters contain no prose, the summary says to read the full comment. Keep the first prose line useful on its own and put the rationale below it. Deleted decisions disappear from the section.
 
 Decision kinds survive project archive export and import. Editing a comment's text preserves its kind.
 

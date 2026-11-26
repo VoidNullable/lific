@@ -526,6 +526,8 @@ pub struct AddCommentInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListCommentsInput {
+    #[schemars(description = "Only comments of this kind: comment, decision, or verification")]
+    pub kind: Option<crate::db::models::CommentKind>,
     #[schemars(description = "Issue (LIF-1), page (LIF-DOC-1), or workspace page (DOC-1) ID")]
     pub identifier: String,
     #[schemars(description = "Only this author's comments")]

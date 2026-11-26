@@ -129,7 +129,7 @@ Returns one issue, or up to 50: title, status, priority, module, `seq`, labels, 
 | `identifiers` | `string[]` | No | Up to 50 issue identifiers to read in one call, instead of `identifier`. |
 | `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. Applies to every issue in a batch. |
 
-Every comment mode also includes a **Decisions** section when decisions exist. It lists every live decision comment's id and first nonblank line, shortened to 320 characters when necessary. This section is independent of the comment window.
+Every comment mode also includes a **Decisions** section when decisions exist. It lists the newest decision comments within 50 entries and 32 KiB, with less space used when necessary to fit the issue's description. Each summary uses the first prose line after leading Markdown headings and fenced code blocks, shortened to 320 characters. A final line counts omitted decisions and points to `list_comments identifier=APP-1 kind=decision`. This section is independent of the comment window.
 
 The status line ends with the issue's `seq`, for example `Status: active | Priority: high | Module: API | seq: 118`. Pass it to [`update_issue`](#update_issue) as `expected_seq` to refuse the write if the issue changes in the meantime.
 
@@ -544,7 +544,7 @@ Adds a comment to an issue or page, authored by the caller. Returns the comment'
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | `APP-1` for an issue, `APP-DOC-1` for a project page, `DOC-1` for a workspace page. |
 | `content` | `string` | Yes | Markdown. At most 262144 bytes. |
-| `kind` | `string` | No | `comment` (default) or `decision`. Decisions always appear as summaries in `get_issue`. |
+| `kind` | `string` | No | `comment` (default) or `decision`. Decisions appear in the separate `get_issue` summary section. |
 
 Commenting takes `viewer`. `@username` [mentions](/docs/concepts/comments-and-activity#mentions) in the body are resolved when the comment is saved.
 
@@ -555,6 +555,7 @@ Returns one page of a thread, newest first by default.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue, project page or workspace page identifier. |
+| `kind` | `string` | No | Filter to `comment`, `decision`, or `verification` before counting and pagination. Preserve it when following continuation offsets. |
 | `author` | `string` | No | Only comments by this username. |
 | `order` | `string` | No | `desc` (default, newest first) or `asc` (oldest first). |
 | `limit` | `integer` | No | Default 50, capped at 500. |
