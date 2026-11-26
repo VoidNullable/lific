@@ -903,8 +903,25 @@ export interface Issue {
   /** LIF-147: the named people. Absent for unassigned issues and for
    *  issues marked for any person. Always human accounts. */
   assignees?: IssueAssignee[];
+  /** LIF-525: the live claim, when a worker holds the issue right now.
+   *  Absent otherwise, including once a claim has expired. */
+  claim?: IssueClaim;
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+}
+
+/** LIF-525: a worker's time-limited hold on an issue. Timestamps are UTC
+ *  `YYYY-MM-DD HH:MM:SS`. */
+export interface IssueClaim {
+  user_id: number;
+  username: string;
+  display_name?: string | null;
+  /** The session holding it. Absent when the whole account holds it. */
+  worker?: string;
+  /** When this holder first claimed it; re-claims keep it. */
+  claimed_at: string;
+  /** Each re-claim moves it. */
+  expires_at: string;
 }
 
 // ── Assignment (LIF-147) ───────────────────────────────────
@@ -2538,6 +2555,18 @@ export interface HomeOverview {
   since: SinceSummary | null;
   /** Issues the caller or their agents moved to done, last 84 days. */
   my_done: DayCount[];
+  /** LIF-525: open issues under a live claim, most recently claimed first. */
+  claims: ClaimedIssue[];
+}
+
+export interface ClaimedIssue {
+  issue_id: number;
+  project_id: number;
+  identifier: string;
+  title: string;
+  status: string;
+  priority: string;
+  claim: IssueClaim;
 }
 
 /** With `projectId`, every aggregate covers that one project (the project

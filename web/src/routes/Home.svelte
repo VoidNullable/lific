@@ -39,6 +39,8 @@
   import ProjectFreshness from "../lib/home/ProjectFreshness.svelte";
   import DoneHeatmap from "../lib/home/DoneHeatmap.svelte";
   import HeatBar from "../lib/home/HeatBar.svelte";
+  import ClaimChip from "../lib/issues/ClaimChip.svelte"; // LIF-525
+  import { liveClaim } from "../lib/issues/claims";
   import { recordHomeVisit } from "../lib/home/lastVisit";
   import { ageLabel, daysSince, heat, importanceScore } from "../lib/issues/importance";
   import {
@@ -49,6 +51,7 @@
     User,
     Hourglass,
     Bot,
+    Lock,
   } from "lucide-svelte";
   import { projectCodeOf } from "../lib/references";
   import { getContext } from "svelte";
@@ -197,6 +200,12 @@
       .map((issue) => ({ issue, score: importanceScore(issue, now) }))
       .sort((a, b) => b.score - a.score);
   });
+
+  // LIF-525: claimed issues are out of the queue (the pool is `workable`,
+  // which leaves them out); they are listed under it with their holder.
+  let liveClaims = $derived(
+    (overview?.claims ?? []).filter((held) => liveClaim(held.claim, activityNow)),
+  );
 
   // ── Only you (LIF-506) ───────────────────────────────────────
   //
@@ -544,6 +553,34 @@
                 {agentQueue.length - QUEUE_CAP} more ready after these.
               </p>
             {/if}
+          {/if}
+
+          <!-- LIF-525: what workers hold right now, and who. -->
+          {#if liveClaims.length > 0}
+            <div class="pt-6" data-testid="claimed-now">
+              <div class="flex items-center gap-2 pb-1.5 text-caption font-medium text-[var(--text-muted)]">
+                <Lock size={13} class="shrink-0 text-[var(--text-faint)]" />
+                <span>Claimed now</span>
+                <span class="text-[var(--text-faint)] tabular-nums">{liveClaims.length}</span>
+              </div>
+              <div class="flex flex-col border-t border-[var(--border)]">
+                {#each liveClaims as held (held.issue_id)}
+                  <button
+                    class="w-full flex items-center gap-2.5 px-1 py-2 text-left border-b border-[var(--border)]
+                           hover:bg-[var(--chart-hover)] transition-colors"
+                    data-identifier={held.identifier}
+                    onclick={() => navigate(`/${projectIdent(held.project_id) ?? projectCodeOf(held.identifier)}/issues/${held.identifier}`)}
+                  >
+                    <StatusIcon status={held.status} size={14} />
+                    <span class="text-caption font-mono text-[var(--text-faint)] w-[64px] shrink-0 truncate">
+                      {held.identifier}
+                    </span>
+                    <span class="text-body-sm text-[var(--text)] truncate flex-1">{held.title}</span>
+                    <ClaimChip claim={held.claim} />
+                  </button>
+                {/each}
+              </div>
+            </div>
           {/if}
         </section>
 
