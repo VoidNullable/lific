@@ -47,6 +47,7 @@ const PASSWORD = "smoke-password-123";
 const ROUTES: { path: string; expect?: string[] }[] = [
   { path: "/", expect: ["Demo"] },
   { path: "/DEMO/overview", expect: ["Demo"] },
+  { path: "/DEMO/settings", expect: ["Danger zone"] },
   { path: "/DEMO/issues", expect: ["Smoke issue"] },
   // Issue detail and page detail carry the comment-window logic that broke
   // in LIF-428; the comment body must actually render.

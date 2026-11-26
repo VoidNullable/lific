@@ -102,6 +102,8 @@ export function routePageTitle(p: RouteTitleInput): string {
       return pageTitle("New project");
     case "project-import":
       return pageTitle("Import project");
+    case "project-overview":
+      return pageTitle("Overview", project);
     case "project-settings":
       return pageTitle("Settings", project);
     case "issue-new":

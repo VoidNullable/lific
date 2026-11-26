@@ -137,7 +137,7 @@ async function changeSession(page: Page, base: string, token: string) {
 }
 
 async function staleDownload(page: Page, base: string, leave: () => Promise<void>) {
-  await page.goto(`${base}/ARC/overview`);
+  await page.goto(`${base}/ARC/settings`);
   const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "Project archive", exact: true }) });
   await panel.getByRole("checkbox").check();
   let release!: () => void, arrived!: () => void, finished!: () => void;
@@ -184,7 +184,7 @@ async function main() {
 
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
   const source = await signedPage(a.base, a.token);
-  await source.goto(`${a.base}/ARC/overview`);
+  await source.goto(`${a.base}/ARC/settings`);
   const exportPanel = source.locator("section").filter({ has: source.getByRole("heading", { name: "Project archive", exact: true }) });
   await exportPanel.getByRole("checkbox").check();
   const downloaded = source.waitForEvent("download");
@@ -311,10 +311,10 @@ async function main() {
   deniedForm.append("archive", new File([await Bun.file(archivePath).bytes()], "ARC.lific.tar.gz", { type: "application/gzip" }));
   const denied = await fetch(`${b.base}/api/project-archives`, { method: "POST", headers: { Authorization: `Bearer ${regularToken}` }, body: deniedForm });
   assert.equal(denied.status, 403, "non-admin archive POST is refused in legacy mode");
-  await regular.goto(`${b.base}/ARC/overview`);
+  await regular.goto(`${b.base}/ARC/settings`);
   await visible(regular, "Archive specimen");
   assert.equal(await regular.getByRole("button", { name: "Download project archive" }).count(), 0);
-  assert(await regular.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile overview overflows");
+  assert(await regular.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile settings overflows");
   await source.setViewportSize({ width: 390, height: 844 });
   await exportPanel.getByRole("button", { name: "Download project archive" }).waitFor();
   assert(await source.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile export overflows");

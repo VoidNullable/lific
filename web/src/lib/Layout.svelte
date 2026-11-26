@@ -35,7 +35,7 @@
   import { navLink } from "./navLink";
   import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
-  import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot } from "lucide-svelte";
+  import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot, Settings2 } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
@@ -464,6 +464,12 @@
         label: "New group…",
         icon: FolderPlus,
         action: () => startCreatingGroup(project.id),
+      },
+      {
+        label: "Project settings",
+        icon: Settings2,
+        href: `#/${project.identifier}/settings`,
+        action: () => navigate(`/${project.identifier}/settings`),
       },
     ], e.currentTarget as HTMLElement);
   }
@@ -931,7 +937,7 @@
     const slug = rest.split("/")[1] ?? "";
     const labels: Record<string, string> = {
       overview: "Overview",
-      settings: "Overview",
+      settings: "Settings",
       issues: "Issues",
       board: "Board",
       modules: "Modules",
@@ -1109,8 +1115,8 @@
               <!-- Sub-nav: indented under the project with a vertical guide
                    line, matching the tree language used in Pages. -->
               <div id={`project-nav-${project.id}`} hidden={!open} class="project-subnav flex flex-col">
-                {#snippet subItem(href: string, label: string, Icon: typeof List)}
-                  {@const active = isActive(href)}
+                {#snippet subItem(href: string, label: string, Icon: typeof List, alsoActiveOn?: string)}
+                  {@const active = isActive(href) || (alsoActiveOn !== undefined && isActive(alsoActiveOn))}
                   <a href={`#${href}`} use:navLink={navigate} aria-current={active ? "page" : undefined}
                     class="sidebar-destination w-full h-8 flex items-center gap-2.5 px-2 rounded-md
                            text-left text-body-sm transition-colors"
@@ -1151,7 +1157,7 @@
                       {/each}
                     {/if}
                 {/snippet}
-                {@render subItem(`/${project.identifier}/overview`, "Overview", LayoutDashboard)}
+                {@render subItem(`/${project.identifier}/overview`, "Overview", LayoutDashboard, `/${project.identifier}/settings`)}
                 {@render subItem(`/${project.identifier}/issues`, "Issues", List)}
                 {@render subItem(`/${project.identifier}/board`, "Board", LayoutGrid)}
                 {@render subItem(`/${project.identifier}/modules`, "Modules", Layers)}

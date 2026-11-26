@@ -9,6 +9,7 @@
   import IssueNew from "./routes/IssueNew.svelte";
   import ProjectNew from "./routes/ProjectNew.svelte";
   import ProjectImport from "./routes/ProjectImport.svelte";
+  import ProjectOverview from "./routes/ProjectOverview.svelte";
   import ProjectSettings from "./routes/ProjectSettings.svelte";
   import PageList from "./routes/PageList.svelte";
   import Files from "./routes/Files.svelte";
@@ -507,7 +508,8 @@
     | { type: "app"; page: "instance-settings" }
     | { type: "app"; page: "project-new" }
     | { type: "app"; page: "project-import" }
-    | { type: "app"; page: "project-settings"; project: string }
+    | { type: "app"; page: "project-overview"; project: string }
+    | { type: "app"; page: "project-settings"; project: string; section: string | null }
     | { type: "app"; page: "issues"; project: string }
     | { type: "app"; page: "board"; project: string }
     | { type: "app"; page: "graph"; project: string }
@@ -610,11 +612,20 @@
       return { type: "app", page: "project-import" };
     }
 
-    // Project-scoped: /{IDENTIFIER}/overview (the project dashboard).
-    // `/settings` is kept as a back-compat alias for old links/bookmarks.
-    const projectOverviewMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/(overview|settings)$/i);
+    // Project-scoped: /{IDENTIFIER}/overview (the project dashboard) and
+    // /{IDENTIFIER}/settings, optionally ?section=labels to open at one.
+    const projectOverviewMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/overview$/i);
     if (projectOverviewMatch) {
-      return { type: "app", page: "project-settings", project: projectOverviewMatch[1] };
+      return { type: "app", page: "project-overview", project: projectOverviewMatch[1] };
+    }
+    const projectSettingsMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/settings$/i);
+    if (projectSettingsMatch) {
+      return {
+        type: "app",
+        page: "project-settings",
+        project: projectSettingsMatch[1],
+        section: query.get("section"),
+      };
     }
 
     // Project-scoped: /{IDENTIFIER}/issues
@@ -933,8 +944,10 @@
       <ProjectNew {navigate} />
     {:else if parsed.page === "project-import"}
       <ProjectImport {navigate} />
+    {:else if parsed.page === "project-overview"}
+      <ProjectOverview {navigate} projectIdentifier={parsed.project} {onProjectChange} />
     {:else if parsed.page === "project-settings"}
-      <ProjectSettings {navigate} projectIdentifier={parsed.project} {onProjectChange} />
+      <ProjectSettings {navigate} projectIdentifier={parsed.project} section={parsed.section} {onProjectChange} />
     {:else if parsed.page === "issues" || parsed.page === "board"}
       <!-- Single IssueList instance shared across the list/board routes.
            Rendering them as one branch keeps Svelte from unmounting +

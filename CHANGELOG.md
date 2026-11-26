@@ -81,6 +81,15 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Ctrl/⌘ . opens actions for the selected result: open it, open it in a new tab, copy its link or identifier, and for issues set the status or priority without leaving the palette.
 - The footer shows real keycaps, and reopening the palette within a minute restores your last query and selection.
 
+### Project overview
+
+- A project's overview is rebuilt in the style of Home. Five numbers lead it: open issues and their change this week, what is in progress, what closed in the last four weeks with a weekly chart, what an agent can pick up, and what waits on a person. A bar of every issue by status sits under them; click a status, a number or a label to open the issue list filtered to it.
+- A Work list ranks open issues with tabs for Needs attention, In progress, Ready for agents, For a person and Blocked. Blocked issues name their blocker.
+- The overview also shows the open count over 90 days, opened against closed for the last four weeks, each module's progress, active plans, pinned and recent pages, who has been working, and open issues per label. It refreshes as changes arrive, and says what agents and people opened and closed since your last visit.
+- Recent activity reads as sentences: "closed LIF-12", "moved LIF-4 to Active", "checked off a step in LIF-PLAN-2", with the issue's title and a comment's first words. A burst of edits by one person to one thing is folded into one line.
+- Settings move to their own tab at `/{PROJECT}/settings`, with a section index that follows the scroll: General (icon, name, description, identifier, lead, sidebar group), Labels, Members, Public view, Import and export, and an always-open Danger zone. The project lead is no longer under the danger zone. Projects' sidebar menus gain a Project settings item, and `?section=labels` opens the page at a section.
+- `GET /api/home/overview` accepts `project_id` to narrow every aggregate to one project.
+
 ### Storage
 
 - Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.

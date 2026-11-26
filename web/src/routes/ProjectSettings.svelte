@@ -1,16 +1,15 @@
 <script lang="ts">
-  // LIF-187: Project Overview. Deliberately calm + high-signal: an
-  // inline-editable identity hero, ONE importance-ranked "Needs attention"
-  // list, a recent-activity feed, and a gated danger zone. No KPI cards,
-  // no priority breakdown, no recently-updated list — signal over volume.
+  // Project settings: everything that changes a project rather than
+  // describing it, moved off the overview so neither page buries the
+  // other. A section index on the left follows the scroll; each section
+  // keeps the panel it always had (labels, members, publishing, archive,
+  // import), and the irreversible actions sit together at the end.
   import {
     listProjects,
     listIssues,
-    listProjectActivity,
     listUsers,
     me,
     getInstance,
-    getIssueCounts,
     updateProject,
     deleteProject,
     archiveProject,
@@ -20,8 +19,6 @@
     type Project,
     type ProjectGroup,
     type Issue,
-    type Activity,
-    type IssueStatusCounts,
     type UserSummary,
   } from "../lib/api";
   import {
@@ -37,25 +34,17 @@
   import ImportPanel from "../lib/ImportPanel.svelte";
   import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
+  import ProjectTopbar from "../lib/overview/ProjectTopbar.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
-  import { ageLabel, daysSince, importanceScore } from "../lib/issues/importance";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
-  import ProgressRing from "../lib/ProgressRing.svelte";
-  import StatusIcon from "../lib/StatusIcon.svelte";
-  import PriorityIcon from "../lib/PriorityIcon.svelte";
-  import { formatDate } from "../lib/format";
-  import TimeAgo from "../lib/TimeAgo.svelte";
-  import {
-    ChevronRight, Download, Pencil, Check, ArrowRight, History,
-    AlertTriangle, ChevronDown,
-  } from "lucide-svelte";
+  import CopyIdButton from "../lib/CopyIdButton.svelte";
+  import { Check, Download, AlertTriangle, Lock } from "lucide-svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
-  import CopyIdButton from "../lib/CopyIdButton.svelte";
-  import { getContext } from "svelte";
+  import { getContext, tick } from "svelte";
   // LIF-234: role-aware affordance gating. `canManage` = lead/admin (or
-  // enforcement off) — settings edits, danger zone, members, and import are
-  // all lead-level. `canEdit` = maintainer/admin — label management.
+  // enforcement off): identity edits, members, import and the danger zone.
+  // `canEdit` = maintainer/admin: label management.
   import { projectRole, loadProjectRole, deriveCanPublish } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
 
@@ -70,31 +59,27 @@
   let {
     navigate,
     projectIdentifier,
+    section = null,
     onProjectChange,
   }: {
     navigate: (path: string) => void;
     projectIdentifier: string;
+    /** Section to scroll to once loaded (`?section=labels`). */
+    section?: string | null;
     onProjectChange?: () => void;
   } = $props();
 
   let project = $state<Project | null>(null);
   let loading = $state(true);
   let error = $state("");
-
-  let counts = $state<IssueStatusCounts | null>(null);
   let issues = $state<Issue[]>([]);
-  let activity = $state<Activity[]>([]);
   let users = $state<UserSummary[]>([]);
 
-  // Inline-edit drafts
-  let editingName = $state(false);
   let draftName = $state("");
-  let editingDesc = $state(false);
   let draftDesc = $state("");
-  let savedAt = $state(0); // ms timestamp of last successful field save
+  let savedAt = $state(0);
 
   // Danger zone
-  let dangerOpen = $state(false);
   let newIdent = $state("");
   let identError = $state("");
   let renaming = $state(false);
@@ -123,17 +108,16 @@
     const found = projRes.data.find((p: Project) => p.identifier === ident);
     if (!found) { error = `Project ${ident} not found`; loading = false; return; }
     project = found;
-    // LIF-234: prime the shared role store for this project so `canManage`/
-    // `canEdit` below reflect the correct answer (Layout also primes it, but
-    // this makes the route self-sufficient and dedupes via the store cache).
+    draftName = found.name;
+    draftDesc = found.description;
+    // LIF-234: prime the shared role store so `canManage`/`canEdit` are
+    // right for this project (Layout primes it too; the store dedupes).
     loadProjectRole(found.id);
     leadValue = found.lead_user_id == null ? "" : String(found.lead_user_id);
     lastLead = found.lead_user_id;
 
-    const [countsRes, issuesRes, actRes, usersRes, meRes, instanceRes] = await Promise.all([
-      getIssueCounts(found.id),
+    const [issuesRes, usersRes, meRes, instanceRes] = await Promise.all([
       listIssues({ project_id: found.id, limit: 1000 }),
-      listProjectActivity(found.id, 14),
       listUsers(),
       // Who is signed in, and whether this instance signs in without a
       // password: both decide how a refused lead assignment recovers.
@@ -142,26 +126,28 @@
     ]);
     if (meRes.ok) currentUserId = meRes.data.id;
     if (instanceRes.ok) webAutoLogin = instanceRes.data.web_auto_login;
-    if (countsRes.ok) counts = countsRes.data;
     if (issuesRes.ok) issues = issuesRes.data;
-    if (actRes.ok) activity = actRes.data.items;
     if (usersRes.ok) users = usersRes.data;
     await loadGroups();
     loading = false;
+    if (section) {
+      await tick();
+      document.getElementById(`settings-${section}`)?.scrollIntoView({ block: "start" });
+    }
   }
 
-  // LIF-357: LabelManager only needs the parent to resync label *usage*, and
-  // usage comes from `issues` alone. Pointing its onChange at `loadAll` meant
-  // every label create, rename, recolor, delete, and merge flipped `loading`,
-  // which tore down the whole settings body (LabelManager included) and
-  // rebuilt it from five requests. That skeleton flash mid-edit is the
-  // "adding a label refreshes the page" behavior; it also reset the
-  // component's local state on every keystroke-sized action. Refetch the one
-  // list that can actually change, and leave `loading` alone.
+  // LIF-357: LabelManager only needs usage counts refreshed, and those come
+  // from `issues` alone. Reloading everything would flash the skeleton
+  // under an open label editor.
   async function refreshLabelUsage() {
     if (!project) return;
     const res = await listIssues({ project_id: project.id, limit: 1000 });
     if (res.ok) issues = res.data;
+  }
+
+  function markSaved() {
+    savedAt = Date.now();
+    window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
   }
 
   // ── Field-level autosave (no Save button) ────────────
@@ -171,40 +157,25 @@
     if (res.ok) {
       project = res.data;
       onProjectChange?.();
-      savedAt = Date.now();
-      window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+      markSaved();
       return true;
-    } else {
-      // `error` only feeds the initial-load ErrorState, which isn't rendered
-      // in the loaded view — so a field autosave failure here would otherwise
-      // be silent. The identity hero has no inline slot, so toast it (LIF-284).
-      toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
-      return false;
     }
+    toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
+    return false;
   }
 
-  function startEditName() {
-    if (!project) return;
-    draftName = project.name;
-    editingName = true;
-  }
   function commitName() {
-    editingName = false;
     const v = draftName.trim();
-    if (project && v && v !== project.name) saveField("name", v);
-  }
-  function startEditDesc() {
     if (!project) return;
-    draftDesc = project.description;
-    editingDesc = true;
+    if (!v) { draftName = project.name; return; }
+    if (v !== project.name) saveField("name", v);
   }
   function commitDesc() {
-    editingDesc = false;
     const v = draftDesc.trim();
     if (project && v !== project.description) saveField("description", v);
   }
 
-  // ── Lead change (danger zone) ─────────────────────────────
+  // ── Lead change ─────────────────────────────────────────
   //
   // Naming a lead grants that person a `lead` membership on the project, so
   // the server requires a sign-in from the last 15 minutes, exactly as adding
@@ -256,8 +227,7 @@
       if (project?.id === pending.projectId) {
         project = res.data;
         onProjectChange?.();
-        savedAt = Date.now();
-        window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+        markSaved();
       }
       return true;
     }
@@ -369,35 +339,17 @@
     const latest = await listProjectGroups();
     if (latest.ok) groups = latest.data;
     onProjectChange?.();
-    savedAt = Date.now();
-    window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+    markSaved();
   }
 
-  // ── Importance heuristic (lib/issues/importance.ts) ──
-  const openIssues = $derived(
-    issues.filter((i) => i.status === "backlog" || i.status === "todo" || i.status === "active"),
-  );
-  const ranked = $derived.by(() =>
-    [...openIssues].sort((a, b) => importanceScore(b) - importanceScore(a)),
-  );
-  const attention = $derived(ranked.slice(0, 6));
-  const moreCount = $derived(Math.max(0, openIssues.length - attention.length));
-
-  const total = $derived(counts?.total ?? 0);
-  const completion = $derived(total > 0 ? (counts?.done ?? 0) / total : 0);
-
-  // LIF-234: lead/admin (or enforcement off) may edit project identity,
-  // manage members, import, and use the danger zone. A non-lead sees a
-  // read-only overview.
   const canManage = $derived(projectRole.canManage);
 
   // LIF-465: publication is NOT a `canManage` affordance. `canManage` is true
   // for everyone while `authz_enforced` is off, but the server's publication
-  // gate is the Lead gate, the one check legacy mode still enforces. Showing
-  // the publish panel on `canManage` therefore offered a disclosure control to
-  // people the server would refuse. Derived from the real answer instead:
-  // instance admin, a `lead` membership, or the project's own lead pointer
-  // (which a pre-LIF-195 project can have without a membership row).
+  // gate is the Lead gate, the one check legacy mode still enforces. Derived
+  // from the real answer instead: instance admin, a `lead` membership, or
+  // the project's own lead pointer (which a pre-LIF-195 project can have
+  // without a membership row).
   const canPublish = $derived(
     deriveCanPublish({
       role: projectRole.role,
@@ -407,12 +359,8 @@
     }),
   );
 
-  function gotoOpenIssues() {
-    navigate(`/${projectIdentifier}/issues`);
-  }
-
   // #1: open the issue list pre-filtered to a label. The list hydrates its
-  // filters from persisted per-project state on mount, so we stamp the label
+  // filters from persisted per-project state on mount, so stamp the label
   // filter there (merging with whatever else is stored) before navigating.
   function openLabelInIssues(name: string) {
     const s = loadListState(projectIdentifier);
@@ -420,17 +368,6 @@
     navigate(`/${projectIdentifier}/issues`);
   }
 
-  function actorName(a: Activity): string {
-    return a.actor_display_name || a.actor_username || (a.actor_is_bot ? "a bot" : "system");
-  }
-  function activityText(a: Activity): string {
-    const verb = a.action === "create" ? "created"
-      : a.action === "delete" ? "deleted"
-      : a.action === "update" ? "updated" : a.action;
-    return `${verb} ${a.entity_label ? `${a.entity_type} ${a.entity_label}` : a.entity_type}`;
-  }
-
-  // ── Danger zone actions ──────────────────────────────
   let leadOptions = $derived([
     { value: "", label: "No lead" },
     ...users.map((u) => ({ value: String(u.id), label: u.display_name || u.username })),
@@ -445,19 +382,22 @@
     if (res.ok) {
       project = res.data;
       onProjectChange?.();
-      navigate(`/${res.data.identifier}/overview`);
+      newIdent = "";
+      renaming = false;
+      navigate(`/${res.data.identifier}/settings`);
     } else {
       identError = res.error;
       renaming = false;
     }
   }
 
+  const total = $derived(issues.length);
   let deleteReady = $derived(project != null && deleteConfirmText === project.identifier);
   async function handleDelete() {
     if (!project || !deleteReady) return;
     deleting = true; deleteError = "";
     const res = await deleteProject(project.id);
-    if (res.ok) navigate("/settings");
+    if (res.ok) navigate("/");
     else { deleteError = res.error; deleting = false; }
   }
 
@@ -467,7 +407,7 @@
     const res = await archiveProject(project.id);
     if (res.ok) {
       toast(`Archived ${res.data.identifier}. An admin can unarchive it from Settings, Instance.`, { kind: "success" });
-      navigate("/settings");
+      navigate("/");
     } else {
       archiveError = res.error;
       archiving = false;
@@ -481,47 +421,98 @@
     if (!res.ok) exportError = res.error;
     exporting = false;
   }
+
+  // ── Section index with scroll-spy ────────────────────────
+  const sections = $derived(
+    [
+      { id: "general", label: "General", show: true },
+      { id: "labels", label: "Labels", show: true },
+      { id: "members", label: "Members", show: canManage },
+      { id: "sharing", label: "Public view", show: canPublish },
+      { id: "data", label: "Import and export", show: true },
+      { id: "danger", label: "Danger zone", show: canManage },
+    ].filter((s) => s.show),
+  );
+  let activeSection = $state("general");
+  let scroller = $state<HTMLElement | null>(null);
+
+  $effect(() => {
+    if (loading || !scroller) return;
+    void sections;
+    const root = scroller;
+    const update = () => {
+      // The last section whose top has passed a line a little below the
+      // top of the scroller is the one being read. At the very bottom, the
+      // last section wins even when it is too short to reach that line.
+      const line = root.getBoundingClientRect().top + 96;
+      let current = sections[0]?.id ?? "general";
+      for (const s of sections) {
+        const el = document.getElementById(`settings-${s.id}`);
+        if (el && el.getBoundingClientRect().top <= line) current = s.id;
+      }
+      if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) {
+        current = sections[sections.length - 1]?.id ?? current;
+      }
+      activeSection = current;
+    };
+    update();
+    root.addEventListener("scroll", update, { passive: true });
+    return () => root.removeEventListener("scroll", update);
+  });
+
+  function jump(id: string) {
+    activeSection = id;
+    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const inputClass =
+    "w-full text-body-sm rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] " +
+    "px-2.5 py-1.5 outline-none transition-colors focus:border-[var(--accent)] " +
+    "focus-visible:ring-2 focus-visible:ring-[var(--accent-subtle)] disabled:opacity-60";
 </script>
 
-{#if loading}
-  <!-- LIF-281: structural skeleton replacing the bare centered spinner.
-       Mirrors the loaded overview's default-visible frame — the same
-       max-w-[840px] … gap-10 wrapper, the identity hero (icon + name/desc +
-       completion ring), and the "Needs attention" heading + card list — so
-       the first heading lands at the same y-position and nothing snaps when
-       data arrives. Conditional/role-gated sections (members, import,
-       danger zone, recent activity) are intentionally omitted; they don't
-       render by default. -->
-  <div class="h-full flex flex-col">
-    <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[840px] mx-auto px-6 py-8 flex flex-col gap-10">
-        <!-- Identity hero -->
-        <section class="flex items-start gap-4">
-          <Skeleton variant="block" class="size-12 rounded-xl shrink-0" />
-          <div class="flex-1 min-w-0 flex flex-col gap-2.5">
-            <Skeleton variant="bar" class="h-8 w-64" />
-            <Skeleton variant="bar" class="h-4 w-full max-w-[46ch]" />
-            <Skeleton variant="bar" class="h-3 w-40" />
-          </div>
-          <Skeleton variant="circle" class="size-[52px] shrink-0" />
-        </section>
+{#snippet topbarContent()}
+  <ProjectTopbar identifier={projectIdentifier} current="settings" {navigate}>
+    {#snippet actions()}
+      {#if savedAt}
+        <span class="inline-flex items-center gap-1 text-caption text-[var(--success)]" aria-live="polite">
+          <Check size={12} /> Saved
+        </span>
+      {/if}
+    {/snippet}
+  </ProjectTopbar>
+{/snippet}
 
-        <!-- Needs attention -->
-        <section>
-          <div class="flex items-baseline justify-between mb-3">
-            <Skeleton variant="bar" class="h-3.5 w-32" />
-          </div>
-          <div class="flex flex-col rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden">
-            {#each [0, 1, 2, 3] as row (row)}
-              <div class="flex items-center gap-3 pl-4 pr-3 py-2.5 {row > 0 ? 'border-t border-[var(--border)]' : ''}">
-                <Skeleton variant="circle" class="size-[15px]" />
-                <Skeleton variant="bar" class="h-3 w-[58px] shrink-0" />
-                <Skeleton variant="bar" class="h-3.5 flex-1 max-w-[320px]" />
-                <Skeleton variant="bar" class="h-3 w-12 shrink-0" />
-              </div>
-            {/each}
-          </div>
-        </section>
+{#snippet row(label: string, help: string, control: import("svelte").Snippet, forId?: string)}
+  <div class="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-8 px-4 py-4 border-t border-[var(--border)] first:border-t-0">
+    <div class="sm:w-52 shrink-0">
+      {#if forId}
+        <label for={forId} class="block text-body-sm font-medium text-[var(--text)]">{label}</label>
+      {:else}
+        <p class="text-body-sm font-medium text-[var(--text)]">{label}</p>
+      {/if}
+      <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">{help}</p>
+    </div>
+    <div class="flex-1 min-w-0">{@render control()}</div>
+  </div>
+{/snippet}
+
+{#snippet sectionHead(id: string, title: string, note?: string)}
+  <div class="mb-3">
+    <h2 id="settings-{id}-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--text)]">{title}</h2>
+    {#if note}<p class="text-body-sm text-[var(--text-muted)] mt-0.5">{note}</p>{/if}
+  </div>
+{/snippet}
+
+{#if loading}
+  <div class="h-full overflow-y-auto">
+    <div class="max-w-[1100px] mx-auto px-4 md:px-10 py-8 flex gap-10">
+      <div class="hidden lg:flex w-44 shrink-0 flex-col gap-3 pt-1">
+        {#each [0, 1, 2, 3, 4] as i (i)}<Skeleton variant="bar" class="h-3.5 w-24" />{/each}
+      </div>
+      <div class="flex-1 min-w-0 flex flex-col gap-3">
+        <Skeleton variant="bar" class="h-5 w-28" />
+        <Skeleton variant="block" class="h-[320px] w-full rounded-xl" />
       </div>
     </div>
   </div>
@@ -535,316 +526,133 @@
     </button>
     <button
       class="text-body-sm text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-      onclick={() => navigate("/settings")}
+      onclick={() => navigate("/")}
     >
       Back to home
     </button>
   </ErrorState>
 {:else}
-  <div class="h-full flex flex-col">
-    <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[840px] mx-auto px-6 py-8 flex flex-col gap-10">
-
-        <!-- ── IDENTITY HERO (inline-editable) ──────────── -->
-        <!-- LIF-234: identity edits (name/desc/icon → updateProject) are
-             lead-gated. A non-lead sees the same hero, read-only: the icon
-             isn't a picker, and name/description aren't click-to-edit. -->
-        <section class="flex items-start gap-4">
-          <div class="shrink-0">
-            {#if canManage}
-              <IconPicker value={project.emoji ?? ""} onchange={(v) => saveField("emoji", v || null)} />
-            {:else}
-              <div class="size-12 grid place-items-center rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
-                {#if project.emoji}
-                  <ProjectIcon value={project.emoji} size={22} />
-                {:else}
-                  <span class="text-body-sm font-mono font-semibold text-[var(--text-muted)]">{project.identifier.slice(0, 2)}</span>
-                {/if}
-              </div>
-            {/if}
-          </div>
-          <div class="flex-1 min-w-0">
-            <!-- Name -->
-            <div class="flex items-center gap-2 flex-wrap">
-              {#if !canManage}
-                <h1 class="text-display font-display tracking-tight text-[var(--text)] -my-0.5 px-0.5">{project.name}</h1>
-              {:else if editingName}
-                <!-- svelte-ignore a11y_autofocus -->
-                <input
-                  bind:value={draftName}
-                  class="text-display font-display tracking-tight bg-transparent border-none outline-none
-                         text-[var(--text)] w-full max-w-[28ch] -my-0.5 focus-visible:ring-2
-                         focus-visible:ring-[var(--accent)] rounded px-0.5"
-                  autofocus
-                  onblur={commitName}
-                  onkeydown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') editingName = false; }}
-                />
-              {:else}
-                <button
-                  class="group flex items-center gap-2 text-display font-display tracking-tight
-                         text-[var(--text)] -my-0.5 rounded px-0.5 cursor-text hover:bg-[var(--bg-subtle)] transition-colors"
-                  onclick={startEditName}
-                >
-                  {project.name}
-                  <Pencil size={14} class="text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />
-                </button>
-              {/if}
-              <!-- `label` echoes the visible identifier: the pill's visible
-                   text belongs in its accessible name (WCAG 2.5.3). -->
-              <CopyIdButton
-                value={project.identifier}
-                label={project.identifier}
-                iconSize={11}
-                iconClass="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity"
-                class="group inline-flex items-center gap-1 text-micro font-mono font-semibold
-                       px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--text-muted)]
-                       hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
+  <div class="h-full overflow-y-auto" bind:this={scroller}>
+    <div class="max-w-[1100px] mx-auto px-4 md:px-10 pt-8 pb-24 lg:flex lg:gap-12">
+      <!-- Section index: a sticky column on wide screens, a scrolling row
+           of chips above the content on narrow ones. -->
+      <nav aria-label="Settings sections" class="settings-nav lg:w-44 lg:shrink-0">
+        <ul class="flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible pb-3 lg:pb-0 -mx-1 px-1
+                   [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {#each sections as s (s.id)}
+            <li class="shrink-0">
+              <button
+                class="w-full text-left whitespace-nowrap px-2.5 py-1.5 rounded-md text-body-sm transition-colors
+                       {activeSection === s.id
+                  ? 'bg-[var(--bg-subtle)] text-[var(--text)] font-medium'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}
+                       {s.id === 'danger' ? 'lg:mt-3' : ''}"
+                aria-current={activeSection === s.id ? "true" : undefined}
+                onclick={() => jump(s.id)}
               >
-                {project.identifier}
-              </CopyIdButton>
-              {#if savedAt}
-                <span class="inline-flex items-center gap-1 text-micro text-[var(--success)]" aria-live="polite">
-                  <Check size={11} /> Saved
-                </span>
-              {/if}
-              {#if !canManage && projectRole.enforced}
-                <!-- LIF-234: tell a non-lead why the identity + settings are
-                     read-only, in the existing badge vocabulary. -->
-                <span class="inline-flex items-center gap-1 text-micro font-medium px-1.5 py-0.5 rounded-full
-                             text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-                      title="Only a project lead or admin can change project settings.">
-                  Read-only
-                </span>
-              {/if}
-            </div>
+                <span class={s.id === "danger" ? "text-[var(--error)]" : ""}>{s.label}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </nav>
 
-            <!-- Description -->
-            {#if !canManage}
-              {#if project.description}
-                <p class="text-body text-[var(--text-muted)] leading-relaxed mt-1.5 max-w-[60ch]">{project.description}</p>
+      <div class="flex-1 min-w-0 max-w-[780px] flex flex-col gap-12">
+        {#if !canManage && projectRole.enforced}
+          <p class="flex items-center gap-2 text-body-sm text-[var(--text-muted)] rounded-lg bg-[var(--bg-subtle)] px-3.5 py-2.5">
+            <Lock size={14} class="shrink-0" />
+            Only a project lead or an admin can change these settings. Your sidebar group is yours to set.
+          </p>
+        {/if}
+
+        <!-- ── GENERAL ─────────────────────────────────────── -->
+        <section id="settings-general" class="scroll-mt-6" aria-labelledby="settings-general-heading">
+          {@render sectionHead("general", "General", "How the project shows up everywhere in Lific.")}
+          <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+            {#snippet iconControl()}
+              {#if canManage}
+                <IconPicker value={project!.emoji ?? ""} onchange={(v) => saveField("emoji", v || null)} />
+              {:else}
+                <div class="size-12 grid place-items-center rounded-xl bg-[var(--bg-subtle)]">
+                  {#if project!.emoji}
+                    <ProjectIcon value={project!.emoji} size={22} />
+                  {:else}
+                    <span class="text-body-sm font-mono font-semibold text-[var(--text-muted)]">{project!.identifier.slice(0, 2)}</span>
+                  {/if}
+                </div>
               {/if}
-            {:else if editingDesc}
-              <!-- svelte-ignore a11y_autofocus -->
+            {/snippet}
+            {@render row("Icon", "Shown in the sidebar and the overview.", iconControl)}
+
+            {#snippet nameControl()}
+              <input
+                id="project-name"
+                bind:value={draftName}
+                disabled={!canManage}
+                class="{inputClass} max-w-[36ch]"
+                onblur={commitName}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                  if (e.key === "Escape") { draftName = project!.name; (e.currentTarget as HTMLInputElement).blur(); }
+                }}
+              />
+            {/snippet}
+            {@render row("Name", "Saved when you leave the field.", nameControl, "project-name")}
+
+            {#snippet descControl()}
               <textarea
+                id="project-description"
                 bind:value={draftDesc}
-                rows="2"
-                class="mt-2 w-full text-body bg-transparent border border-[var(--border)] rounded-md px-2.5 py-1.5
-                       text-[var(--text)] outline-none resize-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                placeholder="Describe this project…"
-                autofocus
+                disabled={!canManage}
+                rows="3"
+                placeholder="What is this project for?"
+                class="{inputClass} resize-y leading-relaxed"
                 onblur={commitDesc}
-                onkeydown={(e) => { if (e.key === 'Escape') editingDesc = false; if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commitDesc(); }}
+                onkeydown={(e) => {
+                  if (e.key === "Escape") { draftDesc = project!.description; (e.currentTarget as HTMLTextAreaElement).blur(); }
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) (e.currentTarget as HTMLTextAreaElement).blur();
+                }}
               ></textarea>
-            {:else}
-              <button class="group block text-left mt-1.5 max-w-[60ch] rounded px-0.5 cursor-text hover:bg-[var(--bg-subtle)] transition-colors" onclick={startEditDesc}>
-                {#if project.description}
-                  <span class="text-body text-[var(--text-muted)] leading-relaxed">{project.description}</span>
-                {:else}
-                  <span class="text-body-sm text-[var(--text-faint)] italic">Add a description…</span>
+            {/snippet}
+            {@render row("Description", "One or two sentences on the overview, under the name.", descControl, "project-description")}
+
+            {#snippet identControl()}
+              <div class="flex items-center gap-3 flex-wrap">
+                <CopyIdButton
+                  value={project!.identifier}
+                  label={project!.identifier}
+                  iconSize={12}
+                  class="inline-flex items-center gap-1.5 text-body-sm font-mono font-semibold px-2 py-1 rounded-md
+                         bg-[var(--bg-subtle)] text-[var(--text)] hover:text-[var(--accent)] transition-colors"
+                >
+                  {project!.identifier}
+                </CopyIdButton>
+                {#if canManage}
+                  <button class="text-caption text-[var(--text-muted)] hover:text-[var(--text)] underline underline-offset-2"
+                          onclick={() => jump("danger")}>
+                    Change it in the danger zone
+                  </button>
                 {/if}
-                <Pencil size={12} class="inline ml-1 text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity align-baseline" />
-              </button>
-            {/if}
-
-            <div class="flex items-center gap-3 mt-2.5 text-caption text-[var(--text-faint)] tabular-nums">
-              <span>Created {formatDate(project.created_at)}</span>
-              {#if activity[0]}<span>·</span><span>Active <TimeAgo date={activity[0].ts} /></span>{/if}
-            </div>
-          </div>
-
-          <!-- Completion: the one health stat worth keeping. -->
-          {#if total > 0}
-            <div class="shrink-0 flex flex-col items-center gap-1 pt-0.5">
-              <ProgressRing value={completion} size={52} stroke={5} color="var(--success)" />
-              <span class="text-micro text-[var(--text-faint)] tabular-nums">{counts?.done ?? 0}/{total} done</span>
-            </div>
-          {/if}
-        </section>
-
-        <!-- ── NEEDS ATTENTION (the star) ───────────────── -->
-        <section>
-          <div class="flex items-baseline justify-between mb-3">
-            <h2 class="text-body-sm font-semibold text-[var(--text)]">Needs attention</h2>
-            {#if moreCount > 0}
-              <button class="text-caption text-[var(--text-muted)] hover:text-[var(--text)] transition-colors flex items-center gap-1" onclick={gotoOpenIssues}>
-                +{moreCount} more open <ArrowRight size={11} />
-              </button>
-            {/if}
-          </div>
-
-          {#if attention.length === 0}
-            <div class="flex items-center gap-3 py-6 px-1 text-[var(--text-muted)]">
-              <span class="grid place-items-center size-8 rounded-full bg-[var(--success-bg)] text-[var(--success)]"><Check size={16} /></span>
-              <div>
-                <p class="text-body text-[var(--text)]">Nothing needs attention</p>
-                <p class="text-body-sm text-[var(--text-faint)]">Everything open is fresh and on track.</p>
               </div>
-            </div>
-          {:else}
-            <div class="flex flex-col rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden">
-              {#each attention as issue, idx (issue.id)}
-                {@const age = daysSince(issue.created_at)}
-                {@const idle = daysSince(issue.updated_at)}
-                {@const heat = issue.priority === 'urgent'
-                  ? 'var(--error)'
-                  : (issue.priority === 'high' || idle >= 14)
-                    ? 'var(--warn)'
-                    : 'var(--text-faint)'}
-                <button
-                  class="group relative flex items-center gap-3 pl-4 pr-3 py-2.5 text-left
-                         hover:bg-[var(--bg-subtle)] transition-colors
-                         {idx > 0 ? 'border-t border-[var(--border)]' : ''}"
-                  onclick={() => navigate(`/${projectIdentifier}/issues/${issue.identifier}`)}
-                >
-                  <!-- heat edge -->
-                  <span class="absolute left-0 top-0 bottom-0 w-[3px]" style="background: {heat}"></span>
-                  <PriorityIcon priority={issue.priority} size={15} />
-                  <span class="text-micro font-mono text-[var(--text-faint)] shrink-0 tabular-nums w-[58px]">{issue.identifier}</span>
-                  <span class="text-body text-[var(--text)] truncate flex-1">{issue.title}</span>
-                  <div class="shrink-0 flex items-center gap-2 text-micro tabular-nums">
-                    <span class="text-[var(--text-faint)]">open {ageLabel(age)}</span>
-                    {#if idle >= 14}
-                      <span class="px-1.5 py-0.5 rounded-full text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)]">idle {ageLabel(idle)}</span>
-                    {/if}
-                    <StatusIcon status={issue.status} size={14} />
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </section>
+            {/snippet}
+            {@render row("Identifier", `Prefix for every issue, page and plan, like ${project.identifier}-42.`, identControl)}
 
-        <!-- ── SIDEBAR GROUP ────────────────────────────── -->
-        <!-- Personal to the signed-in user, so it needs no role gate and
-             stays out of the danger zone: nobody else's sidebar changes. -->
-        <section class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-          <div class="flex items-center gap-3">
-            <div class="flex-1">
-              <p class="text-body-sm font-medium text-[var(--text)]">Sidebar group</p>
-              <p class="text-caption text-[var(--text-muted)]">
-                Where this project sits in your sidebar. Only you see it.
-              </p>
-            </div>
-            <select
-              value={selectedGroupId === null ? "" : String(selectedGroupId)}
-              onchange={(e) => {
-                const v = e.currentTarget.value;
-                selectedGroupId = v === "" ? null : Number(v);
-                saveGroup(selectedGroupId);
-              }}
-              class="text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)]
-                     text-[var(--text)] px-2.5 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            >
-              <option value="">No group</option>
-              {#each groups as group (group.id)}
-                <option value={String(group.id)}>{group.name}</option>
-              {/each}
-            </select>
-          </div>
-        </section>
-
-        <!-- ── LABELS (management) ──────────────────────── -->
-        <!-- LIF-234: label management is a maintainer-level structure edit —
-             a viewer sees labels read-only. -->
-        <LabelManager
-          projectId={project.id}
-          {issues}
-          canEdit={projectRole.canEdit}
-          onChange={refreshLabelUsage}
-          onOpenLabel={openLabelInIssues}
-        />
-
-        <!-- ── MEMBERS (LIF-200) ────────────────────────── -->
-        <!-- LIF-234: members management is a lead-level operation. Hidden
-             entirely for non-leads (its own read-only-notice path was for the
-             flag-off era; now the whole panel only shows when manageable). -->
-        <!-- ── PUBLIC ISSUE VIEW (LIF-465) ──────────────── -->
-        <!-- Gated on `canPublish`, deliberately NOT on `canManage`: see the
-             derivation above. The panel is not in the danger zone either:
-             publishing is a normal thing to do deliberately, not a
-             destructive action, and burying it would bury its warning too. -->
-        {#if canPublish}
-          <PublishPanel
-            {project}
-            onChange={(updated) => { project = updated; }}
-          />
-          {#if project.identifier === projectIdentifier}
-            <ArchiveTransferPanel projectId={project.id} identifier={project.identifier} />
-          {/if}
-        {/if}
-
-        {#if canManage}
-          <ProjectMembers projectId={project.id} />
-
-          <!-- ── IMPORT (LIF-264) ─────────────────────────── -->
-          <ImportPanel projectId={project.id} onImported={() => loadAll(projectIdentifier)} />
-        {/if}
-
-        <!-- ── RECENT ACTIVITY ──────────────────────────── -->
-        {#if activity.length > 0}
-          <section>
-            <div class="flex items-baseline justify-between mb-3">
-              <h2 class="text-body-sm font-semibold text-[var(--text)]">Recent activity</h2>
-              <button class="text-caption text-[var(--text-muted)] hover:text-[var(--text)] transition-colors flex items-center gap-1" onclick={() => navigate(`/${projectIdentifier}/activity`)}>
-                <History size={11} /> Full log
-              </button>
-            </div>
-            <div class="flex flex-col gap-2.5">
-              {#each activity.slice(0, 8) as a (a.id)}
-                <div class="flex items-start gap-2.5 text-body-sm leading-snug">
-                  <span class="size-1.5 rounded-full bg-[var(--text-faint)] mt-1.5 shrink-0"></span>
-                  <p class="text-[var(--text-muted)]">
-                    <span class="font-medium text-[var(--text)]">{actorName(a)}</span>
-                    {activityText(a)}
-                    <span class="text-[var(--text-faint)] tabular-nums">· <TimeAgo date={a.ts} /></span>
-                  </p>
-                </div>
-              {/each}
-            </div>
-          </section>
-        {/if}
-
-        <!-- ── DANGER ZONE ──────────────────────────────── -->
-        <!-- LIF-234: lead/admin-only. Hidden entirely for everyone else. -->
-        {#if canManage}
-        <section class="rounded-xl border border-[var(--error)]/40 overflow-hidden mt-2"
-                 style="border-color: color-mix(in oklab, var(--error) 35%, transparent)">
-          <button
-            class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-[var(--error-bg)] transition-colors"
-            onclick={() => { dangerOpen = !dangerOpen; }}
-          >
-            <AlertTriangle size={15} class="text-[var(--error)]" />
-            <span class="text-body font-semibold text-[var(--error)] flex-1">Danger zone</span>
-            <ChevronDown size={15} class="text-[var(--error)] transition-transform {dangerOpen ? 'rotate-180' : ''}" />
-          </button>
-
-          {#if dangerOpen}
-            <div class="border-t px-4 py-4 flex flex-col gap-5"
-                 style="border-color: color-mix(in oklab, var(--error) 25%, transparent)">
-
-              <!-- Project lead -->
-              <div class="flex items-center gap-3">
-                <div class="flex-1">
-                  <p class="text-body-sm font-medium text-[var(--text)]">Project lead</p>
-                  <p class="text-caption text-[var(--text-muted)]">Who owns this project.</p>
-                </div>
-                <select
-                  bind:value={leadValue}
-                  disabled={pendingLead !== null || leadBusy}
-                  class="text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)]
-                         text-[var(--text)] px-2.5 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                >
-                  {#each leadOptions as o}
-                    <option value={o.value}>{o.label}</option>
-                  {/each}
-                </select>
-              </div>
-
+            {#snippet leadControl()}
+              <select
+                id="project-lead"
+                bind:value={leadValue}
+                disabled={!canManage || pendingLead !== null || leadBusy}
+                class="{inputClass} max-w-[36ch]"
+              >
+                {#each leadOptions as o (o.value)}
+                  <option value={o.value}>{o.label}</option>
+                {/each}
+              </select>
               <!-- Naming a lead grants that person a lead membership, so the
                    server wants a recent sign-in. Confirm inline, right under
                    the control that was refused. -->
               {#if pendingLead}
-                <div class="flex flex-col gap-2 rounded-md bg-[var(--bg-subtle)] px-3 py-2.5">
+                <div class="mt-3 flex flex-col gap-2 rounded-md bg-[var(--bg-subtle)] px-3 py-2.5">
                   <p class="text-caption text-[var(--text)] leading-relaxed">
                     Verify it's you to make that person the project lead. It grants them lead
                     access to this project, and you have been signed in for a while.
@@ -866,10 +674,8 @@
                         placeholder="your current password"
                         autocomplete="current-password"
                         disabled={leadBusy}
-                        class="w-full px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
-                               bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2
-                               focus-visible:ring-[var(--accent)] disabled:opacity-50"
-                        onkeydown={(e) => { if (e.key === 'Enter') submitLeadReauth(); }}
+                        class={inputClass}
+                        onkeydown={(e) => { if (e.key === "Enter") submitLeadReauth(); }}
                       />
                     </label>
                     <button
@@ -891,150 +697,248 @@
                   </div>
                 </div>
               {/if}
+            {/snippet}
+            {@render row("Lead", "Who owns this project. Naming someone makes them a lead member.", leadControl, "project-lead")}
 
-              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
+            <!-- Personal to the signed-in user, so it needs no role gate:
+                 nobody else's sidebar changes. -->
+            {#snippet groupControl()}
+              <select
+                id="project-group"
+                value={selectedGroupId === null ? "" : String(selectedGroupId)}
+                onchange={(e) => {
+                  const v = e.currentTarget.value;
+                  selectedGroupId = v === "" ? null : Number(v);
+                  saveGroup(selectedGroupId);
+                }}
+                class="{inputClass} max-w-[36ch]"
+              >
+                <option value="">No group</option>
+                {#each groups as group (group.id)}
+                  <option value={String(group.id)}>{group.name}</option>
+                {/each}
+              </select>
+            {/snippet}
+            {@render row("Sidebar group", "Where this project sits in your sidebar. Only you see it.", groupControl, "project-group")}
+          </div>
+        </section>
 
-              <!-- Change identifier -->
-              <div>
-                <p class="text-body-sm font-medium text-[var(--text)]">Change identifier</p>
-                <p class="text-caption text-[var(--text-muted)] mt-0.5 mb-2 leading-relaxed">
-                  Re-keys every issue, page, and plan. Existing references to <span class="font-mono">{project.identifier}-NNN</span>
-                  written inside other issues/pages will no longer resolve. This cannot be undone automatically.
-                </p>
-                <div class="flex items-center gap-2">
-                  <input
-                    bind:value={newIdent}
-                    placeholder={project.identifier}
-                    class="w-[120px] px-2.5 py-1.5 text-body-sm font-mono uppercase rounded-md
-                           border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
-                           outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
-                  />
-                  <button
-                    class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
-                           hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                    disabled={renaming || !newIdent.trim() || newIdent.trim().toUpperCase() === project.identifier}
-                    onclick={renameIdentifier}
-                  >
-                    {renaming ? "Renaming…" : "Rename"}
+        <!-- ── LABELS ──────────────────────────────────────── -->
+        <!-- LIF-234: label management is a maintainer-level structure edit;
+             a viewer sees labels read-only. -->
+        <section id="settings-labels" class="scroll-mt-6" aria-labelledby="settings-labels-heading">
+          {@render sectionHead("labels", "Labels", "Shared by issues and pages. Click a count to see what carries it.")}
+          <LabelManager
+            showHeading={false}
+            projectId={project.id}
+            {issues}
+            canEdit={projectRole.canEdit}
+            onChange={refreshLabelUsage}
+            onOpenLabel={openLabelInIssues}
+          />
+        </section>
+
+        <!-- ── MEMBERS (LIF-200) ───────────────────────────── -->
+        {#if canManage}
+          <section id="settings-members" class="scroll-mt-6" aria-labelledby="settings-members-heading">
+            {@render sectionHead("members", "Members", "Who can see this project, and what each person may change.")}
+            <ProjectMembers projectId={project.id} showHeading={false} />
+          </section>
+        {/if}
+
+        <!-- ── PUBLIC VIEW (LIF-465) ───────────────────────── -->
+        <!-- Gated on `canPublish`, deliberately NOT on `canManage`: see the
+             derivation above. Publishing is a deliberate, normal act, not a
+             destructive one, so it stays out of the danger zone. -->
+        {#if canPublish}
+          <section id="settings-sharing" class="scroll-mt-6 flex flex-col gap-8">
+            <PublishPanel
+              {project}
+              onChange={(updated) => { project = updated; }}
+            />
+          </section>
+        {/if}
+
+        <!-- ── IMPORT AND EXPORT ───────────────────────────── -->
+        <section id="settings-data" class="scroll-mt-6 flex flex-col gap-8" aria-labelledby="settings-data-heading">
+          <div>
+            {@render sectionHead("data", "Import and export")}
+            <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+              {#snippet exportControl()}
+                <div class="flex items-center gap-3 flex-wrap">
+                  <button class="toolbar-pill" onclick={exportProject} disabled={exporting}>
+                    <Download size={14} />
+                    {exporting ? "Exporting…" : "Export as Markdown"}
                   </button>
+                  {#if exportError}<span class="text-caption text-[var(--error)]" role="alert">{exportError}</span>{/if}
                 </div>
-                {#if identError}<p class="text-caption text-[var(--error)] mt-1.5">{identError}</p>{/if}
-              </div>
+              {/snippet}
+              {@render row("Markdown export", "Every issue and page as Markdown files in one download. Leaves the project untouched.", exportControl)}
+            </div>
+          </div>
+          {#if canPublish && project.identifier === projectIdentifier}
+            <ArchiveTransferPanel projectId={project.id} identifier={project.identifier} />
+          {/if}
+          {#if canManage}
+            <ImportPanel projectId={project.id} onImported={() => loadAll(projectIdentifier)} />
+          {/if}
+        </section>
 
-              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
-
-              <!-- Archive -->
-              <div>
-                <p class="text-body-sm font-medium text-[var(--text)]">Archive project</p>
-                <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
-                  Compresses the project into a single file on the server and removes it from Lific.
-                  Nothing is lost: an instance admin can unarchive it from Settings, Instance.
-                </p>
-                {#if !showArchiveSection}
-                  <button
-                    class="mt-2 text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
-                    onclick={() => { showArchiveSection = true; }}
-                  >
-                    Archive this project
-                  </button>
-                {:else}
-                  <p class="text-caption text-[var(--text-muted)] mt-2 mb-2 leading-relaxed">
-                    <strong class="font-mono">{project.identifier}</strong> and its <strong>{total}</strong> issue{total !== 1 ? 's' : ''},
-                    pages, plans, and attachments disappear for everyone until it is unarchived. It comes back private, with its
-                    members and history. Page revision history, saved views, and repository bindings are not kept.
+        <!-- ── DANGER ZONE ─────────────────────────────────── -->
+        <!-- LIF-234: lead/admin-only. Hidden entirely for everyone else. -->
+        {#if canManage}
+          <section id="settings-danger" class="scroll-mt-6" aria-labelledby="settings-danger-heading">
+            <div class="mb-3 flex items-center gap-2">
+              <AlertTriangle size={16} class="text-[var(--error)]" />
+              <h2 id="settings-danger-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--error)]">Danger zone</h2>
+            </div>
+            <div class="danger rounded-xl border overflow-hidden">
+              <!-- Change identifier -->
+              <div class="px-4 py-4 flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-8">
+                <div class="sm:w-52 shrink-0">
+                  <p class="text-body-sm font-medium text-[var(--text)]">Change identifier</p>
+                  <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                    Re-keys every issue, page and plan. References to <span class="font-mono">{project.identifier}-NNN</span>
+                    written inside other issues and pages stop resolving. It can't be undone automatically.
                   </p>
-                  <div class="flex items-center gap-2">
-                    <button
-                      class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
-                             hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                      disabled={archiving}
-                      onclick={handleArchive}
-                    >
-                      {archiving ? "Archiving…" : "Archive"}
-                    </button>
-                    <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                            disabled={archiving}
-                            onclick={() => { showArchiveSection = false; archiveError = ''; }}>
-                      Cancel
-                    </button>
-                  </div>
-                {/if}
-                {#if archiveError}<p class="text-caption text-[var(--error)] mt-1.5">{archiveError}</p>{/if}
-              </div>
-
-              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
-
-              <!-- Delete -->
-              <div>
-                <p class="text-body-sm font-medium text-[var(--text)]">Delete project</p>
-                {#if !showDeleteSection}
-                  <button
-                    class="mt-2 text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
-                    onclick={() => { showDeleteSection = true; }}
-                  >
-                    Delete this project
-                  </button>
-                {:else}
-                  <p class="text-caption text-[var(--text-muted)] mt-1 mb-2">
-                    Permanently deletes the project and all <strong>{total}</strong> issue{total !== 1 ? 's' : ''}, modules, labels, folders, pages, and plans.
-                    Type <strong class="font-mono">{project.identifier}</strong> to confirm.
-                  </p>
+                </div>
+                <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <input
-                      bind:value={deleteConfirmText}
+                      bind:value={newIdent}
+                      aria-label="New identifier"
                       placeholder={project.identifier}
-                      class="w-[140px] px-2.5 py-1.5 text-body-sm font-mono rounded-md border border-[var(--error)]
-                             bg-[var(--surface)] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                      class="w-[130px] px-2.5 py-1.5 text-body-sm font-mono uppercase rounded-md
+                             border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                             outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                      onkeydown={(e) => { if (e.key === "Enter") renameIdentifier(); }}
                     />
                     <button
                       class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
                              hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                      disabled={!deleteReady || deleting}
-                      onclick={handleDelete}
+                      disabled={renaming || !newIdent.trim() || newIdent.trim().toUpperCase() === project.identifier}
+                      onclick={renameIdentifier}
                     >
-                      {deleting ? "Deleting…" : "Delete permanently"}
-                    </button>
-                    <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                            onclick={() => { showDeleteSection = false; deleteConfirmText = ''; deleteError = ''; }}>
-                      Cancel
+                      {renaming ? "Renaming…" : "Rename"}
                     </button>
                   </div>
-                  {#if deleteError}<p class="text-caption text-[var(--error)] mt-1.5">{deleteError}</p>{/if}
-                {/if}
+                  {#if newIdent.trim() && newIdent.trim().toUpperCase() !== project.identifier}
+                    <p class="text-caption text-[var(--text-muted)] mt-1.5 font-mono">
+                      {project.identifier}-1 becomes {newIdent.trim().toUpperCase()}-1
+                    </p>
+                  {/if}
+                  {#if identError}<p class="text-caption text-[var(--error)] mt-1.5" role="alert">{identError}</p>{/if}
+                </div>
+              </div>
+
+              <!-- Archive -->
+              <div class="danger-rule px-4 py-4 flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-8">
+                <div class="sm:w-52 shrink-0">
+                  <p class="text-body-sm font-medium text-[var(--text)]">Archive project</p>
+                  <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                    Packs the project into one file on the server and removes it from Lific. An instance admin can
+                    bring it back from Settings, Instance.
+                  </p>
+                </div>
+                <div class="flex-1 min-w-0">
+                  {#if !showArchiveSection}
+                    <button
+                      class="text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
+                      onclick={() => { showArchiveSection = true; }}
+                    >
+                      Archive this project
+                    </button>
+                  {:else}
+                    <p class="text-caption text-[var(--text-muted)] mb-2 leading-relaxed">
+                      <strong class="font-mono">{project.identifier}</strong> and its <strong>{total}</strong> issue{total !== 1 ? "s" : ""},
+                      pages, plans and attachments disappear for everyone until it is unarchived. It comes back private, with its
+                      members and history. Page revision history, saved views and repository bindings are not kept.
+                    </p>
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
+                               hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={archiving}
+                        onclick={handleArchive}
+                      >
+                        {archiving ? "Archiving…" : "Archive"}
+                      </button>
+                      <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                              disabled={archiving}
+                              onclick={() => { showArchiveSection = false; archiveError = ""; }}>
+                        Cancel
+                      </button>
+                    </div>
+                  {/if}
+                  {#if archiveError}<p class="text-caption text-[var(--error)] mt-1.5" role="alert">{archiveError}</p>{/if}
+                </div>
+              </div>
+
+              <!-- Delete -->
+              <div class="danger-rule px-4 py-4 flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-8">
+                <div class="sm:w-52 shrink-0">
+                  <p class="text-body-sm font-medium text-[var(--text)]">Delete project</p>
+                  <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                    Permanently deletes the project and everything in it. There is no undo.
+                  </p>
+                </div>
+                <div class="flex-1 min-w-0">
+                  {#if !showDeleteSection}
+                    <button
+                      class="text-body-sm text-[var(--error)] border border-[var(--error)] px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors"
+                      onclick={() => { showDeleteSection = true; }}
+                    >
+                      Delete this project
+                    </button>
+                  {:else}
+                    <p class="text-caption text-[var(--text-muted)] mb-2 leading-relaxed">
+                      Deletes all <strong>{total}</strong> issue{total !== 1 ? "s" : ""}, modules, labels, folders, pages and plans.
+                      Type <strong class="font-mono">{project.identifier}</strong> to confirm.
+                    </p>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <input
+                        bind:value={deleteConfirmText}
+                        aria-label="Type the project identifier to confirm"
+                        placeholder={project.identifier}
+                        class="w-[140px] px-2.5 py-1.5 text-body-sm font-mono rounded-md border border-[var(--error)]
+                               bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--error)]"
+                      />
+                      <button
+                        class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
+                               hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={!deleteReady || deleting}
+                        onclick={handleDelete}
+                      >
+                        {deleting ? "Deleting…" : "Delete permanently"}
+                      </button>
+                      <button class="text-body-sm text-[var(--text-muted)] px-2 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                              onclick={() => { showDeleteSection = false; deleteConfirmText = ""; deleteError = ""; }}>
+                        Cancel
+                      </button>
+                    </div>
+                    {#if deleteError}<p class="text-caption text-[var(--error)] mt-1.5" role="alert">{deleteError}</p>{/if}
+                  {/if}
+                </div>
               </div>
             </div>
-          {/if}
-        </section>
+          </section>
         {/if}
-
-        <div class="h-2"></div>
       </div>
     </div>
   </div>
 {/if}
 
-{#snippet topbarContent()}
-  {#if project}
-    <div class="flex items-center gap-3 px-6 py-2 w-full">
-      <div class="flex items-center gap-1.5 shrink-0">
-        <button
-          class="text-body-sm font-mono font-medium text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-          onclick={() => navigate(`/${project!.identifier}/issues`)}
-        >
-          {project.identifier}
-        </button>
-        <ChevronRight size={12} class="text-[var(--text-faint)]" />
-        <span class="text-body-sm font-medium text-[var(--text)]">Overview</span>
-      </div>
-      <div class="ml-auto flex items-center gap-2 shrink-0">
-        {#if exportError}
-          <span class="text-body-sm text-[var(--error)] max-w-[min(280px,30vw)] truncate" title={exportError}>{exportError}</span>
-        {/if}
-        <button class="toolbar-pill" onclick={exportProject} disabled={exporting}>
-          <Download size={14} />
-          {exporting ? "Exporting…" : "Export"}
-        </button>
-      </div>
-    </div>
-  {/if}
-{/snippet}
+<style>
+  .danger {
+    border-color: color-mix(in oklab, var(--error) 35%, transparent);
+  }
+  .danger-rule {
+    border-top: 1px solid color-mix(in oklab, var(--error) 18%, transparent);
+  }
+  @media (min-width: 1024px) {
+    .settings-nav ul {
+      position: sticky;
+      top: 2rem;
+    }
+  }
+</style>
