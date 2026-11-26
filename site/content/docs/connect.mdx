@@ -109,6 +109,10 @@ Do not commit the key or paste it into a shared project configuration. With `--o
 
 ## Server URL
 
+URLs carrying a credential after `/mcp/` are rejected, including in dry runs. Use the `/mcp` endpoint with an API key in the Authorization header, or select `--oauth`. `lific doctor` checks supported clients' global and current-project configuration files for the removed URL form without printing the credential. Unreadable or unparseable files are reported for manual inspection.
+
+Doctor checks root `/mcp/<token>` URLs. It reports a failure when the entry's key or name contains `lific` (case-insensitive), or its URL origin matches the configured public URL or local server address. An unidentified entry on another origin gets a conditional warning; deeper paths used by other MCP services are skipped.
+
 The default URL is `server.public_url` from `lific.toml` plus `/mcp`. Without a configured public URL, it falls back to `http://127.0.0.1:<port>/mcp`.
 
 Use `--url` to point clients at a remote server:

@@ -1,7 +1,7 @@
 //! HTTP server construction and startup.
 //!
 //! [`build_app`] is the single place the production router is assembled:
-//! REST API, MCP (authed and the optional authless path token), OAuth, the
+//! REST API, authenticated MCP, OAuth, the
 //! embedded frontend, and every middleware layer and extension they depend
 //! on. [`run`] is `lific start`: guard rails, background tasks, bind, serve.
 //!
@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::any,
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
@@ -30,9 +30,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
 use crate::config::{self, Config};
-use crate::{
-    actor, api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, resolve_caller, storage,
-};
+use crate::{api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, storage};
 
 /// Embedded frontend assets compiled from web/dist/.
 /// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
@@ -60,7 +58,7 @@ mod inline_attachment_tests {
 }
 
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
-async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
+fn serve_frontend(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Try the exact path first (e.g. assets/index-abc.js)
@@ -246,13 +244,12 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 /// Assemble the full production router.
 ///
 /// Everything a request can hit lives here: the REST API, the authed `/mcp`
-/// endpoint, the optional authless `/mcp/<token>` escape hatch, the OAuth
+/// endpoint, the OAuth
 /// routes, and the embedded frontend fallback, wrapped in the middleware and
 /// extensions they expect (auth, rate limiters, attachment storage, realtime
 /// hub, CORS, body limit, compression).
 ///
-/// Side-effect free apart from a DB read to resolve the authless MCP identity:
-/// background tasks (backups, attachment GC) are [`run`]'s business, so tests
+/// Background tasks (backups, attachment GC) are [`run`]'s business, so tests
 /// and diagnostics can build the app without spawning anything.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn build_app(
@@ -419,60 +416,7 @@ pub(crate) fn build_app_with_store(
         client_documents: Arc::new(oauth::cimd::HttpsSource),
     };
 
-    // Optional authless MCP escape hatch at /mcp/<token> (see the
-    // mcp_path_token config docs). Resolved identity for attribution:
-    // the configured username, else the first admin, else anonymous.
-    let authless_mcp_router: Option<Router> = cfg
-        .server
-        .mcp_path_token
-        .clone()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .map(|token| {
-            let authless_user: Option<db::models::AuthUser> = {
-                match pool.read() {
-                    Ok(conn) => match cfg.server.mcp_path_user.as_deref() {
-                        Some(uname) => db::queries::users::get_user_by_username(&conn, uname)
-                            .ok()
-                            .map(|u| db::models::AuthUser {
-                                id: u.id,
-                                username: u.username,
-                                display_name: u.display_name,
-                                is_admin: u.is_admin,
-                            }),
-                        // LIFIC-8: the "no credential → first admin"
-                        // fallback is consolidated in `resolve_caller`.
-                        None => {
-                            resolve_caller::resolve_caller_conn(&conn, None, actor::Transport::Mcp)
-                                .ok()
-                                .flatten()
-                                .map(|i| i.user)
-                        }
-                    },
-                    Err(_) => None,
-                }
-            };
-            info!(
-                acting_as = authless_user
-                    .as_ref()
-                    .map_or("<anonymous>", |u| u.username.as_str()),
-                "authless MCP endpoint enabled at /mcp/<token>"
-            );
-            build_authless_mcp_router(
-                pool.clone(),
-                &token,
-                authless_user,
-                mcp_allowed_hosts.clone(),
-                cfg.server.public_url.clone(),
-                realtime.clone(),
-            )
-        });
-
     let app = authed_routes.merge(oauth::router(oauth_state));
-    let app = match authless_mcp_router {
-        Some(r) => app.merge(r),
-        None => app,
-    };
     // LIF-465: the anonymous project view. Merged here, *after* the auth
     // middleware has been layered onto `authed_routes`, so it is genuinely
     // outside that middleware rather than carved out of it by path. Nothing in
@@ -490,7 +434,7 @@ pub(crate) fn build_app_with_store(
     ));
     let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
     with_compression(
-        app.fallback(get(serve_frontend))
+        app.fallback(frontend_fallback)
             // Top-level CORS layer.
             //
             // This wraps EVERYTHING (REST API, /mcp, OAuth, frontend). Two
@@ -508,7 +452,7 @@ pub(crate) fn build_app_with_store(
             //    `last-event-id` for SSE resumption).
             //
             // This is the only CORS layer. Keeping it outside the merged router
-            // gives REST, MCP, authless MCP, OAuth, and fallback routes one
+            // gives REST, MCP, OAuth, and fallback routes one
             // equivalent policy boundary instead of wrapping every API route.
             .layer(build_global_cors(&cfg.server.cors_origins))
             .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
@@ -521,6 +465,28 @@ pub(crate) fn build_app_with_store(
             // already-compressed images, and bodies under 32 bytes.
             .layer(middleware::from_fn(add_security_headers)),
     )
+}
+
+async fn frontend_fallback(request: Request<Body>) -> Response {
+    // Removed MCP paths must not become SPA pages or authenticate credentials.
+    if request.uri().path().starts_with("/mcp/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match *request.method() {
+        Method::GET | Method::HEAD => {
+            let head = request.method() == Method::HEAD;
+            let mut response = serve_frontend(request.uri().clone());
+            if head {
+                *response.body_mut() = Body::empty();
+            }
+            response
+        }
+        _ => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET,HEAD")],
+        )
+            .into_response(),
+    }
 }
 
 /// Apply compression once around the completed router instead of asking
@@ -538,6 +504,10 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
         )
         .init();
+
+    for warning in cfg.server.removed_setting_warnings() {
+        warn!("{warning}");
+    }
 
     // Parse trusted proxy CIDRs once at startup. Invalid entries must
     // stop the server rather than quietly disabling the trust boundary
@@ -790,56 +760,6 @@ fn mcp_issue_link_context(
             .get(header::HOST)
             .and_then(|value| value.to_str().ok()),
         allowed_hosts,
-    )
-}
-
-/// Build the authless MCP router mounted at `/mcp/<token>`.
-///
-/// This endpoint deliberately bypasses the OAuth/API-key auth middleware: the
-/// secret path segment IS the credential. It exists because claude.ai web's
-/// OAuth connector flow is currently broken (it finishes the OAuth dance, gets
-/// a token, then never sends the authenticated MCP request). An authless server
-/// sidesteps that path entirely. Every request is run as a fixed identity
-/// (`user`) so MCP tools that attribute actions to a user still work.
-///
-/// Security: anyone who learns the URL has full MCP access. The token must be
-/// long and random, and only served over HTTPS.
-fn build_authless_mcp_router(
-    pool: db::DbPool,
-    token: &str,
-    user: Option<db::models::AuthUser>,
-    allowed_hosts: Vec<String>,
-    public_url: Option<String>,
-    realtime: realtime::RealtimeHub,
-) -> Router {
-    let allowed_hosts_for_links = allowed_hosts.clone();
-    let config = StreamableHttpServerConfig::default()
-        .with_legacy_session_mode(false)
-        .with_json_response(true)
-        .with_max_request_body_bytes(mcp::MAX_REQUEST_BODY_BYTES)
-        .with_allowed_hosts(allowed_hosts);
-    let service = Arc::new(StreamableHttpService::new(
-        move || Ok(mcp::LificMcp::with_realtime(pool.clone(), realtime.clone())),
-        Arc::new(LocalSessionManager::default()),
-        config,
-    ));
-    Router::new().route(
-        &format!("/mcp/{token}"),
-        any(move |mut request: Request<Body>| async move {
-            let issue_links = mcp_issue_link_context(
-                public_url.as_deref(),
-                request.headers(),
-                &allowed_hosts_for_links,
-            );
-            if let Some(issue_links) = issue_links {
-                request
-                    .extensions_mut()
-                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
-            } else {
-                request.extensions_mut().insert(user);
-            }
-            service.handle(request).await.into_response()
-        }),
     )
 }
 
@@ -1269,7 +1189,7 @@ mod cors_tests {
 
     /// Production assembles one global CORS layer around every route family.
     /// Preflights must therefore remain independent of whether the request is
-    /// handled by REST, authenticated MCP, authless MCP, or the fallback.
+    /// handled by REST, authenticated MCP, or the fallback.
     #[tokio::test]
     async fn production_cors_covers_all_route_surfaces() {
         let pool = db::open_memory().expect("test db");
@@ -1277,7 +1197,6 @@ mod cors_tests {
         let mut cfg = Config::default();
         cfg.auth.required = true;
         cfg.server.cors_origins = vec!["https://client.example".into()];
-        cfg.server.mcp_path_token = Some("secret".into());
         let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
             cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
         );
@@ -1292,7 +1211,6 @@ mod cors_tests {
         for (uri, requested_method) in [
             ("/api/health", "GET"),
             ("/mcp", "POST"),
-            ("/mcp/secret", "POST"),
             ("/not-a-route", "GET"),
         ] {
             let response = app
@@ -1435,7 +1353,7 @@ mod frontend_security_headers_tests {
     #[tokio::test]
     async fn frontend_responses_cannot_be_framed_or_mime_sniffed() {
         let app = Router::new()
-            .fallback(get(serve_frontend))
+            .fallback(frontend_fallback)
             .layer(middleware::from_fn(add_security_headers));
         let response = app
             .oneshot(
@@ -1790,10 +1708,40 @@ mod public_surface_tests {
 }
 
 #[cfg(test)]
-mod authless_mcp_tests {
+mod authenticated_mcp_tests {
     use super::*;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct McpClient {
+        app: Router,
+        key: String,
+    }
+
+    impl McpClient {
+        fn new(pool: db::DbPool, user_id: Option<i64>) -> Self {
+            let key =
+                auth::create_api_key(&pool, &format!("test-client-{user_id:?}"), user_id).unwrap();
+            let mut cfg = Config::default();
+            cfg.auth.required = true;
+            Self {
+                app: build_app(&cfg, pool, realtime::RealtimeHub::new(), Arc::from([])),
+                key,
+            }
+        }
+
+        async fn oneshot(
+            self,
+            mut request: Request<Body>,
+        ) -> Result<Response, std::convert::Infallible> {
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.key).parse().unwrap(),
+            );
+            self.app.oneshot(request).await
+        }
+    }
 
     fn initialize_body() -> Body {
         let body = serde_json::json!({
@@ -1809,25 +1757,14 @@ mod authless_mcp_tests {
         Body::from(serde_json::to_vec(&body).unwrap())
     }
 
-    /// The whole point: a request to /mcp/<token> with NO Authorization header
-    /// drives a full MCP `initialize` and returns 200. This is the path that
-    /// works around claude.ai web's broken OAuth connector flow.
     #[tokio::test]
-    async fn authless_path_serves_mcp_without_auth() {
+    async fn bearer_header_serves_mcp() {
         let pool = db::open_memory().unwrap();
-        let token = "s3cret-authless-token-abcdef";
-        let router = build_authless_mcp_router(
-            pool,
-            token,
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
+        let router = McpClient::new(pool, None);
 
         let req = Request::builder()
             .method(Method::POST)
-            .uri(format!("/mcp/{token}"))
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -1838,7 +1775,7 @@ mod authless_mcp_tests {
         assert_eq!(
             res.status(),
             StatusCode::OK,
-            "authless MCP initialize must succeed without any auth header"
+            "MCP initialize must succeed with a bearer header"
         );
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1848,7 +1785,7 @@ mod authless_mcp_tests {
         );
     }
 
-    fn router_with_project() -> Router {
+    fn router_with_project() -> McpClient {
         let pool = db::open_memory().unwrap();
         {
             let conn = pool.write().unwrap();
@@ -1863,27 +1800,20 @@ mod authless_mcp_tests {
             )
             .unwrap();
         }
-        build_authless_mcp_router(
-            pool,
-            "test-token",
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        )
+        McpClient::new(pool, None)
     }
 
     /// POST one JSON-RPC message the way a stateless client does: no session
     /// id, the version in a header, and the 2026-07-28 routing headers when
     /// the client speaks that revision.
     async fn post_mcp(
-        router: &Router,
+        router: &McpClient,
         version: &str,
         body: serde_json::Value,
     ) -> serde_json::Value {
         let mut req = Request::builder()
             .method(Method::POST)
-            .uri("/mcp/test-token")
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -2060,14 +1990,7 @@ mod authless_mcp_tests {
                 )
                 .unwrap();
             }
-            build_authless_mcp_router(
-                pool,
-                "test-token",
-                None,
-                vec!["localhost".into()],
-                None,
-                realtime::RealtimeHub::new(),
-            )
+            McpClient::new(pool, None)
         });
 
         // Alternate servers and repeat requests: each request constructs a new
@@ -2075,7 +1998,7 @@ mod authless_mcp_tests {
         for index in [0, 1, 0, 1] {
             let req = Request::builder()
                 .method(Method::POST)
-                .uri("/mcp/test-token")
+                .uri("/mcp")
                 .header("host", "localhost")
                 .header("content-type", "application/json")
                 .header("accept", "application/json, text/event-stream")
@@ -2155,24 +2078,17 @@ mod authless_mcp_tests {
         users
     }
 
-    fn user_mcp_routers(pool: &db::DbPool, users: &[db::models::AuthUser; 2]) -> [Router; 2] {
-        users.clone().map(|user| {
-            build_authless_mcp_router(
-                pool.clone(),
-                "test-token",
-                Some(user),
-                vec!["localhost".into()],
-                None,
-                realtime::RealtimeHub::new(),
-            )
-        })
+    fn user_mcp_routers(pool: &db::DbPool, users: &[db::models::AuthUser; 2]) -> [McpClient; 2] {
+        users
+            .clone()
+            .map(|user| McpClient::new(pool.clone(), Some(user.id)))
     }
 
     /// Call one MCP tool over HTTP and return its first text block.
-    async fn call_mcp_tool(router: Router, name: &str, arguments: serde_json::Value) -> String {
+    async fn call_mcp_tool(router: McpClient, name: &str, arguments: serde_json::Value) -> String {
         let request = Request::builder()
             .method(Method::POST)
-            .uri("/mcp/test-token")
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -2281,49 +2197,69 @@ mod authless_mcp_tests {
         }
     }
 
-    /// A wrong path token does not match the route at all (no secret leak,
-    /// no MCP access) — it falls through to 404 in this isolated router.
     #[tokio::test]
-    async fn wrong_path_token_does_not_match() {
+    async fn path_credentials_never_authenticate_in_the_production_router() {
         let pool = db::open_memory().unwrap();
-        let router = build_authless_mcp_router(
-            pool,
-            "the-right-token",
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
-
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/mcp/the-wrong-token")
-            .header("host", "localhost")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .body(initialize_body())
+        let mut client = McpClient::new(pool.clone(), None);
+        let cfg: Config = toml::from_str(
+            "[server]\nmcp_path_token = 'obsolete-secret'\nmcp_path_user = 'admin'\n",
+        )
+        .unwrap();
+        client.app = build_app(&cfg, pool, realtime::RealtimeHub::new(), Arc::from([]));
+        let obsolete = client
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp/obsolete-secret")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-
-        let res = router.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(obsolete.status(), StatusCode::NOT_FOUND);
+        for method in [Method::GET, Method::HEAD, Method::POST, Method::DELETE] {
+            for with_header in [false, true] {
+                let mut req = Request::builder()
+                    .method(method.clone())
+                    .uri(format!("/mcp/{}", client.key))
+                    .header("host", "localhost");
+                if with_header {
+                    req = req.header(header::AUTHORIZATION, format!("Bearer {}", client.key));
+                }
+                let res = client
+                    .app
+                    .clone()
+                    .oneshot(req.body(initialize_body()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                assert!(res.headers().get(header::WWW_AUTHENTICATE).is_none());
+            }
+        }
+        let res = client
+            .app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn authless_path_rejects_unallowlisted_host() {
+    async fn authenticated_mcp_rejects_unallowlisted_host() {
         let pool = db::open_memory().unwrap();
-        let token = "the-right-token";
-        let router = build_authless_mcp_router(
-            pool,
-            token,
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
+        let router = McpClient::new(pool, None);
 
         let req = Request::builder()
             .method(Method::POST)
-            .uri(format!("/mcp/{token}"))
+            .uri("/mcp")
             .header("host", "spoofed.example")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")

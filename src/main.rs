@@ -819,7 +819,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 // directory must be obvious here, not after the writes.
                 cli::ui::info(format!(
                     "Instance: {} {}",
-                    cli::ui::command(cli::connect::target_url(&args, &cfg)),
+                    cli::ui::command(cli::connect::target_url(&args, &cfg)?),
                     cli::ui::dim(format!(
                         "(keys minted in {})",
                         cli::connect::absolute_db_path(&cfg)

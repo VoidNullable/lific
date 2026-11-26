@@ -166,7 +166,7 @@ The key is printed once. A key assigned to a user acts as that user, with that u
 
 "Reachable" means `server.host` is not a loopback address, or `server.public_url` is set to something that is not loopback or a private network. Private means a private, link-local or unique-local IP address, or a name ending in `.localhost`, `.local`, `.internal`, `.home.arpa` or `.lan`. A public DNS name counts as public even when it resolves to a private address, and that includes a Tailscale name such as `host.tailnet.ts.net`. The check reads only your configuration. A proxy you have not told Lific about is invisible to it, so passing the check does not prove the instance is private.
 
-If `server.mcp_path_token` is set, `/mcp/<token>` answers without any other credential; the path itself is the secret. It exists for MCP clients whose OAuth support is broken. Use a long random value and serve it only over HTTPS.
+HTTP MCP clients connect to `/mcp` using an `Authorization: Bearer <API_KEY>` header or OAuth. The credential-in-path endpoint was removed in 3.0; see [Upgrading](/docs/upgrading#v30).
 
 ## Accounts and access
 

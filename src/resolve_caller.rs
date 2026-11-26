@@ -7,7 +7,7 @@
 //! user (an unbound API key, a legacy unbound OAuth token, a credential-less
 //! "auth off" request, or a stdio MCP session), [`resolve_caller`] falls back
 //! to the first admin — the same `first_admin` decision that was previously
-//! scattered across four call sites (auto-login, authless MCP, comment-create,
+//! scattered across call sites (auto-login, comment-create,
 //! comment-edit). Consolidating it here is the expand step: the new identity
 //! exists *alongside* the legacy `Option<AuthUser>` and nothing breaks while
 //! downstream tickets (LIFIC-10/11) migrate the gates onto it.
