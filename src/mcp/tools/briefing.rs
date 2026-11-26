@@ -156,13 +156,18 @@ fn title(value: &str) -> TruncatedValue<'_> {
 }
 
 fn issue_line(context: Option<&IssueLinkContext>, issue: &models::Issue) -> String {
-    format!(
+    let mut line = format!(
         "{} | {} | {} | {}",
         issue_reference(context, &issue.identifier),
         issue.status,
         issue.priority,
         title(&issue.title)
-    )
+    );
+    // LIF-525: who is on it right now.
+    if let Some(claim) = &issue.claim {
+        let _ = write!(line, " | claimed by {}", claim.describe());
+    }
+    line
 }
 
 /// An issue line with how long it has gone untouched (LIF-492).
@@ -769,11 +774,13 @@ impl LificMcp {
         ident: &str,
     ) -> Result<Option<Section>, String> {
         // Active issues have their own section; this one is what to pick up.
+        // LIF-525: an issue another worker holds is not.
         let (issues, total, total_is_floor) = self.briefing_issues(
             project_id,
             models::ListIssuesQuery {
                 workable: Some(true),
                 exclude_statuses: vec![models::Status::Active],
+                claimant: self.claimant(None),
                 ..Default::default()
             },
         )?;
@@ -810,7 +817,7 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 status: Some(models::Status::Active),
-                updated_since: Some(cutoff.to_string()),
+                touched_since: Some(cutoff.to_string()),
                 ..Default::default()
             },
         )?;
@@ -846,7 +853,7 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 status: Some(models::Status::Active),
-                updated_until: Some(cutoff.to_string()),
+                idle_before: Some(cutoff.to_string()),
                 ..Default::default()
             },
         )?;

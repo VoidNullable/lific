@@ -6,10 +6,12 @@
 //! and every field edit bump it (migration 017 and the base triggers), so it is
 //! the last time anyone touched the issue at all.
 //!
-//! The predicate is `status = 'active' AND updated_at < cutoff`. Listings
-//! express it through `ListIssuesQuery { status: Active, updated_until }` so it
-//! composes with every other filter; this module owns the cutoff arithmetic so
-//! all callers agree on it to the second.
+//! The predicate is `status = 'active'` with last activity before the cutoff,
+//! where a claim (LIF-525) counts as activity: the later of `updated_at` and
+//! the holder's last claim or re-claim, or now while a claim is live.
+//! Listings express it through `ListIssuesQuery { status: Active, idle_before }`
+//! so it composes with every other filter; this module owns the cutoff
+//! arithmetic so all callers agree on it to the second.
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 

@@ -18,6 +18,7 @@ use chrono::{Duration, NaiveDate, NaiveDateTime};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
+use crate::db::models::IssueClaim;
 use crate::error::LificError;
 
 /// Days in the open-work trend, ending today.
@@ -51,6 +52,21 @@ pub struct HomeOverview {
     pub since: Option<SinceSummary>,
     /// Issues the caller or one of their bots moved to done, per day.
     pub my_done: Vec<DayCount>,
+    /// LIF-525: open issues someone holds a live claim on, most recently
+    /// claimed first.
+    pub claims: Vec<ClaimedIssue>,
+}
+
+/// LIF-525: an open issue under a live claim, with its holder.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ClaimedIssue {
+    pub issue_id: i64,
+    pub project_id: i64,
+    pub identifier: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub claim: IssueClaim,
 }
 
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
@@ -63,8 +79,8 @@ pub struct AgeBucket {
     pub medium: i64,
     pub low: i64,
     pub none: i64,
-    /// Unassigned, unblocked, and not already active: what an agent can
-    /// pick up.
+    /// Unassigned, unblocked, not already active and not claimed: what an
+    /// agent can pick up.
     pub agent_ready: i64,
     /// Assigned to named people or marked for any person.
     pub needs_human: i64,
@@ -135,11 +151,14 @@ pub fn overview(conn: &Connection, input: &OverviewInput) -> Result<HomeOverview
                            AND b.status != 'done' AND b.deleted_at IS NULL)
                 OR EXISTS (SELECT 1 FROM issue_waits w
                             WHERE w.issue_id = i.id AND {})
+                OR {}
            FROM issues i
           WHERE i.deleted_at IS NULL AND i.status NOT IN ('done', 'cancelled')",
-        super::waits::holding_predicate("?1")
+        super::waits::holding_predicate("?1"),
+        super::claims::held_by_other_sql("i", "?2", None),
     ))?;
-    let rows = stmt.query_map(params![today_text], |row| {
+    let now_text = input.now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let rows = stmt.query_map(params![today_text, now_text], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
@@ -150,7 +169,8 @@ pub fn overview(conn: &Connection, input: &OverviewInput) -> Result<HomeOverview
         ))
     })?;
     for row in rows {
-        let (project_id, priority, status, created_at, needs_human, blocked) = row?;
+        // `taken`: blocked, held by a wait, or under a live claim.
+        let (project_id, priority, status, created_at, needs_human, taken) = row?;
         if !visible(Some(project_id)) {
             continue;
         }
@@ -174,7 +194,7 @@ pub fn overview(conn: &Connection, input: &OverviewInput) -> Result<HomeOverview
         }
         if needs_human {
             bucket.needs_human += 1;
-        } else if !blocked && status != "active" {
+        } else if !taken && status != "active" {
             bucket.agent_ready += 1;
         }
     }
@@ -189,7 +209,55 @@ pub fn overview(conn: &Connection, input: &OverviewInput) -> Result<HomeOverview
             None => None,
         },
         my_done: my_done(conn, &visible, input.user_id, tz, today)?,
+        claims: live_claims(conn, &visible, &now_text)?,
     })
+}
+
+fn live_claims(
+    conn: &Connection,
+    visible: &dyn Fn(Option<i64>) -> bool,
+    now: &str,
+) -> Result<Vec<ClaimedIssue>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.project_id, p.identifier || '-' || i.sequence, i.title, i.status,
+                i.priority, c.user_id, u.username, u.display_name, c.worker,
+                c.claimed_at, c.expires_at
+           FROM issue_claims c
+           JOIN issues i ON i.id = c.issue_id
+           JOIN projects p ON p.id = i.project_id
+           JOIN users u ON u.id = c.user_id
+          WHERE c.expires_at > ?1 AND i.deleted_at IS NULL
+            AND i.status NOT IN ('done', 'cancelled')
+          ORDER BY c.claimed_at DESC, i.id",
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
+        Ok(ClaimedIssue {
+            issue_id: row.get(0)?,
+            project_id: row.get(1)?,
+            identifier: row.get(2)?,
+            title: row.get(3)?,
+            status: row.get(4)?,
+            priority: row.get(5)?,
+            claim: IssueClaim {
+                user_id: row.get(6)?,
+                username: row.get(7)?,
+                display_name: row
+                    .get::<_, Option<String>>(8)?
+                    .filter(|name| !name.is_empty()),
+                worker: row.get(9)?,
+                claimed_at: row.get(10)?,
+                expires_at: row.get(11)?,
+            },
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let claimed = row?;
+        if visible(Some(claimed.project_id)) {
+            out.push(claimed);
+        }
+    }
+    Ok(out)
 }
 
 /// Stored timestamps are `YYYY-MM-DD HH:MM:SS` (UTC), sometimes with

@@ -397,6 +397,8 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/issues/{id}/restore"), Gated(Maintainer)),
         // LIF-487: Maintainer on the source and on the target project.
         (("POST", "/api/issues/{id}/move"), Gated(Maintainer)),
+        (("POST", "/api/issues/{id}/claim"), Gated(Maintainer)),
+        (("POST", "/api/issues/{id}/release"), Gated(Maintainer)),
         (("GET", "/api/issues/resolve/{identifier}"), Gated(Viewer)),
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),

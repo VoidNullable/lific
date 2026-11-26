@@ -17,8 +17,8 @@
 //! * a project's `lead_user_id` is dropped;
 //! * an issue's waits (user and date blockers, LIF-484) are dropped from
 //!   every issue and sync row: they name accounts and carry private notes;
-//! * an issue's assignment (LIF-147) is dropped the same way: it names
-//!   accounts;
+//! * an issue's assignment (LIF-147) and live claim (LIF-525) are dropped
+//!   the same way: they name accounts;
 //! * an issue's `source` (import provenance) is dropped, and every relation
 //!   identifier naming an issue outside this project is filtered out, so a
 //!   public issue never names a private one;
@@ -87,6 +87,7 @@ pub fn scrub_issue(project: &Project, issue: &mut Issue) {
     // LIF-484: waits name accounts and carry private notes. The public view
     // shows none of them, not even a marker.
     issue.waits.clear();
+    issue.claim = None;
     issue.needs_human = false;
     issue.assignees.clear();
     for relations in [

@@ -237,6 +237,16 @@ pub struct UpdateIssueInput {
         description = "How you verified the work (markdown), only with status=done. Saved as a verification comment"
     )]
     pub evidence: Option<String>,
+    #[schemars(
+        description = "true holds it for you (others are refused until it expires; todo or backlog becomes active; again to extend). false releases it"
+    )]
+    pub claim: Option<bool>,
+    #[schemars(description = "Claim length in minutes, 1 to 1440 (default 15)")]
+    pub claim_minutes: Option<i64>,
+    #[schemars(
+        description = "The worker id a claim returned, to resume it in a new stdio session. Over HTTP send it as the X-Lific-Worker header instead"
+    )]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

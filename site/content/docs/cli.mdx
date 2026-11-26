@@ -275,8 +275,8 @@ lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMA
 | `--session-days <DAYS>` | How long a browser sign-in lasts, from 1 to 365 days. |
 | `--login-message <MESSAGE>` | A short message on the sign-in screen, up to 280 characters. An empty string clears it. |
 | `--auto-login <BOOLEAN>` | Signs the browser in as the administrator without a login screen. REST and MCP still need credentials. Turning it on is refused when the configuration makes the instance reachable from outside, by the same rule `lific start` applies. Turning it off always works. |
-| `--stale-active-days <DAYS>` | How long an active issue may go untouched before the MCP briefing and `list_issues(stale=true)` report it as stale, from 1 to 365 days. Default 3. Not in the web UI yet. |
-| `--stale-active-reset-days <DAYS>` | How long an active issue may go untouched before `lific start` moves it back to `todo`, from 0 to 365 days. Default 14; `0` turns it off. The server checks once a day and leaves a comment from `Lific` on each issue it moves; the change is audited as `system`. Not in the web UI yet. |
+| `--stale-active-days <DAYS>` | How long an active issue may go untouched (no edit, comment, label change or [claim](/docs/concepts/issues#claims)) before the MCP briefing and `list_issues(stale=true)` report it as stale, from 1 to 365 days. Default 3. Not in the web UI yet. |
+| `--stale-active-reset-days <DAYS>` | How long an active issue may go untouched, claims included, before `lific start` moves it back to `todo`, from 0 to 365 days. Default 14; `0` turns it off. The server checks once a day and leaves a comment from `Lific` on each issue it moves; the change is audited as `system`. Not in the web UI yet. |
 
 ### login and logout
 

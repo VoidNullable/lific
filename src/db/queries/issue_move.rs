@@ -159,6 +159,9 @@ pub fn move_issue(
 
         let dropped_assignees =
             super::assignees::drop_non_members(conn, issue_id, target_project_id)?;
+        // LIF-525: the holder may have no write role in the target project,
+        // and then nobody could release the claim; a move ends it.
+        super::claims::end(conn, issue_id)?;
 
         // The alias takes its seq before the issue's update stamps a newer
         // one, so the old project's tombstone sorts before the new project's

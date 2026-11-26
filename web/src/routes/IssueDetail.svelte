@@ -37,6 +37,7 @@
   } from "../lib/issues/relations";
   import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
   import AssigneeField from "../lib/issues/AssigneeField.svelte"; // LIF-147
+  import ClaimField from "../lib/issues/ClaimField.svelte"; // LIF-525
   import { assignmentKind, assignmentNames, personName, sameNames, type Person } from "../lib/issues/assignees";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
@@ -754,6 +755,9 @@
 
           <!-- LIF-147: who must do it. -->
           <AssigneeField {issue} {editable} onApply={setAssignees} onOpen={() => (openMenu = null)} />
+
+          <!-- LIF-525: which worker holds it right now. -->
+          <ClaimField claim={issue.claim} />
 
           <div class="issue-meta-field">
             <p class="issue-meta-field-label">Labels</p>

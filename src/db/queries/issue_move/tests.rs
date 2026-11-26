@@ -477,3 +477,32 @@ fn assignees_who_cannot_see_the_target_are_unassigned_and_reported() {
     assert_eq!(kept, vec!["ann"]);
     assert_eq!(moved.dropped_assignees, vec!["bo"]);
 }
+
+/// LIF-525: the holder may have no role in the target project, so nobody
+/// could release a claim that crossed over with the issue. A move ends it,
+/// and the issue can be claimed again at once.
+#[test]
+fn a_move_ends_the_claim_on_the_issue() {
+    let f = fixture();
+    let conn = f.db.write().unwrap();
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash) VALUES ('agent', 'a@test', 'x')",
+        [],
+    )
+    .unwrap();
+    let holder = Claimant {
+        user_id: conn.last_insert_rowid(),
+        worker: Some("p-1".into()),
+    };
+    let moved = issue(&conn, f.src, "held while moved");
+    queries::claims::claim(&conn, moved.id, &moved.identifier, &holder, 60).unwrap();
+    assert!(queries::get_issue(&conn, moved.id).unwrap().claim.is_some());
+
+    let after = move_to(&conn, moved.id, f.dst);
+    assert!(after.issue.claim.is_none(), "the claim did not cross over");
+    let other = Claimant {
+        user_id: holder.user_id,
+        worker: Some("p-2".into()),
+    };
+    queries::claims::claim(&conn, moved.id, &after.issue.identifier, &other, 15).unwrap();
+}

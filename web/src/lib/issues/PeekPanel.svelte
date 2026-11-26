@@ -48,6 +48,10 @@
   import ProjectIcon from "../ProjectIcon.svelte";
   import Skeleton from "../Skeleton.svelte"; // LIF-281
   import CopyIdButton from "../CopyIdButton.svelte";
+  import ClaimChip from "./ClaimChip.svelte"; // LIF-525
+  import { liveClaim } from "./claims";
+  import { now } from "../now.svelte";
+  import { serverNow } from "../serverClock.svelte";
   import InlineTitle from "../InlineTitle.svelte";
   import Markdown from "../Markdown.svelte";
   import Select from "../Select.svelte";
@@ -487,6 +491,11 @@
             </span>
           {/if}
         </div>
+
+        <!-- LIF-525: the worker holding it right now. -->
+        {#if liveClaim(issue.claim, serverNow(now()))}
+          <div class="flex mb-4"><ClaimChip claim={issue.claim} /></div>
+        {/if}
 
         <!-- Labels — read-only chips (edit lives in the full detail view). -->
         {#if issue.labels.length > 0}

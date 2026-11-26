@@ -315,6 +315,56 @@ pub struct Issue {
     /// and for issues marked for any human.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<IssueAssignee>,
+    /// LIF-525: who holds the issue right now. Only a claim that has not
+    /// expired is read; an expired one is the same as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<IssueClaim>,
+}
+
+/// LIF-525: a live claim on an issue. The holder is an account plus, when
+/// the claim came from one MCP session or process, that worker's id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueClaim {
+    pub user_id: i64,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// `None`: the claim is tied to the account alone, so any session of
+    /// that account holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    /// UTC, `YYYY-MM-DD HH:MM:SS`. Kept across re-claims by the same holder.
+    pub claimed_at: String,
+    /// UTC, `YYYY-MM-DD HH:MM:SS`. Each re-claim moves it.
+    pub expires_at: String,
+}
+
+/// LIF-525: who is asking, for claims. The account that authenticated (a
+/// bot key is the bot, not its owner) and the worker id of the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimant {
+    pub user_id: i64,
+    pub worker: Option<String>,
+}
+
+impl IssueClaim {
+    /// Whether `claimant` holds this claim: the same account, and the same
+    /// worker unless the claim is tied to the account alone.
+    pub fn held_by(&self, claimant: &Claimant) -> bool {
+        self.user_id == claimant.user_id
+            && (self.worker.is_none() || self.worker == claimant.worker)
+    }
+
+    /// `@user (worker w) until 2026-11-26 15:04 UTC`.
+    pub fn describe(&self) -> String {
+        let mut text = format!("@{}", self.username);
+        if let Some(worker) = &self.worker {
+            text.push_str(&format!(" (worker {worker})"));
+        }
+        let until = self.expires_at.get(..16).unwrap_or(&self.expires_at);
+        text.push_str(&format!(" until {until} UTC"));
+        text
+    }
 }
 
 /// LIF-147: one named assignee. Always a human account.
@@ -529,6 +579,19 @@ pub struct ListIssuesQuery {
     /// Who `assignee=me` means. Internal: set by the transport.
     #[serde(skip)]
     pub caller_user_id: Option<i64>,
+    /// LIF-525: who `workable=true` is asked for. An issue someone else
+    /// holds a live claim on is not workable for them; `None` treats every
+    /// live claim as someone else's. Internal: set by the transport.
+    #[serde(skip)]
+    pub claimant: Option<Claimant>,
+    /// LIF-525: last activity (the later of `updated_at` and the last claim
+    /// or re-claim, now for a live claim) strictly before this. The stale
+    /// checks use it. Internal: not a REST parameter.
+    #[serde(skip)]
+    pub idle_before: Option<String>,
+    /// LIF-525: last activity at or after this. Internal.
+    #[serde(skip)]
+    pub touched_since: Option<String>,
 }
 
 /// Per-status issue counts for a project (LIF-161). `total` is the sum of

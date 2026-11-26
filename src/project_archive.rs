@@ -2199,3 +2199,6 @@ mod assignees_tests;
 
 #[cfg(test)]
 mod number_sequence_tests;
+
+#[cfg(test)]
+mod claims_tests;

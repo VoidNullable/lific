@@ -5,6 +5,7 @@ pub(crate) mod assignees;
 pub(crate) mod attachments;
 pub(crate) mod briefing;
 pub(crate) mod changes;
+pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod home;
 pub(crate) mod human_queue;

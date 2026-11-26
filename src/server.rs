@@ -2130,6 +2130,137 @@ mod authenticated_mcp_tests {
             .to_owned()
     }
 
+    /// Call one MCP tool over HTTP as a client whose session header names
+    /// `session` (none for a stateless client). Returns the first text block.
+    async fn call_in_session(
+        router: &McpClient,
+        session: Option<(&str, &str)>,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> String {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18");
+        if let Some((header, value)) = session {
+            request = request.header(header, value);
+        }
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// LIF-525 over the real transport: two clients on one credential are
+    /// told apart by their session header, and a stateless client with none
+    /// claims for the whole account.
+    #[tokio::test]
+    async fn http_sessions_on_one_key_hold_claims_apart() {
+        let router = router_with_project();
+        let first = Some(("Mcp-Session-Id", "session-one"));
+        let second = Some(("X-Lific-Worker", "proxy-two"));
+        call_in_session(
+            &router,
+            None,
+            "create_issue",
+            serde_json::json!({"project": "PRO", "title": "Contested", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRO-1", "claim": true});
+        let held = call_in_session(&router, first, "update_issue", claim.clone()).await;
+        let worker = crate::db::queries::claims::worker_from_session("session-one").unwrap();
+        assert!(held.contains(&format!("as worker {worker}")), "{held}");
+        assert!(
+            held.contains("| active |"),
+            "a todo claim starts work: {held}"
+        );
+
+        let refused = call_in_session(&router, second, "update_issue", claim.clone()).await;
+        assert!(
+            refused.starts_with("Error:")
+                && refused.contains(&format!("claimed by @operator (worker {worker})")),
+            "{refused}"
+        );
+        let stateless = call_in_session(&router, None, "update_issue", claim.clone()).await;
+        assert!(stateless.starts_with("Error:"), "{stateless}");
+
+        let workable = serde_json::json!({"project": "PRO", "workable": true});
+        let own = call_in_session(&router, first, "list_issues", workable.clone()).await;
+        assert!(own.contains("Contested"), "{own}");
+        let other = call_in_session(&router, second, "list_issues", workable).await;
+        assert_eq!(other, "No issues found.");
+
+        let release = serde_json::json!({"identifier": "PRO-1", "claim": false});
+        let released = call_in_session(&router, first, "update_issue", release).await;
+        assert!(released.contains("Claim released."), "{released}");
+        let account = call_in_session(&router, None, "update_issue", claim).await;
+        assert!(
+            account.contains("for your whole account"),
+            "a stateless claim is the account's: {account}"
+        );
+    }
+
+    /// LIF-525: a new HTTP session resumes a claim by sending the worker id
+    /// the claim reported as `X-Lific-Worker`. Its claims and its reads then
+    /// agree; the `worker` argument cannot stand in for the header.
+    #[tokio::test]
+    async fn an_http_client_resumes_a_claim_by_sending_its_worker_id() {
+        let router = router_with_project();
+        call_in_session(
+            &router,
+            None,
+            "create_issue",
+            serde_json::json!({"project": "PRO", "title": "Resumed", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRO-1", "claim": true});
+        let first = Some(("Mcp-Session-Id", "session-one"));
+        call_in_session(&router, first, "update_issue", claim.clone()).await;
+        let worker = crate::db::queries::claims::worker_from_session("session-one").unwrap();
+
+        // A fresh session passing the id as an argument is told to use the
+        // header, and nothing changes.
+        let fresh = Some(("Mcp-Session-Id", "session-two"));
+        let argued = call_in_session(
+            &router,
+            fresh,
+            "update_issue",
+            serde_json::json!({"identifier": "PRO-1", "claim": true, "worker": worker}),
+        )
+        .await;
+        assert!(
+            argued.starts_with("Error:") && argued.contains(&format!("X-Lific-Worker: {worker}")),
+            "{argued}"
+        );
+
+        let resumed = Some(("X-Lific-Worker", worker.as_str()));
+        let renewed = call_in_session(&router, resumed, "update_issue", claim).await;
+        assert!(
+            renewed.contains("Claim renewed until") && renewed.contains(&worker),
+            "{renewed}"
+        );
+        let workable = serde_json::json!({"project": "PRO", "workable": true});
+        let own = call_in_session(&router, resumed, "list_issues", workable.clone()).await;
+        assert!(own.contains("Resumed"), "the resumed holder sees it: {own}");
+        let other = call_in_session(&router, fresh, "list_issues", workable).await;
+        assert_eq!(other, "No issues found.");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_http_mcp_calls_keep_their_own_user() {
         let pool = db::open_memory().unwrap();

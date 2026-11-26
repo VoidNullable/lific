@@ -7,7 +7,10 @@
 //! gets a comment saying why, and the writes are audited as `system`.
 //!
 //! Idle uses the same predicate as `list_issues(stale=true)`: active, with
-//! `updated_at` before a cutoff (see `db::queries::stale`). The threshold is
+//! no activity since a cutoff (see `db::queries::stale`). A claim counts as
+//! activity (LIF-525): an issue under a live claim, or renewed by its holder
+//! inside the window, is being worked even if nothing else about it
+//! changed, so it stays active. The threshold is
 //! the `stale_active_reset_days` instance setting, read on every run so an
 //! admin's change applies without a restart; `0` turns the job off.
 //!
@@ -96,7 +99,7 @@ pub fn reset_idle(pool: &DbPool, now: DateTime<Utc>, days: i64) -> Result<Vec<St
                 tx,
                 &ListIssuesQuery {
                     status: Some(Status::Active),
-                    updated_until: Some(cutoff.clone()),
+                    idle_before: Some(cutoff.clone()),
                     order_by: Some("updated".into()),
                     limit: Some(BATCH),
                     ..Default::default()
@@ -234,6 +237,48 @@ mod tests {
         // The move itself is activity, so the next run leaves it alone.
         drop(conn);
         assert!(reset_idle(&pool, now(), 14).unwrap().is_empty());
+    }
+
+    /// LIF-525: a claim is activity. An issue under a live claim, or one its
+    /// holder renewed inside the window, stays active; one whose last claim
+    /// is older than the window is idle like any other.
+    #[test]
+    fn a_claim_inside_the_window_keeps_an_issue_active() {
+        let pool = crate::db::open_memory().unwrap();
+        seed(
+            &pool,
+            &[
+                ("Held now", Status::Active, "2026-01-01 00:00:00"),
+                ("Renewed last week", Status::Active, "2026-01-01 00:00:00"),
+                ("Claimed long ago", Status::Active, "2026-01-01 00:00:00"),
+            ],
+        );
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES ('agent', 'a@test', 'x')",
+                [],
+            )
+            .unwrap();
+            let user = conn.last_insert_rowid();
+            for (issue, renewed, expires) in [
+                (1, "2026-11-06 02:55:00", "2026-11-06 03:10:00"),
+                (2, "2026-10-30 12:00:00", "2026-10-30 12:15:00"),
+                (3, "2026-09-01 12:00:00", "2026-09-01 12:15:00"),
+            ] {
+                conn.execute(
+                    "INSERT INTO issue_claims
+                         (issue_id, user_id, worker, claimed_at, renewed_at, expires_at)
+                     VALUES (?1, ?2, 'p-1', ?3, ?3, ?4)",
+                    rusqlite::params![issue, user, renewed, expires],
+                )
+                .unwrap();
+            }
+        }
+        let _clock = queries::claims::pin_now("2026-11-06 03:00:00");
+        assert_eq!(reset_idle(&pool, now(), 14).unwrap(), ["RST-3"]);
+        assert_eq!(status_of(&pool, "RST-1"), "active");
+        assert_eq!(status_of(&pool, "RST-2"), "active");
     }
 
     #[test]
