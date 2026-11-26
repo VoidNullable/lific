@@ -203,7 +203,7 @@ Changes the fields you pass and leaves the rest alone. Text fields are replaced 
 | `evidence` | `string` | No | How the work was verified, in Markdown. Only with `status: "done"` on an issue that is not already done. Saved as a verification comment. |
 | `claim` | `boolean` | No | `true` holds the issue for you for a limited time, or extends the claim you hold. `false` releases it. See [Claims](/docs/concepts/issues#claims). |
 | `claim_minutes` | `integer` | No | How long the claim lasts, 1 to 1440 minutes. Default 15. Only with `claim: true`. |
-| `worker` | `string` | No | The worker id an earlier claim reported, to resume that claim from a new session. Only with `claim: true`. |
+| `worker` | `string` | No | The worker id an earlier claim reported, to resume that claim from a new stdio session, which keeps working as that worker. Only with `claim` set. Over HTTP, send the id as the `X-Lific-Worker` header instead; a `worker` that differs from the header is refused. |
 
 A claim is refused while someone else holds the issue; the error names the holder and when the claim ends, and nothing else in the call changes. A claim on a `todo` or `backlog` issue moves it to `active` unless the call sets `status`. A `done` or `cancelled` issue cannot be claimed. The response ends with `Claim held until 2026-11-26 12:15 UTC as worker p-1a2b3c4d.` (or `Claim renewed ...`); call again before that time to keep it. Releasing a claim nobody holds succeeds with `No live claim to release.`; releasing someone else's is refused.
 
@@ -223,7 +223,7 @@ Moves an issue to another project. Needs maintainer rights on both projects.
 | `project` | `string` | Yes | Target project identifier. Never taken from a binding. |
 | `module` | `string` | No | Module in the target project. Omitted: a module with the same name as the current one is kept, otherwise the module is cleared. |
 
-The issue takes the next number in the target project, and its old identifier keeps resolving: `get_issue`, links and `search` all find the issue by either. Comments, relations, waits, history, attachments and plan steps stay attached. Labels are matched by name in the target project. The response starts with `Moved APP-12 to OPS-4:`, and names any label the target has no label of that name for, a module it cleared, and any assignee who cannot see the target project and was unassigned. `get_issue` lists the identifiers an issue had before under `Formerly:`. Moving an issue to the project it is already in is an error.
+The issue takes the next number in the target project, and its old identifier keeps resolving: `get_issue`, links and `search` all find the issue by either. Comments, relations, waits, history, attachments and plan steps stay attached. Labels are matched by name in the target project. The response starts with `Moved APP-12 to OPS-4:`, and names any label the target has no label of that name for, a module it cleared, and any assignee who cannot see the target project and was unassigned. A claim on the issue ends with the move. `get_issue` lists the identifiers an issue had before under `Formerly:`. Moving an issue to the project it is already in is an error.
 
 ### `bulk_update`
 
