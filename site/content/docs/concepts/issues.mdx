@@ -60,7 +60,7 @@ Two issues can be linked in one of three ways. Links may cross projects, but an 
 
 Only `blocks` changes behavior. A duplicate is not closed automatically; set its status yourself.
 
-When project-scoped authorization is enforced, every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins, and instances without enforcement, see every relation.
+Every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins see every relation.
 
 ## Assignment
 
@@ -129,4 +129,4 @@ By default the last write wins. To avoid overwriting someone else's change, send
 
 ## Who can change an issue
 
-When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
+Reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.

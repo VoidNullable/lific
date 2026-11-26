@@ -182,7 +182,7 @@ The server's calendar day and its offset from UTC, which decide whether a date w
 
 ## Comments
 
-Anyone who can read a project can comment in it: **viewer**. On a workspace page, that means an administrator when enforcement is on. Deleting an issue or page takes its comments to the trash with it.
+Anyone who can read a project can comment in it: **viewer**. On a workspace page, that means an administrator. Deleting an issue or page takes its comments to the trash with it.
 
 ### GET `/api/issues/{issue_id}/comments`
 
@@ -228,7 +228,7 @@ Deletes a comment. Same rule: the author or an administrator who can read the pr
 
 ## Pages
 
-A page has a project, or none for a workspace page. With enforcement on, workspace pages are administrator-only for reading and writing.
+A page has a project, or none for a workspace page. Workspace pages are administrator-only for reading and writing.
 
 ### GET `/api/pages`
 
@@ -323,7 +323,7 @@ Deletes a step and the steps under it. **Maintainer.** Returns the plan with its
 
 ## Modules, labels and folders
 
-Reading these needs **viewer**. Changing them needs **maintainer** with enforcement on and **lead** with it off.
+Reading these needs **viewer**. Changing them needs **maintainer**.
 
 ### GET `/api/modules`
 
@@ -385,4 +385,4 @@ Deletes the folder and the folders inside it. Their pages are kept and move to t
 
 ### GET `/api/plans/{id}/activity`
 
-One item's history, newest first. A plan's feed includes its steps. **Viewer**, or administrator for a workspace page with enforcement on. Query: `limit` (default 50, at most 200) and `offset`. Returns `items` and `has_more`, in the shape described under [project activity](/docs/rest-api/projects#get-apiprojectsidactivity).
+One item's history, newest first. A plan's feed includes its steps. **Viewer**, or administrator for a workspace page. Query: `limit` (default 50, at most 200) and `offset`. Returns `items` and `has_more`, in the shape described under [project activity](/docs/rest-api/projects#get-apiprojectsidactivity).

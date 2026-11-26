@@ -9,7 +9,7 @@ A project holds everything else and is the unit of access. The [projects concept
 
 ### GET `/api/projects`
 
-The projects you can read, as a `Project` array in your own sidebar order. With enforcement on, a project you are not a member of is absent rather than an error. Administrators see every project.
+The projects you can read, as a `Project` array in your own sidebar order. A project you are not a member of is absent rather than an error. Administrators see every project.
 
 ### POST `/api/projects`
 
@@ -44,11 +44,11 @@ Changing the identifier renames every issue, page and plan identifier in the pro
 
 ### DELETE `/api/projects/{id}`
 
-Deletes the project and everything in it, immediately and permanently, including anything in its trash. **Lead**, or **administrator** when enforcement is off. The check is repeated inside the delete transaction. Returns `{"deleted": true}`.
+Deletes the project and everything in it, immediately and permanently, including anything in its trash. **Lead.** The check is repeated inside the delete transaction. Returns `{"deleted": true}`.
 
 ### POST `/api/projects/{id}/archive`
 
-Takes the project out of the instance and keeps it as one compressed file in the data directory. Same permission as deleting: **Lead**, or **administrator** when enforcement is off, checked again inside the transaction. Returns `201` with the `ArchivedProject` below. See [Archiving projects](/docs/archiving-projects).
+Takes the project out of the instance and keeps it as one compressed file in the data directory. Same permission as deleting: **Lead**, checked again inside the transaction. Returns `201` with the `ArchivedProject` below. See [Archiving projects](/docs/archiving-projects).
 
 ### GET `/api/archived-projects`
 
@@ -94,7 +94,7 @@ Sets the order of your groups. Body: `ids`, group ids in the order you want; gro
 
 ## Members and roles
 
-The role rules, including what `authz_enforced` changes, are in [Roles](/docs/rest-api#roles). A member record has `project_id`, `user_id`, `role` and `created_at`.
+The role rules are in [Roles](/docs/rest-api#roles). A member record has `project_id`, `user_id`, `role` and `created_at`.
 
 ### GET `/api/projects/{id}/members`
 
@@ -123,7 +123,7 @@ Removes a member. **Lead**, with no recency requirement. Removing the last `lead
 
 ### GET `/api/projects/{id}/my-role`
 
-Your own standing, so a client can decide what to show without reading the roster. **Viewer.** Returns `role` (`viewer`, `maintainer`, `lead`, or null when you are not a member), `enforced` (whether `authz_enforced` is on) and `is_admin`. For a connected tool, the role is its owner's.
+Your own standing, so a client can decide what to show without reading the roster. **Viewer.** Returns `role` (`viewer`, `maintainer`, `lead`, or null when you are not a member) and `is_admin`. For a connected tool, the role is its owner's.
 
 ## Saved views
 
@@ -192,7 +192,7 @@ Returns:
 
 ### GET `/api/projects/{id}/mention-candidates`
 
-People who can be `@`-mentioned in the project's comments: `user_id`, `username` and `display_name`. **Viewer.** With enforcement on, only the project's members; otherwise every user.
+People who can be `@`-mentioned in the project's comments: `user_id`, `username` and `display_name`. **Viewer.** Only people who can see the project: its members and the instance administrators.
 
 ## Activity
 
