@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "warm-start": "bun warm-start.ts",
     "smoke": "bun smoke.ts",
     "public": "bun public-projects.ts",
     "archives": "bun project-archives.ts",

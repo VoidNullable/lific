@@ -196,6 +196,13 @@ async function main(): Promise<number> {
         // than failing the route for a slow network-idle.
         await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
 
+        // IndexedDB hydration can still be pending after the network goes idle.
+        // Assert the rendered result, not the absence of in-flight HTTP calls.
+        for (const expected of route.expect ?? []) {
+          await page.waitForFunction(text => document.body.innerText.includes(text), expected, {
+            timeout: 10_000,
+          }).catch(() => {});
+        }
         const bodyText = (await page.locator("body").innerText()) ?? "";
 
         // The <svelte:boundary> fallback in App.svelte (LIF-193). Its

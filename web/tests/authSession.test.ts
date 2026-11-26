@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readModelAccount, setReadModelAccount } from "../src/lib/sync/account";
 
 // api.ts reads `localStorage` and `fetch` off the global at call time, so a
 // plain object and a stub function are enough; no DOM is involved.
@@ -23,6 +24,7 @@ let reply: Reply;
 const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
+  setReadModelAccount(undefined);
   storage = new MemoryStorage();
   (globalThis as { localStorage: unknown }).localStorage = storage;
   // api.ts derives the MCP URL from `window.location.origin` at module load.
@@ -40,6 +42,38 @@ beforeEach(() => {
       json: async () => reply.body,
     };
   }) as unknown as typeof fetch;
+});
+
+describe("read-model account identity", () => {
+  test("only adopts the server-confirmed account", async () => {
+    const { me } = await api();
+    expect(readModelAccount()).toBeUndefined();
+    reply = { status: 200, body: { id: 7 } };
+    await me();
+    expect(readModelAccount()).toBe(7);
+  });
+
+  test("an expired session clears the account", async () => {
+    const { me } = await api();
+    setReadModelAccount(7);
+    storage.setItem("lific_token", "expired");
+    reply = { status: 401, body: { error: "expired" } };
+    await me();
+    expect(readModelAccount()).toBeNull();
+    expect(storage.getItem("lific_token")).toBeNull();
+  });
+
+  test("a late identity response cannot undo sign-out", async () => {
+    const { me, clearSession } = await api();
+    setReadModelAccount(7);
+    let release!: (response: Response) => void;
+    globalThis.fetch = (() => new Promise<Response>(resolve => { release = resolve; })) as typeof fetch;
+    const pending = me();
+    await clearSession();
+    release(new Response(JSON.stringify({ id: 7 })));
+    await pending;
+    expect(readModelAccount()).toBeNull();
+  });
 });
 
 afterEach(() => {

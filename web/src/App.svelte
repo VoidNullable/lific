@@ -36,6 +36,7 @@
     realtimeOpened,
   } from "./lib/sync/readModel.svelte"; // LIF-442
   import { createSyncClient } from "./lib/sync/leader"; // LIF-443
+  import { onReadModelAccountChange, readModelAccount } from "./lib/sync/account";
   import {
     commentTargetFromHash,
     routeForCommentHash,
@@ -103,6 +104,10 @@
   let route = $state(initialRoute);
   function applyRoute(next: string) {
     setPublicProject(publicProjectOf(next));
+    if (publicProjectOf(next) === null && readModelAccount() === undefined && hasSession()) {
+      bootstrapping = true;
+      void me().finally(() => { bootstrapping = false; });
+    }
     route = next;
   }
   let isPublicRoute = $derived(publicProjectOf(route) !== null);
@@ -153,11 +158,16 @@
 
   // LIF-215: single-user mode. On a cold load with no session, ask the
   // instance whether web auto-login is enabled; if so, silently mint an admin
-  // session before the redirect logic can bounce us to /login. We start
-  // "bootstrapping" only when there's no session, so the logged-in common case
-  // never shows a spinner.
+  // session before the redirect logic can bounce us to /login.
+  // Private disk caches must wait for /auth/me to establish the account.
   // LIF-465: a public page has nothing to bootstrap, so no spinner either.
-  let bootstrapping = $state(publicProjectOf(initialRoute) === null && !hasSession());
+  let bootstrapping = $state(publicProjectOf(initialRoute) === null);
+  $effect(() => onReadModelAccountChange(() => {
+    if (isPublicRoute || readModelAccount() !== undefined) return;
+    // Another tab changed the session. Clear views until its account is known.
+    bootstrapping = true;
+    void me().finally(() => { bootstrapping = false; });
+  }));
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —

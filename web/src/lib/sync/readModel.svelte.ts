@@ -25,11 +25,14 @@
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
 import { getPublicProject } from "../publicScope";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
+import { onReadModelAccountChange, readModelAccount } from "./account";
+import { loadSnapshot, removeSnapshot, snapshotOf, storeSnapshot } from "./persistence";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
  *  from one bulk mutation becomes a single request, short enough that a
  *  single edit still feels immediate. */
 const PULL_DEBOUNCE_MS = 150;
+const WRITE_BEHIND_MS = 250;
 
 export type ReadModelStatus = "cold" | "loading" | "ready";
 
@@ -73,8 +76,11 @@ export class ProjectReadModel {
    *  reads its cursor before its rows, so the snapshot may predate that
    *  write; pull once the bootstrap settles rather than dropping it. */
   private pullAfterBootstrap = false;
+  private writeTimer: ReturnType<typeof setTimeout> | null = null;
+  private epoch: string | null = null;
+  private disposed = false;
 
-  constructor(projectId: number, key: string = `private:${projectId}`) {
+  constructor(projectId: number, key: string = modelKey(projectId)) {
     this.projectId = projectId;
     this.key = key;
   }
@@ -82,7 +88,28 @@ export class ProjectReadModel {
   /** False once the client has crossed the public/private boundary since
    *  this model was created; see `key`. */
   private inScope(): boolean {
-    return modelKey(this.projectId) === this.key;
+    return !this.disposed && modelKey(this.projectId) === this.key;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (models.get(this.key) === this) models.delete(this.key);
+    if (this.pullTimer) clearTimeout(this.pullTimer);
+    if (this.writeTimer) clearTimeout(this.writeTimer);
+    this.pullTimer = this.writeTimer = null;
+    this.issues = new Map();
+    this.pages = new Map();
+    this.cursor = 0;
+    this.status = "cold";
+  }
+
+  private persist(): void {
+    if (!this.inScope() || this.epoch === null || this.writeTimer) return;
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = null;
+      if (!this.inScope() || this.epoch === null) return;
+      void storeSnapshot(this.key, snapshotOf(this.cursor, this.issues, this.pages), this.epoch);
+    }, WRITE_BEHIND_MS);
   }
 
   /** Cold start. Idempotent: concurrent callers share one request, and a
@@ -96,7 +123,24 @@ export class ProjectReadModel {
     }
     this.status = "loading";
     this.bootstrapping = (async () => {
+      // An unverified private session can cold-load but cannot read or write
+      // another account's disk cache. Public views have their own signed-out scope.
+      if (getPublicProject() !== null || readModelAccount() !== undefined) {
+        const cached = await loadSnapshot(this.key);
+        if (!this.inScope()) return;
+        this.epoch = cached.epoch;
+        if (cached.snapshot) {
+          this.issues = new Map(cached.snapshot.issues.map(row => [row.id, row]));
+          this.pages = new Map(cached.snapshot.pages.map(row => [row.id, row]));
+          this.cursor = cached.snapshot.cursor;
+          this.error = "";
+          this.status = "ready";
+          this.pullAfterBootstrap = true;
+          return;
+        }
+      }
       const res = await getProjectIndex(this.projectId);
+      if (!this.inScope()) return;
       if (res.ok) {
         const issues = new Map<number, IssueRow>();
         for (const row of res.data.issues) issues.set(row.id, row);
@@ -110,6 +154,8 @@ export class ProjectReadModel {
         if (res.data.cursor > this.cursor) this.cursor = res.data.cursor;
         this.error = "";
         this.status = "ready";
+        this.persist();
+        this.pullAfterBootstrap = true;
       } else {
         this.error = res.error;
         this.status = "cold";
@@ -127,6 +173,7 @@ export class ProjectReadModel {
   /** Queue a catch-up pull, coalescing anything scheduled in the same
    *  ~150ms window into one request. */
   schedulePull(): void {
+    if (!this.inScope()) return;
     if (this.bootstrapping) {
       // The snapshot in flight will land a cursor; pull from there.
       this.pullAfterBootstrap = true;
@@ -181,7 +228,16 @@ export class ProjectReadModel {
         for (;;) {
           if (!this.inScope()) return;
           const res = await getProjectChanges(this.projectId, this.cursor);
-          if (!res.ok) return;
+          if (!this.inScope()) return;
+          if (!res.ok) {
+            // Revoked access must not leave cached private rows on screen.
+            if (res.status === 401 || res.status === 403 || res.status === 404) {
+              this.dispose();
+              this.error = res.error;
+              void removeSnapshot(this.key);
+            }
+            return;
+          }
           this.applyChanges(res.data);
           if (!res.data.has_more) break;
         }
@@ -197,6 +253,7 @@ export class ProjectReadModel {
    *  cursor. Comment rows ride the same stream and are skipped — the
    *  detail views own comments. */
   applyChanges(page: ChangesPage): void {
+    if (!this.inScope()) return;
     let issues = this.issues;
     let pages = this.pages;
     let issuesDirty = false;
@@ -232,6 +289,7 @@ export class ProjectReadModel {
     if (issuesDirty) this.issues = issues;
     if (pagesDirty) this.pages = pages;
     if (page.cursor > this.cursor) this.cursor = page.cursor;
+    this.persist();
   }
 
   /** Handle one realtime envelope. Returns whether it scheduled a pull, so
@@ -267,7 +325,9 @@ const models = new Map<string, ProjectReadModel>();
 
 function modelKey(projectId: number): string {
   const audience = getPublicProject();
-  return audience === null ? `private:${projectId}` : `public:${audience}:${projectId}`;
+  return audience === null
+    ? `private:${readModelAccount() ?? (readModelAccount() === null ? "signed-out" : "unverified")}:${projectId}`
+    : `public:signed-out:${audience}:${projectId}`;
 }
 
 /** The project whose websocket resume frame we send on reconnect. Set by
@@ -359,7 +419,8 @@ export function handleRealtimeEvent(event: SyncEvent): void {
   const projectId = typeof event.project_id === "number" ? event.project_id : null;
   if (projectId == null) return;
   // Realtime is a private channel; it only ever feeds private replicas.
-  const model = models.get(`private:${projectId}`);
+  if (getPublicProject() !== null) return;
+  const model = models.get(modelKey(projectId));
   if (!model) return;
 
   // `sync_required` is the server saying "my replay ring no longer covers
@@ -408,7 +469,7 @@ function installGlobalListeners(): void {
 const projectsByIdentifier = new Map<string, Project>();
 
 function projectKey(identifier: string): string {
-  const audience = getPublicProject() === null ? "private" : "public";
+  const audience = modelKey(0);
   return `${audience}:${identifier.toLowerCase()}`;
 }
 
@@ -421,3 +482,10 @@ export function cacheProjects(projects: Project[]): void {
 export function cachedProject(identifier: string): Project | null {
   return projectsByIdentifier.get(projectKey(identifier)) ?? null;
 }
+
+onReadModelAccountChange(() => {
+  for (const model of models.values()) model.dispose();
+  models.clear();
+  projectsByIdentifier.clear();
+  activeProjectId = null;
+});

@@ -1,5 +1,6 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
 import { inPublicScope, publicMirror, publicSynthetic } from "./publicScope";
+import { clearReadModelAccount, readModelAccount, readModelAccountRevision, setReadModelAccount } from "./sync/account";
 
 const BASE = "/api";
 
@@ -320,17 +321,21 @@ export async function signup(
   email: string,
   password: string
 ) {
-  return request<AuthResponse>("/auth/signup", {
+  const result = await request<AuthResponse>("/auth/signup", {
     method: "POST",
     body: JSON.stringify({ username, email, password }),
   });
+  if (result.ok) setReadModelAccount(result.data.user.id);
+  return result;
 }
 
 export async function login(identity: string, password: string) {
-  return request<AuthResponse>("/auth/login", {
+  const result = await request<AuthResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ identity, password }),
   });
+  if (result.ok) setReadModelAccount(result.data.user.id);
+  return result;
 }
 
 /** Single-user mode (LIF-215): mint an admin session without a password when
@@ -341,7 +346,9 @@ export async function login(identity: string, password: string) {
  *  whoever is already using the tab. To freshen an existing session, use
  *  `refreshSession`, whose entire contract is "same user". */
 export async function autoLogin() {
-  return request<AuthResponse>("/auth/auto-login", { method: "POST" });
+  const result = await request<AuthResponse>("/auth/auto-login", { method: "POST" });
+  if (result.ok) setReadModelAccount(result.data.user.id);
+  return result;
 }
 
 /** Swap this browser's session for a fresh one, for the same account.
@@ -364,12 +371,23 @@ export async function refreshSession(password?: string) {
 
 export async function logout() {
   const result = await request("/auth/logout", { method: "POST" });
-  clearSession();
+  await clearSession();
   return result;
 }
 
 export async function me() {
-  return request<AuthUser>("/auth/me");
+  const before = readModelAccountRevision();
+  const publicScope = inPublicScope();
+  const wasSignedIn = typeof readModelAccount() === "number" || hasSession();
+  const result = await request<AuthUser>("/auth/me");
+  if (!publicScope && before === readModelAccountRevision()) {
+    if (result.ok) setReadModelAccount(result.data.id);
+    else if (result.status === 401) {
+      if (wasSignedIn) await clearSession();
+      else setReadModelAccount(null);
+    }
+  }
+  return result;
 }
 
 // LIF-190: account settings.
@@ -418,7 +436,7 @@ export async function changePassword(input: { current_password: string; new_pass
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
   if (result.ok) {
-    clearSession();
+    await clearSession();
   }
   return result;
 }
@@ -432,7 +450,9 @@ export function saveSession(token: string) {
 
 export function clearSession() {
   localStorage.removeItem("lific_token");
+  const cleared = clearReadModelAccount();
   for (const listener of sessionListeners) listener();
+  return cleared;
 }
 
 export function onSessionChange(listener: () => void) {

@@ -39,6 +39,20 @@ Issues, pages and comments share one counter, `seq`, across the whole instance; 
 
 Rows from both endpoints are summaries. They leave out issue descriptions, page content and comment text; fetch the item itself when a detail view needs them. Issue and page rows do carry `preview`, the first non-empty line of the body cut to 200 characters (or `""` when there is none), which is enough for a list row.
 
+The web client saves these summary rows in IndexedDB after updates, coalescing
+writes over 250 ms. Each saved project contains its rows and cursor in one
+transaction, including the removal of deleted rows. On a return visit, the client
+renders the saved rows and catches up through `/changes` instead of downloading
+another `/index`. A closed tab can lose an unflushed cache update; the next visit
+simply catches up from the last committed cursor.
+
+Private caches are keyed by the account confirmed by `/api/auth/me`. Public
+views use a separate signed-out scope. Signing out clears the cache and prevents
+other tabs from writing back data queued before sign-out. Invalid or incompatible
+cache records, and browsers without usable IndexedDB, fall back to `/index`.
+This is a warm-start cache, not offline editing: authentication, project
+resolution, detail views and writes still use the server.
+
 ### GET `/api/projects/{id}/index`
 
 Every live issue and page in the project, and the cursor to continue from. **Viewer.**
