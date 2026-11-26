@@ -45,6 +45,8 @@ The server URL is `--url` or `LIFIC_URL`, then `server.public_url` from the conf
 
 Changes made over HTTP are attributed to the user the credential belongs to, and that user's project permissions apply. That is why `comment add --user` only works with the local backend.
 
+`issue create`, `page create` and `comment add` send an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key) and, when the connection drops or times out before the reply arrives, send the request once more with the same key, but only when the server's `/api/instance` lists the `idempotency-key` capability (asked once per run). If the first attempt had been written, the server returns it instead of creating a second one. An older server would write it twice, so there the lost connection is reported instead. An error reply from the server is reported, not resent.
+
 Credentials are only sent to a non-loopback host over HTTPS. A credentials file that is malformed or unsafe stops the lookup rather than being treated as empty.
 
 Both backends print the same output. Issues, projects, pages, plans, modules and comments carry a `web_url` in JSON, and human-readable output turns their identifiers into Markdown links. Over HTTP the link uses the server URL. Locally it uses `server.public_url`, and without one there is no address to link to, so local output has no links.
@@ -175,6 +177,8 @@ Plain `lific mcp` opens the local database. The session acts as the user whose k
 | `--instances <FILE>` | Forwards to several servers named in a TOML file, each with its own credential. Cannot be combined with `--remote` or a typed `--url`; an exported `LIFIC_URL` is ignored. See [Multiple instances](/docs/mcp/multi-instance). |
 
 When the working directory is a checkout [bound to a project](/docs/repository-bindings), local and remote sessions use that project whenever a tool call leaves `project` out.
+
+With `--remote`, a create the server lists with an `op_key` parameter gets a key when the agent sent none, and is forwarded once more with that key when the connection drops or times out. See [Retrying a create](/docs/mcp/tools#retrying-a-create-with-op_key).
 
 ### agents-md
 

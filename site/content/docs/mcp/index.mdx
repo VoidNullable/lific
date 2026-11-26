@@ -105,7 +105,11 @@ Clients on MCP 2026-07-28 open with `server/discover` and carry their protocol v
 
 `lific mcp --remote --url https://your-server.example` gives a client that only launches commands a way to reach a server. It opens no database. Each request is POSTed to the server's `/mcp` endpoint with the credential, so authentication and revocation work exactly as they do over HTTP. `LIFIC_URL` can stand in for `--url`.
 
-When the server is unreachable, answers with an HTTP error, or rejects the credential, the proxy answers that request with a JSON-RPC error (`-32603`) carrying a readable message, and keeps running. A JSON-RPC protocol error the server sends with HTTP 400, such as an unsupported protocol version, is relayed unchanged. For a 2026-07-28 client, the proxy copies the protocol version, method and tool name from each request into the HTTP headers that revision requires. It ends only when the client closes its input. The [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server) covers binding a checkout through it.
+When the server is unreachable, answers with an HTTP error, or rejects the credential, the proxy answers that request with a JSON-RPC error (`-32603`) carrying a readable message, and keeps running. A JSON-RPC protocol error the server sends with HTTP 400, such as an unsupported protocol version, is relayed unchanged. For a 2026-07-28 client, the proxy copies the protocol version, method and tool name from each request into the HTTP headers that revision requires. It ends only when the client closes its input.
+
+A create is the one request the proxy repeats. When the server's `tools/list` shows a tool takes an [`op_key`](/docs/mcp/tools#retrying-a-create-with-op_key), the proxy adds a random one to each call of that tool that has none. If the connection then fails or times out before the reply arrives, it forwards the same call once more, and the server returns the first result when the write had already gone through. An HTTP error reply is never resent, and neither is any other tool.
+
+The [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server) covers binding a checkout through it.
 
 ## Response conventions
 

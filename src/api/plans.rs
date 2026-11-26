@@ -9,7 +9,9 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency;
 use super::{filter_visible, with_read, with_write};
+use crate::db::queries::op_keys::Written;
 
 /// LIF-407: a step's (or plan's) linked issue can live in a *different*
 /// project than the plan that references it. Authorizing only the plan's
@@ -92,15 +94,27 @@ pub(super) async fn create_plan(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreatePlan>,
-) -> Result<Json<Plan>, LificError> {
+) -> Result<Written<Plan>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     require_create_plan_issue_roles(&db, &identity, &input)?;
-    let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
+    let op_key = idempotency::key(&identity, &headers, "rest.create_plan", &input)?;
+    let written = db.transaction(|conn| {
+        if let Some(stored) = idempotency::replay(conn, op_key.as_ref())? {
+            return Ok(Written::Replayed(stored));
+        }
+        let plan = plans::create_plan(conn, &input)?;
+        idempotency::record(conn, op_key.as_ref(), &plan)?;
+        Ok(Written::Fresh(plan))
+    })?;
+    let Written::Fresh(plan) = written else {
+        return Ok(written);
+    };
     realtime.send(RealtimeEvent::ProjectUpdated {
         project_id: plan.project_id,
     });
-    Ok(Json(plan))
+    Ok(Written::Fresh(plan))
 }
 
 pub(super) async fn update_plan(

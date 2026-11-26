@@ -1013,6 +1013,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // once more when the session ends.
             db::agent_reads::start_flush_task(pool.clone());
             let flush_pool = pool.clone();
+            // LIF-526: the creates this session records keys for are its to
+            // expire; the server's retention sweep never runs here.
+            retention::start_op_key_expiry_task(pool.clone());
 
             let server =
                 mcp::LificMcp::for_stdio(pool, stdio_auth).with_bound_project(bound_project);

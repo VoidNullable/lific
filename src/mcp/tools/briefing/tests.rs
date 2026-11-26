@@ -114,6 +114,7 @@ fn seeded() -> (LificMcp, McpTestGuard, String) {
                 ..Default::default()
             },
         ]),
+        op_key: None,
     }));
     assert!(plan.starts_with("Created"), "got: {plan}");
     page(&m, "BRF", "Canon", "The rules.");
@@ -279,6 +280,7 @@ fn a_large_project_stays_under_the_budget_and_says_what_it_trimmed() {
                 title: format!("Step {long}"),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         assert!(plan.starts_with("Created"), "got: {plan}");
     }
@@ -615,6 +617,7 @@ fn comment(m: &LificMcp, identifier: &str, content: &str) {
         kind: Default::default(),
         identifier: identifier.into(),
         content: content.into(),
+        op_key: None,
     }));
     assert!(!added.starts_with("Error"), "got: {added}");
 }
@@ -1152,6 +1155,7 @@ fn plan(m: &LificMcp, project: &str, title: &str, steps: &[(&str, bool)]) {
                 })
                 .collect(),
         ),
+        op_key: None,
     }));
     assert!(created.starts_with("Created"), "got: {created}");
 }

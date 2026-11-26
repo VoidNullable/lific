@@ -117,6 +117,19 @@ By default the last write wins. To avoid overwriting somebody else's change, sen
 
 `current` has the same shape as the `GET` response, so a client can merge and retry without another request.
 
+## Retrying a create with `Idempotency-Key`
+
+When a create times out, a client cannot tell whether it was written. Send an `Idempotency-Key` header with any unique string (at most 255 bytes) on `POST /api/issues`, `POST /api/issues/{issue_id}/comments`, `POST /api/pages/{page_id}/comments`, `POST /api/pages` and `POST /api/plans`, and repeat the same key when you retry:
+
+- The same key and the same body return the body the first call returned, with the header `Idempotent-Replayed: true`. Nothing new is written.
+- The same key with a different body, or on a different route, is refused with `409` and writes nothing.
+- A call that failed records no key, so a corrected retry with the same key goes through.
+- A replay needs the same permission a new create would. A caller who lost access since gets that refusal, not the stored body.
+- A retry sent while the first call is still writing waits for it and gets the replay.
+- A response body over 1 MiB is not kept. Its key still blocks a second write: the retry gets `409` with `Idempotent-Replayed: true`, and should read the record directly.
+
+The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the user who sent them and are kept for 24 hours; after that the same key starts a new write. A server that honors the header lists `idempotency-key` in the `capabilities` of [`GET /api/instance`](/docs/rest-api/identity); an older one ignores it, so resending a lost create to it can write twice. The CLI's HTTP backend sends a key on every create and, against a server that lists the capability, retries once after a lost connection.
+
 ## Errors
 
 Handlers answer failures with a JSON object carrying one `error` string, and a status that says what kind of failure it was:
@@ -132,7 +145,7 @@ Handlers answer failures with a JSON object carrying one `error` string, and a s
 | `403` | Authenticated but not allowed, including `recent authentication required`. The refusal of an OAuth token on an account route is plain text. |
 | `404` | The record does not exist, is in the trash, or is hidden from you in a way that must not reveal that it exists. |
 | `405` | The path exists but not with that method. |
-| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, or an `expected_seq` mismatch (see above). |
+| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, an `expected_seq` mismatch, or an `Idempotency-Key` reused for a different request (see above). |
 | `413` | The request or its result is larger than Lific accepts. The message names the limit. |
 | `415`, `422` | The body is not JSON, or does not have the expected shape. These come from the request parser as plain text. |
 | `429` | A shared slot is taken: exports, project archives, the public read API's rate limit. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |

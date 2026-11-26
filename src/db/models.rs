@@ -1514,7 +1514,7 @@ pub struct PlanStepNode {
 /// Create a plan, optionally anchored to an issue, with a full nested step
 /// tree authored in one call. Issue references are pre-resolved to ids by the
 /// MCP/REST layer.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePlan {
     pub project_id: i64,
     pub title: String,
@@ -1524,7 +1524,7 @@ pub struct CreatePlan {
 }
 
 /// A step in a create_plan tree. Recursive via `steps`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePlanStep {
     pub title: String,
     #[serde(default)]

@@ -356,6 +356,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "decision comments",
         include_str!("../../migrations/072_decision_comments.sql"),
     ),
+    (
+        73,
+        "op keys",
+        include_str!("../../migrations/073_op_keys.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

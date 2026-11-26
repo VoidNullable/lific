@@ -13,6 +13,7 @@ pub(crate) mod issue_move;
 mod issues;
 pub(crate) mod members;
 pub(crate) mod number_sequences;
+pub(crate) mod op_keys;
 mod pages;
 pub(crate) mod plans;
 pub(crate) mod project_groups;

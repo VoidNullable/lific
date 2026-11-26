@@ -21,6 +21,7 @@ use super::outputs::{self, StructuredReply};
 use super::read_log::ReadLog;
 use super::schemas::*;
 use super::{LificMcp, current_issue_link_context, sanitize_error};
+use crate::db::queries::op_keys::Written;
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
 /// **zero** projects, so the first agent connecting to a fresh install learns
@@ -546,6 +547,19 @@ fn issue_reference<'a>(
     identifier: &'a str,
 ) -> Reference<'a> {
     reference_with_context(context, ReferenceKind::Issue(identifier))
+}
+
+/// LIF-526: what a create answers when its `op_key` already ran.
+fn replay_text(key: Option<&queries::op_keys::OpKey>, stored: queries::op_keys::Stored) -> String {
+    let key = key.map(queries::op_keys::OpKey::key).unwrap_or_default();
+    let head =
+        format!("Replayed op_key \"{key}\": this call already ran, so nothing new was written.");
+    match stored {
+        queries::op_keys::Stored::Result(result) => format!("{head}\n{result}"),
+        queries::op_keys::Stored::TooLarge => format!(
+            "{head}\nIts result was too large to keep; read what it created with get_issue, get_page, get_plan or list_comments."
+        ),
+    }
 }
 
 /// How many possible duplicates `create_issue` names (LIF-477).
@@ -3096,6 +3110,32 @@ No issues found."
         )
     }
 
+    /// LIF-526: the caller's `op_key` for a create, bound to `request` (the
+    /// tool's whole input, the key itself excluded).
+    fn op_key(
+        &self,
+        operation: &'static str,
+        key: Option<&str>,
+        request: &impl serde::Serialize,
+    ) -> Result<Option<queries::op_keys::OpKey>, String> {
+        let user_id = super::current_auth_user().map(|user| user.id);
+        queries::op_keys::OpKey::new("op_key", user_id, key, operation, request)
+            .map_err(sanitize_error)
+    }
+
+    /// The result an earlier call with this `op_key` committed, marked as a
+    /// replay. `None` when there was no such call and this one should write.
+    ///
+    /// Callers check here once their permission checks pass and before
+    /// anything that could drift since the first call (a renamed module, a
+    /// deleted relation target), then again inside the write transaction,
+    /// which is the check that settles a race.
+    fn replay(&self, key: Option<&queries::op_keys::OpKey>) -> Result<Option<String>, String> {
+        Ok(self
+            .read(|conn| queries::op_keys::replay_opt(conn, key))?
+            .map(|stored| replay_text(key, stored)))
+    }
+
     fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
         if let Some(items) = input.issues.take() {
             return self.create_issue_batch(input, items);
@@ -3106,6 +3146,13 @@ No issues found."
         let conn = self.read_conn()?;
         let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        // The project a binding supplied is not in `input`, so the resolved
+        // one is part of the fingerprint: two sessions bound to different
+        // projects never share a key's result.
+        let op_key = self.op_key("mcp.create_issue", input.op_key.as_deref(), &(pid, &input))?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
+        }
         let module_id = match &input.module {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
@@ -3126,12 +3173,31 @@ No issues found."
             require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         }
         let caller = self.caller_username(input.assignees.as_deref())?;
-        let issue = self.transaction(|conn| {
+        let context = current_issue_link_context();
+        let render = |issue: &models::Issue, similar: &[queries::SimilarIssue]| {
+            render_response(|output| {
+                write!(
+                    output,
+                    "Created {}: {}",
+                    issue_reference(context.as_deref(), &issue.identifier),
+                    issue.title
+                )?;
+                if !relations.is_empty() {
+                    write!(output, "\nLinked: ")?;
+                    create_relations::render(output, context.as_deref(), &relations, &[])?;
+                }
+                write_similar_issues(output, context.as_deref(), similar)
+            })
+        };
+        let written = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_issue` then links the
             // description's references inside its own savepoint.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
-            queries::create_issue(
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
+            let issue = queries::create_issue(
                 conn,
                 &models::CreateIssue {
                     project_id: pid,
@@ -3159,8 +3225,16 @@ No issues found."
             .and_then(|issue| {
                 create_relations::apply(conn, issue.id, &relations, &[])?;
                 Ok(issue)
-            })
+            })?;
+            // The replay leaves out the similar-issues hint: it was a
+            // suggestion about the moment of the first call.
+            queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(render(&issue, &[])))?;
+            Ok(Written::Fresh(issue))
         })?;
+        let issue = match written {
+            Written::Fresh(issue) => issue,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueCreated {
                 project_id: issue.project_id,
@@ -3185,20 +3259,7 @@ No issues found."
                 queries::similar_open_issues(conn, pid, &issue.title, &exclude, SIMILAR_ISSUE_LIMIT)
             })
             .unwrap_or_default();
-        let context = current_issue_link_context();
-        Ok(render_response(|output| {
-            write!(
-                output,
-                "Created {}: {}",
-                issue_reference(context.as_deref(), &issue.identifier),
-                issue.title
-            )?;
-            if !relations.is_empty() {
-                write!(output, "\nLinked: ")?;
-                create_relations::render(output, context.as_deref(), &relations, &[])?;
-            }
-            write_similar_issues(output, context.as_deref(), &similar)
-        }))
+        Ok(render(&issue, &similar))
     }
 
     /// LIF-478: agents file issues in bursts. The whole batch is one
@@ -3245,10 +3306,24 @@ No issues found."
             ));
         }
         let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
-        let (pid, relations) = {
+        let pid = resolve_project(
+            &*self.read_conn()?,
+            self.project_or_bound(input.project.as_deref())?,
+        )?;
+        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        // As in the single create: the resolved project is fingerprinted.
+        let op_key = self.op_key(
+            "mcp.create_issue",
+            input.op_key.as_deref(),
+            &(pid, &input, &items),
+        )?;
+        let op_key = op_key.as_ref();
+        if let Some(replayed) = self.replay(op_key)? {
+            return Ok(replayed);
+        }
+        let relations = {
             let conn = self.read_conn()?;
-            let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
-            let relations = items
+            items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
@@ -3266,18 +3341,63 @@ No issues found."
                     )
                     .map_err(|error| super::sanitize_error(at_batch_item(index, error)))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            (pid, relations)
+                .collect::<Result<Vec<_>, _>>()?
         };
-        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let linked = create_relations::existing(relations.iter().flatten());
         for &(project_id, _) in &linked {
             require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         }
         let caller = self.caller_username(Some(&["me".to_string()]))?;
-        let created = self.transaction(|conn| {
+        let context = current_issue_link_context();
+        let render = |created: &[models::Issue], similar: &[Vec<queries::SimilarIssue>]| {
+            let batch_identifiers: Vec<String> = created
+                .iter()
+                .map(|issue| issue.identifier.clone())
+                .collect();
+            render_response(|output| {
+                write!(output, "Created {} issues:", created.len())?;
+                created.iter().zip(&relations).enumerate().try_for_each(
+                    |(index, (issue, planned))| {
+                        write!(
+                            output,
+                            "\n- {}: {}",
+                            issue_reference(context.as_deref(), &issue.identifier),
+                            issue.title
+                        )?;
+                        if !planned.is_empty() {
+                            write!(output, " (")?;
+                            create_relations::render(
+                                output,
+                                context.as_deref(),
+                                planned,
+                                &batch_identifiers,
+                            )?;
+                            write!(output, ")")?;
+                        }
+                        let similar = similar.get(index).map(Vec::as_slice).unwrap_or_default();
+                        if similar.is_empty() {
+                            return Ok(());
+                        }
+                        write!(output, " (similar open: ")?;
+                        similar.iter().enumerate().try_for_each(|(i, other)| {
+                            let separator = if i == 0 { "" } else { ", " };
+                            write!(
+                                output,
+                                "{separator}{}",
+                                issue_reference(context.as_deref(), &other.identifier)
+                            )
+                        })?;
+                        write!(output, ")")
+                    },
+                )
+            })
+        };
+        let written = self.transaction(|conn| {
             // Same actor re-check as the single create, once for the batch.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key)? {
+                return Ok(Written::Replayed(stored));
+            }
             let created = items
                 .iter()
                 .enumerate()
@@ -3294,8 +3414,14 @@ No issues found."
                         .map_err(|error| at_batch_item(index, error))
                 },
             )?;
-            Ok(created)
+            // The batch replays as a whole: one key, one stored result.
+            queries::op_keys::record_opt(conn, op_key, || Ok(render(&created, &[])))?;
+            Ok(Written::Fresh(created))
         })?;
+        let created = match written {
+            Written::Fresh(created) => created,
+            Written::Replayed(stored) => return Ok(replay_text(op_key, stored)),
+        };
         for issue in &created {
             self.emit_with_seq(
                 crate::realtime::RealtimeEvent::IssueCreated {
@@ -3312,10 +3438,6 @@ No issues found."
             });
         }
         let batch_ids: Vec<i64> = created.iter().map(|issue| issue.id).collect();
-        let batch_identifiers: Vec<String> = created
-            .iter()
-            .map(|issue| issue.identifier.clone())
-            .collect();
         let similar: Vec<Vec<queries::SimilarIssue>> = created
             .iter()
             .zip(&relations)
@@ -3339,43 +3461,7 @@ No issues found."
                 .unwrap_or_default()
             })
             .collect();
-        let context = current_issue_link_context();
-        Ok(render_response(|output| {
-            write!(output, "Created {} issues:", created.len())?;
-            created.iter().zip(&similar).zip(&relations).try_for_each(
-                |((issue, similar), planned)| {
-                    write!(
-                        output,
-                        "\n- {}: {}",
-                        issue_reference(context.as_deref(), &issue.identifier),
-                        issue.title
-                    )?;
-                    if !planned.is_empty() {
-                        write!(output, " (")?;
-                        create_relations::render(
-                            output,
-                            context.as_deref(),
-                            planned,
-                            &batch_identifiers,
-                        )?;
-                        write!(output, ")")?;
-                    }
-                    if similar.is_empty() {
-                        return Ok(());
-                    }
-                    write!(output, " (similar open: ")?;
-                    similar.iter().enumerate().try_for_each(|(i, other)| {
-                        let separator = if i == 0 { "" } else { ", " };
-                        write!(
-                            output,
-                            "{separator}{}",
-                            issue_reference(context.as_deref(), &other.identifier)
-                        )
-                    })?;
-                    write!(output, ")")
-                },
-            )
-        }))
+        Ok(render(&created, &similar))
     }
 
     #[tool(
@@ -4257,18 +4343,44 @@ No issues found."
             None => None,
         };
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let op_key = self.op_key(
+            "mcp.create_page",
+            input.op_key.as_deref(),
+            &(project_id, &input),
+        )?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
+        }
         let folder_id = match (&input.folder, project_id) {
             (Some(name), Some(pid)) => Some(resolve_folder(&conn, pid, name)?),
             (Some(_), None) => return Err("folder requires a project".into()),
             _ => None,
         };
         drop(conn);
-        let page = self.transaction(|conn| {
+        let context = current_issue_link_context();
+        let render = |page: &models::Page| {
+            // LIF-481: warn the writer when readers will get an outline.
+            let warning = super::page_reads::oversize_warning(&page.content);
+            render_response(|output| {
+                write!(
+                    output,
+                    "Created {}: {}",
+                    page_reference(context.as_deref(), page),
+                    page.title
+                )?;
+                output.push_str(warning.as_deref().unwrap_or_default());
+                Ok(())
+            })
+        };
+        let written = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_page` then links the content's
             // references inside its own savepoint.
             let attachments = sync_link_actor_conn(conn, project_id, models::Role::Maintainer)?;
-            queries::create_page(
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
+            let page = queries::create_page(
                 conn,
                 &models::CreatePage {
                     project_id,
@@ -4286,24 +4398,19 @@ No issues found."
                     },
                     attachments,
                 },
-            )
+            )?;
+            let rendered = render(&page);
+            queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
+            Ok(Written::Fresh((page, rendered)))
         })?;
+        let (page, rendered) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         if let Some(project_id) = page.project_id {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
-        let context = current_issue_link_context();
-        // LIF-481: warn the writer when readers will get an outline.
-        let warning = super::page_reads::oversize_warning(&page.content);
-        Ok(render_response(|output| {
-            write!(
-                output,
-                "Created {}: {}",
-                page_reference(context.as_deref(), &page),
-                page.title
-            )?;
-            output.push_str(warning.as_deref().unwrap_or_default());
-            Ok(())
-        }))
+        Ok(rendered)
     }
 
     #[tool(
@@ -5305,46 +5412,28 @@ No issues found."
     }
 
     fn add_comment_inner(&self, input: AddCommentInput) -> Result<String, String> {
-        let (comment, parent, parent_identifier, event) = self.transaction(|conn| {
-            let (parent, parent_identifier, project_id) =
-                resolve_comment_parent_conn(conn, &input.identifier)?;
-            let actor = resolve_comment_actor_conn(conn)?;
-            crate::authz::require_project_or_workspace_role_conn(
-                conn,
-                &Some(actor.clone()),
-                project_id,
-                models::Role::Viewer,
-            )?;
-            let author = models::CommentActor::from(&actor.user);
-            let comment = queries::comments::create_typed_comment_with_mentions(
-                conn,
-                parent,
-                project_id,
-                author,
-                models::AttachmentActor::Authenticated(author),
-                &input.content,
-                input.kind,
-            )?;
-            let event = comment_updated_event(parent, project_id);
-            Ok((comment, parent, parent_identifier, event))
-        })?;
+        // The replay check runs in the transaction below, after the same
+        // permission check a fresh comment needs.
+        let op_key = self.op_key("mcp.add_comment", input.op_key.as_deref(), &input)?;
+        let context = current_issue_link_context();
         // Don't echo the content back — the agent already supplied it in the
         // tool args, so repeating it just duplicates tokens in context
         // (LIF-115). The comment id is the useful new handle for any
         // follow-up edit/delete.
-        event.into_iter().for_each(|event| self.emit(event));
-        Ok(match current_issue_link_context() {
+        let render = |comment: &models::Comment,
+                      parent: queries::comments::CommentParent,
+                      parent_identifier: &str| match &context {
             Some(context) => render_response(|output| {
                 write!(
                     output,
                     "{} added to {} by {} at {}",
                     reference_with_context(
                         Some(context.as_context()),
-                        comment_reference_kind(&parent_identifier, parent, comment.id),
+                        comment_reference_kind(parent_identifier, parent, comment.id),
                     ),
                     reference_with_context(
                         Some(context.as_context()),
-                        comment_parent_reference_kind(&parent_identifier, parent),
+                        comment_parent_reference_kind(parent_identifier, parent),
                     ),
                     comment.author,
                     comment.created_at
@@ -5357,7 +5446,41 @@ No issues found."
                     comment.id, parent_identifier, comment.author, comment.created_at
                 )
             }),
-        })
+        };
+        let written = self.transaction(|conn| {
+            let (parent, parent_identifier, project_id) =
+                resolve_comment_parent_conn(conn, &input.identifier)?;
+            let actor = resolve_comment_actor_conn(conn)?;
+            crate::authz::require_project_or_workspace_role_conn(
+                conn,
+                &Some(actor.clone()),
+                project_id,
+                models::Role::Viewer,
+            )?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
+            let author = models::CommentActor::from(&actor.user);
+            let comment = queries::comments::create_typed_comment_with_mentions(
+                conn,
+                parent,
+                project_id,
+                author,
+                models::AttachmentActor::Authenticated(author),
+                &input.content,
+                input.kind,
+            )?;
+            let event = comment_updated_event(parent, project_id);
+            let rendered = render(&comment, parent, &parent_identifier);
+            queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
+            Ok(Written::Fresh((rendered, event)))
+        })?;
+        let (rendered, event) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
+        event.into_iter().for_each(|event| self.emit(event));
+        Ok(rendered)
     }
 
     #[tool(
@@ -5690,7 +5813,34 @@ No issues found."
         if let Some(ref steps) = input.steps {
             self.require_plan_step_issue_roles(steps, models::Role::Maintainer)?;
         }
-        let plan = self.write(|conn| {
+        // The resolved project is fingerprinted: a binding is not in `input`.
+        let op_key = self.op_key("mcp.create_plan", input.op_key.as_deref(), &(pid, &input))?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
+        }
+        let context = current_issue_link_context();
+        let render = |plan: &models::Plan| {
+            render_response(|output| {
+                writeln!(
+                    output,
+                    "Created {}",
+                    plan_reference(context.as_deref(), plan)
+                )?;
+                write!(
+                    output,
+                    "{}",
+                    PlanView {
+                        plan,
+                        context: context.as_deref(),
+                        full_descriptions: false,
+                    }
+                )
+            })
+        };
+        let written = self.transaction(|conn| {
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
             let anchor = match &input.anchor_issue {
                 Some(ident) => Some(queries::resolve_identifier(conn, ident)?),
                 None => None,
@@ -5701,7 +5851,7 @@ No issues found."
                     steps.push(build_create_step(conn, s)?);
                 }
             }
-            queries::plans::create_plan(
+            let plan = queries::plans::create_plan(
                 conn,
                 &models::CreatePlan {
                     project_id: pid,
@@ -5709,28 +5859,19 @@ No issues found."
                     issue_id: anchor,
                     steps,
                 },
-            )
+            )?;
+            let rendered = render(&plan);
+            queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
+            Ok(Written::Fresh((plan, rendered)))
         })?;
+        let (plan, rendered) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
             project_id: plan.project_id,
         });
-        let context = current_issue_link_context();
-        Ok(render_response(|output| {
-            writeln!(
-                output,
-                "Created {}",
-                plan_reference(context.as_deref(), &plan)
-            )?;
-            write!(
-                output,
-                "{}",
-                PlanView {
-                    plan: &plan,
-                    context: context.as_deref(),
-                    full_descriptions: false,
-                }
-            )
-        }))
+        Ok(rendered)
     }
 
     #[tool(
@@ -7098,6 +7239,10 @@ mod tests_assignees;
 mod tests_move_issue;
 
 #[cfg(test)]
+#[path = "tests_op_keys.rs"]
+mod tests_op_keys;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn encoded_tool_result_bytes_matches_small_unicode_and_large_payloads() {
@@ -7870,6 +8015,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let stale_seq = page_seq_of(&m, "OCP-DOC-1");
 
@@ -7910,6 +8056,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let seq = page_seq_of(&m, "OPF-DOC-1");
 
@@ -9031,6 +9178,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         m.delete(Parameters(DeleteInput {
@@ -9076,6 +9224,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         assert!(created.contains("PG-DOC-1"), "got: {created}");
 
@@ -9110,6 +9259,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         assert!(created.contains("DOC-"), "got: {created}");
     }
@@ -9126,6 +9276,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "page".into(),
@@ -9166,12 +9317,14 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         assert!(page.starts_with("Created FMT-DOC-1"), "got: {page}");
         let comment = m.add_comment(Parameters(AddCommentInput {
             kind: Default::default(),
             identifier: "FMT-1".into(),
             content: "Comment mixedformatneedle".into(),
+            op_key: None,
         }));
         assert!(comment.starts_with("Comment #"), "got: {comment}");
 
@@ -9211,6 +9364,7 @@ mod tests {
                 kind: Default::default(),
                 identifier: "SRC-1".into(),
                 content: "Unique comment needle".into(),
+                op_key: None,
             }));
             m.search(Parameters(SearchInput {
                 query: "needle".into(),
@@ -9385,6 +9539,7 @@ mod tests {
             title: "Current plan".into(),
             anchor_issue: None,
             steps: None,
+            op_key: None,
         }));
         assert!(created.starts_with("Created REC-PLAN-1"), "got: {created}");
 
@@ -9966,6 +10121,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Hello from MCP".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
         assert!(result.contains("testuser"), "got: {result}");
@@ -9981,6 +10137,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Second comment".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
 
@@ -10029,6 +10186,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "cc @ada and @ghost".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
         let comment_id: i64 = result
@@ -10284,6 +10442,7 @@ mod tests {
             kind: Default::default(),
             identifier: "ATC-1".into(),
             content: format!("here: /api/attachments/{att}"),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
 
@@ -10307,6 +10466,7 @@ mod tests {
             kind: Default::default(),
             identifier: "ATD-1".into(),
             content: format!("/api/attachments/{old}"),
+            op_key: None,
         }));
         let comment_id = comment_id_from(&created);
         assert_eq!(
@@ -10339,6 +10499,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Visible in get_issue".into(),
+            op_key: None,
         }));
 
         let result = m.get_issue(Parameters(GetIssueInput {
@@ -10358,6 +10519,7 @@ mod tests {
                 kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("comment number {i}"),
+                op_key: None,
             }));
         }
     }
@@ -10371,6 +10533,7 @@ mod tests {
                 kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("body {i} {}", "x".repeat(size)),
+                op_key: None,
             }));
         }
     }
@@ -10997,6 +11160,7 @@ mod tests {
             kind: Default::default(),
             identifier: "NOPE-999".into(),
             content: "Orphan".into(),
+            op_key: None,
         }));
         assert!(result.contains("Error"), "got: {result}");
     }
@@ -11022,6 +11186,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Comment via stdio fallback".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
         assert!(result.contains("admin"), "got: {result}");
@@ -11040,6 +11205,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let _guard = seed_user(&m);
 
@@ -11047,6 +11213,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PGC-DOC-01".into(),
             content: "Comment on a page".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
         assert!(result.contains("PGC-DOC-1"), "got: {result}");
@@ -11075,6 +11242,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let _guard = seed_user(&m);
         drain_realtime(&mut rx);
@@ -11083,6 +11251,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PCO-DOC-1".into(),
             content: "original".into(),
+            op_key: None,
         }));
         let comment_id = comment_id_from(&added);
         assert_eq!(
@@ -11121,6 +11290,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let _guard = seed_user(&m);
 
@@ -11128,11 +11298,13 @@ mod tests {
             kind: Default::default(),
             identifier: "MIX-1".into(),
             content: "issue thread".into(),
+            op_key: None,
         }));
         m.add_comment(Parameters(AddCommentInput {
             kind: Default::default(),
             identifier: "MIX-DOC-1".into(),
             content: "page thread".into(),
+            op_key: None,
         }));
 
         let issue_listing = m.list_comments(Parameters(ListCommentsInput {
@@ -11170,6 +11342,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         let _guard = seed_user(&m);
 
@@ -11177,6 +11350,7 @@ mod tests {
             kind: Default::default(),
             identifier: "DOC-1".into(),
             content: "comment on workspace page".into(),
+            op_key: None,
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
 
@@ -11621,6 +11795,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -11655,6 +11830,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         assert!(created.starts_with("Created"), "got: {created}");
         assert_eq!(
@@ -11699,6 +11875,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -11737,6 +11914,7 @@ mod tests {
             folder: Some("Specs".into()),
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         m.edit_page(Parameters(EditPageInput {
@@ -11786,6 +11964,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -11811,6 +11990,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -11858,6 +12038,7 @@ mod tests {
             folder: None,
             status: None,
             labels: Some(vec!["design".into()]),
+            op_key: None,
         }));
         assert!(created.contains("PGL-DOC-1"), "got: {created}");
 
@@ -11881,6 +12062,7 @@ mod tests {
             folder: None,
             status: None,
             labels: Some(vec!["design".into()]),
+            op_key: None,
         }));
 
         m.update_page(Parameters(UpdatePageInput {
@@ -11989,6 +12171,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         // Move into folder.
@@ -12133,6 +12316,7 @@ mod tests {
             folder: None,
             status: None,
             labels: Some(vec!["design".into()]),
+            op_key: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("PLI".into()),
@@ -12141,6 +12325,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let listing = m.list_resources(Parameters(ListResourcesInput {
@@ -12171,6 +12356,7 @@ mod tests {
             folder: None,
             status: None,
             labels: Some(vec!["design".into()]),
+            op_key: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("PLF".into()),
@@ -12179,6 +12365,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let filtered = m.list_resources(Parameters(ListResourcesInput {
@@ -12208,6 +12395,7 @@ mod tests {
             folder: None,
             status: None,
             labels: Some(vec!["anything".into()]),
+            op_key: None,
         }));
         assert!(created.contains("DOC-1"), "got: {created}");
 
@@ -12245,6 +12433,7 @@ mod tests {
             folder: Some("Specs".into()),
             status: Some("active".into()),
             labels: None,
+            op_key: None,
         }));
 
         let detail = m.get_page(Parameters(GetPageInput {
@@ -12278,6 +12467,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let detail = m.get_page(Parameters(GetPageInput {
@@ -12302,6 +12492,7 @@ mod tests {
             folder: None,
             status: Some("active".into()),
             labels: None,
+            op_key: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("STA".into()),
@@ -12310,6 +12501,7 @@ mod tests {
             folder: None,
             status: Some("archived".into()),
             labels: None,
+            op_key: None,
         }));
 
         let active = m.list_resources(Parameters(ListResourcesInput {
@@ -12337,6 +12529,7 @@ mod tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }));
         }
 
@@ -12377,6 +12570,7 @@ mod tests {
             folder: Some("Design".into()),
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let listing = m.list_resources(Parameters(ListResourcesInput {
@@ -12402,6 +12596,7 @@ mod tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }));
         }
 
@@ -12440,6 +12635,7 @@ mod tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }));
         }
 
@@ -12472,6 +12668,7 @@ mod tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }));
         }
 
@@ -12501,6 +12698,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Mine".into(),
+            op_key: None,
         }));
 
         let mine = m.list_comments(Parameters(ListCommentsInput {
@@ -12534,11 +12732,13 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "first".into(),
+            op_key: None,
         }));
         m.add_comment(Parameters(AddCommentInput {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "second".into(),
+            op_key: None,
         }));
 
         // Same-second timestamps tiebreak on id, so desc puts the later
@@ -12632,6 +12832,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
+            op_key: None,
         }));
         let cid = comment_id_from(&added);
 
@@ -12677,6 +12878,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: oversized.clone(),
+            op_key: None,
         }));
         assert!(
             rejected.starts_with("Error:") && rejected.contains("too large"),
@@ -12687,6 +12889,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "keep me".into(),
+            op_key: None,
         }));
         let cid = comment_id_from(&added);
 
@@ -12723,6 +12926,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "delete me".into(),
+            op_key: None,
         }));
         let cid = comment_id_from(&added);
 
@@ -12762,6 +12966,7 @@ mod tests {
                     kind: Default::default(),
                     identifier: "PRJ-1".into(),
                     content: "original".into(),
+                    op_key: None,
                 }));
                 let comment_id = comment_id_from(&added);
                 let edited = m.edit_comment(Parameters(EditCommentInput {
@@ -12802,6 +13007,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
+            op_key: None,
         }));
         let comment_id = comment_id_from(&added);
         drain_realtime(&mut events);
@@ -12844,6 +13050,7 @@ mod tests {
                 kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "mine".into(),
+                op_key: None,
             }));
             comment_id_from(&added)
         };
@@ -12890,6 +13097,7 @@ mod tests {
             kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: body.into(),
+            op_key: None,
         }));
         (comment_id_from(&added), guard)
     }
@@ -13044,6 +13252,7 @@ mod tests {
                 kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "regular user's comment".into(),
+                op_key: None,
             }));
             comment_id_from(&added)
         };
@@ -13092,6 +13301,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
 
         let issues_only = m.search(Parameters(SearchInput {
@@ -13256,6 +13466,7 @@ mod tests {
             folder: None,
             status: None,
             labels: None,
+            op_key: None,
         }));
         m.edit_page(Parameters(EditPageInput {
             identifier: "TST-DOC-1".into(),
@@ -13315,12 +13526,14 @@ mod tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }));
             m.create_plan(Parameters(CreatePlanInput {
                 project: Some("TST".into()),
                 title: "Audit plan".into(),
                 anchor_issue: None,
                 steps: None,
+                op_key: None,
             }));
             m.manage_resource(Parameters(ManageResourceInput {
                 resource_type: "module".into(),
@@ -13346,6 +13559,7 @@ mod tests {
                     kind: Default::default(),
                     identifier: "TST-1".into(),
                     content: "Audit comment".into(),
+                    op_key: None,
                 }));
                 (
                     m.get_activity(Parameters(GetActivityInput {
@@ -13477,6 +13691,7 @@ mod tests {
                 title: "Exercise the link".into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         assert!(created.contains("Created TST-PLAN-1"), "got: {created}");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
@@ -13508,6 +13723,7 @@ mod tests {
                 title: "Exercise the link".into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let updated = m.update_plan_step(Parameters(UpdatePlanStepInput {
             plan: "TST-PLAN-1".into(),
@@ -13620,6 +13836,7 @@ mod tests {
                     ..Default::default()
                 },
             ]),
+            op_key: None,
         }));
         assert!(created.contains("PLN-PLAN-1"), "got: {created}");
         assert!(created.contains("Backend"));
@@ -13849,6 +14066,7 @@ mod tests {
                 description: Some(description.into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         assert!(
             created.contains('…') && !created.contains("every word of it."),
@@ -13882,6 +14100,7 @@ mod tests {
                 title: "mirror".into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let step_id = created
             .split('#')
@@ -13923,6 +14142,7 @@ mod tests {
                 issue: Some("PLN-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         // Pull the step id from the rendered "#N".
         let step_id: i64 = created
@@ -13982,6 +14202,7 @@ mod tests {
                     ..Default::default()
                 },
             ]),
+            op_key: None,
         }));
         let step_id: i64 = created
             .split('#')
@@ -14020,6 +14241,7 @@ mod tests {
                 title: "only step".into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
 
         let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
@@ -14058,6 +14280,7 @@ mod tests {
                 }]),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
 
         let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
@@ -14093,6 +14316,7 @@ mod tests {
                 title: "only".into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
 
         let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
@@ -14133,6 +14357,7 @@ mod tests {
                 issue: Some("PLE-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let step_id: i64 = created
             .split('#')
@@ -14174,6 +14399,7 @@ mod tests {
                 description: Some("old text".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let step_id: i64 = created
             .split('#')
@@ -14206,6 +14432,7 @@ mod tests {
             title: "Plan".into(),
             anchor_issue: None,
             steps: None,
+            op_key: None,
         }));
 
         // Plan-level status change (no step_id).
@@ -14259,6 +14486,7 @@ mod tests {
                 issue: Some("CNP-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
 
         let updated = m.update_issue(Parameters(UpdateIssueInput {
@@ -14299,6 +14527,7 @@ mod tests {
                 issue: Some("PLN-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let step_id: i64 = created
             .split('#')
@@ -14341,6 +14570,7 @@ mod tests {
                 issue: Some("RPN-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         let step_id: i64 = created
             .split('#')
@@ -14389,6 +14619,7 @@ mod tests {
                 issue: Some("ARC-1".into()),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         m.update_plan_step(Parameters(UpdatePlanStepInput {
             plan: "ARC-PLAN-1".into(),
@@ -14425,6 +14656,7 @@ mod tests {
             title: "Doomed".into(),
             anchor_issue: None,
             steps: None,
+            op_key: None,
         }));
         let out = m.delete(Parameters(DeleteInput {
             resource_type: "plan".into(),
@@ -14532,6 +14764,7 @@ mod tests {
             kind: Default::default(),
             identifier: "ESC-1".into(),
             content: raw_comment.into(),
+            op_key: None,
         }));
 
         // via get_issue
@@ -14563,6 +14796,7 @@ mod tests {
                 title: raw_step.into(),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         assert_no_html_escape(&created, &[raw_step]);
 
@@ -14825,6 +15059,7 @@ mod tests {
             kind: Default::default(),
             identifier: "ATT-1".into(),
             content: "see attached".into(),
+            op_key: None,
         })));
 
         let page_receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
@@ -15918,6 +16153,7 @@ mod authz_gating_tests {
                     issue: Some(foreign_ident.clone()),
                     ..Default::default()
                 }]),
+                op_key: None,
             }))
         });
         assert!(is_forbidden(&via_step), "top-level step: {via_step}");
@@ -15936,6 +16172,7 @@ mod authz_gating_tests {
                     }]),
                     ..Default::default()
                 }]),
+                op_key: None,
             }))
         });
         assert!(is_forbidden(&via_child), "nested step: {via_child}");
@@ -15946,6 +16183,7 @@ mod authz_gating_tests {
                 title: "Leaky anchor".into(),
                 anchor_issue: Some(foreign_ident.clone()),
                 steps: None,
+                op_key: None,
             }))
         });
         assert!(is_forbidden(&via_anchor), "anchor: {via_anchor}");
@@ -15983,6 +16221,7 @@ mod authz_gating_tests {
                     issue: Some("MEM-1".into()),
                     ..Default::default()
                 }]),
+                op_key: None,
             }))
         });
         assert!(ok.starts_with("Created"), "got: {ok}");
@@ -16000,6 +16239,7 @@ mod authz_gating_tests {
                 title: "Anchorable".into(),
                 anchor_issue: None,
                 steps: None,
+                op_key: None,
             }))
         });
         assert!(plan.starts_with("Created"), "got: {plan}");
@@ -16165,6 +16405,7 @@ mod authz_gating_tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }))
         });
         assert!(page.starts_with("Created"), "got: {page}");
@@ -16174,6 +16415,7 @@ mod authz_gating_tests {
                 title: "Plan".into(),
                 anchor_issue: None,
                 steps: None,
+                op_key: None,
             }))
         });
         assert!(plan.starts_with("Created"), "got: {plan}");
@@ -16520,6 +16762,7 @@ mod authz_gating_tests {
                 kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "viewers can comment".into(),
+                op_key: None,
             }))
         });
         assert!(
@@ -16532,6 +16775,7 @@ mod authz_gating_tests {
                 kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "should not land".into(),
+                op_key: None,
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
@@ -16567,6 +16811,7 @@ mod authz_gating_tests {
                     kind: Default::default(),
                     identifier: "MEM-1".into(),
                     content: content.into(),
+                    op_key: None,
                 }))
             }))
         });
@@ -16886,6 +17131,7 @@ mod authz_gating_tests {
                     title: "step".into(),
                     ..Default::default()
                 }]),
+                op_key: None,
             }))
         });
         assert!(plan.starts_with("Created"), "got: {plan}");
@@ -16975,6 +17221,7 @@ mod authz_gating_tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
@@ -16987,6 +17234,7 @@ mod authz_gating_tests {
                 folder: None,
                 status: None,
                 labels: None,
+                op_key: None,
             }))
         });
         assert!(!is_forbidden(&allowed), "got: {allowed}");

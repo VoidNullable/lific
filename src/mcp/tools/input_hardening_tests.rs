@@ -69,6 +69,7 @@ fn edit_comment_accepts_camel_case_keys() {
         kind: Default::default(),
         identifier: "CML-1".into(),
         content: "a b a".into(),
+        op_key: None,
     }));
     let cid = comment_id_from(&added);
 

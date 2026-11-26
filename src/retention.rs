@@ -8,9 +8,10 @@
 //! the only moment the foreign-key cascades fire.
 //!
 //! The same sweep deletes `agent_reads` rows older than
-//! [`agent_reads::RETENTION_DAYS`]. That part always runs: `trash_days = 0`
-//! keeps tombstones forever, which says nothing about read telemetry, so the
-//! task is spawned either way and only the trash half is skipped.
+//! [`agent_reads::RETENTION_DAYS`] and idempotency keys older than
+//! [`op_keys::TTL_HOURS`]. Those parts always run: `trash_days = 0` keeps
+//! tombstones forever, which says nothing about read telemetry or keys, so
+//! the task is spawned either way and only the trash half is skipped.
 //!
 //! Shape copied from `backup::start_backup_task`: settle, sweep once at
 //! startup, then sweep on an interval, with the synchronous SQLite work handed
@@ -23,7 +24,7 @@ use tracing::{error, info, warn};
 
 use crate::db::DbPool;
 use crate::db::agent_reads;
-use crate::db::queries::trash;
+use crate::db::queries::{op_keys, trash};
 
 /// How often the sweep runs. Four times a day: a tombstone lives for days, so
 /// collecting it within six hours of its expiry is as precise as this needs to
@@ -95,6 +96,40 @@ fn sweep_once(pool: &DbPool, trash_days: u32) {
         Ok(0) => {}
         Ok(rows) => info!(rows, "expired old agent reads"),
         Err(e) => warn!(error = %e, "agent read expiry failed"),
+    }
+    expire_op_keys(&conn);
+}
+
+fn expire_op_keys(conn: &rusqlite::Connection) {
+    match op_keys::purge_expired(conn) {
+        Ok(0) => {}
+        Ok(rows) => info!(rows, "expired old op keys"),
+        Err(e) => warn!(error = %e, "op key expiry failed"),
+    }
+}
+
+/// LIF-526: a stdio `lific mcp` session writes idempotency keys but never
+/// runs the server's retention sweep, and it may be the only process that
+/// ever opens its database. It expires keys at start and on the sweep's
+/// schedule. Only the keys: emptying the trash stays the server's job.
+pub fn start_op_key_expiry_task(pool: DbPool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let pool = pool.clone();
+            let swept = tokio::task::spawn_blocking(move || expire_op_keys_once(&pool)).await;
+            if let Err(e) = swept {
+                error!(error = %e, "op key expiry failed to run to completion");
+            }
+        }
+    })
+}
+
+fn expire_op_keys_once(pool: &DbPool) {
+    match pool.write() {
+        Ok(conn) => expire_op_keys(&conn),
+        Err(e) => warn!(error = %e, "could not acquire write connection for op key expiry"),
     }
 }
 
@@ -202,6 +237,68 @@ mod tests {
         agent_read(&pool, "fresh", 2);
         sweep_once(&pool, 30);
         assert_eq!(agent_read_rows(&pool), ["fresh"]);
+    }
+
+    fn op_key_names(pool: &db::DbPool) -> Vec<String> {
+        let conn = pool.read().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT op_key FROM op_keys ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn op_key(pool: &db::DbPool, key: &str, age_hours: i64) {
+        let conn = pool.write().unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO op_keys (op_key, operation, request_hash, result, created_at)
+                 VALUES (?1, 'mcp.create_issue', 'h', 'r', datetime('now', '-{age_hours} hours'))"
+            ),
+            rusqlite::params![key],
+        )
+        .unwrap();
+    }
+
+    /// LIF-526: idempotency keys live 24 hours; every sweep drops older
+    /// ones, whatever `trash_days` says.
+    #[test]
+    fn one_sweep_expires_op_keys_older_than_a_day() {
+        let (pool, _) = seeded();
+        op_key(&pool, "old", 25);
+        op_key(&pool, "fresh", 1);
+        sweep_once(&pool, 0);
+        assert_eq!(op_key_names(&pool), ["fresh"]);
+    }
+
+    /// The stdio session's expiry: old keys go, fresh keys and the trash stay.
+    #[test]
+    fn the_stdio_expiry_drops_old_op_keys_and_leaves_the_trash() {
+        let (pool, pid) = seeded();
+        let id = doomed_issue(&pool, pid, 90);
+        op_key(&pool, "old", 25);
+        op_key(&pool, "fresh", 1);
+        expire_op_keys_once(&pool);
+        assert_eq!(op_key_names(&pool), ["fresh"]);
+        assert_eq!(issue_rows(&pool, id), 1);
+    }
+
+    /// The task runs its first expiry as soon as it starts.
+    #[tokio::test]
+    async fn the_stdio_expiry_task_runs_at_start() {
+        let (pool, _) = seeded();
+        op_key(&pool, "old", 25);
+        let task = start_op_key_expiry_task(pool.clone());
+        for _ in 0..200 {
+            if op_key_names(&pool).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+        assert!(op_key_names(&pool).is_empty());
     }
 
     /// `trash_days = 0` keeps tombstones forever but must not keep agent
