@@ -30,9 +30,9 @@ Legacy HWP is the one type the bytes cannot settle alone: its file signature is 
 
 ### Importing an image URL
 
-Paste a single HTTP or HTTPS URL ending in `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` or `.svg` into an editor or comment box. Query strings are supported. **Import as attachment** asks the server to download the image and replaces the URL with attachment Markdown. **Keep URL** or Escape leaves the plain text in place. Nothing is fetched until you accept.
+Paste a single HTTP or HTTPS URL ending in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` into an editor or comment box. Query strings are supported. **Import as attachment** asks the server to download the image and replaces the URL with attachment Markdown. **Keep URL** or Escape leaves the plain text in place. The offer also disappears when you edit or move the caret away from the URL. Modified Enter shortcuts keep their usual behavior. Nothing is fetched until you accept.
 
-Imports use the same upload size limit, account rate limit and linking permissions as file uploads. Only public hosts are allowed. Redirects are refused, so paste the final image URL. The fetch has a ten-second deadline, including DNS lookup, and checks the image's contents. A failed import keeps the URL and shows the reason with a retry button. SVG imports remain download-only, like uploaded SVG files.
+Imports use the same upload size limit, account rate limit and linking permissions as file uploads. Only public hosts are allowed. Redirects are refused, so paste the final image URL. The fetch has a ten-second deadline, including DNS lookup, and checks the image's contents. A failed import keeps the URL and shows the reason with a retry button. If you remove or change the URL during a successful import, a notice explains that the image was imported without inserting it. SVG URLs stay as plain text because SVG attachments are download-only.
 
 ### Annotating a screenshot
 

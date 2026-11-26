@@ -9,34 +9,22 @@ import { png } from "./png";
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/ImageUrlPasteFixture.svelte";
 const fixture = `<script>
-  import { onDestroy } from 'svelte';
   import EditableMarkdown from './lib/EditableMarkdown.svelte';
-  import AttachComposer from './lib/attachments/AttachComposer.svelte';
-  import { createComposerAttachments } from './lib/attachments/composer.svelte';
+  import Comments from './lib/Comments.svelte';
+  import Toaster from './lib/toast/Toaster.svelte';
   import { EditorView } from '@codemirror/view';
   let body = $state('Before.\\n\\n');
-  let draft = $state('');
-  let el = $state(null);
   window.view = () => EditorView.findFromDOM(document.querySelector('.cm-editor'));
   window.saved = [];
-  const attach = createComposerAttachments({
-    el: () => el,
-    text: { read: () => draft, write: (next, caret) => {
-      draft = next;
-      if (el) { el.value = next; if (caret !== undefined) el.setSelectionRange(caret, caret); }
-    }},
-  });
-  onDestroy(() => attach.destroy());
+  window.submitted = [];
 </script>
 <main style="max-width: 700px">
   <EditableMarkdown value={body} attachTo={{entity_type:'page',entity_id:1}}
     onSave={async (next) => { window.saved.push(next); body = next; return {ok:true,body:next,seq:null}; }} />
-  <AttachComposer composer={attach}>
-    <textarea aria-label="Comment draft" bind:this={el} bind:value={draft}
-      onpaste={(e) => attach.handlePaste(e)} onkeydown={(e) => attach.handleKeydown(e)}></textarea>
-    <button disabled={attach.uploads.pending}>Submit comment</button>
-  </AttachComposer>
-</main>`;
+  <Comments comments={[]} placeholder="Comment draft"
+    onSubmit={async (content) => { window.submitted.push(content); return {id: 1, content}; }} />
+</main>
+<Toaster />`;
 const originalHtml = await Bun.file(root + "/index.html").text();
 const html = originalHtml.replace(
   '<script type="module" src="/src/main.ts"></script>',
@@ -81,7 +69,7 @@ try {
       requests.push(route.request().postDataJSON());
       if (delay) await new Promise<void>(r => { release = r; });
       return route.fulfill(fail
-        ? { status: 400, json: {error: "image host must resolve only to public addresses"} }
+        ? { status: 400, json: {error: "image host is unavailable"} }
         : { json: {id: 7, url: "/api/attachments/7", filename: "screen.png", mime: "image/png", size: 80} });
     }
     if (path === "/api/attachments/7") return route.fulfill({ contentType: "image/png", body: png(2, 3) });
@@ -128,13 +116,13 @@ try {
   await page.waitForFunction(() => (window as any).saved.some((s: string) => s.includes("/api/attachments/7")));
   console.log("image URL accept, edits during fetch, saved Markdown: ok");
 
-  const comment = page.getByRole("textbox", {name: "Comment draft"});
+  const comment = page.getByPlaceholder("Comment draft");
   await comment.fill("Comment ");
   await comment.press("End");
   await paste("http://127.0.0.1/private.png");
   fail = true;
   await accept.click();
-  await page.getByText("image host must resolve only to public addresses", {exact: true}).waitFor();
+  await page.getByText("image host is unavailable", {exact: true}).waitFor();
   assert.equal(await comment.inputValue(), "Comment http://127.0.0.1/private.png");
   assert.deepEqual(requests[1], {url: "http://127.0.0.1/private.png"});
   fail = false;
@@ -154,13 +142,86 @@ try {
   const commentImport = page.waitForRequest("**/api/attachments/import");
   await comment.press("Enter");
   await commentImport;
-  assert.ok(await page.getByRole("button", {name: "Submit comment"}).isDisabled());
+  assert.ok(await page.getByRole("button", {name: "Comment", exact: true}).isDisabled());
   release!();
   delay = false;
   await page.waitForFunction(() => (document.querySelector("textarea") as HTMLTextAreaElement).value.includes("/api/attachments/7"));
   assert.equal(await comment.inputValue(), "![screen.png](/api/attachments/7)");
-  assert.ok(await page.getByRole("button", {name: "Submit comment"}).isEnabled());
+  assert.ok(await page.getByRole("button", {name: "Comment", exact: true}).isEnabled());
   console.log("image URL keyboard accept, decline and pending save gate: ok");
+
+  const importsBeforeEditing = requests.length;
+  await comment.fill("");
+  await paste(url);
+  await accept.waitFor();
+  await comment.pressSequentially(" note");
+  await accept.waitFor({state: "hidden"});
+  await comment.press("Enter");
+  assert.equal(await comment.inputValue(), `${url} note\n`);
+  await comment.press("Control+Enter");
+  await page.waitForFunction(() => (window as any).submitted.length === 1);
+  assert.equal(await page.evaluate(() => (window as any).submitted[0]), `${url} note`);
+  assert.equal(requests.length, importsBeforeEditing);
+  // Modified Enter also submits when the offer is still visible.
+  await comment.fill("");
+  await paste(url);
+  await accept.waitFor();
+  await comment.press("Control+Enter");
+  await page.waitForFunction(() => (window as any).submitted.length === 2);
+  assert.equal(await page.evaluate(() => (window as any).submitted[1]), url);
+  assert.equal(requests.length, importsBeforeEditing);
+  console.log("image URL offer dismisses on edit; newline and Ctrl+Enter submit: ok");
+
+  await comment.fill("Before ");
+  await comment.press("End");
+  await paste(url);
+  await accept.waitFor();
+  await comment.press("Home");
+  await accept.waitFor({state: "hidden"});
+  assert.equal(requests.length, importsBeforeEditing);
+
+  await page.locator(".cm-line").first().click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await paste(url);
+  await accept.waitFor();
+  await page.keyboard.type(" note");
+  await accept.waitFor({state: "hidden"});
+  await page.keyboard.press("Enter");
+  assert.ok((await text()).endsWith(`${url} note\n`));
+  await paste(url);
+  await accept.waitFor();
+  await page.keyboard.press("Control+Home");
+  await accept.waitFor({state: "hidden"});
+  await page.keyboard.press("Escape");
+  assert.equal(await page.evaluate(() => (window as any).view().hasFocus), false);
+  assert.equal(requests.length, importsBeforeEditing);
+  console.log("image URL caret movement dismisses offer; editor Escape still blurs: ok");
+
+  await comment.fill("");
+  await paste("https://images.example/picture.svg");
+  assert.equal(await comment.inputValue(), "https://images.example/picture.svg");
+  assert.equal(await accept.count(), 0);
+  assert.equal(requests.length, importsBeforeEditing);
+  console.log("SVG URL stays plain text without an import offer: ok");
+
+  // A successful fetch must explain why a deleted URL was not replaced.
+  await page.locator(".cm-line").first().click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await paste("https://images.example/removed.png");
+  delay = true;
+  const removedImport = page.waitForRequest("**/api/attachments/import");
+  await accept.click();
+  await removedImport;
+  await page.locator(".cm-line").first().click();
+  await page.keyboard.press("Control+a");
+  await page.keyboard.type("Replacement text.");
+  release!();
+  delay = false;
+  await page.getByText("Image imported but not inserted. Find it in Attachments.", {exact: true}).waitFor();
+  assert.equal(await text(), "Replacement text.");
+  console.log("deleted URL during import preserves edits and shows attachment notice: ok");
   assert.deepEqual(errors, []);
 } finally {
   clearTimeout(deadline);

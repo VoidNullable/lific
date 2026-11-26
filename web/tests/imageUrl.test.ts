@@ -3,10 +3,11 @@ import { imageUrlFromPaste, replacePastedUrl } from "../src/lib/attachments/imag
 
 describe("image URL paste", () => {
   test("recognizes only single HTTP image URLs, including query strings", () => {
-    for (const url of ["https://example.com/a.PNG?download=1#image", "http://example.com/a.webp", "https://example.com/a.svg"]) {
+    for (const url of ["https://example.com/a.PNG?download=1#image", "http://example.com/a.webp"]) {
       expect(imageUrlFromPaste(` ${url}\n`)).toBe(url);
     }
     for (const text of ["https://example.com/", "words https://example.com/a.png", "https://example.com/a.png https://example.com/b.png",
+      "https://example.com/a.svg", "https://example.com/a.SVG?download=1",
       "data:image/png;base64,aaaa", "file:///a.png", "https://u:p@example.com/a.png", "https://example.com/page?name=a.png"]) {
       expect(imageUrlFromPaste(text)).toBeNull();
     }

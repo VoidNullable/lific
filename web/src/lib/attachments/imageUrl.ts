@@ -5,7 +5,7 @@ export function imageUrlFromPaste(text: string): string | null {
   try {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
-    if (!/\.(png|jpe?g|gif|webp|svg)$/i.test(url.pathname)) return null;
+    if (!/\.(png|jpe?g|gif|webp)$/i.test(url.pathname)) return null;
     return value;
   } catch {
     return null;
