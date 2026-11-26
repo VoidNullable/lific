@@ -302,6 +302,26 @@ pub struct ServerConfig {
     /// isolated reverse-proxy addresses that cannot be reached directly.
     /// Example: ["10.0.0.0/8"]
     pub trusted_proxies: Vec<String>,
+    /// Remember only presence so obsolete secrets never reach logs or serialized config.
+    #[serde(
+        rename = "mcp_path_token",
+        deserialize_with = "removed_setting_present",
+        skip_serializing
+    )]
+    removed_mcp_path_token: bool,
+    #[serde(
+        rename = "mcp_path_user",
+        deserialize_with = "removed_setting_present",
+        skip_serializing
+    )]
+    removed_mcp_path_user: bool,
+}
+
+fn removed_setting_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,11 +387,22 @@ impl Default for ServerConfig {
             public_url: None,
             cors_origins: Vec::new(),
             trusted_proxies: Vec::new(),
+            removed_mcp_path_token: false,
+            removed_mcp_path_user: false,
         }
     }
 }
 
 impl ServerConfig {
+    pub fn removed_setting_warnings(&self) -> impl Iterator<Item = String> {
+        [
+            ("mcp_path_token", self.removed_mcp_path_token),
+            ("mcp_path_user", self.removed_mcp_path_user),
+        ].into_iter().filter(|(_, present)| *present).map(|(key, _)| {
+            format!("server.{key} no longer has any effect and should be removed; use /mcp with an Authorization header or OAuth")
+        })
+    }
+
     /// Validate the configured proxy ranges once during startup before request
     /// handlers use them for rate-limit and audit client-IP keys.
     pub fn trusted_proxy_ranges(&self) -> Result<Vec<crate::ratelimit::IpNetwork>, String> {
@@ -988,14 +1019,37 @@ enabled = false
     }
 
     #[test]
-    fn removed_mcp_path_settings_are_rejected() {
+    fn removed_mcp_path_settings_load_and_warn_without_retaining_values() {
         for key in ["mcp_path_token", "mcp_path_user"] {
-            let error =
-                toml::from_str::<Config>(&format!("[server]\n{key} = 'old-value'\n")).unwrap_err();
-            assert!(error.message().contains(key), "{error}");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("lific.toml");
+            std::fs::write(&path, format!("[server]\n{key} = 'SECRET_VALUE'\n")).unwrap();
+            let config = Config::load(Some(&path)).unwrap();
+            let warnings = config.server.removed_setting_warnings().collect::<Vec<_>>();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains(key));
+            assert!(warnings[0].contains("no longer has any effect and should be removed"));
+            assert!(!warnings[0].contains("SECRET_VALUE"));
+            assert!(!format!("{config:?}").contains("SECRET_VALUE"));
+            let serialized = toml::to_string(&config).unwrap();
+            assert!(!serialized.contains("mcp_path_"));
+            assert!(!serialized.contains("SECRET_VALUE"));
         }
+        assert_eq!(
+            Config::default().server.removed_setting_warnings().count(),
+            0
+        );
         let defaults = Config::default_toml();
         assert!(!defaults.contains("mcp_path_"));
+    }
+
+    #[test]
+    fn accepting_removed_settings_does_not_accept_other_unknown_server_keys() {
+        let error = toml::from_str::<Config>(
+            "[server]\nmcp_path_token = 'old'\nmcp_path_user = 'old'\nunknown_setting = true\n",
+        )
+        .unwrap_err();
+        assert!(error.message().contains("unknown_setting"), "{error}");
     }
 
     /// The whole point of the change: the permissive defaults an operator

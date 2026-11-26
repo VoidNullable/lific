@@ -1,4 +1,86 @@
+use std::fmt::Write;
 use std::process::Command;
+
+#[test]
+fn obsolete_mcp_settings_warn_at_startup_and_in_doctor_without_disclosing_values() {
+    for keys in [
+        vec!["mcp_path_token"],
+        vec!["mcp_path_user"],
+        vec!["mcp_path_token", "mcp_path_user"],
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let config = scratch.path().join("lific.toml");
+        let mut settings = String::new();
+        for key in &keys {
+            writeln!(settings, "{key} = 'SECRET_VALUE'").unwrap();
+        }
+        std::fs::write(
+            &config,
+            format!("[server]\nhost = '127.0.0.1'\nport = 0\n{settings}"),
+        )
+        .unwrap();
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_lific"));
+            command
+                .current_dir(scratch.path())
+                .env("LIFIC_CONNECT_HOME", scratch.path().join("home"))
+                .env("RUST_LOG", "lific=warn")
+                .env_remove("LIFIC_URL")
+                .env_remove("LIFIC_TOKEN")
+                .env_remove("LIFIC_API_KEY")
+                .arg("--config")
+                .arg(&config);
+            command
+        };
+        let output = command().args(["doctor", "--json"]).output().unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let warnings = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["name"] == "removed_setting")
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), keys.len(), "{report}");
+        for key in &keys {
+            let matching = warnings
+                .iter()
+                .filter(|check| check["detail"].as_str().unwrap().contains(key))
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(matching[0]["status"], "warn");
+            assert!(
+                matching[0]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no longer has any effect and should be removed")
+            );
+        }
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(bytes).contains("SECRET_VALUE"));
+        }
+
+        // Stop startup after logging, before it opens a database or binds a listener.
+        std::fs::write(scratch.path().join("lific.db"), []).unwrap();
+        std::fs::write(
+            &config,
+            format!("[server]\ntrusted_proxies = ['invalid-cidr']\n{settings}"),
+        )
+        .unwrap();
+        let output = command().arg("start").output().unwrap();
+        assert!(!output.status.success());
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(logs.contains("invalid server.trusted_proxies"), "{logs}");
+        for key in &keys {
+            let message = format!("server.{key} no longer has any effect and should be removed");
+            assert_eq!(logs.matches(&message).count(), 1, "{logs}");
+        }
+        assert!(!logs.contains("SECRET_VALUE"));
+    }
+}
 
 #[test]
 fn doctor_flags_an_existing_path_token_client_config_offline() {

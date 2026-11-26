@@ -505,6 +505,10 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    for warning in cfg.server.removed_setting_warnings() {
+        warn!("{warning}");
+    }
+
     // Parse trusted proxy CIDRs once at startup. Invalid entries must
     // stop the server rather than quietly disabling the trust boundary
     // around client-IP rate-limit and audit keys.
@@ -2196,7 +2200,25 @@ mod authenticated_mcp_tests {
     #[tokio::test]
     async fn path_credentials_never_authenticate_in_the_production_router() {
         let pool = db::open_memory().unwrap();
-        let client = McpClient::new(pool, None);
+        let mut client = McpClient::new(pool.clone(), None);
+        let cfg: Config = toml::from_str(
+            "[server]\nmcp_path_token = 'obsolete-secret'\nmcp_path_user = 'admin'\n",
+        )
+        .unwrap();
+        client.app = build_app(&cfg, pool, realtime::RealtimeHub::new(), Arc::from([]));
+        let obsolete = client
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp/obsolete-secret")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(obsolete.status(), StatusCode::NOT_FOUND);
         for method in [Method::GET, Method::HEAD, Method::POST, Method::DELETE] {
             for with_header in [false, true] {
                 let mut req = Request::builder()

@@ -72,7 +72,7 @@ Newest first. Each section lists what changed for someone upgrading past that ve
 
 The `/mcp/<token>` endpoint has been removed and returns `404`. Credentials in URLs can appear in proxy logs and browser or shell history.
 
-Before starting 3.0, remove `mcp_path_token` and `mcp_path_user` from `[server]` in `lific.toml`. They are now unknown settings and prevent startup.
+The `mcp_path_token` and `mcp_path_user` settings in `[server]` are accepted but ignored, so an existing configuration can still start. Startup and `lific doctor` warn for each present key that it no longer has any effect and should be removed. Remove these keys from `lific.toml`; other unknown settings still fail validation.
 
 Change each affected client's URL to `https://your-server.example/mcp` and choose one replacement:
 

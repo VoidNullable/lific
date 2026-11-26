@@ -401,6 +401,11 @@ async fn build_report(
         cfg.database.path = path.to_owned();
     }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
+    checks.extend(
+        cfg.server
+            .removed_setting_warnings()
+            .map(|warning| Check::new("removed_setting", Status::Warn, warning)),
+    );
     checks.extend(check_backups(&cfg));
     checks.push(service_check);
     checks.extend(client_configs::check());

@@ -88,7 +88,7 @@ trash_days = 30
 
 A trusted proxy can instead send the client address in `X-Lific-Client-IP`, together with `X-Lific-Proxy-Secret`. Lific accepts that pair only from an address in `trusted_proxies`, and only when the secret equals the `LIFIC_TRUSTED_PROXY_SECRET` environment variable of the server process. If a trusted proxy sends either header without a valid pair, including when the variable is unset, requests to rate-limited routes are answered with `503` rather than counted against a bucket every visitor shares. Set the variable before the proxy starts sending the headers, use a long random value, and have the proxy strip any copies of both headers that arrive from clients. [Self-hosting](/docs/self-hosting) shows complete proxy setups.
 
-The former `mcp_path_token` and `mcp_path_user` settings were removed in 3.0. Remove them before starting the new binary, and connect clients to `/mcp` with an Authorization header or OAuth. See [Upgrading](/docs/upgrading#v30).
+The former `mcp_path_token` and `mcp_path_user` settings are accepted but ignored in 3.0. Startup and `lific doctor` warn for each present key that it no longer has any effect and should be removed. Connect clients to `/mcp` with an Authorization header or OAuth. Other unknown settings still fail validation. See [Upgrading](/docs/upgrading#v30).
 
 ## `[database]`
 
