@@ -408,7 +408,7 @@ async fn build_report(
     );
     checks.extend(check_backups(&cfg));
     checks.push(service_check);
-    checks.extend(client_configs::check());
+    checks.extend(client_configs::check(&cfg));
     checks.extend(check_remote(&cfg, key).await);
     Report::new(checks)
 }

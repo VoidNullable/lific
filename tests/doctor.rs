@@ -2,6 +2,69 @@ use std::fmt::Write;
 use std::process::Command;
 
 #[test]
+fn doctor_only_fails_legacy_urls_identified_as_lific() {
+    let scratch = tempfile::tempdir().unwrap();
+    let config = scratch.path().join("lific.toml");
+    std::fs::write(&config, "[server]\nhost = '127.0.0.1'\nport = 0\n").unwrap();
+    for (name, url, expected) in [
+        (
+            "zapier",
+            "https://mcp.zapier.com/api/mcp/s/SECRET/mcp",
+            None,
+        ),
+        ("LiFiC", "https://foreign.example/mcp/SECRET", Some("fail")),
+        ("custom", "https://foreign.example/mcp/SECRET", Some("warn")),
+    ] {
+        std::fs::write(
+            scratch.path().join(".mcp.json"),
+            serde_json::json!({
+                "mcpServers": {name: {"url": url}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_lific"))
+            .current_dir(scratch.path())
+            .env("LIFIC_CONNECT_HOME", scratch.path().join("home"))
+            .env_remove("LIFIC_URL")
+            .env_remove("LIFIC_TOKEN")
+            .env_remove("LIFIC_API_KEY")
+            .arg("--config")
+            .arg(&config)
+            .args(["doctor", "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "client_config");
+        assert_eq!(
+            check.and_then(|check| check["status"].as_str()),
+            expected,
+            "{report}"
+        );
+        assert_eq!(
+            output.status.success(),
+            expected != Some("fail"),
+            "{report}"
+        );
+        if expected == Some("warn") {
+            assert!(
+                check.unwrap()["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("if this entry points at Lific")
+            );
+        }
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(bytes).contains("SECRET"));
+        }
+    }
+}
+
+#[test]
 fn obsolete_mcp_settings_warn_at_startup_and_in_doctor_without_disclosing_values() {
     for keys in [
         vec!["mcp_path_token"],
