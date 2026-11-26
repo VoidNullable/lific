@@ -53,7 +53,9 @@ const ROUTES: { path: string; expect?: string[] }[] = [
   // Issue detail and page detail carry the comment-window logic that broke
   // in LIF-428; the comment body must actually render.
   { path: "/DEMO/issues/DEMO-1", expect: ["Smoke issue", "First smoke comment"] },
-  { path: "/DEMO/pages/1", expect: ["Smoke page"] },
+  // The page detail route; its id comes from the seed below, since the
+  // project's conventions page is created first.
+  { path: "/DEMO/pages/:smoke-page", expect: ["Smoke page"] },
   { path: "/DEMO/board", expect: ["Smoke issue"] },
   { path: "/DEMO/graph" },
   { path: "/DEMO/files" },
@@ -144,7 +146,8 @@ async function main(): Promise<number> {
         "--json",
       ]),
     );
-    if (pageOut.id !== 1) throw new Error(`expected seeded page id 1, got ${pageOut.id}`);
+    if (!Number.isInteger(pageOut.id)) throw new Error(`seeded page has no id: ${JSON.stringify(pageOut)}`);
+    for (const route of ROUTES) route.path = route.path.replace(":smoke-page", String(pageOut.id));
 
     // ---- server --------------------------------------------------------
     const port = await freePort();

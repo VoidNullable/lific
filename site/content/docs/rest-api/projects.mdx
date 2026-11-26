@@ -15,7 +15,7 @@ The projects you can read, as a `Project` array in your own sidebar order. A pro
 
 Creates a project. Any signed-in caller.
 
-Body: `name`, `identifier`, and optional `description` (Markdown, default empty), `emoji` and `lead_user_id`. The identifier is one to five characters, an uppercase letter followed by uppercase letters or digits, and cannot be `DOC`; anything else is `400`.
+Body: `name`, `identifier`, and optional `description` (Markdown, default empty), `emoji`, `lead_user_id` and `conventions`: the template the project's [conventions page](/docs/concepts/pages#conventions-page) starts from, `empty` (default), `ai_managed`, `human_managed` or `human_owned`. The project starts with that page. The identifier is one to five characters, an uppercase letter followed by uppercase letters or digits, and cannot be `DOC`; anything else is `400`.
 
 The lead gets a `lead` membership. Leaving `lead_user_id` out, or naming yourself, makes you the lead with no further check; for a connected tool, "yourself" is the person who owns it. Naming **somebody else** gives them lasting access, so it needs a [recent browser session](/docs/rest-api#which-credentials-an-endpoint-accepts).
 

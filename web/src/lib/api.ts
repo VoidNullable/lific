@@ -700,6 +700,9 @@ export interface CreateProjectInput {
   description?: string;
   emoji?: string;
   lead_user_id?: number;
+  /** LIF-524: the template the project's conventions page starts from.
+   *  The server defaults to `"empty"`. */
+  conventions?: ConventionTemplateKey;
 }
 
 export async function createProject(input: CreateProjectInput) {
@@ -1958,6 +1961,27 @@ export interface Page {
   labels: string[];
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+  /** LIF-524: true only for the project's conventions page. */
+  conventions?: boolean;
+  /** LIF-524: whether agents get the conventions page in their briefing.
+   *  Meaningful only when `conventions` is true. */
+  conventions_enabled?: boolean;
+}
+
+/** LIF-524: the starting points for a conventions page, in server order. */
+export type ConventionTemplateKey = "empty" | "ai_managed" | "human_managed" | "human_owned";
+
+export interface ConventionTemplate {
+  key: ConventionTemplateKey;
+  name: string;
+  /** One line describing who the template suits. */
+  summary: string;
+  /** The Markdown body; `""` for the empty template. */
+  content: string;
+}
+
+export async function listConventionTemplates() {
+  return request<ConventionTemplate[]>("/conventions/templates");
 }
 
 export interface Folder {
@@ -2006,6 +2030,9 @@ export interface CreatePageInput {
   status?: string;
   /** LIF-105: label names to attach. Ignored on workspace pages. */
   labels?: string[];
+  /** LIF-524: make this the project's conventions page. 409 when the
+   *  project already has one. */
+  conventions?: boolean;
 }
 
 export async function createPage(input: CreatePageInput) {
@@ -2027,6 +2054,9 @@ export interface UpdatePageInput {
   labels?: string[];
   /** LIF-441: refuse the write (409) unless the page still has this seq. */
   expected_seq?: number;
+  /** LIF-524: turn a conventions page on or off for agents. 400 on any
+   *  other page. */
+  conventions_enabled?: boolean;
 }
 
 export async function updatePage(id: number, input: UpdatePageInput) {

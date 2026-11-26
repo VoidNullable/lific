@@ -207,6 +207,15 @@ pub(super) async fn delete_page_handler(
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
+/// LIF-524: the starting texts a conventions page can take, for the project
+/// picker and the Pages empty state.
+pub(super) async fn conventions_templates(
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<Vec<crate::conventions::TemplateInfo>>, LificError> {
+    super::require_user(&identity)?;
+    Ok(Json(crate::conventions::templates()))
+}
+
 /// Undo a soft delete (LIF-438), gated exactly like [`delete_page_handler`].
 ///
 /// The page is invisible to `get_page` while tombstoned, so the project the
@@ -313,7 +322,7 @@ mod tests {
         let body = parse_json(resp).await;
         assert_eq!(body["code"], "update_conflict");
         assert!(
-            body["error"].as_str().unwrap().contains("TST-DOC-1"),
+            body["error"].as_str().unwrap().contains("TST-DOC-2"),
             "the message names the entity: {body}"
         );
 
@@ -440,7 +449,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            json_get(&app, "/api/pages/resolve/TST-DOC-1")
+            json_get(&app, "/api/pages/resolve/TST-DOC-2")
                 .await
                 .status(),
             StatusCode::NOT_FOUND
@@ -449,7 +458,9 @@ mod tests {
             parse_json(json_get(&app, &format!("/api/pages?project_id={pid}")).await).await,
         )
         .unwrap();
-        assert!(listed.is_empty());
+        // Only the project's conventions page (TST-DOC-1) is left.
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["conventions"], true);
 
         let resp = json_post(
             &app,
@@ -459,7 +470,7 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let restored = parse_json(resp).await;
-        assert_eq!(restored["identifier"], "TST-DOC-1");
+        assert_eq!(restored["identifier"], "TST-DOC-2");
         // Labels survive a soft delete, so a restore is a real undo rather than
         // a stripped-down copy of what was deleted.
         assert_eq!(restored["labels"], serde_json::json!(["design"]));
@@ -752,7 +763,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/pages/resolve/TST-DOC-1")
+                    .uri("/api/pages/resolve/TST-DOC-2")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -761,7 +772,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let page = parse_json(response).await;
         assert_eq!(page["id"], created["id"]);
-        assert_eq!(page["identifier"], "TST-DOC-1");
+        assert_eq!(page["identifier"], "TST-DOC-2");
         assert_eq!(page["title"], "Project spec");
     }
 
@@ -850,5 +861,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── LIF-524: conventions pages ──
+
+    async fn project_pages(app: &axum::Router, project_id: i64) -> Vec<serde_json::Value> {
+        serde_json::from_value(
+            parse_json(json_get(app, &format!("/api/pages?project_id={project_id}")).await).await,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_project_created_over_rest_starts_with_the_chosen_conventions_page() {
+        let app = test_app();
+        let (default_id, _) = seed_project(&app).await;
+        let pages = project_pages(&app, default_id).await;
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0]["conventions"], true);
+        assert_eq!(pages[0]["conventions_enabled"], true);
+        assert_eq!(pages[0]["content"], "");
+        assert_eq!(pages[0]["title"], "Conventions");
+
+        let created = parse_json(
+            json_post(
+                &app,
+                "/api/projects",
+                serde_json::json!({
+                    "name": "Owned",
+                    "identifier": "OWN",
+                    "conventions": "human_owned",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let pages = project_pages(&app, created["id"].as_i64().unwrap()).await;
+        assert_eq!(
+            pages[0]["content"],
+            crate::conventions::Template::HumanOwned.content()
+        );
+
+        let bad = json_post(
+            &app,
+            "/api/projects",
+            serde_json::json!({ "name": "Bad", "identifier": "BAD", "conventions": "agents" }),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn the_templates_endpoint_lists_every_starting_text() {
+        let app = test_app();
+        let templates = parse_json(json_get(&app, "/api/conventions/templates").await).await;
+        let keys: Vec<&str> = templates
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            ["empty", "ai_managed", "human_managed", "human_owned"]
+        );
+        assert_eq!(templates[1]["name"], "Heavily AI managed");
+        assert_eq!(
+            templates[1]["content"],
+            crate::conventions::Template::AiManaged.content()
+        );
+        assert!(!templates[3]["summary"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_conventions_toggle_keeps_the_text_and_refuses_other_pages() {
+        let app = test_app();
+        let (pid, _) = seed_project(&app).await;
+        let page = project_pages(&app, pid).await.remove(0);
+        let id = page["id"].as_i64().unwrap();
+        put(
+            &app,
+            &format!("/api/pages/{id}"),
+            serde_json::json!({ "content": "Close issues with a comment." }),
+        )
+        .await;
+
+        let resp = put(
+            &app,
+            &format!("/api/pages/{id}"),
+            serde_json::json!({ "conventions_enabled": false }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let off = parse_json(resp).await;
+        assert_eq!(off["conventions_enabled"], false);
+        assert_eq!(off["content"], "Close issues with a comment.");
+        assert!(
+            off["seq"].as_i64() > page["seq"].as_i64(),
+            "the toggle stamps a seq so sync readers see it"
+        );
+        let index = parse_json(json_get(&app, &format!("/api/projects/{pid}/index")).await).await;
+        assert_eq!(index["pages"][0]["conventions_enabled"], false);
+
+        let other = parse_json(
+            json_post(
+                &app,
+                "/api/pages",
+                serde_json::json!({ "project_id": pid, "title": "Notes" }),
+            )
+            .await,
+        )
+        .await;
+        let refused = put(
+            &app,
+            &format!("/api/pages/{}", other["id"]),
+            serde_json::json!({ "conventions_enabled": false }),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_second_conventions_page_is_a_conflict_until_the_first_is_deleted() {
+        let app = test_app();
+        let (pid, _) = seed_project(&app).await;
+        let body = serde_json::json!({
+            "project_id": pid,
+            "title": "Rules",
+            "content": "Close issues with a comment.",
+            "conventions": true,
+        });
+        let conflict = json_post(&app, "/api/pages", body.clone()).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        let first = project_pages(&app, pid).await.remove(0);
+        json_delete(&app, &format!("/api/pages/{}", first["id"])).await;
+        let created = json_post(&app, "/api/pages", body).await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = parse_json(created).await;
+        assert_eq!(created["conventions"], true);
+        assert_eq!(created["identifier"], "TST-DOC-2");
     }
 }

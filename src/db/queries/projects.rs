@@ -239,6 +239,20 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
         if let Some(lead_id) = input.lead_user_id {
             super::members::upsert_member(conn, id, lead_id, Role::Lead)?;
         }
+        // LIF-524: the project and its conventions page are one creation.
+        if let Some(template) = input.conventions {
+            super::create_page(
+                conn,
+                &CreatePage {
+                    project_id: Some(id),
+                    title: crate::conventions::PAGE_TITLE.into(),
+                    content: template.content().into(),
+                    status: "active".into(),
+                    conventions: true,
+                    ..Default::default()
+                },
+            )?;
+        }
         // LIF-409: hydrated inside the savepoint, so a failed final read rolls
         // the project and its membership back together.
         get_project(conn, id)

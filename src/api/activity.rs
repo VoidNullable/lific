@@ -212,10 +212,11 @@ mod tests {
             &format!("/api/projects/{project_id}/activity?limit=50&offset=3"),
         )
         .await;
-        // 7 total (project create + its auto-seeded lead membership row
+        // 8 total (project create + its auto-seeded lead membership row
         // (LIF-199 audits `project_members`, LIF-102 defaults the creator
-        // as lead) + 5 issues) minus the 3 already seen.
-        assert_eq!(rest["items"].as_array().unwrap().len(), 4);
+        // as lead) + its conventions page (LIF-524) + 5 issues) minus the 3
+        // already seen.
+        assert_eq!(rest["items"].as_array().unwrap().len(), 5);
         assert_eq!(rest["has_more"], false);
     }
 
@@ -259,7 +260,8 @@ mod tests {
             .expect("content edit audited");
         assert!(edit["old_value"].is_null());
         assert!(edit["new_value"].as_str().unwrap().contains("+# hello"));
-        assert_eq!(edit["entity_label"], "TST-DOC-1");
+        // TST-DOC-1 is the conventions page the project starts with.
+        assert_eq!(edit["entity_label"], "TST-DOC-2");
     }
 
     #[tokio::test]

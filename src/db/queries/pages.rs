@@ -29,14 +29,18 @@ fn page_from_row(row: &rusqlite::Row) -> rusqlite::Result<Page> {
         pinned: row.get(11)?,
         seq: row.get::<_, Option<i64>>(12)?.unwrap_or(0),
         labels: Vec::new(),
+        conventions: row.get(13)?,
+        conventions_enabled: row.get(14)?,
     })
 }
 
 const PAGE_SELECT: &str = "SELECT pg.id, pg.project_id, pg.sequence, p.identifier,
             pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
-            pg.created_at, pg.updated_at, pg.pinned, pg.seq
+            pg.created_at, pg.updated_at, pg.pinned, pg.seq,
+            pc.page_id IS NOT NULL, COALESCE(pc.enabled, 1)
      FROM pages pg
-     LEFT JOIN projects p ON p.id = pg.project_id";
+     LEFT JOIN projects p ON p.id = pg.project_id
+     LEFT JOIN project_conventions pc ON pc.page_id = pg.id";
 
 /// Look up label names attached to a single page. Used by `get_page` to
 /// populate `Page.labels`. Returns empty for pages with no labels (or for
@@ -131,9 +135,11 @@ pub fn list_pages_page(
     let mut sql = String::from(
         "SELECT DISTINCT pg.id, pg.project_id, pg.sequence, p.identifier,
                 pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
-                pg.created_at, pg.updated_at, pg.pinned, pg.seq
+                pg.created_at, pg.updated_at, pg.pinned, pg.seq,
+                pc.page_id IS NOT NULL, COALESCE(pc.enabled, 1)
          FROM pages pg
-         LEFT JOIN projects p ON p.id = pg.project_id",
+         LEFT JOIN projects p ON p.id = pg.project_id
+         LEFT JOIN project_conventions pc ON pc.page_id = pg.id",
     );
     // LIF-438: tombstones keep their row for delta sync; reads are live-only.
     let mut conditions: Vec<String> = vec!["pg.deleted_at IS NULL".to_string()];
@@ -326,6 +332,19 @@ fn validate_page_folder(
 
 pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificError> {
     validate_page_folder(conn, input.project_id, input.folder_id)?;
+    if input.conventions {
+        let Some(project_id) = input.project_id else {
+            return Err(LificError::BadRequest(
+                "a conventions page belongs to a project; workspace pages cannot be one".into(),
+            ));
+        };
+        if let Some(existing) = conventions_page(conn, project_id)? {
+            return Err(LificError::Conflict(format!(
+                "this project already has a conventions page, {}. Edit it instead.",
+                existing.identifier
+            )));
+        }
+    }
     // The page id is captured inside the savepoint closure —
     // `conn.last_insert_rowid()` after the savepoint releases would reflect
     // the most recent INSERT, which may be a page_labels row, not the page
@@ -367,14 +386,61 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
             input.attachments,
             input.project_id,
         )?;
+        if input.conventions {
+            conn.execute(
+                "INSERT INTO project_conventions (project_id, page_id, enabled) VALUES (?1, ?2, 1)
+                 ON CONFLICT (project_id) DO UPDATE SET page_id = excluded.page_id, enabled = 1",
+                params![input.project_id, id],
+            )?;
+        }
         get_page(conn, id)
     })
+}
+
+/// LIF-524: a project's live conventions page, toggled on or off.
+pub fn conventions_page(conn: &Connection, project_id: i64) -> Result<Option<Page>, LificError> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT pg.id FROM project_conventions pc
+               JOIN pages pg ON pg.id = pc.page_id AND pg.deleted_at IS NULL
+              WHERE pc.project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.map(|id| get_page(conn, id)).transpose()
+}
+
+/// LIF-524: whether the briefing should suggest creating a conventions page.
+/// Only a project that has never had one and has not dismissed the
+/// suggestion gets it; deleting the page is a choice, not a reason to nag.
+pub fn conventions_hint_due(conn: &Connection, project_id: i64) -> Result<bool, LificError> {
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM project_conventions WHERE project_id = ?1)",
+        params![project_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// LIF-524: stop suggesting a conventions page for a project that has none.
+pub fn dismiss_conventions_hint(conn: &Connection, project_id: i64) -> Result<(), LificError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO project_conventions (project_id, page_id) VALUES (?1, NULL)",
+        params![project_id],
+    )?;
+    Ok(())
 }
 
 pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Page, LificError> {
     let page = get_page(conn, id)?;
     if let Some(folder_id) = input.folder_id {
         validate_page_folder(conn, page.project_id, folder_id)?;
+    }
+    if input.conventions_enabled.is_some() && !page.conventions {
+        return Err(LificError::BadRequest(format!(
+            "{} is not a conventions page; only a conventions page can be turned on or off",
+            page.identifier
+        )));
     }
     super::savepoint::<_, Page>(conn, "update_page", || {
         // LIF-441: see `update_issue` — checked inside the savepoint so the
@@ -426,6 +492,18 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
             conn.execute(
                 "UPDATE pages SET pinned = ?1 WHERE id = ?2",
                 params![pinned, id],
+            )?;
+        }
+        if let Some(enabled) = input.conventions_enabled {
+            conn.execute(
+                "UPDATE project_conventions SET enabled = ?1 WHERE page_id = ?2",
+                params![enabled, id],
+            )?;
+            // The flag lives beside the page, so touch the row to stamp a
+            // new seq: sync and realtime readers see the toggle like a pin.
+            conn.execute(
+                "UPDATE pages SET pinned = pinned WHERE id = ?1",
+                params![id],
             )?;
         }
         if let Some(ref labels) = input.labels {

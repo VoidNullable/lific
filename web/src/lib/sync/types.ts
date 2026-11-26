@@ -70,6 +70,10 @@ export interface PageRow {
   preview: string;
   /** LIF-105 page label NAMES, project-scoped. */
   labels: string[];
+  /** LIF-524: true only for the project's conventions page. */
+  conventions?: boolean;
+  /** LIF-524: whether agents get it in their briefing. */
+  conventions_enabled?: boolean;
 }
 
 /** A live comment row. The read model tracks issues and pages only, so this

@@ -259,7 +259,11 @@ Query: `project_id`, `folder_id`, `label`, `status`, `order_by` (`sort_order`, `
 
 Creates a page. **Maintainer**, or administrator for a workspace page.
 
-Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `status` (`draft` by default, or `active`, `complete`, `archived`) and `labels` (names; ignored on workspace pages). Returns the `Page`.
+Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `status` (`draft` by default, or `active`, `complete`, `archived`), `labels` (names; ignored on workspace pages) and `conventions` (`true` makes it the project's [conventions page](/docs/concepts/pages#conventions-page); `409` while the project has one, `400` on a workspace page). Returns the `Page`.
+
+### GET `/api/conventions/templates`
+
+The starting texts a conventions page can be created from, in order. Any signed-in caller. Returns an array of `key` (`empty`, `ai_managed`, `human_managed`, `human_owned`), `name`, `summary` (one line on when to use it) and `content` (the Markdown the page starts with).
 
 ### GET `/api/pages/{id}`
 
@@ -271,7 +275,7 @@ The same, by identifier: `APP-DOC-3`, or `DOC-3` for a workspace page. **Viewer.
 
 ### PUT `/api/pages/{id}`
 
-Changes a page. **Maintainer.** Every field is optional: `title`, `content`, `folder_id` (null moves it to the top level), `sort_order`, `status`, `pinned`, `labels` (replaces the set) and `expected_seq`. A stale `expected_seq` is `409`, as for issues. Returns the `Page`.
+Changes a page. **Maintainer.** Every field is optional: `title`, `content`, `folder_id` (null moves it to the top level), `sort_order`, `status`, `pinned`, `labels` (replaces the set), `conventions_enabled` and `expected_seq`. `conventions_enabled` turns the project's conventions page on or off and keeps its text; on any other page it is `400`. A stale `expected_seq` is `409`, as for issues. Returns the `Page`.
 
 ### DELETE `/api/pages/{id}`
 

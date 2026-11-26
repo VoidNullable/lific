@@ -306,7 +306,7 @@ These commands work with either [backend](#local-and-http-backends). Identifiers
 ```shell
 lific project list
 lific project get <IDENTIFIER>
-lific project create --name <NAME> --identifier <IDENTIFIER> [--description <TEXT>]
+lific project create --name <NAME> --identifier <IDENTIFIER> [--description <TEXT>] [--conventions <TEMPLATE>]
 lific project update <IDENTIFIER> [--name <NAME>] [--description <TEXT>]
 ```
 
@@ -315,6 +315,7 @@ lific project update <IDENTIFIER> [--name <NAME>] [--description <TEXT>]
 | `-n, --name <NAME>` | The project's display name. |
 | `-i, --identifier <IDENTIFIER>` | One to five uppercase letters or digits, starting with a letter. It prefixes every issue number, so `APP` gives `APP-1`. `DOC` is reserved. |
 | `-d, --description <TEXT>` | The project description. Empty by default. |
+| `--conventions <TEMPLATE>` | `create` only. The template the project's [conventions page](/docs/concepts/pages#conventions-page) starts from: `empty` (default), `ai_managed`, `human_managed` or `human_owned`. |
 
 ### issue
 

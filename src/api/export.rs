@@ -542,7 +542,8 @@ mod tests {
         let bundle = parse_json(resp).await;
         assert_eq!(
             bundle["files"][0]["path"],
-            "TST/pages/tst-doc-1-bundle-page.md"
+            // DOC-1 is the conventions page the project starts with.
+            "TST/pages/tst-doc-2-bundle-page.md"
         );
     }
 

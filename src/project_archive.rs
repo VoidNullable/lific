@@ -217,6 +217,12 @@ const SPECS: &[Spec] = &[
         columns: "id,project_id,folder_id,title,content,sort_order,created_at,updated_at,sequence,status,pinned,deleted_at",
         scope: "project_id = ?1",
     },
+    // LIF-524. Archives written before conventions pages existed lack it.
+    Spec {
+        name: "project_conventions",
+        columns: "project_id,page_id,enabled",
+        scope: "project_id = ?1",
+    },
     Spec {
         name: "plans",
         columns: "id,project_id,sequence,issue_id,title,status,created_at,updated_at",
@@ -682,7 +688,8 @@ fn foreign_keys(s: &Spec) -> Vec<(&'static str, &'static str, bool)> {
         let optional = matches!(
             c,
             "module_id" | "folder_id" | "parent_id" | "parent_step_id"
-        ) || (c == "issue_id" && matches!(s.name, "plans" | "plan_steps"));
+        ) || (c == "issue_id" && matches!(s.name, "plans" | "plan_steps"))
+            || (c == "page_id" && s.name == "project_conventions");
         keys.push((c, target, optional));
     }
     keys
@@ -1163,7 +1170,7 @@ fn upgrade_manifest(m: &mut Manifest) {
 
 /// Tables added after format v1 shipped. An archive from an older Lific
 /// lacks them, which means "none of these rows", not a damaged archive.
-const OPTIONAL_TABLES: &[&str] = &["issue_waits", "issue_assignees"];
+const OPTIONAL_TABLES: &[&str] = &["issue_waits", "issue_assignees", "project_conventions"];
 
 fn backfill_optional_tables(m: &mut Manifest) {
     for name in OPTIONAL_TABLES {
@@ -1406,6 +1413,7 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
                             | "position"
                             | "done"
                             | "pinned"
+                            | "enabled"
                             | "width"
                             | "height"
                             | "size_bytes"
@@ -1420,7 +1428,9 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
                 if !valid_type {
                     return Err(invalid(format!("invalid type for {}.{column}", s.name)));
                 }
-                if matches!(column, "done" | "pinned") && !matches!(value.as_i64(), Some(0 | 1)) {
+                if matches!(column, "done" | "pinned" | "enabled")
+                    && !matches!(value.as_i64(), Some(0 | 1))
+                {
                     return Err(invalid(format!("invalid boolean for {}.{column}", s.name)));
                 }
                 if s.name == "attachments"

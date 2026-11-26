@@ -385,8 +385,13 @@ fn search_entities_fts(
     // "relevance" = BM25 rank (FTS5 default). "recent" = most recently
     // updated entity first; both joins are LEFT so COALESCE picks whichever
     // side matched. Fixed fragments only — never interpolated user input.
+    // LIF-524: a project's conventions page (turned on) gets a modest boost.
+    // BM25 ranks are negative with better hits lower, so scaling by more than
+    // one moves it up only among hits that already match the query.
     let order_clause = match q.sort.as_deref() {
-        None | Some("relevance") => "ORDER BY rank",
+        None | Some("relevance") => {
+            "ORDER BY rank * CASE WHEN cv.page_id IS NULL THEN 1.0 ELSE 2.0 END"
+        }
         Some("recent") => {
             "ORDER BY COALESCE(i.updated_at, pg.updated_at, ci.updated_at, cpg.updated_at) DESC, rank"
         }
@@ -429,6 +434,7 @@ fn search_entities_fts(
          FROM search_index s
          LEFT JOIN issues i ON s.entity_type = 'issue' AND i.id = s.entity_id
          LEFT JOIN pages pg ON s.entity_type = 'page' AND pg.id = s.entity_id
+         LEFT JOIN project_conventions cv ON cv.page_id = pg.id AND cv.enabled = 1
          LEFT JOIN projects p ON p.id = s.project_id
          LEFT JOIN comments c ON s.entity_type = 'comment' AND c.id = s.entity_id
          LEFT JOIN issues ci ON c.issue_id = ci.id

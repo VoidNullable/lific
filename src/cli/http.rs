@@ -567,6 +567,7 @@ impl HttpBackend {
                 name,
                 identifier,
                 description,
+                conventions,
             } => {
                 self.send_json(
                     Method::POST,
@@ -577,6 +578,7 @@ impl HttpBackend {
                         description: description.clone(),
                         emoji: None,
                         lead_user_id: None,
+                        conventions: Some(crate::conventions::Template::parse(conventions)?),
                     },
                 )
                 .await
@@ -708,6 +710,7 @@ impl HttpBackend {
                             description: String::new(),
                             emoji: None,
                             lead_user_id: None,
+                            conventions: Some(crate::conventions::Template::Empty),
                         },
                     )
                     .await?;
@@ -3049,7 +3052,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(page["title"], "Project page");
-        assert_eq!(page["identifier"], "TST-DOC-1");
+        // TST-DOC-1 is the conventions page the project starts with.
+        assert_eq!(page["identifier"], "TST-DOC-2");
         fixture.server.abort();
     }
 
@@ -3623,6 +3627,7 @@ mod tests {
     #[test]
     fn builds_project_create_payload_with_server_defaults() {
         let payload = serde_json::to_value(models::CreateProject {
+            conventions: None,
             name: "Docs".into(),
             identifier: "DOC".into(),
             description: "Reference material".into(),
@@ -3926,6 +3931,7 @@ mod tests {
             let project = crate::db::queries::create_project(
                 &conn,
                 &models::CreateProject {
+                    conventions: None,
                     name: "Test Project".into(),
                     identifier: "TST".into(),
                     description: "integration test project".into(),

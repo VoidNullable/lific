@@ -109,6 +109,9 @@ const UPDATED_AT: usize = 20;
 const BODY: usize = 21;
 /// `comments.kind` (migration 056). NULL on issue and page rows.
 const COMMENT_KIND: usize = 22;
+/// LIF-524: the page is its project's conventions page, and whether it is on.
+const CONVENTIONS: usize = 23;
+const CONVENTIONS_ENABLED: usize = 24;
 
 const ISSUE_COLUMNS: &str = "'issue' AS kind, i.seq AS seq, (i.deleted_at IS NOT NULL) AS deleted,
             i.id AS id, p.identifier AS project_identifier, i.sequence AS sequence,
@@ -118,7 +121,8 @@ const ISSUE_COLUMNS: &str = "'issue' AS kind, i.seq AS seq, (i.deleted_at IS NOT
             NULL AS folder_id, NULL AS pinned,
             NULL AS issue_id, NULL AS page_id, NULL AS user_id, NULL AS username,
             i.created_at AS created_at, i.updated_at AS updated_at,
-            i.description AS body, NULL AS comment_kind";
+            i.description AS body, NULL AS comment_kind,
+            NULL AS conventions, NULL AS conventions_enabled";
 
 const ISSUE_FROM: &str = "FROM issues i JOIN projects p ON p.id = i.project_id";
 
@@ -130,9 +134,11 @@ const PAGE_COLUMNS: &str = "'page', pg.seq, (pg.deleted_at IS NOT NULL),
             pg.folder_id, pg.pinned,
             NULL, NULL, NULL, NULL,
             pg.created_at, pg.updated_at,
-            pg.content, NULL";
+            pg.content, NULL,
+            cv.page_id IS NOT NULL, COALESCE(cv.enabled, 1)";
 
-const PAGE_FROM: &str = "FROM pages pg JOIN projects p ON p.id = pg.project_id";
+const PAGE_FROM: &str = "FROM pages pg JOIN projects p ON p.id = pg.project_id
+     LEFT JOIN project_conventions cv ON cv.page_id = pg.id";
 
 const COMMENT_COLUMNS: &str = "'comment', c.seq, (c.deleted_at IS NOT NULL),
             c.id, NULL, NULL,
@@ -142,7 +148,8 @@ const COMMENT_COLUMNS: &str = "'comment', c.seq, (c.deleted_at IS NOT NULL),
             NULL, NULL,
             c.issue_id, c.page_id, COALESCE(c.user_id, -1), COALESCE(c.imported_author, u.username),
             c.created_at, c.updated_at,
-            NULL, c.kind";
+            NULL, c.kind,
+            NULL, NULL";
 
 const COMMENT_FROM: &str = "FROM comments c LEFT JOIN users u ON u.id = c.user_id";
 
@@ -168,6 +175,7 @@ const DEPARTURE_COLUMNS: &str = "'issue', a.seq, 1,
             NULL, NULL,
             NULL, NULL,
             NULL, NULL, NULL, NULL,
+            NULL, NULL,
             NULL, NULL,
             NULL, NULL";
 
@@ -216,6 +224,8 @@ fn page_change(row: &Row) -> rusqlite::Result<PageChange> {
         updated_at: row.get(UPDATED_AT)?,
         preview: preview_of(&row.get::<_, Option<String>>(BODY)?.unwrap_or_default()),
         labels: Vec::new(),
+        conventions: row.get(CONVENTIONS)?,
+        conventions_enabled: row.get(CONVENTIONS_ENABLED)?,
     })
 }
 

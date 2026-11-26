@@ -9,6 +9,7 @@ mod backup;
 mod checklist;
 mod cli;
 mod config;
+mod conventions;
 mod db;
 mod dump;
 mod error;

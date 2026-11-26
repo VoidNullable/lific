@@ -382,6 +382,7 @@ mod tests {
         queries::create_project(
             &conn,
             &crate::db::models::CreateProject {
+                conventions: None,
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
                 description: String::new(),

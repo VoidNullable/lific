@@ -366,6 +366,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "issue claims",
         include_str!("../../migrations/074_issue_claims.sql"),
     ),
+    (
+        75,
+        "project conventions",
+        include_str!("../../migrations/075_project_conventions.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

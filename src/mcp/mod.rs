@@ -437,7 +437,8 @@ const SERVER_INSTRUCTIONS: &str = "Lific is an issue tracker. Open every session
      When you finish an issue, set status='done'. Keep each issue one self-contained change, filed in one of the project's modules. \
      For small text changes use edit_issue and edit_page, not full updates. \
      Use plans (create_plan) for multi-step or multi-session work; a step can mirror an issue. get_plan(plan='X-PLAN-1') gives a plan's full tree. \
-     Use pages for documentation and design notes.";
+     Use pages for documentation and design notes. \
+     A project can have a conventions page, the rules for working with its issues, pages and plans; get_briefing opens with it, and you follow it when working in that tracker.";
 
 /// LIF-452: the one sentence a repository-bound stdio session appends to
 /// [`SERVER_INSTRUCTIONS`]. Kept to a single clause for the same reason the
@@ -1287,6 +1288,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "MCP Gate".into(),
                     identifier: "MGT".into(),
                     description: String::new(),

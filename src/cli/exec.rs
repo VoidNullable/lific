@@ -476,6 +476,7 @@ fn project(
             name,
             identifier,
             description,
+            conventions,
         } => {
             let conn = pool.write()?;
             // LIF-409: match `POST /api/projects`, where the creator leads the
@@ -495,6 +496,7 @@ fn project(
                     identifier: identifier.clone(),
                     description: description.clone(),
                     lead_user_id,
+                    conventions: Some(crate::conventions::Template::parse(conventions)?),
                     ..Default::default()
                 },
             )?;
@@ -1149,6 +1151,7 @@ mod tests {
                 name: "Test".into(),
                 identifier: "TST".into(),
                 description: "A test".into(),
+                conventions: "ai_managed".into(),
             },
         };
         run(&pool, &cmd, false, None).unwrap();
@@ -1158,6 +1161,13 @@ mod tests {
         let projects = queries::list_projects(&conn).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].identifier, "TST");
+        let page = queries::conventions_page(&conn, projects[0].id)
+            .unwrap()
+            .expect("the project starts with its conventions page");
+        assert_eq!(
+            page.content,
+            crate::conventions::Template::AiManaged.content()
+        );
     }
 
     #[test]
@@ -2253,6 +2263,7 @@ mod tests {
                     name: "Test".into(),
                     identifier: "TST".into(),
                     description: String::new(),
+                    conventions: "empty".into(),
                 },
             },
             false,
@@ -2368,6 +2379,7 @@ mod tests {
                     name: "Test".into(),
                     identifier: "TST".into(),
                     description: String::new(),
+                    conventions: "empty".into(),
                 },
             },
             false,

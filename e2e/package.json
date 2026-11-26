@@ -21,7 +21,8 @@
     "image-url-paste": "bun image-url-paste.ts",
     "lightbox": "bun lightbox.ts",
     "body-editor": "bun body-editor.ts",
-    "palette-design": "bun palette-design.ts"
+    "palette-design": "bun palette-design.ts",
+    "conventions": "bun conventions.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"
