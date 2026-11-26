@@ -118,7 +118,14 @@ pub struct Check {
     pub name: String,
     pub status: Status,
     pub detail: String,
+    /// Every item the check is about, when it is about a list. JSON carries
+    /// all of them; the text report shows the first [`TEXT_ENTRIES_SHOWN`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
 }
+
+/// How many [`Check::entries`] the text report lists before summarizing.
+const TEXT_ENTRIES_SHOWN: usize = 10;
 
 impl Check {
     fn new(name: &str, status: Status, detail: impl Into<String>) -> Self {
@@ -126,7 +133,34 @@ impl Check {
             name: name.to_string(),
             status,
             detail: detail.into(),
+            entries: Vec::new(),
         }
+    }
+
+    fn with_entries(mut self, entries: Vec<String>) -> Self {
+        self.entries = entries;
+        self
+    }
+
+    /// The detail as the text report prints it, with the entries shortened.
+    fn text_detail(&self) -> String {
+        if self.entries.is_empty() {
+            return self.detail.clone();
+        }
+        let mut listed = self
+            .entries
+            .iter()
+            .take(TEXT_ENTRIES_SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.entries.len() > TEXT_ENTRIES_SHOWN {
+            listed.push_str(&format!(
+                "; and {} more (--json lists every one)",
+                self.entries.len() - TEXT_ENTRIES_SHOWN
+            ));
+        }
+        format!("{} {listed}", self.detail)
     }
 }
 
@@ -439,9 +473,14 @@ fn unconfigured_checks(
             format!("{CONFIG_UNRESOLVED} (pass --db PATH to inspect one anyway)"),
         ),
     };
-    vec![
-        config_check,
-        database,
+    // Reads only the named database, so it runs whenever that was inspected.
+    let project_access = match database_override {
+        Some(path) if database.status != Status::Fail => check_project_access(path),
+        _ => None,
+    };
+    let mut checks = vec![config_check, database];
+    checks.extend(project_access);
+    checks.extend([
         Check::new("backups", Status::Skipped, CONFIG_UNRESOLVED),
         // Reads no configured value — it inspects the machine's installed
         // service — so the fail-closed policy does not hold it back; same
@@ -450,7 +489,8 @@ fn unconfigured_checks(
         Check::new("server", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("oauth_discovery", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("mcp", Status::Skipped, CONFIG_UNRESOLVED),
-    ]
+    ]);
+    checks
 }
 
 /// Run checks that depend on the configured server or its credentials.
@@ -891,10 +931,7 @@ fn dir_is_writable(dir: &Path) -> bool {
     }
 }
 
-// ── Check 3: backups ─────────────────────────────────────────────────────
-
-/// How many users the warning names before summarizing the rest.
-const ACCESS_LOSS_LISTED: usize = 10;
+// ── Project access after the 3.0 upgrade ─────────────────────────────────
 
 /// LIF-518: who could reach a project before roles were enforced everywhere
 /// and still holds no role in it. Omitted when the database can't be read or
@@ -922,27 +959,21 @@ fn project_access_check(losses: &[crate::db::queries::access_losses::AccessLoss]
         );
     }
     let lines = crate::db::queries::access_losses::summarize(losses);
-    let mut listed = lines
-        .iter()
-        .take(ACCESS_LOSS_LISTED)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("; ");
-    if lines.len() > ACCESS_LOSS_LISTED {
-        listed.push_str(&format!("; and {} more", lines.len() - ACCESS_LOSS_LISTED));
-    }
     Check::new(
         "project_access",
         Status::Warn,
         format!(
-            "{} user{} could reach these projects before 3.0 and hold no role in them now: \
-             {listed}. Restore anyone who needs access with `lific member add --project <PROJECT> \
-             --user <name> --role maintainer`",
+            "{} user{} could reach projects before 3.0 and hold no role in them now. Restore \
+             anyone who needs access with `lific member add --project <PROJECT> --user <name> \
+             --role maintainer`. Still left out:",
             lines.len(),
             plural(lines.len()),
         ),
     )
+    .with_entries(lines)
 }
+
+// ── Check 3: backups ─────────────────────────────────────────────────────
 
 /// Returns `None` when backups are disabled (the check is omitted entirely).
 fn check_backups(cfg: &Config) -> Option<Check> {
@@ -1406,7 +1437,12 @@ fn print_report(report: &Report, json: bool) {
         .unwrap_or(0);
 
     for c in &report.checks {
-        let line = format!("{:<width$}  {}", c.name, c.detail, width = name_width);
+        let line = format!(
+            "{:<width$}  {}",
+            c.name,
+            c.text_detail(),
+            width = name_width
+        );
         match c.status {
             Status::Pass => ui::step(line),
             Status::Warn => ui::warn(line),
@@ -1702,6 +1738,57 @@ mod tests {
         assert!(c.detail.contains("no migrations run"));
     }
 
+    /// Seed `users` users who each lost access to one project, as migration
+    /// 070 records it.
+    fn seed_access_losses(db_path: &Path, users: usize) {
+        let pool = crate::db::open(db_path).unwrap();
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, identifier) VALUES ('Api', 'API')",
+            [],
+        )
+        .unwrap();
+        for n in 0..users {
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, is_admin, is_bot)
+                 VALUES (?1, ?1 || '@test.local', 'x', 0, 0)",
+                [format!("user{n:02}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO authz_upgrade_losses (user_id, project_id)
+             SELECT u.id, p.id FROM users u, projects p",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_access_json_lists_every_entry_and_text_shortens_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        seed_access_losses(&db_path, TEXT_ENTRIES_SHOWN + 3);
+
+        let check = check_project_access(&db_path).unwrap();
+        let json = serde_json::to_value(Report::new(vec![check.clone()])).unwrap();
+        let entries = json["checks"][0]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), TEXT_ENTRIES_SHOWN + 3);
+        assert_eq!(entries.last().unwrap(), "user12: API");
+        assert!(!json.to_string().contains("more"), "{json}");
+
+        let text = check.text_detail();
+        assert!(text.contains("user09: API"), "{text}");
+        assert!(!text.contains("user10: API"), "{text}");
+        assert!(text.contains("and 3 more"), "{text}");
+    }
+
+    #[test]
+    fn checks_without_entries_serialize_as_before() {
+        let json = serde_json::to_value(check("database", Status::Pass)).unwrap();
+        assert!(json.get("entries").is_none(), "{json}");
+    }
+
     #[test]
     fn project_access_is_omitted_without_an_upgrade_record() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1732,7 +1819,8 @@ mod tests {
 
         let c = check_project_access(&db_path).expect("recorded losses are reported");
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
-        assert!(c.detail.contains("bob: API"), "detail: {}", c.detail);
+        assert_eq!(c.entries, vec!["bob: API".to_string()]);
+        assert!(c.text_detail().contains("bob: API"), "{}", c.text_detail());
         assert!(
             c.detail.contains("lific member add"),
             "detail: {}",
@@ -2658,6 +2746,31 @@ mod tests {
         assert!(detail.contains("no migrations run"), "{detail}");
         assert_config_dependent_checks_skipped(&report);
         assert!(!report.ok, "the configuration failure is retained");
+        assert_eq!(status_of(&report.checks, "project_access"), None);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_reports_project_access_after_a_config_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database_path = tmp.path().join("override.db");
+        seed_access_losses(&database_path, 1);
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        assert_eq!(
+            status_of(&report.checks, "project_access"),
+            Some(Status::Warn)
+        );
+        assert_config_dependent_checks_skipped(&report);
     }
 
     #[tokio::test]

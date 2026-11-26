@@ -567,6 +567,6 @@ lific doctor [--key <API_KEY>] [--repair]
 | `--key <API_KEY>` | Uses this key for an authorized MCP check. Also read from `LIFIC_API_KEY`. Without a key, `doctor` still checks that authentication is enforced and discovery is advertised. |
 | `--repair` | Applies pending database migrations while checking. Needs a readable configuration or an explicit `--db`. |
 
-On an instance upgraded from one that ran with project permissions switched off, the `project_access` check warns while anyone who lost access to a project in the [3.0 upgrade](/docs/upgrading#v30) still has no role in it, names them, and passes once every one is resolved.
+On an instance upgraded from one that ran with project permissions switched off, the `project_access` check warns while anyone who lost access to a project in the [3.0 upgrade](/docs/upgrading#v30) still has no role in it, names them, and passes once every one is resolved. The text report names the first ten; with `--json`, the check's `entries` array lists every one. The check also runs on a database named with `--db` when the configuration could not be read.
 
 Without `--repair`, `doctor` does not change the database: it runs no migrations and writes no data, although SQLite may still touch its WAL and SHM files. If the configuration cannot be read, `doctor` reports that and skips the checks that depend on it rather than running them against defaults. Pass `--db <PATH>` to inspect a particular database anyway.
