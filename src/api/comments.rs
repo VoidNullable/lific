@@ -9,8 +9,9 @@ use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::idempotency::{self, Bound, Created};
+use super::idempotency;
 use super::{require_user, with_read};
+use crate::db::queries::op_keys::Written;
 
 /// Comments are gated at `Viewer` — anyone who can see a project
 /// can read and post comments on its issues/pages (the actual auth-required
@@ -176,26 +177,40 @@ fn list_for_parent(
     Ok((headers, Json(page.items)))
 }
 
+/// What an `Idempotency-Key` on a new comment is bound to: the parent and
+/// the whole request body, so a field added to [`CreateComment`] is part of
+/// the fingerprint without touching this.
+fn comment_fingerprint(
+    parent: CommentParent,
+    input: &CreateComment,
+) -> (&'static str, i64, &CreateComment) {
+    match parent {
+        CommentParent::Issue(id) => ("issue", id, input),
+        CommentParent::Page(id) => ("page", id, input),
+    }
+}
+
 fn create_for_parent(
     db: &DbPool,
     realtime: &RealtimeHub,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     headers: &axum::http::HeaderMap,
     parent: CommentParent,
-    content: &str,
-) -> Result<Created<Comment>, LificError> {
+    input: &CreateComment,
+) -> Result<Written<Comment>, LificError> {
     let user = require_user(identity)?;
-    let request = match parent {
-        CommentParent::Issue(id) => ("issue", id, content),
-        CommentParent::Page(id) => ("page", id, content),
-    };
-    let op_key = match idempotency::bind(db, identity, headers, "rest.create_comment", &request)? {
-        Bound::Replay(body) => return Ok(Created::Replayed(body)),
-        Bound::Write(op_key) => op_key,
-    };
-    let (comment, project_id) = db.transaction(|conn| {
+    let op_key = idempotency::key(
+        identity,
+        headers,
+        "rest.create_comment",
+        &comment_fingerprint(parent, input),
+    )?;
+    let written = db.transaction(|conn| {
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
+        if let Some(stored) = idempotency::replay(conn, op_key.as_ref())? {
+            return Ok(Written::Replayed(stored));
+        }
         let member_scoped = authz::authz_enforced_conn(conn)?;
         let actor = CommentActor::from(&user);
         let comment = comments::create_comment_with_mentions(
@@ -204,12 +219,16 @@ fn create_for_parent(
             project_id,
             actor,
             AttachmentActor::Authenticated(actor),
-            content,
+            &input.content,
             member_scoped,
         )?;
         idempotency::record(conn, op_key.as_ref(), &comment)?;
-        Ok((comment, project_id))
+        Ok(Written::Fresh((comment, project_id)))
     })?;
+    let (comment, project_id) = match written {
+        Written::Fresh(fresh) => fresh,
+        Written::Replayed(stored) => return Ok(Written::Replayed(stored)),
+    };
     if let Some(project_id) = project_id {
         realtime.send_with_seq(
             match parent {
@@ -219,7 +238,7 @@ fn create_for_parent(
             comment.seq,
         );
     }
-    Ok(Created::Fresh(comment))
+    Ok(Written::Fresh(comment))
 }
 
 pub(super) async fn list_comments(
@@ -238,14 +257,14 @@ pub(super) async fn create_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Created<Comment>, LificError> {
+) -> Result<Written<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
         &headers,
         CommentParent::Issue(issue_id),
-        &input.content,
+        &input,
     )
 }
 
@@ -265,14 +284,14 @@ pub(super) async fn create_page_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Created<Comment>, LificError> {
+) -> Result<Written<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
         &headers,
         CommentParent::Page(page_id),
-        &input.content,
+        &input,
     )
 }
 

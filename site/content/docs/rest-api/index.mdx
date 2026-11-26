@@ -132,8 +132,11 @@ When a create times out, a client cannot tell whether it was written. Send an `I
 - The same key and the same body return the body the first call returned, with the header `Idempotent-Replayed: true`. Nothing new is written.
 - The same key with a different body, or on a different route, is refused with `409` and writes nothing.
 - A call that failed records no key, so a corrected retry with the same key goes through.
+- A replay needs the same permission a new create would. A caller who lost access since gets that refusal, not the stored body.
+- A retry sent while the first call is still writing waits for it and gets the replay.
+- A response body over 1 MiB is not kept. Its key still blocks a second write: the retry gets `409` with `Idempotent-Replayed: true`, and should read the record directly.
 
-The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the user who sent them and are kept for 24 hours; after that the same key starts a new write. The CLI's HTTP backend sends one on every create and retries once after a lost connection.
+The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the user who sent them and are kept for 24 hours; after that the same key starts a new write. A server that honors the header lists `idempotency-key` in the `capabilities` of [`GET /api/instance`](/docs/rest-api/identity); an older one ignores it, so resending a lost create to it can write twice. The CLI's HTTP backend sends a key on every create and, against a server that lists the capability, retries once after a lost connection.
 
 ## Errors
 

@@ -21,6 +21,7 @@ use super::outputs::{self, StructuredReply};
 use super::read_log::ReadLog;
 use super::schemas::*;
 use super::{LificMcp, current_issue_link_context, sanitize_error};
+use crate::db::queries::op_keys::Written;
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
 /// **zero** projects, so the first agent connecting to a fresh install learns
@@ -515,6 +516,19 @@ fn issue_reference<'a>(
     identifier: &'a str,
 ) -> Reference<'a> {
     reference_with_context(context, ReferenceKind::Issue(identifier))
+}
+
+/// LIF-526: what a create answers when its `op_key` already ran.
+fn replay_text(key: Option<&queries::op_keys::OpKey>, stored: queries::op_keys::Stored) -> String {
+    let key = key.map(queries::op_keys::OpKey::key).unwrap_or_default();
+    let head =
+        format!("Replayed op_key \"{key}\": this call already ran, so nothing new was written.");
+    match stored {
+        queries::op_keys::Stored::Result(result) => format!("{head}\n{result}"),
+        queries::op_keys::Stored::TooLarge => format!(
+            "{head}\nIts result was too large to keep; read what it created with get_issue, get_page, get_plan or list_comments."
+        ),
+    }
 }
 
 /// How many possible duplicates `create_issue` names (LIF-477).
@@ -3055,27 +3069,20 @@ No issues found."
 
     /// The result an earlier call with this `op_key` committed, marked as a
     /// replay. `None` when there was no such call and this one should write.
+    ///
+    /// Callers check here once their permission checks pass and before
+    /// anything that could drift since the first call (a renamed module, a
+    /// deleted relation target), then again inside the write transaction,
+    /// which is the check that settles a race.
     fn replay(&self, key: Option<&queries::op_keys::OpKey>) -> Result<Option<String>, String> {
-        let Some(key) = key else {
-            return Ok(None);
-        };
         Ok(self
-            .read(|conn| queries::op_keys::replay(conn, key))?
-            .map(|result| {
-                format!(
-                    "Replayed op_key \"{}\": this call already ran, so nothing new was written.\n{result}",
-                    key.key()
-                )
-            }))
+            .read(|conn| queries::op_keys::replay_opt(conn, key))?
+            .map(|stored| replay_text(key, stored)))
     }
 
     fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
-        let op_key = self.op_key("mcp.create_issue", input.op_key.as_deref(), &input)?;
-        if let Some(replayed) = self.replay(op_key.as_ref())? {
-            return Ok(replayed);
-        }
         if let Some(items) = input.issues.take() {
-            return self.create_issue_batch(input, items, op_key.as_ref());
+            return self.create_issue_batch(input, items);
         }
         if input.title.trim().is_empty() {
             return Err("title is required (or pass issues to create several)".into());
@@ -3083,6 +3090,13 @@ No issues found."
         let conn = self.read_conn()?;
         let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        // The project a binding supplied is not in `input`, so the resolved
+        // one is part of the fingerprint: two sessions bound to different
+        // projects never share a key's result.
+        let op_key = self.op_key("mcp.create_issue", input.op_key.as_deref(), &(pid, &input))?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
+        }
         let module_id = match &input.module {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
@@ -3119,11 +3133,14 @@ No issues found."
                 write_similar_issues(output, context.as_deref(), similar)
             })
         };
-        let issue = self.transaction(|conn| {
+        let written = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_issue` then links the
             // description's references inside its own savepoint.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
             let issue = queries::create_issue(
                 conn,
                 &models::CreateIssue {
@@ -3156,8 +3173,12 @@ No issues found."
             // The replay leaves out the similar-issues hint: it was a
             // suggestion about the moment of the first call.
             queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(render(&issue, &[])))?;
-            Ok(issue)
+            Ok(Written::Fresh(issue))
         })?;
+        let issue = match written {
+            Written::Fresh(issue) => issue,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueCreated {
                 project_id: issue.project_id,
@@ -3199,7 +3220,6 @@ No issues found."
         &self,
         input: CreateIssueInput,
         items: Vec<CreateIssueItem>,
-        op_key: Option<&queries::op_keys::OpKey>,
     ) -> Result<String, String> {
         const MAX_ISSUE_BATCH: usize = 50;
         let has_single_fields = !input.title.is_empty()
@@ -3230,10 +3250,24 @@ No issues found."
             ));
         }
         let titles: Vec<&str> = items.iter().map(|item| item.title.as_str()).collect();
-        let (pid, relations) = {
+        let pid = resolve_project(
+            &*self.read_conn()?,
+            self.project_or_bound(input.project.as_deref())?,
+        )?;
+        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        // As in the single create: the resolved project is fingerprinted.
+        let op_key = self.op_key(
+            "mcp.create_issue",
+            input.op_key.as_deref(),
+            &(pid, &input, &items),
+        )?;
+        let op_key = op_key.as_ref();
+        if let Some(replayed) = self.replay(op_key)? {
+            return Ok(replayed);
+        }
+        let relations = {
             let conn = self.read_conn()?;
-            let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
-            let relations = items
+            items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
@@ -3251,10 +3285,8 @@ No issues found."
                     )
                     .map_err(|error| super::sanitize_error(at_batch_item(index, error)))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            (pid, relations)
+                .collect::<Result<Vec<_>, _>>()?
         };
-        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let linked = create_relations::existing(relations.iter().flatten());
         for &(project_id, _) in &linked {
             require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
@@ -3304,9 +3336,12 @@ No issues found."
                 )
             })
         };
-        let created = self.transaction(|conn| {
+        let written = self.transaction(|conn| {
             // Same actor re-check as the single create, once for the batch.
             let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key)? {
+                return Ok(Written::Replayed(stored));
+            }
             let created = items
                 .iter()
                 .enumerate()
@@ -3325,8 +3360,12 @@ No issues found."
             )?;
             // The batch replays as a whole: one key, one stored result.
             queries::op_keys::record_opt(conn, op_key, || Ok(render(&created, &[])))?;
-            Ok(created)
+            Ok(Written::Fresh(created))
         })?;
+        let created = match written {
+            Written::Fresh(created) => created,
+            Written::Replayed(stored) => return Ok(replay_text(op_key, stored)),
+        };
         for issue in &created {
             self.emit_with_seq(
                 crate::realtime::RealtimeEvent::IssueCreated {
@@ -4243,16 +4282,20 @@ No issues found."
     }
 
     fn create_page_inner(&self, input: CreatePageInput) -> Result<String, String> {
-        let op_key = self.op_key("mcp.create_page", input.op_key.as_deref(), &input)?;
-        if let Some(replayed) = self.replay(op_key.as_ref())? {
-            return Ok(replayed);
-        }
         let conn = self.read_conn()?;
         let project_id = match &input.project {
             Some(p) => Some(resolve_project(&conn, p)?),
             None => None,
         };
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let op_key = self.op_key(
+            "mcp.create_page",
+            input.op_key.as_deref(),
+            &(project_id, &input),
+        )?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
+        }
         let folder_id = match (&input.folder, project_id) {
             (Some(name), Some(pid)) => Some(resolve_folder(&conn, pid, name)?),
             (Some(_), None) => return Err("folder requires a project".into()),
@@ -4274,11 +4317,14 @@ No issues found."
                 Ok(())
             })
         };
-        let (page, rendered) = self.transaction(|conn| {
+        let written = self.transaction(|conn| {
             // LIF-369/LIF-409: resolve the actor and re-assert the role on the
             // writing connection first; `create_page` then links the content's
             // references inside its own savepoint.
             let attachments = sync_link_actor_conn(conn, project_id, models::Role::Maintainer)?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
             let page = queries::create_page(
                 conn,
                 &models::CreatePage {
@@ -4300,8 +4346,12 @@ No issues found."
             )?;
             let rendered = render(&page);
             queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
-            Ok((page, rendered))
+            Ok(Written::Fresh((page, rendered)))
         })?;
+        let (page, rendered) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         if let Some(project_id) = page.project_id {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
@@ -5310,10 +5360,9 @@ No issues found."
     }
 
     fn add_comment_inner(&self, input: AddCommentInput) -> Result<String, String> {
+        // The replay check runs in the transaction below, after the same
+        // permission check a fresh comment needs.
         let op_key = self.op_key("mcp.add_comment", input.op_key.as_deref(), &input)?;
-        if let Some(replayed) = self.replay(op_key.as_ref())? {
-            return Ok(replayed);
-        }
         let context = current_issue_link_context();
         // Don't echo the content back — the agent already supplied it in the
         // tool args, so repeating it just duplicates tokens in context
@@ -5346,7 +5395,7 @@ No issues found."
                 )
             }),
         };
-        let (rendered, event) = self.transaction(|conn| {
+        let written = self.transaction(|conn| {
             let (parent, parent_identifier, project_id) =
                 resolve_comment_parent_conn(conn, &input.identifier)?;
             let actor = resolve_comment_actor_conn(conn)?;
@@ -5356,6 +5405,9 @@ No issues found."
                 project_id,
                 models::Role::Viewer,
             )?;
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
             let member_scoped = crate::authz::authz_enforced_conn(conn)?;
             let author = models::CommentActor::from(&actor.user);
             let comment = queries::comments::create_comment_with_mentions(
@@ -5370,8 +5422,12 @@ No issues found."
             let event = comment_updated_event(parent, project_id);
             let rendered = render(&comment, parent, &parent_identifier);
             queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
-            Ok((rendered, event))
+            Ok(Written::Fresh((rendered, event)))
         })?;
+        let (rendered, event) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         event.into_iter().for_each(|event| self.emit(event));
         Ok(rendered)
     }
@@ -5698,10 +5754,6 @@ No issues found."
     }
 
     fn create_plan_inner(&self, input: CreatePlanInput) -> Result<String, String> {
-        let op_key = self.op_key("mcp.create_plan", input.op_key.as_deref(), &input)?;
-        if let Some(replayed) = self.replay(op_key.as_ref())? {
-            return Ok(replayed);
-        }
         let pid = resolve_project(
             &*self.read_conn()?,
             self.project_or_bound(input.project.as_deref())?,
@@ -5715,6 +5767,11 @@ No issues found."
         }
         if let Some(ref steps) = input.steps {
             self.require_plan_step_issue_roles(steps, models::Role::Maintainer)?;
+        }
+        // The resolved project is fingerprinted: a binding is not in `input`.
+        let op_key = self.op_key("mcp.create_plan", input.op_key.as_deref(), &(pid, &input))?;
+        if let Some(replayed) = self.replay(op_key.as_ref())? {
+            return Ok(replayed);
         }
         let context = current_issue_link_context();
         let render = |plan: &models::Plan| {
@@ -5735,7 +5792,10 @@ No issues found."
                 )
             })
         };
-        let (plan, rendered) = self.transaction(|conn| {
+        let written = self.transaction(|conn| {
+            if let Some(stored) = queries::op_keys::replay_opt(conn, op_key.as_ref())? {
+                return Ok(Written::Replayed(stored));
+            }
             let anchor = match &input.anchor_issue {
                 Some(ident) => Some(queries::resolve_identifier(conn, ident)?),
                 None => None,
@@ -5757,8 +5817,12 @@ No issues found."
             )?;
             let rendered = render(&plan);
             queries::op_keys::record_opt(conn, op_key.as_ref(), || Ok(rendered.clone()))?;
-            Ok((plan, rendered))
+            Ok(Written::Fresh((plan, rendered)))
         })?;
+        let (plan, rendered) = match written {
+            Written::Fresh(fresh) => fresh,
+            Written::Replayed(stored) => return Ok(replay_text(op_key.as_ref(), stored)),
+        };
         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
             project_id: plan.project_id,
         });

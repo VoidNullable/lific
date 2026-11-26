@@ -72,11 +72,40 @@ impl OpKey {
     }
 }
 
+/// Largest result kept for a replay. A bigger one (a plan with a huge tree, a
+/// page near the request cap) records the key with no result: the retry still
+/// writes nothing, and is told to read what was created instead. Dropping the
+/// key would have let that retry write a duplicate, which is the one thing a
+/// key exists to prevent.
+pub(crate) const MAX_RESULT_BYTES: usize = 1024 * 1024;
+
+/// What an earlier call with the same key left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stored {
+    /// The result it returned.
+    Result(String),
+    /// It committed, but its result was over [`MAX_RESULT_BYTES`].
+    TooLarge,
+}
+
+/// A create's outcome: its own fresh result, or an earlier call's.
+#[derive(Debug)]
+pub(crate) enum Written<T> {
+    Fresh(T),
+    Replayed(Stored),
+}
+
 /// The result stored by the call that first used this key, when that call
 /// committed within [`TTL_HOURS`] and asked for the same thing. The same key
 /// with a different request is refused with a conflict.
-pub(crate) fn replay(conn: &Connection, key: &OpKey) -> Result<Option<String>, LificError> {
-    let row: Option<(String, String, String)> = conn
+///
+/// A create runs this inside its own immediate transaction, after its
+/// authorization checks and before it writes. The transaction serializes it
+/// with a concurrent call holding the same key, so a retry that races the
+/// still-running original waits for it and replays its result; and a caller
+/// who lost access since gets the same refusal a fresh create would.
+pub(crate) fn replay(conn: &Connection, key: &OpKey) -> Result<Option<Stored>, LificError> {
+    let row: Option<(String, String, Option<String>)> = conn
         .query_row(
             "SELECT operation, request_hash, result FROM op_keys
              WHERE IFNULL(user_id, 0) = IFNULL(?1, 0) AND op_key = ?2
@@ -90,7 +119,7 @@ pub(crate) fn replay(conn: &Connection, key: &OpKey) -> Result<Option<String>, L
         Some((operation, hash, result))
             if operation == key.operation && hash == key.request_hash =>
         {
-            Ok(Some(result))
+            Ok(Some(result.map_or(Stored::TooLarge, Stored::Result)))
         }
         Some(_) => Err(LificError::Conflict(format!(
             "{} \"{}\" was already used for a different request; nothing was written. Use a new key for a new write",
@@ -99,9 +128,19 @@ pub(crate) fn replay(conn: &Connection, key: &OpKey) -> Result<Option<String>, L
     }
 }
 
+/// [`replay`] when the call carried a key; `None` otherwise.
+pub(crate) fn replay_opt(
+    conn: &Connection,
+    key: Option<&OpKey>,
+) -> Result<Option<Stored>, LificError> {
+    key.map_or(Ok(None), |key| replay(conn, key))
+}
+
 /// Mark the key done with `result`. Call inside the create's transaction,
 /// after the write, so the key and the write commit or roll back together.
+/// A result over [`MAX_RESULT_BYTES`] is not kept; see [`Stored::TooLarge`].
 pub(crate) fn record(conn: &Connection, key: &OpKey, result: &str) -> Result<(), LificError> {
+    let result = (result.len() <= MAX_RESULT_BYTES).then_some(result);
     conn.execute(
         "DELETE FROM op_keys
          WHERE IFNULL(user_id, 0) = IFNULL(?1, 0) AND op_key = ?2
@@ -121,7 +160,7 @@ pub(crate) fn record(conn: &Connection, key: &OpKey, result: &str) -> Result<(),
     );
     match inserted {
         Ok(_) => Ok(()),
-        // Two calls with one key raced past `replay`; the first committed.
+        // Only reachable when a caller skipped `replay` in its transaction.
         // Failing here rolls this one back, and a retry replays the winner.
         Err(rusqlite::Error::SqliteFailure(error, _))
             if error.code == ErrorCode::ConstraintViolation =>
@@ -182,8 +221,26 @@ mod tests {
         assert_eq!(replay(&conn, &first).unwrap(), None);
         record(&conn, &first, "Created X-1").unwrap();
         assert_eq!(
-            replay(&conn, &key(None, "k1", "same")).unwrap().as_deref(),
-            Some("Created X-1")
+            replay(&conn, &key(None, "k1", "same")).unwrap(),
+            Some(Stored::Result("Created X-1".into()))
+        );
+    }
+
+    #[test]
+    fn an_oversized_result_still_records_the_key_without_the_result() {
+        let pool = crate::db::open_memory().unwrap();
+        let conn = pool.write().unwrap();
+        let big = "x".repeat(MAX_RESULT_BYTES + 1);
+        record(&conn, &key(None, "big", "same"), &big).unwrap();
+        assert_eq!(
+            replay(&conn, &key(None, "big", "same")).unwrap(),
+            Some(Stored::TooLarge)
+        );
+        let at_cap = "x".repeat(MAX_RESULT_BYTES);
+        record(&conn, &key(None, "cap", "same"), &at_cap).unwrap();
+        assert_eq!(
+            replay(&conn, &key(None, "cap", "same")).unwrap(),
+            Some(Stored::Result(at_cap))
         );
     }
 
@@ -239,10 +296,8 @@ mod tests {
         .unwrap();
         record(&conn, &key(None, "fresh2", "second"), "reused").unwrap();
         assert_eq!(
-            replay(&conn, &key(None, "fresh2", "second"))
-                .unwrap()
-                .as_deref(),
-            Some("reused")
+            replay(&conn, &key(None, "fresh2", "second")).unwrap(),
+            Some(Stored::Result("reused".into()))
         );
     }
 

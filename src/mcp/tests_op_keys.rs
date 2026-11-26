@@ -219,6 +219,160 @@ fn create_plan_replays_on_retry() {
     assert_eq!(count(&m, "plan_steps"), 1);
 }
 
+/// A session's bound project is not in the request, so it is part of the
+/// fingerprint: a session bound elsewhere never receives another project's
+/// result for the same key. It is refused and writes nothing.
+#[test]
+fn the_same_op_key_from_sessions_bound_to_other_projects_never_replays() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Alpha", "AAA");
+    seed_project(&m, "Beta", "BBB");
+    let bound = |project: &str| m.clone().with_bound_project(Some(project.into()));
+    let (alpha, beta) = (bound("AAA"), bound("BBB"));
+    let single = |m: &LificMcp| {
+        m.create_issue(Parameters(CreateIssueInput {
+            title: "Same".into(),
+            op_key: Some("single".into()),
+            ..Default::default()
+        }))
+    };
+    let batch = |m: &LificMcp| {
+        m.create_issue(Parameters(CreateIssueInput {
+            issues: Some(vec![item("Batched")]),
+            op_key: Some("batch".into()),
+            ..Default::default()
+        }))
+    };
+    let plan = |m: &LificMcp| {
+        m.create_plan(Parameters(CreatePlanInput {
+            title: "Plan".into(),
+            op_key: Some("plan".into()),
+            ..Default::default()
+        }))
+    };
+
+    assert!(single(&alpha).contains("AAA-1"));
+    assert!(batch(&alpha).contains("AAA-2"));
+    assert!(plan(&alpha).starts_with("Created"));
+    for (tool, answer) in [
+        ("single", single(&beta)),
+        ("batch", batch(&beta)),
+        ("plan", plan(&beta)),
+    ] {
+        assert!(answer.contains("different request"), "{tool}: {answer}");
+        assert!(!answer.contains("AAA"), "{tool} leaked: {answer}");
+    }
+    assert_eq!(count(&m, "issues"), 2);
+    assert_eq!(count(&m, "plans"), 1);
+    // The same session still replays its own result.
+    assert!(single(&alpha).contains(REPLAYED));
+}
+
+/// A retry sent while the original is still writing waits for it and
+/// replays its result, instead of failing on the key the original records.
+/// The test holds the writer so both calls pass the early replay check
+/// before either can write.
+#[test]
+fn two_racing_calls_with_one_op_key_both_end_with_the_same_result() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "TST");
+    let writer = m.db.write().unwrap();
+    let mut calls = Vec::new();
+    for _ in 0..2 {
+        let m = m.clone();
+        calls.push(std::thread::spawn(move || create(&m, "Raced", "race")));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(writer);
+    let answers: Vec<String> = calls.into_iter().map(|c| c.join().unwrap()).collect();
+
+    for answer in &answers {
+        assert!(answer.contains("Created TST-1: Raced"), "got: {answer}");
+    }
+    assert_eq!(
+        answers.iter().filter(|a| a.contains(REPLAYED)).count(),
+        1,
+        "{answers:?}"
+    );
+    assert_eq!(count(&m, "issues"), 1);
+}
+
+fn as_user(user: &models::AuthUser, f: impl FnOnce() -> String) -> String {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(crate::mcp::with_request_user(
+            Some(user.clone()),
+            || async { f() },
+        ))
+}
+
+/// A replay hands back what the first call created, so it needs the same
+/// permission a fresh create would. A member removed since gets the refusal.
+#[test]
+fn a_member_removed_since_the_first_call_gets_no_replay() {
+    let (db, _admin, _lead, maintainer, _viewer, _outsider, project) =
+        crate::api::test_helpers::setup_membership_test();
+    let m = LificMcp::new(db.clone());
+    let _guard = super::acquire_test_guard();
+    let user = models::AuthUser {
+        id: maintainer.id,
+        username: maintainer.username,
+        display_name: maintainer.display_name,
+        is_admin: false,
+    };
+    let issue = || {
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("MEM".into()),
+            title: "Private".into(),
+            op_key: Some("issue".into()),
+            ..Default::default()
+        }))
+    };
+    let comment = || {
+        m.add_comment(Parameters(AddCommentInput {
+            identifier: "MEM-1".into(),
+            content: "Secret notes".into(),
+            op_key: Some("comment".into()),
+        }))
+    };
+    let page = || {
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("MEM".into()),
+            title: "Hidden".into(),
+            op_key: Some("page".into()),
+            ..Default::default()
+        }))
+    };
+    let plan = || {
+        m.create_plan(Parameters(CreatePlanInput {
+            project: Some("MEM".into()),
+            title: "Hidden plan".into(),
+            op_key: Some("plan".into()),
+            ..Default::default()
+        }))
+    };
+    let calls: [(&str, &dyn Fn() -> String); 4] = [
+        ("issue", &issue),
+        ("comment", &comment),
+        ("page", &page),
+        ("plan", &plan),
+    ];
+    for (tool, call) in calls {
+        let first = as_user(&user, call);
+        assert!(!first.starts_with("Error"), "{tool}: {first}");
+    }
+    queries::members::remove_member(&db.write().unwrap(), project, user.id).unwrap();
+
+    for (tool, call) in calls {
+        let retried = as_user(&user, call);
+        assert!(retried.starts_with("Error"), "{tool}: {retried}");
+        assert!(!retried.contains(REPLAYED), "{tool}: {retried}");
+        assert!(!retried.contains("Secret notes"), "{tool}: {retried}");
+    }
+}
+
 /// Agents only learn the retry rule from the schema, so every create tool
 /// must advertise `op_key` and say to reuse it.
 #[test]

@@ -8,8 +8,9 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::idempotency::{self, Bound, Created};
+use super::idempotency;
 use super::{filter_visible, with_read, with_write};
+use crate::db::queries::op_keys::Written;
 
 /// Gate a page mutation/read by its `project_id`: project-scoped pages check
 /// `min` role on the project; workspace-level pages (`project_id = None`,
@@ -131,30 +132,33 @@ pub(super) async fn create_page(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     headers: axum::http::HeaderMap,
     Json(mut input): Json<CreatePage>,
-) -> Result<Created<Page>, LificError> {
+) -> Result<Written<Page>, LificError> {
     require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let op_key = match idempotency::bind(&db, &identity, &headers, "rest.create_page", &input)? {
-        Bound::Replay(body) => return Ok(Created::Replayed(body)),
-        Bound::Write(op_key) => op_key,
-    };
+    let op_key = idempotency::key(&identity, &headers, "rest.create_page", &input)?;
     // LIF-262/LIF-409: `create_page` links the content's attachment references
     // inside its own savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let page = db.transaction(|conn| {
+    let written = db.transaction(|conn| {
         // The gate above ran on a read connection before this write began.
         // Re-run it on the connection that writes the links, in one immediate
         // transaction, so the authorization deciding which references may be
         // linked cannot go stale between the check and the insert.
         require_page_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
+        if let Some(stored) = idempotency::replay(conn, op_key.as_ref())? {
+            return Ok(Written::Replayed(stored));
+        }
         let page = crate::db::queries::create_page(conn, &input)?;
         idempotency::record(conn, op_key.as_ref(), &page)?;
-        Ok(page)
+        Ok(Written::Fresh(page))
     })?;
+    let Written::Fresh(page) = written else {
+        return Ok(written);
+    };
     if let Some(project_id) = page.project_id {
         realtime.send_with_seq(RealtimeEvent::ProjectUpdated { project_id }, page.seq);
     }
-    Ok(Created::Fresh(page))
+    Ok(Written::Fresh(page))
 }
 
 pub(super) async fn update_page(

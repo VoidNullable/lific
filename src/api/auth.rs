@@ -467,6 +467,8 @@ pub(super) async fn instance_info(
         // the SPA's bootstrap signal, not the stored setting (the admin
         // settings endpoint keeps reporting the real DB flag).
         "web_auto_login": settings.web_auto_login || !auth_cfg.required,
+        // LIF-526: what clients may rely on before they act on it.
+        "capabilities": [super::idempotency::CAPABILITY],
     })))
 }
 

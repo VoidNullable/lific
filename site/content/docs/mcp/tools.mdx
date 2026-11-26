@@ -45,6 +45,9 @@ A create can commit on the server while its reply is lost to a client timeout, a
 - The same key and the same arguments return the first call's result, starting with `Replayed op_key "...": this call already ran, so nothing new was written.` A batch replays as a whole. The similar-issues hint is not repeated.
 - The same key with different arguments, or on a different tool, is refused with `Error: Conflict: op_key "..." was already used for a different request` and writes nothing.
 - A call that failed records no key, so a corrected retry with the same key goes through.
+- A replay needs the same permission a new create would, and a session bound to another project never gets this one's result.
+- A retry sent while the first call is still writing waits for it and gets the replay.
+- A result over 1 MiB is not kept. The retry still writes nothing and says to read what was created.
 
 The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the caller's account and are kept for 24 hours. `lific mcp --remote` adds a key to every create that lacks one and retries once after a lost connection, so agents behind it get this without sending keys themselves.
 

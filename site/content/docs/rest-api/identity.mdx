@@ -15,7 +15,7 @@ Answers the plain text `ok` with status `200`. No credential. Use it for health 
 
 What a sign-in screen needs before anyone is signed in. No credential.
 
-Returns `allow_signup` (boolean), `has_users` (whether any human account exists yet), `instance_name`, `login_message` and `web_auto_login`. `web_auto_login` is also `true` when the server runs with `[auth] required = false`, because that is the signal the web UI uses to sign in without a form.
+Returns `allow_signup` (boolean), `has_users` (whether any human account exists yet), `instance_name`, `login_message`, `web_auto_login` and `capabilities`. `web_auto_login` is also `true` when the server runs with `[auth] required = false`, because that is the signal the web UI uses to sign in without a form. `capabilities` lists behaviour a client may rely on: `idempotency-key` means creates honor an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key), so a lost create can be resent safely. An older server leaves the field out.
 
 ```json
 {
@@ -23,7 +23,8 @@ Returns `allow_signup` (boolean), `has_users` (whether any human account exists 
   "has_users": true,
   "instance_name": "Lific",
   "login_message": "",
-  "web_auto_login": false
+  "web_auto_login": false,
+  "capabilities": ["idempotency-key"]
 }
 ```
 
