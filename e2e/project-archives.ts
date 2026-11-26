@@ -102,7 +102,10 @@ function watch(page: Page) {
     if (message.type() !== "error") return;
     // Chromium reports intentional HTTP rejections and the lost-response probe.
     if (/^Failed to load resource:.*(400|403|409|422|net::ERR_FAILED)/.test(message.text())) return;
-    errors.push(message.text());
+    // A tab told another one signed out confirms it with the server, which
+    // answers that probe 401.
+    if (/^Failed to load resource:.*401/.test(message.text()) && message.location().url.endsWith("/api/auth/me")) return;
+    errors.push(`${message.text()} (${message.location().url})`);
   });
 }
 

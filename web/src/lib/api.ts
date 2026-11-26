@@ -358,9 +358,16 @@ export async function refreshSession(password?: string) {
   });
 }
 
-export async function logout() {
-  const result = await request("/auth/logout", { method: "POST" });
-  clearSession();
+/** End this browser's session. The tab is marked signed out only once the
+ *  server confirms it, or answers 401 because there was no session left to
+ *  end. Any other failure leaves the HttpOnly cookie valid, so the tab stays
+ *  signed in and the caller shows the error. */
+export async function logout(): Promise<RequestResult<{ logged_out: boolean }>> {
+  const result = await request<{ logged_out: boolean }>("/auth/logout", { method: "POST" });
+  if (result.ok || result.status === 401) {
+    clearSession();
+    return { ok: true, data: { logged_out: true } };
+  }
   return result;
 }
 
@@ -424,6 +431,9 @@ export async function revokeAllSessions() {
 
 const sessionListeners = new Set<() => void>();
 let signedIn = false;
+/** False between another tab's notice that the session changed and this
+ *  tab's own `/api/auth/me` answer. */
+let sessionKnown = true;
 let sessionGeneration = 0;
 
 // Before 3.0 the token itself lived in localStorage. Drop any copy left over
@@ -438,19 +448,27 @@ const SESSION_CHANNEL = "lific:session";
 const sessionChannel: BroadcastChannel | null =
   typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(SESSION_CHANNEL);
 
-function setSession(next: boolean, broadcast: boolean) {
-  signedIn = next;
-  sessionGeneration += 1;
-  if (broadcast) sessionChannel?.postMessage(next ? "signed-in" : "signed-out");
+function notifySession() {
   for (const listener of sessionListeners) listener();
 }
 
-// The cookie is shared by every tab, so a sign-in or sign-out in one is true
-// for all of them.
-sessionChannel?.addEventListener("message", (event: MessageEvent) => {
-  if (event.data === "signed-in" || event.data === "signed-out") {
-    setSession(event.data === "signed-in", false);
-  }
+function setSession(next: boolean, broadcast: boolean) {
+  signedIn = next;
+  sessionKnown = true;
+  sessionGeneration += 1;
+  if (broadcast) sessionChannel?.postMessage("changed");
+  notifySession();
+}
+
+// The cookie is shared by every tab, so a sign-in or sign-out in one changes
+// it for all of them. A message only says that something changed, never what:
+// this tab forgets which account it is on and asks the server, which is the
+// only authority on what the cookie now holds.
+sessionChannel?.addEventListener("message", () => {
+  sessionKnown = false;
+  sessionGeneration += 1;
+  notifySession();
+  void probeSession();
 });
 
 /** Mark this tab signed in, after a response that set the session cookie. */
@@ -477,26 +495,29 @@ export function hasSession(): boolean {
   return signedIn;
 }
 
-/** An opaque name for the current session, or null when signed out. It
- *  changes on every sign-in, sign-out and session swap, so code that started
- *  work under one session can compare it afterwards and drop a stale answer. */
+/** An opaque name for the current session, or null when signed out or while
+ *  another tab's change is being confirmed. It changes on every sign-in,
+ *  sign-out and session swap, so code that started work under one session can
+ *  compare it afterwards and drop a stale answer. */
 export function sessionKey(): string | null {
-  return signedIn ? `session:${sessionGeneration}` : null;
+  return signedIn && sessionKnown ? `session:${sessionGeneration}` : null;
 }
 
 /** Learn whether the browser's cookie is a live session. A 401 means signed
- *  out; any other failure (the server unreachable) leaves the answer unknown
- *  and the tab signed out until a later probe succeeds. */
+ *  out. Any other failure (the server unreachable) is no evidence either way:
+ *  the tab keeps what it last knew, and a later probe or request corrects it. */
 export async function probeSession(): Promise<RequestResult<AuthUser>> {
   const started = sessionGeneration;
   const result = await me();
-  // A sign-in or sign-out that landed while the probe was out is newer than
-  // its answer.
+  // A sign-in, sign-out or cross-tab notice that landed while the probe was
+  // out is newer than its answer.
   if (started !== sessionGeneration) return result;
   if (result.ok) {
-    if (!signedIn) setSession(true, false);
-  } else if (result.status === 401 && signedIn) {
-    setSession(false, false);
+    if (!signedIn || !sessionKnown) setSession(true, false);
+  } else if (result.status === 401) {
+    if (signedIn || !sessionKnown) setSession(false, false);
+  } else if (!sessionKnown) {
+    setSession(signedIn, false);
   }
   return result;
 }
