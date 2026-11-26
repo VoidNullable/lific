@@ -1149,7 +1149,7 @@
       </div>
     {:else if pages.length === 0 && folders.length === 0 && !createTarget}
       <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[460px] mx-auto text-center">
-        <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} />
+        <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} />
         <div class="flex flex-col items-center gap-1.5">
           <p class="text-heading font-medium text-[var(--text)]">A blank page</p>
           <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
@@ -1179,7 +1179,7 @@
       <div class="px-6 py-4">
         {#if filteredPages.length === 0}
           <div class="flex flex-col items-center py-16 gap-3">
-            <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} scale={0.16} />
+            <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.16} />
             <p class="text-body-lg text-[var(--text-muted)]">
               No pages match "{searchQuery}"
             </p>
@@ -1532,7 +1532,7 @@
 {#snippet flatPageList(pageList: PageRow[], emptyTitle: string, emptyDescription: string = "")}
   {#if pageList.length === 0}
     <div class="flex flex-col items-center py-16 gap-3 px-6 max-w-[460px] mx-auto text-center">
-      <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} scale={0.16} />
+      <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.16} />
       <div class="flex flex-col items-center gap-1.5">
         <p class="text-heading font-medium text-[var(--text)]">{emptyTitle}</p>
         {#if emptyDescription}

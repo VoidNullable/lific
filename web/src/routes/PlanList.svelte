@@ -339,7 +339,7 @@
 
           {#if plans.length === 0 && !creating && (activeTab === "active" || activeTab === "all")}
             <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[480px] mx-auto text-center">
-              <Mascot src="/LizzyWriting.png" nativeW={567} nativeH={562} />
+              <Mascot src="/LizzyWriting.png" nativeW={603} nativeH={597} />
               <div class="flex flex-col items-center gap-1.5">
                 <p class="text-heading font-medium text-[var(--text)]">The drawing board's empty</p>
                 <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">

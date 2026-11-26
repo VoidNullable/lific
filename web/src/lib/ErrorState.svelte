@@ -53,6 +53,6 @@
     class="pointer-events-none absolute right-0 bottom-[14%] z-0
            rotate-[7deg] translate-x-[18%]"
   >
-    <Mascot src="/LizzyOops.png" nativeW={742} nativeH={488} {scale} />
+    <Mascot src="/LizzyOops.png" nativeW={762} nativeH={467} {scale} />
   </div>
 </div>

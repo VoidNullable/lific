@@ -159,8 +159,8 @@
   {title}
   {subtitle}
   mascotSrc="/LizzyWriting.png"
-  mascotW={567}
-  mascotH={562}
+  mascotW={603}
+  mascotH={597}
 >
   {#if closed}
     <!-- Closed-signup state: no form. New accounts come from whoever runs the

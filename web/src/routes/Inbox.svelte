@@ -700,7 +700,7 @@
         {#if visible.length === 0}
           <div class="flex flex-col items-center justify-center text-center py-16 px-6 gap-3" data-testid="inbox-empty">
             {#if filtered}
-              <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} scale={0.12} />
+              <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.12} />
               <p class="text-body font-medium text-[var(--text)]">Nothing matches</p>
               <button type="button" class="tool-btn" onclick={clearFilters}>Clear filters</button>
             {:else}
@@ -798,7 +798,7 @@
             {/key}
           {:else}
             <div class="h-full flex flex-col items-center justify-center gap-3 text-center px-8">
-              <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} scale={0.14} />
+              <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.14} />
               <p class="text-body-sm text-[var(--text-muted)]">Pick an issue to read it here.</p>
             </div>
           {/if}

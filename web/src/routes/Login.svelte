@@ -93,8 +93,8 @@
   title="Welcome back."
   subtitle="Sign in to continue on this instance."
   mascotSrc="/LizzyReading.png"
-  mascotW={487}
-  mascotH={714}
+  mascotW={527}
+  mascotH={674}
 >
   <form onsubmit={handleSubmit} class="flex flex-col gap-5" novalidate>
     <!-- Form-level error, announced politely to screen readers. -->
