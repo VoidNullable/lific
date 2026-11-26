@@ -228,6 +228,12 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Attachments (LIF-262) ──
         // The list endpoint gates on the owning entity's project at Viewer.
         (("GET", "/api/attachments"), Gated(Viewer)),
+        (
+            ("POST", "/api/attachments/import"),
+            Exempt(
+                "authenticated, per-user upload rate limit; optional entity link uses authorize_link before fetching and again in store_upload: Maintainer for issues/pages, Viewer for comments, workspace-admin for project-less pages",
+            ),
+        ),
         // Upload is open to any authenticated user (per-user rate-limited); the
         // blob only becomes project-visible once linked into an entity, so
         // there's no project to gate at upload time.
