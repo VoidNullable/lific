@@ -35,6 +35,7 @@ The 2 MiB ceiling also decides the largest issue description or page you can sav
 | Saved view configuration | 8 KiB | Saved views | `400` |
 | Wait note | 500 characters | Waits on a person or a date, over REST and MCP `link_issues` | `400` (MCP: `Error:` text) |
 | Issues created in one call | 50 | MCP `create_issue` with `issues` | `Error:` text, and nothing is created |
+| Create retry key | 1 to 255 bytes, no control characters, kept 24 hours | MCP `op_key`, REST `Idempotency-Key` | `400` (MCP: `Error:` text), and nothing is created |
 
 ## Pages of results
 

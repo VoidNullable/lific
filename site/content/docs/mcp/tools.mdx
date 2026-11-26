@@ -38,6 +38,16 @@ Every tool carries MCP annotations, so a client can decide which calls to run wi
 
 `get_briefing(since='last')` stores where you left off, and every read is counted on the Agent activity page; neither changes your issues or pages, so the reads stay read-only.
 
+## Retrying a create with `op_key`
+
+A create can commit on the server while its reply is lost to a client timeout, and calling again would file a duplicate. `create_issue` (single and batch), `add_comment`, `create_page` and `create_plan` take an optional `op_key`: any unique string, at most 255 bytes. Send the same `op_key` when you retry:
+
+- The same key and the same arguments return the first call's result, starting with `Replayed op_key "...": this call already ran, so nothing new was written.` A batch replays as a whole. The similar-issues hint is not repeated.
+- The same key with different arguments, or on a different tool, is refused with `Error: Conflict: op_key "..." was already used for a different request` and writes nothing.
+- A call that failed records no key, so a corrected retry with the same key goes through.
+
+The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the caller's account and are kept for 24 hours. `lific mcp --remote` adds a key to every create that lacks one and retries once after a lost connection, so agents behind it get this without sending keys themselves.
+
 ## Structured results
 
 `list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
@@ -169,7 +179,8 @@ Creates an issue, or up to 50 at once, and returns the new identifiers.
 | `blocks` | `string[]` | No | Issue identifiers the new issue blocks. |
 | `blocked_by` | `string[]` | No | Issue identifiers that block the new issue. |
 | `relates_to` | `string[]` | No | Issue identifiers the new issue relates to. |
-| `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project`. |
+| `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project` and `op_key`. |
+| `op_key` | `string` | No | Retry key for the whole call. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 Attachment links (`/api/attachments/12`) in the description are linked to the new issue.
 
@@ -424,6 +435,7 @@ Creates a page in a project, or a workspace page when `project` is omitted.
 | `folder` | `string` | No | Folder name. Needs `project`. |
 | `status` | `string` | No | `draft` (default), `active`, `complete` or `archived`. |
 | `labels` | `string[]` | No | Label names. Labels belong to a project, so this is ignored on workspace pages. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 Workspace pages take an administrator when membership is enforced.
 
@@ -470,6 +482,7 @@ Creates a plan and its whole step tree in one call. See [Plans](/docs/concepts/p
 | `title` | `string` | Yes | Plan title. |
 | `anchor_issue` | `string` | No | Issue this plan breaks down, e.g. `APP-42`. Moving it to `done` archives the plan. |
 | `steps` | `PlanStep[]` | No | The nested step tree. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 A `PlanStep` object:
 
@@ -542,6 +555,7 @@ Adds a comment to an issue or page, authored by the caller. Returns the comment'
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | `APP-1` for an issue, `APP-DOC-1` for a project page, `DOC-1` for a workspace page. |
 | `content` | `string` | Yes | Markdown. At most 262144 bytes. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 Commenting takes `viewer`. `@username` [mentions](/docs/concepts/comments-and-activity#mentions) in the body are resolved when the comment is saved.
 
