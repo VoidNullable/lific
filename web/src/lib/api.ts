@@ -2540,9 +2540,12 @@ export interface HomeOverview {
   my_done: DayCount[];
 }
 
-export async function getHomeOverview(since: string | null) {
+/** With `projectId`, every aggregate covers that one project (the project
+ *  overview); `projects` then holds at most its own pulse. */
+export async function getHomeOverview(since: string | null, projectId?: number) {
   const params = new URLSearchParams({ tz: String(-new Date().getTimezoneOffset()) });
   if (since) params.set("since", since);
+  if (projectId !== undefined) params.set("project_id", String(projectId));
   return request<HomeOverview>(`/home/overview?${params}`);
 }
 

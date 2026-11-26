@@ -20,16 +20,27 @@ pub(super) struct HomeQuery {
     pub since: Option<String>,
     /// The caller's offset from UTC in minutes, east positive. Defaults to 0.
     pub tz: Option<i32>,
+    /// Narrow every aggregate to one project, for the project overview. A
+    /// project the caller cannot see counts as empty, like any other.
+    pub project_id: Option<i64>,
 }
 
-/// GET /api/home/overview?since=...&tz=...
+/// GET /api/home/overview?since=...&tz=...&project_id=...
 pub(super) async fn home_overview(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(q): Query<HomeQuery>,
 ) -> Result<Json<HomeOverview>, LificError> {
     let user = super::require_user(&identity)?;
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    let mut visible = authz::visible_project_ids(&db, &identity)?;
+    if let Some(pid) = q.project_id {
+        let allowed = visible.as_ref().is_none_or(|set| set.contains(&pid));
+        visible = Some(if allowed {
+            std::collections::HashSet::from([pid])
+        } else {
+            std::collections::HashSet::new()
+        });
+    }
     with_read(&db, |conn| {
         let user_id = authz::effective_user(conn, &Some(user)).map(|u| u.id);
         overview(
@@ -77,6 +88,67 @@ mod tests {
         assert_eq!(body["projects"][0]["project_id"], project_id);
         assert_eq!(body["since"]["people_opened"], 1);
         assert_eq!(body["my_done"].as_array().unwrap().len(), 84);
+    }
+
+    #[tokio::test]
+    async fn overview_narrows_to_one_project() {
+        let app = test_app();
+        let (first, _) = seed_project(&app).await;
+        let second = parse_json(
+            json_post(
+                &app,
+                "/api/projects",
+                serde_json::json!({ "name": "Second", "identifier": "SEC" }),
+            )
+            .await,
+        )
+        .await["id"]
+            .as_i64()
+            .unwrap();
+        for (project_id, title) in [(first, "One"), (second, "Two"), (second, "Three")] {
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": title }),
+            )
+            .await;
+        }
+
+        let all = parse_json(json_get(&app, "/api/home/overview").await).await;
+        assert_eq!(all["open_total"], 3);
+
+        let body =
+            parse_json(json_get(&app, &format!("/api/home/overview?project_id={second}")).await)
+                .await;
+        assert_eq!(body["open_total"], 2);
+        let pulses = body["projects"].as_array().unwrap();
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses[0]["project_id"], second);
+        assert_eq!(
+            body["open_trend"].as_array().unwrap().last().unwrap()["count"],
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn overview_of_a_hidden_project_is_empty() {
+        let (db, _admin, lead, _maintainer, _viewer, non_member, project_id) =
+            setup_membership_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        json_post(
+            &lead_app,
+            "/api/issues",
+            serde_json::json!({ "project_id": project_id, "title": "Members only" }),
+        )
+        .await;
+        let path = format!("/api/home/overview?project_id={project_id}");
+        let lead_body = parse_json(json_get(&lead_app, &path).await).await;
+        assert_eq!(lead_body["open_total"], 1);
+
+        let outsider = app_as_user(db, &non_member);
+        let body = parse_json(json_get(&outsider, &path).await).await;
+        assert_eq!(body["open_total"], 0);
+        assert!(body["projects"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
