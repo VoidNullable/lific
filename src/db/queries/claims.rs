@@ -3,9 +3,11 @@
 //! A claim is a lease. It names a holder (an account plus an optional worker
 //! id, see [`Claimant`]) and an expiry; claiming again while you hold it
 //! moves the expiry and keeps the first claim time. A claim held by someone
-//! else that has not expired refuses yours. Expiry is read, never written:
-//! every read compares `expires_at` with the clock, and an expired row is the
-//! same as no row until the next claim overwrites it. There is no reaper.
+//! else that has not expired refuses yours. Every read compares `expires_at`
+//! with the clock, and an expired row is the same as no row until the next
+//! claim overwrites it. There is no reaper. Releasing a claim moves its expiry
+//! to now rather than deleting it, so the stale checks still see when anyone
+//! last worked under a claim.
 //!
 //! The clock is [`now`], which tests can pin per thread the way
 //! `waits::pin_today` pins the day, so a test passes a claim's TTL by moving
@@ -242,11 +244,23 @@ pub fn release(
             current.describe()
         )));
     }
-    conn.execute(
-        "DELETE FROM issue_claims WHERE issue_id = ?1",
-        params![issue_id],
-    )?;
+    if current.is_some() {
+        end(conn, issue_id)?;
+    }
     Ok(current)
+}
+
+/// End whatever live claim `issue_id` has, whoever holds it. The row stays,
+/// expired now, so the release still counts as the issue's last claim
+/// activity for the stale checks; the next claim overwrites it.
+pub fn end(conn: &Connection, issue_id: i64) -> Result<(), LificError> {
+    let stamp = now_text();
+    conn.execute(
+        "UPDATE issue_claims SET expires_at = ?2, renewed_at = ?2
+          WHERE issue_id = ?1 AND expires_at > ?2",
+        params![issue_id, stamp],
+    )?;
+    Ok(())
 }
 
 /// SQL true when issue `{alias}.id` has a live claim held by anyone other

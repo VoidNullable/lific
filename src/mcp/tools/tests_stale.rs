@@ -91,4 +91,14 @@ fn a_live_claim_is_activity() {
     }));
     assert!(claimed.contains("Claim held"), "{claimed}");
     assert_eq!(stale(&m, ListIssuesInput::default()), "No issues found.");
+
+    // Releasing ends the claim but not the record that someone just worked
+    // under it: the issue is not stale the moment its holder lets go.
+    let released = m.update_issue(Parameters(UpdateIssueInput {
+        identifier: "STA-1".into(),
+        claim: Some(false),
+        ..Default::default()
+    }));
+    assert!(released.contains("Claim released."), "{released}");
+    assert_eq!(stale(&m, ListIssuesInput::default()), "No issues found.");
 }
