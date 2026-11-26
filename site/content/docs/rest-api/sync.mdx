@@ -59,7 +59,7 @@ Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id
 
 - **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`, and `waits` when the issue has any (see [waits](/docs/rest-api/work#waits))
 - **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, `labels`
-- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment` or `verification`; not `kind`, which already names the change type)
+- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment`, `decision`, or `verification`; not `kind`, which already names the change type)
 
 A comment belongs to the project of the issue or page it is on.
 

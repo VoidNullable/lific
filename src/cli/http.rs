@@ -933,6 +933,7 @@ impl HttpBackend {
                 identifier,
                 content,
                 user,
+                kind,
             } => {
                 user.as_ref().map_or(Ok(()), |_| {
                     Err(anyhow!(
@@ -940,15 +941,26 @@ impl HttpBackend {
                     ))
                 })?;
                 let issue = self.issue_identity(identifier).await?;
-                self.send_json(
-                    Method::POST,
-                    &format!("/api/issues/{}/comments", issue.id),
-                    &models::CreateComment {
-                        content: content.clone(),
-                    },
-                )
-                .await
-                .map(|value| (value, issue.identifier))
+                let value = self
+                    .send_json(
+                        Method::POST,
+                        &format!("/api/issues/{}/comments", issue.id),
+                        &models::CreateComment {
+                            content: content.clone(),
+                            kind: *kind,
+                        },
+                    )
+                    .await?;
+                let expected = models::CommentKind::from(*kind).as_str();
+                let returned = value["kind"].as_str().unwrap_or("comment");
+                if returned != expected {
+                    return Err(anyhow!(
+                        "The server stored comment #{} as {returned}, but {expected} was requested. \
+                         Upgrade the server before recording decisions. The comment was already created; do not retry blindly.",
+                        value["id"],
+                    ));
+                }
+                Ok((value, issue.identifier))
             }
         }
     }
@@ -2315,6 +2327,69 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn http_comment_add_rejects_a_server_that_drops_decision_kind() {
+        for returned in [json!({"id": 7, "kind": "comment"}), json!({"id": 7})] {
+            let router = Router::new()
+                .route("/api/issues/resolve/{identifier}", get(issue_response))
+                .route(
+                    "/api/issues/42/comments",
+                    any(move || {
+                        let returned = returned.clone();
+                        async move { Json(returned) }
+                    }),
+                );
+            let (url, server) = spawn_server(router).await;
+            let backend = HttpBackend::new(&url, None).unwrap();
+            let error = backend
+                .execute(
+                    &Command::Comment {
+                        action: CommentAction::Add {
+                            identifier: "LIF-42".into(),
+                            content: "Use SQLite".into(),
+                            user: None,
+                            kind: models::CommentWriteKind::Decision,
+                        },
+                    },
+                    IssueLinkOutput::Url,
+                )
+                .await
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("stored comment #7 as comment"),
+                "{message}"
+            );
+            assert!(message.contains("decision was requested"), "{message}");
+            assert!(
+                message.contains("already created; do not retry blindly"),
+                "{message}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_comment_add_carries_decision_kind() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let value = backend
+            .execute(
+                &Command::Comment {
+                    action: CommentAction::Add {
+                        identifier: fixture.issue_identifier.clone(),
+                        content: "Use SQLite".into(),
+                        user: None,
+                        kind: models::CommentWriteKind::Decision,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["kind"], "decision");
+    }
+
     /// LIF-421: the server answers the continuation question in headers, and
     /// this backend believes it rather than probing or guessing.
     #[tokio::test]
@@ -2327,6 +2402,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,
@@ -2476,6 +2552,7 @@ mod tests {
             .execute(
                 &Command::Comment {
                     action: CommentAction::Add {
+                        kind: Default::default(),
                         identifier: issue.clone(),
                         content: "A remark\nover two lines".into(),
                         user: None,
@@ -2637,6 +2714,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,

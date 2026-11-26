@@ -115,7 +115,7 @@
   });
 
   const thread = new CommentThread({
-    list: (id, before, size) => listComments(id, before, size),
+    list: listComments,
     create: createComment,
     update: updateComment,
     remove: deleteComment,
@@ -619,7 +619,9 @@
   onDelete={handleDelete}
   menuItems={canMove ? [{ label: "Move to project…", icon: FolderInput, run: () => (moveOpen = true) }] : []}
   comments={thread.comments}
-  onNewComment={(c) => thread.create(c)}
+  onNewComment={(c, kind) => thread.create(c, kind)}
+  decisionsOnly={thread.decisionsOnly}
+  onFilterDecisions={(enabled) => thread.filterDecisions(enabled)}
   {currentUser}
   onUpdateComment={(id, c) => thread.update(id, c)}
   onDeleteComment={(id) => thread.remove(id)}

@@ -85,6 +85,31 @@ fn project_archive_imports_format_1_comments_as_ordinary_comments() {
 }
 
 #[test]
+fn project_archive_round_trips_issue_and_page_decisions() {
+    let (source, dir, store) = fixture();
+    seed(&source, &store);
+    source
+        .write()
+        .unwrap()
+        .execute("UPDATE comments SET kind = 'decision'", [])
+        .unwrap();
+    let archive = dir.path().join("decisions.tar.gz");
+    export(&source, &store, "LIF", &archive).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+    import(&dest, &dest_store, &archive, "owner").unwrap();
+    assert_eq!(issue_comment_kind(&dest), "decision");
+    let conn = dest.read().unwrap();
+    let page_kind: String = conn
+        .query_row(
+            "SELECT kind FROM comments WHERE page_id IS NOT NULL AND deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(page_kind, "decision");
+}
+
+#[test]
 fn project_archive_rejects_an_unknown_comment_kind() {
     let (source, _dir, store) = fixture();
     seed(&source, &store);

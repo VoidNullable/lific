@@ -47,6 +47,8 @@
     comments,
     editable = true,
     onSubmit,
+    decisionsOnly = false,
+    onFilterDecisions,
     currentUser = null,
     onUpdate,
     onDelete,
@@ -75,7 +77,9 @@
   }: {
     comments: Comment[];
     editable?: boolean;
-    onSubmit: (content: string) => Promise<Comment | null>;
+    onSubmit: (content: string, kind?: "comment" | "decision") => Promise<Comment | null>;
+    decisionsOnly?: boolean;
+    onFilterDecisions?: (enabled: boolean) => void;
     currentUser?: { id: number } | null;
     onUpdate?: (id: number, content: string) => Promise<Comment | null>;
     onDelete?: (id: number) => Promise<boolean>;
@@ -92,6 +96,7 @@
   let showOlderControl = $derived(hasOlder && onLoadOlder !== undefined);
 
   let draft = $state("");
+  let draftKind = $state<"comment" | "decision">("comment");
   let submitting = $state(false);
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
   let editingId = $state<number | null>(null);
@@ -324,10 +329,11 @@
   async function submit() {
     if (!canSend) return;
     submitting = true;
-    const created = await onSubmit(draft.trim());
+    const created = await onSubmit(draft.trim(), draftKind);
     submitting = false;
     if (created) {
       draft = "";
+      draftKind = "comment";
       // The draft the alt-text chips point into is gone, so the offer goes
       // with it rather than lingering over an empty composer.
       attach.destroy();
@@ -515,6 +521,12 @@
 <section class="cmt">
   <header class="cmt__head">
     <h2 class="cmt__title">Comments</h2>
+    {#if onFilterDecisions}
+      <label class="cmt__filter">
+        <input type="checkbox" checked={decisionsOnly} onchange={(event) => onFilterDecisions?.(event.currentTarget.checked)} />
+        Decisions only
+      </label>
+    {/if}
     {#if comments.length > 0}
       <span
         class="cmt__count"
@@ -551,6 +563,8 @@
               <span class="cmt__author">{author}</span>
               {#if comment.kind === "verification"}
                 <span class="cmt__kind" title="Evidence recorded when this issue was closed">Verification</span>
+              {:else if comment.kind === "decision"}
+                <span class="cmt__kind" title="Decision recorded in this comment">Decision</span>
               {/if}
               <span class="cmt__time"><TimeAgo date={comment.created_at} /></span>
               {#if commentWasEdited(comment)}
@@ -619,9 +633,9 @@
     <div class="cmt__empty">
       <span class="cmt__empty-icon"><MessageSquare size={16} /></span>
       <div>
-        <p class="cmt__empty-title">No comments yet</p>
+        <p class="cmt__empty-title">{decisionsOnly ? "No decisions to show" : "No comments yet"}</p>
         {#if editable}
-          <p class="cmt__empty-sub">Start the conversation below.</p>
+          <p class="cmt__empty-sub">{decisionsOnly ? "Record a decision below, or turn off the filter to read the discussion." : "Start the conversation below."}</p>
         {/if}
       </div>
     </div>
@@ -689,6 +703,10 @@
         onFiles={(files, source) => attach.enqueue(files, source)}
       />
       <span class="cmt__hint">Markdown · drag, paste or attach files</span>
+      <label class="cmt__filter">
+        <input type="checkbox" checked={draftKind === "decision"} onchange={(event) => draftKind = event.currentTarget.checked ? "decision" : "comment"} />
+        Record as decision
+      </label>
     </div>
     <div class="cmt__actions">
       <span class="cmt__kbd" aria-hidden="true">
@@ -749,7 +767,15 @@
     display: flex;
     align-items: center;
     gap: 0.625rem;
+    flex-wrap: wrap;
     margin-bottom: 1.5rem;
+  }
+  .cmt__filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
   }
   .cmt__title {
     font-family: var(--font-display);

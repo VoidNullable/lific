@@ -16,7 +16,7 @@ import type { IssueAssignee, IssueWait } from "../api";
 export type SyncKind = "issue" | "page" | "comment";
 
 /** Mirrors the server's `CommentKind`. */
-export type CommentKind = "comment" | "verification";
+export type CommentKind = "comment" | "verification" | "decision";
 
 /** A live issue row. `labels` carries label NAMES (not ids), matching the
  *  `Issue.labels` shape the list views already filter on. */

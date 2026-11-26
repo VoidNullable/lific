@@ -108,7 +108,7 @@
   }
 
   const thread = new CommentThread({
-    list: (id, before, size) => listPageComments(id, before, size),
+    list: listPageComments,
     create: createPageComment,
     update: updateComment,
     remove: deleteComment,
@@ -386,7 +386,9 @@
   deleteUndoable
   onDelete={handleDelete}
   comments={thread.comments}
-  onNewComment={(c) => thread.create(c)}
+  onNewComment={(c, kind) => thread.create(c, kind)}
+  decisionsOnly={thread.decisionsOnly}
+  onFilterDecisions={(enabled) => thread.filterDecisions(enabled)}
   {currentUser}
   onUpdateComment={(id, c) => thread.update(id, c)}
   onDeleteComment={(id) => thread.remove(id)}

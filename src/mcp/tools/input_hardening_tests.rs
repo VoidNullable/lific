@@ -66,6 +66,7 @@ fn edit_comment_accepts_camel_case_keys() {
     seed_project(&m, "Camel", "CML");
     seed_issue(&m, "CML", "Commented");
     let added = m.add_comment(Parameters(AddCommentInput {
+        kind: Default::default(),
         identifier: "CML-1".into(),
         content: "a b a".into(),
     }));

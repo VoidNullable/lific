@@ -181,6 +181,37 @@ fn bounded_comment_response(
     }
 }
 
+fn decision_section(
+    decisions: &queries::comments::DecisionSummaries,
+    identifier: &str,
+    available: usize,
+) -> Result<String, String> {
+    if decisions.total == 0 {
+        return Ok(String::new());
+    }
+    const DECISION_BYTES: usize = 32 * 1024;
+    let budget = available.min(DECISION_BYTES);
+    let envelope = encoded_tool_result_bytes("")?;
+    for shown in (0..=decisions.items.len()).rev() {
+        let mut section = String::from("\nDecisions:\n");
+        for (id, summary) in decisions.items[..shown].iter().rev() {
+            writeln!(section, "- #{id}: {summary}").map_err(|error| error.to_string())?;
+        }
+        let omitted = decisions.total - shown as i64;
+        if omitted > 0 {
+            writeln!(
+                section,
+                "- ({omitted} earlier decisions not shown: list_comments identifier={identifier} kind=decision)"
+            ).map_err(|error| error.to_string())?;
+        }
+        // Even with no summary room, the pointer fits the response overhead reserve.
+        if shown == 0 || encoded_tool_result_bytes(&section)? - envelope <= budget {
+            return Ok(section);
+        }
+    }
+    unreachable!("the zero-summary pointer always fits the overhead reserve")
+}
+
 /// LIF-376: the single place a tool's `Err` becomes its returned text. Every
 /// `*_inner` returns the bare message; this stamps the `Error: ` prefix every
 /// MCP tool response has always carried, so the wrappers stay one-liners and
@@ -705,6 +736,8 @@ impl Display for CommentLines<'_> {
             write!(formatter, "[{}] ", comment.created_at)?;
             if comment.kind == models::CommentKind::Verification {
                 formatter.write_str("[verification] ")?;
+            } else if comment.kind == models::CommentKind::Decision {
+                formatter.write_str("[decision] ")?;
             }
             write!(
                 formatter,
@@ -2719,7 +2752,7 @@ No issues found."
         require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
         let context = current_issue_link_context();
         // Load exactly the rows the chosen mode renders, never the whole
-        // thread. `none` reads no comment rows at all, `recent` reads three,
+        // thread. `none` reads no comment bodies, `recent` reads three,
         // and `all` is capped at the shared page limit: a comment body may be
         // 256 KiB, so "every comment" is not a bounded read and get_issue is
         // the one tool an agent calls reflexively.
@@ -2736,7 +2769,7 @@ No issues found."
         // bytes an agent's context window pays for. Charging them to the
         // budget first is the difference between a bounded response and a
         // bounded *half* of one.
-        let preamble = try_render(|output| {
+        let mut preamble = try_render(|output| {
             writeln!(
                 output,
                 "{} — {}\nStatus: {} | Priority: {} | Module: {} | seq: {}",
@@ -2808,6 +2841,16 @@ No issues found."
             &issue.identifier,
         )
         .map_err(|error| error.to_string())?;
+        let decisions = self.read(|conn| queries::comments::decision_summaries(conn, issue.id))?;
+        let has_decisions = decisions.total > 0;
+        let section = decision_section(
+            &decisions,
+            &issue.identifier,
+            allowance.saturating_sub(1024),
+        )?;
+        let section_bytes = encoded_tool_result_bytes(&section)? - encoded_tool_result_bytes("")?;
+        preamble.push_str(&section);
+        let allowance = allowance.saturating_sub(section_bytes);
 
         // Authorization already passed, so a failure here is a real database
         // fault and must surface rather than silently render a comment-less
@@ -2816,6 +2859,7 @@ No issues found."
             let total = queries::comments::count_comments(conn, parent, None)?;
             let (comments, budget_limited) = match window {
                 None => (Vec::new(), false),
+                Some(_) if has_decisions && allowance == 0 => (Vec::new(), true),
                 Some(limit) => {
                     // Newest-first off the index, then flipped: the display
                     // order is chronological, the *selection* is the tail.
@@ -2829,79 +2873,92 @@ No issues found."
                         Some(limit),
                         Some(0),
                         allowance,
-                    )?;
-                    let mut newest = page.items;
-                    newest.reverse();
-                    (newest, page.budget_limited)
+                    );
+                    match page {
+                        Ok(page) => {
+                            let mut newest = page.items;
+                            newest.reverse();
+                            (newest, page.budget_limited)
+                        }
+                        Err(crate::error::LificError::PayloadTooLarge(_)) if has_decisions => {
+                            (Vec::new(), true)
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             };
             Ok((total, comments, budget_limited))
         })?;
-        let response = bounded_comment_response(
-            comments.len(),
-            || {
-                format!(
-                    "{} and its newest comment cannot fit the encoded response budget. Use list_comments to read the thread separately.",
-                    issue.identifier
-                )
-            },
-            |shown, encoded_limit| {
-                let comments = &comments[comments.len() - shown..];
-                let budget_limited = budget_limited || encoded_limit;
-                let mut output = preamble.clone();
-                let result = (|output: &mut String| {
-                    // `none` is a request for the count, so it answers with the count
-                    // even when that count is zero: "0, omitted" is the fact the
-                    // caller asked for, and suppressing it means the one mode whose
-                    // entire job is reporting the number silently reports nothing.
-                    // `recent` and `all` are requests for comments, and an issue with
-                    // none of those keeps its clean, header-free output.
-                    if total == 0 && comment_mode != "none" {
-                        return Ok(());
-                    }
-                    let shown = comments.len() as i64;
-                    match comment_mode {
-                        "none" => writeln!(
-                            output,
-                            "\n--- Comments ({total}, omitted — use list_comments) ---"
-                        )?,
-                        "recent" if shown < total => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
-                        )?,
-                        // `all` past the cap, or past the response-byte budget. Say
-                        // plainly that this is a window, not the thread, and name the
-                        // tool that pages the rest. When bytes rather than rows ended
-                        // it, say so: "3 of 40" is otherwise unexplainable next to a
-                        // 500-row cap, and an agent has no way to tell whether asking
-                        // again would help.
-                        _ if shown < total && budget_limited => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing the most recent {shown}; \
+        let render = |shown: usize, encoded_limit: bool| {
+            let comments = &comments[comments.len() - shown..];
+            let budget_limited = budget_limited || encoded_limit;
+            let mut output = preamble.clone();
+            let result = (|output: &mut String| {
+                // `none` is a request for the count, so it answers with the count
+                // even when that count is zero: "0, omitted" is the fact the
+                // caller asked for, and suppressing it means the one mode whose
+                // entire job is reporting the number silently reports nothing.
+                // `recent` and `all` are requests for comments, and an issue with
+                // none of those keeps its clean, header-free output.
+                if total == 0 && comment_mode != "none" {
+                    return Ok(());
+                }
+                let shown = comments.len() as i64;
+                match comment_mode {
+                    "none" => writeln!(
+                        output,
+                        "\n--- Comments ({total}, omitted — use list_comments) ---"
+                    )?,
+                    "recent" if shown < total => writeln!(
+                        output,
+                        "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
+                    )?,
+                    // `all` past the cap, or past the response-byte budget. Say
+                    // plainly that this is a window, not the thread, and name the
+                    // tool that pages the rest. When bytes rather than rows ended
+                    // it, say so: "3 of 40" is otherwise unexplainable next to a
+                    // 500-row cap, and an agent has no way to tell whether asking
+                    // again would help.
+                    _ if shown < total && budget_limited => writeln!(
+                        output,
+                        "\n--- Comments ({total}, showing the most recent {shown}; \
                      the rest did not fit the response size budget — \
                      use list_comments to page them) ---"
-                        )?,
-                        _ if shown < total => writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing the most recent {shown}; \
-                     use list_comments to page the rest) ---"
-                        )?,
-                        _ => writeln!(output, "\n--- Comments ({total}) ---")?,
-                    }
-                    write!(
+                    )?,
+                    _ if shown < total => writeln!(
                         output,
-                        "{}",
-                        CommentLines {
-                            comments,
-                            parent_identifier: &issue.identifier,
-                            parent,
-                            context: context.as_deref(),
-                        }
-                    )
-                })(&mut output);
-                finish_response(output, result)
-            },
-        );
+                        "\n--- Comments ({total}, showing the most recent {shown}; \
+                     use list_comments to page the rest) ---"
+                    )?,
+                    _ => writeln!(output, "\n--- Comments ({total}) ---")?,
+                }
+                write!(
+                    output,
+                    "{}",
+                    CommentLines {
+                        comments,
+                        parent_identifier: &issue.identifier,
+                        parent,
+                        context: context.as_deref(),
+                    }
+                )
+            })(&mut output);
+            finish_response(output, result)
+        };
+        let response = bounded_comment_response(
+            comments.len(),
+            || format!(
+                "{} and its newest comment cannot fit the encoded response budget. Use list_comments to read the thread separately.",
+                issue.identifier
+            ),
+            render,
+        ).or_else(|error| {
+            if has_decisions {
+                bounded_comment_response(0, || error, |_, _| render(0, true))
+            } else {
+                Err(error)
+            }
+        });
         if response.is_ok() {
             log.entity(
                 Some(issue.project_id),
@@ -5259,13 +5316,14 @@ No issues found."
                 models::Role::Viewer,
             )?;
             let author = models::CommentActor::from(&actor.user);
-            let comment = queries::comments::create_comment_with_mentions(
+            let comment = queries::comments::create_typed_comment_with_mentions(
                 conn,
                 parent,
                 project_id,
                 author,
                 models::AttachmentActor::Authenticated(author),
                 &input.content,
+                input.kind,
             )?;
             let event = comment_updated_event(parent, project_id);
             Ok((comment, parent, parent_identifier, event))
@@ -5347,27 +5405,23 @@ No issues found."
             }
         };
 
-        // This response is comments plus one header line and one continuation
-        // line, both of which are still bytes the 2 MiB budget promised. They
-        // cannot be rendered before their own counts are known, so what they
-        // will cost is reserved instead: the two lines are a fixed template
-        // around a parent identifier and a rendered URL, and this reserve is
-        // an order of magnitude past the longest either can be.
-        const HEADING_RESERVE: usize = 4 * 1024;
-        let allowance = queries::comments::remaining_budget(HEADING_RESERVE, &parent_identifier)
-            .map_err(|error| error.to_string())?;
-
         let (page, total) = self.read(|conn| {
-            let comments = queries::comments::list_comments_page_within(
+            let comments = queries::comments::list_comments_by_kind(
                 conn,
                 parent,
                 input.author.as_deref(),
                 Some(order),
                 Some(limit),
                 Some(offset),
-                allowance,
+                None,
+                input.kind,
             )?;
-            let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
+            let total = queries::comments::count_comments_by_kind(
+                conn,
+                parent,
+                input.author.as_deref(),
+                input.kind,
+            )?;
             Ok((comments, total))
         })?;
         let comments = page.items;
@@ -5388,7 +5442,7 @@ No issues found."
             comments.len(),
             || {
                 format!(
-                    "Comment #{} cannot fit the encoded response budget. To deliberately skip it, call list_comments with the same author/order and offset={}.",
+                    "Comment #{} cannot fit the encoded response budget. To deliberately skip it, call list_comments with the same kind/author/order and offset={}.",
                     comments[0].id,
                     offset + 1
                 )
@@ -5451,12 +5505,12 @@ No issues found."
                     if budget_limited {
                         writeln!(
                             output,
-                            "\n... {remaining} more comment(s) — this page stopped at the response size budget, not the row limit; call again with the same author/order/limit and offset={next_offset}"
+                            "\n... {remaining} more comment(s): this page stopped at the response size budget, not the row limit; call again with the same kind/author/order/limit and offset={next_offset}"
                         )
                     } else {
                         writeln!(
                             output,
-                            "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}"
+                            "\n... {remaining} more comment(s): call again with the same kind/author/order/limit and offset={next_offset}"
                         )
                     }
                 })
@@ -6996,6 +7050,8 @@ mod relation_visibility_tests;
 #[cfg(test)]
 mod roles_tests;
 
+#[cfg(test)]
+mod tests_decisions;
 #[cfg(test)]
 mod tests_verification;
 
@@ -9113,6 +9169,7 @@ mod tests {
         }));
         assert!(page.starts_with("Created FMT-DOC-1"), "got: {page}");
         let comment = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "FMT-1".into(),
             content: "Comment mixedformatneedle".into(),
         }));
@@ -9151,6 +9208,7 @@ mod tests {
 
         let result = crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "SRC-1".into(),
                 content: "Unique comment needle".into(),
             }));
@@ -9905,6 +9963,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Hello from MCP".into(),
         }));
@@ -9919,6 +9978,7 @@ mod tests {
         );
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Second comment".into(),
         }));
@@ -9966,6 +10026,7 @@ mod tests {
         .unwrap();
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "cc @ada and @ghost".into(),
         }));
@@ -10220,6 +10281,7 @@ mod tests {
         let _user_guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATC-1".into(),
             content: format!("here: /api/attachments/{att}"),
         }));
@@ -10242,6 +10304,7 @@ mod tests {
         let _user_guard = seed_user(&m);
 
         let created = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATD-1".into(),
             content: format!("/api/attachments/{old}"),
         }));
@@ -10273,6 +10336,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Visible in get_issue".into(),
         }));
@@ -10291,6 +10355,7 @@ mod tests {
     fn seed_comment_trail(m: &LificMcp, n: usize) {
         for i in 1..=n {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("comment number {i}"),
             }));
@@ -10303,6 +10368,7 @@ mod tests {
     fn seed_large_comments(m: &LificMcp, n: usize, size: usize) {
         for i in 1..=n {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("body {i} {}", "x".repeat(size)),
             }));
@@ -10430,7 +10496,7 @@ mod tests {
         assert!(result.starts_with("Error: "), "{}", &result[..80]);
         assert!(result.contains("PRJ-1"), "the refusal names the issue");
         assert!(
-            result.contains("comments=none"),
+            result.contains("/api/issues/resolve/PRJ-1"),
             "and a way to read it anyway"
         );
     }
@@ -10731,7 +10797,7 @@ mod tests {
             "got: {result}"
         );
         assert!(
-            result.contains("call again with the same author/order/limit and offset=3"),
+            result.contains("call again with the same kind/author/order/limit and offset=3"),
             "got: {result}"
         );
         // Explicit asc, so the first 3 are the oldest: 1,2,3.
@@ -10784,7 +10850,7 @@ mod tests {
         assert!(!result.contains("comment number 2"), "got: {result}");
         assert!(!result.contains("comment number 5"), "got: {result}");
         assert!(
-            result.contains("call again with the same author/order/limit and offset=4"),
+            result.contains("call again with the same kind/author/order/limit and offset=4"),
             "got: {result}"
         );
         assert!(
@@ -10852,7 +10918,7 @@ mod tests {
         assert!(!result.contains("comment number 5\n"), "got: {result}");
         assert!(
             result.contains(&format!(
-                "call again with the same author/order/limit and offset={}",
+                "call again with the same kind/author/order/limit and offset={}",
                 queries::DEFAULT_PAGE_LIMIT
             )),
             "got: {result}"
@@ -10928,6 +10994,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "NOPE-999".into(),
             content: "Orphan".into(),
         }));
@@ -10952,6 +11019,7 @@ mod tests {
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = None;
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Comment via stdio fallback".into(),
         }));
@@ -10976,6 +11044,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PGC-DOC-01".into(),
             content: "Comment on a page".into(),
         }));
@@ -11011,6 +11080,7 @@ mod tests {
         drain_realtime(&mut rx);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PCO-DOC-1".into(),
             content: "original".into(),
         }));
@@ -11055,10 +11125,12 @@ mod tests {
         let _guard = seed_user(&m);
 
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "MIX-1".into(),
             content: "issue thread".into(),
         }));
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "MIX-DOC-1".into(),
             content: "page thread".into(),
         }));
@@ -11102,6 +11174,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "DOC-1".into(),
             content: "comment on workspace page".into(),
         }));
@@ -12425,11 +12498,13 @@ mod tests {
         seed_issue(&m, "PRJ", "Authored");
         let _guard = seed_user(&m);
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Mine".into(),
         }));
 
         let mine = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: Some("testuser".into()),
             order: None,
@@ -12439,6 +12514,7 @@ mod tests {
         assert!(mine.contains("Mine"), "got: {mine}");
 
         let ghost = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: Some("ghost".into()),
             order: None,
@@ -12455,10 +12531,12 @@ mod tests {
         seed_issue(&m, "PRJ", "Threaded");
         let _guard = seed_user(&m);
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "first".into(),
         }));
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "second".into(),
         }));
@@ -12471,12 +12549,14 @@ mod tests {
             order: Some("desc".into()),
             limit: None,
             offset: None,
+            kind: None,
         }));
         let second = listing.find("second").unwrap();
         let first = listing.find("first").unwrap();
         assert!(second < first, "desc must list newest first: {listing}");
 
         let bad = m.list_comments(Parameters(ListCommentsInput {
+            kind: None,
             identifier: "PRJ-1".into(),
             author: None,
             order: Some("newest".into()),
@@ -12549,6 +12629,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
         }));
@@ -12593,6 +12674,7 @@ mod tests {
 
         let oversized = "x".repeat(queries::comments::MAX_COMMENT_BYTES + 1);
         let rejected = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: oversized.clone(),
         }));
@@ -12602,6 +12684,7 @@ mod tests {
         );
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "keep me".into(),
         }));
@@ -12637,6 +12720,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "delete me".into(),
         }));
@@ -12675,6 +12759,7 @@ mod tests {
         let (comment_id, edited, deleted) =
             crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 let added = m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "PRJ-1".into(),
                     content: "original".into(),
                 }));
@@ -12714,6 +12799,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
         }));
@@ -12755,6 +12841,7 @@ mod tests {
         let cid = {
             let _g = act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "mine".into(),
             }));
@@ -12800,6 +12887,7 @@ mod tests {
         let author = make_user(m, "author", false);
         let guard = act_as(&author);
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: body.into(),
         }));
@@ -12953,6 +13041,7 @@ mod tests {
         let cid = {
             let _g = act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "regular user's comment".into(),
             }));
@@ -13254,6 +13343,7 @@ mod tests {
         let (project, page, issue) =
             crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "TST-1".into(),
                     content: "Audit comment".into(),
                 }));
@@ -14439,6 +14529,7 @@ mod tests {
 
         let raw_comment = r#"needs & review of <T> before "ship""#;
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ESC-1".into(),
             content: raw_comment.into(),
         }));
@@ -14731,6 +14822,7 @@ mod tests {
             ..Default::default()
         }));
         let comment_id = comment_id_from(&m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATT-1".into(),
             content: "see attached".into(),
         })));
@@ -16425,6 +16517,7 @@ mod authz_gating_tests {
 
         let allowed = as_user(&viewer, || {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "viewers can comment".into(),
             }))
@@ -16436,6 +16529,7 @@ mod authz_gating_tests {
 
         let denied = as_user(&non_member, || {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "should not land".into(),
             }))
@@ -16470,6 +16564,7 @@ mod authz_gating_tests {
         .map(|(author, content)| {
             comment_id_from(&as_user(author, || {
                 m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "MEM-1".into(),
                     content: content.into(),
                 }))

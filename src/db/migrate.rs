@@ -351,6 +351,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "number high water",
         include_str!("../../migrations/071_number_high_water.sql"),
     ),
+    (
+        72,
+        "decision comments",
+        include_str!("../../migrations/072_decision_comments.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page
@@ -384,7 +389,7 @@ const PAGE_AUDIT_DIFF_MIGRATION: i64 = 63;
 /// before its savepoint releases, and `run_inner` repeats the check
 /// batch-wide before commit to cover every other migration that ran while
 /// enforcement was off.
-const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50, 57];
+const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50, 57, 72];
 
 /// Highest migration version this binary knows how to apply. Used by
 /// `lific dump`/`restore` (LIF-266) to stamp and gate archives on schema
@@ -538,7 +543,7 @@ fn run_inner(conn: &Connection, fk_off: bool) -> Result<(), crate::error::LificE
             info!(version, name, "applying migration");
             let sp = format!("migrate_v{version}");
             crate::db::queries::savepoint(conn, &sp, || {
-                let triggers = if version == 50 {
+                let triggers = if matches!(version, 50 | 72) {
                     suspend_triggers(conn)?
                 } else {
                     Vec::new()
@@ -704,7 +709,7 @@ pub(crate) fn apply_up_to(conn: &Connection, stop: i64) {
         if version >= stop {
             break;
         }
-        let triggers = if version == 50 {
+        let triggers = if matches!(version, 50 | 72) {
             suspend_triggers(conn).unwrap()
         } else {
             Vec::new()
@@ -1109,6 +1114,66 @@ mod tests {
             )
             .is_err(),
             "the CHECK constraint must reject an unknown kind"
+        );
+    }
+
+    #[test]
+    fn decision_migration_preserves_history_mentions_search_and_sync() {
+        let conn = migrated_up_to(72);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES(1,'owner','owner@test','hash');
+             INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO comments(id,issue_id,user_id,content,kind) VALUES
+               (1,1,1,'Existing searchable decision','comment'),
+               (2,1,1,'Tests pass','verification');
+             INSERT INTO comment_mentions(comment_id,user_id) VALUES(1,1);
+             INSERT INTO comments(id,issue_id,user_id,content) VALUES(90,1,1,'Gone');
+             DELETE FROM comments WHERE id=90;",
+        ).unwrap();
+        let seq = count(&conn, "SELECT seq FROM comments WHERE id=1");
+        let audit = count(&conn, "SELECT count(*) FROM audit_log");
+        let triggers = count(
+            &conn,
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+        );
+        run(&conn).unwrap();
+        assert_eq!(count(&conn, "SELECT seq FROM comments WHERE id=1"), seq);
+        assert_eq!(count(&conn, "SELECT count(*) FROM audit_log"), audit);
+        assert_eq!(count(&conn, "SELECT count(*) FROM comment_mentions"), 1);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger'"
+            ),
+            triggers
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM comments WHERE kind='verification'"
+            ),
+            1
+        );
+        conn.execute(
+            "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'Chosen','decision')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 91);
+        assert!(count(&conn, "SELECT seq FROM comments WHERE id=91") > seq);
+        assert!(count(&conn, "SELECT count(*) FROM audit_log") > audit);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM search_index WHERE entity_type='comment' AND body='Chosen'"
+            ),
+            1
+        );
+        assert_eq!(count(&conn, "PRAGMA foreign_keys"), 1);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM pragma_foreign_key_check"),
+            0
         );
     }
 
