@@ -2,7 +2,13 @@
 // views show it.
 //
 // The server leaves an expired claim out of every read, but a page can sit
-// open past the expiry, so each surface checks it again against the clock.
+// open past the expiry, so each surface checks it again. It checks against
+// the SERVER's time, never the browser's: a browser clock that runs a few
+// minutes fast would hide a fresh claim, and a slow one would keep showing
+// a claim the server has already let go. The server's time is the browser's
+// plus the skew measured from `GET /api/clock` (`serverClock.svelte.ts`).
+// Until that is known, the server's own answer stands: a claim it sent is
+// shown.
 
 import type { IssueClaim } from "../api";
 import { personName } from "./assignees";
@@ -12,19 +18,39 @@ export function serverMs(ts: string): number {
   return new Date(ts.replace(" ", "T") + "Z").getTime();
 }
 
-/** The claim while it lasts at `nowMs`, else null. */
-export function liveClaim(claim: IssueClaim | null | undefined, nowMs: number): IssueClaim | null {
+/** How far the server's clock is ahead of the browser's, from one request:
+ *  the server read `serverNowMs` somewhere between `sentMs` and
+ *  `receivedMs` on the browser's clock, taken as the midpoint. */
+export function clockSkew(serverNowMs: number, sentMs: number, receivedMs: number): number {
+  return serverNowMs - (sentMs + receivedMs) / 2;
+}
+
+/** The server's time at browser time `browserMs`, or null when the skew is
+ *  not known yet. */
+export function serverTime(browserMs: number, skewMs: number | null): number | null {
+  return skewMs === null ? null : browserMs + skewMs;
+}
+
+/** The claim while it lasts at the server's time `serverNowMs`, else null.
+ *  A null time (not known yet) trusts the server, which only sends live
+ *  claims. */
+export function liveClaim(
+  claim: IssueClaim | null | undefined,
+  serverNowMs: number | null,
+): IssueClaim | null {
   if (!claim) return null;
-  return serverMs(claim.expires_at) > nowMs ? claim : null;
+  if (serverNowMs === null) return claim;
+  return serverMs(claim.expires_at) > serverNowMs ? claim : null;
 }
 
 export function claimHolder(claim: IssueClaim): string {
   return personName(claim);
 }
 
-/** Time left, rounded up to the minute: "4m left", "1h 20m left". */
-export function claimRemaining(claim: IssueClaim, nowMs: number): string {
-  const minutes = Math.max(1, Math.ceil((serverMs(claim.expires_at) - nowMs) / 60_000));
+/** Time left at the server's time `serverNowMs`, rounded up to the minute:
+ *  "4m left", "1h 20m left". */
+export function claimRemaining(claim: IssueClaim, serverNowMs: number): string {
+  const minutes = Math.max(1, Math.ceil((serverMs(claim.expires_at) - serverNowMs) / 60_000));
   if (minutes < 60) return `${minutes}m left`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;

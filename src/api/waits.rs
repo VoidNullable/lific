@@ -20,7 +20,8 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 use super::with_read;
 
 /// `GET /api/clock`: the server's calendar day and UTC offset, which decide
-/// whether a date wait is holding, due or overdue. The web client computes
+/// whether a date wait is holding, due or overdue, and its current time in
+/// epoch milliseconds, which decides whether a claim has ended. The web client computes
 /// "today" at this offset rather than in the browser's timezone. Signed-in
 /// callers only: the offset hints at where the server lives.
 pub(super) async fn server_clock(
@@ -30,6 +31,9 @@ pub(super) async fn server_clock(
     Ok(Json(serde_json::json!({
         "today": waits::today_text(),
         "utc_offset_minutes": waits::utc_offset_minutes(),
+        // LIF-525: the server's clock, so the web client can tell when a
+        // claim ends however far the browser's clock is off.
+        "now_ms": crate::db::queries::claims::now().and_utc().timestamp_millis(),
     })))
 }
 

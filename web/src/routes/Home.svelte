@@ -41,6 +41,7 @@
   import HeatBar from "../lib/home/HeatBar.svelte";
   import ClaimChip from "../lib/issues/ClaimChip.svelte"; // LIF-525
   import { liveClaim } from "../lib/issues/claims";
+  import { ensureServerClock, serverNow } from "../lib/serverClock.svelte";
   import { recordHomeVisit } from "../lib/home/lastVisit";
   import { ageLabel, daysSince, heat, importanceScore } from "../lib/issues/importance";
   import {
@@ -203,9 +204,13 @@
 
   // LIF-525: claimed issues are out of the queue (the pool is `workable`,
   // which leaves them out); they are listed under it with their holder.
+  // Checked on the server's clock (see lib/issues/claims.ts).
   let liveClaims = $derived(
-    (overview?.claims ?? []).filter((held) => liveClaim(held.claim, activityNow)),
+    (overview?.claims ?? []).filter((held) => liveClaim(held.claim, serverNow(activityNow))),
   );
+  $effect(() => {
+    if (overview?.claims.length) ensureServerClock(activityNow);
+  });
 
   // ── Only you (LIF-506) ───────────────────────────────────────
   //

@@ -196,10 +196,13 @@ async fn wait_routes_are_gated_viewer_to_read_and_maintainer_to_write() {
 async fn the_clock_reports_the_servers_day_and_utc_offset() {
     let app = test_app();
     let _day = crate::db::queries::waits::pin_today("2026-09-26");
+    let _now = crate::db::queries::claims::pin_now("2026-09-26 12:00:00");
     let resp = json_get(&app, "/api/clock").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let clock = parse_json(resp).await;
     assert_eq!(clock["today"], "2026-09-26");
+    // LIF-525: the instant, for claim expiry in the web client.
+    assert_eq!(clock["now_ms"], 1_790_424_000_000_i64);
     assert_eq!(
         clock["utc_offset_minutes"],
         chrono::Local::now().offset().local_minus_utc() / 60

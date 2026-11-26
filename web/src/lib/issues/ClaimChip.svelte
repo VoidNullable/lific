@@ -4,11 +4,17 @@
   import { Lock } from "lucide-svelte";
   import type { IssueClaim } from "../api";
   import { now } from "../now.svelte";
+  import { ensureServerClock, serverNow } from "../serverClock.svelte";
   import { claimHolder, claimRemaining, claimTitle, liveClaim } from "./claims";
 
   let { claim }: { claim: IssueClaim | undefined } = $props();
 
-  const live = $derived(liveClaim(claim, now()));
+  // The server's time, not the browser's: see claims.ts.
+  const at = $derived(serverNow(now()));
+  const live = $derived(liveClaim(claim, at));
+  $effect(() => {
+    if (claim) ensureServerClock(now());
+  });
 </script>
 
 {#if live}
@@ -21,6 +27,6 @@
   >
     <Lock size={11} class="shrink-0" />
     <span class="truncate">{claimHolder(live)}</span>
-    <span class="shrink-0 opacity-75 tabular-nums">{claimRemaining(live, now())}</span>
+    <span class="shrink-0 opacity-75 tabular-nums">{claimRemaining(live, at ?? now())}</span>
   </span>
 {/if}

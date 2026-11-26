@@ -994,6 +994,8 @@ export async function addIssueWait(issueId: number, input: CreateWaitInput) {
 export interface ServerClock {
   today: string;
   utc_offset_minutes: number;
+  /** LIF-525: the server's current time in epoch milliseconds. */
+  now_ms: number;
 }
 
 export async function getServerClock() {

@@ -51,6 +51,7 @@
   import ClaimChip from "./ClaimChip.svelte"; // LIF-525
   import { liveClaim } from "./claims";
   import { now } from "../now.svelte";
+  import { serverNow } from "../serverClock.svelte";
   import InlineTitle from "../InlineTitle.svelte";
   import Markdown from "../Markdown.svelte";
   import Select from "../Select.svelte";
@@ -496,7 +497,7 @@
         </div>
 
         <!-- LIF-525: the worker holding it right now. -->
-        {#if liveClaim(issue.claim, now())}
+        {#if liveClaim(issue.claim, serverNow(now()))}
           <div class="flex mb-4"><ClaimChip claim={issue.claim} /></div>
         {/if}
 

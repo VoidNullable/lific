@@ -4,8 +4,10 @@ import {
   claimHolder,
   claimRemaining,
   claimSession,
+  clockSkew,
   liveClaim,
   serverMs,
+  serverTime,
 } from "../src/lib/issues/claims";
 
 const claim: IssueClaim = {
@@ -28,6 +30,44 @@ describe("liveClaim", () => {
   test("no claim is no claim", () => {
     expect(liveClaim(undefined, at("2026-11-26 12:00:00"))).toBeNull();
     expect(liveClaim(null, at("2026-11-26 12:00:00"))).toBeNull();
+  });
+
+  test("until the server's time is known, a claim the server sent stands", () => {
+    expect(liveClaim(claim, null)).toBe(claim);
+  });
+});
+
+describe("server time, whatever the browser's clock says", () => {
+  const MIN = 60_000;
+  // The server reads its clock halfway through a 200 ms round trip.
+  const measure = (browserAtServerNoon: number) =>
+    clockSkew(at("2026-11-26 12:00:00"), browserAtServerNoon - 100, browserAtServerNoon + 100);
+
+  test("a browser 20 minutes fast still shows a fresh claim", () => {
+    const browserNoon = at("2026-11-26 12:00:00") + 20 * MIN;
+    const skew = measure(browserNoon);
+    expect(skew).toBe(-20 * MIN);
+    // Five minutes later on the browser's clock: 12:25 there, 12:05 here.
+    const later = browserNoon + 5 * MIN;
+    expect(liveClaim(claim, later)).toBeNull(); // what the raw browser clock would say
+    const server = serverTime(later, skew)!;
+    expect(server).toBe(at("2026-11-26 12:05:00"));
+    expect(liveClaim(claim, server)).toBe(claim);
+    expect(claimRemaining(claim, server)).toBe("10m left");
+  });
+
+  test("a browser 20 minutes slow hides a claim the server has let go", () => {
+    const browserNoon = at("2026-11-26 12:00:00") - 20 * MIN;
+    const skew = measure(browserNoon);
+    expect(skew).toBe(20 * MIN);
+    // 12:16 on the server, 11:56 on the browser.
+    const later = browserNoon + 16 * MIN;
+    expect(liveClaim(claim, later)).toBe(claim); // what the raw browser clock would say
+    expect(liveClaim(claim, serverTime(later, skew))).toBeNull();
+  });
+
+  test("no skew measured yet is no server time", () => {
+    expect(serverTime(at("2026-11-26 12:00:00"), null)).toBeNull();
   });
 
   test("reads server time as UTC whatever the browser's zone", () => {
