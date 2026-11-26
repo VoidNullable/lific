@@ -612,6 +612,7 @@ fn a_next_step_linked_into_an_invisible_project_is_not_named() {
 
 fn comment(m: &LificMcp, identifier: &str, content: &str) {
     let added = m.add_comment(Parameters(AddCommentInput {
+        kind: Default::default(),
         identifier: identifier.into(),
         content: content.into(),
     }));

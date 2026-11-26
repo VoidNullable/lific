@@ -1095,6 +1095,10 @@ pub enum CommentAction {
         /// Username of the comment author (defaults to first admin user)
         #[arg(short, long)]
         user: Option<String>,
+
+        /// Mark this comment as a decision
+        #[arg(long, value_enum, default_value = "comment")]
+        kind: crate::db::models::CommentWriteKind,
     },
 }
 
@@ -2906,6 +2910,7 @@ mod tests {
                         identifier,
                         content,
                         user,
+                        ..
                     },
             } => {
                 assert_eq!(identifier, "LIF-42");

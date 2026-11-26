@@ -1294,7 +1294,7 @@ export interface Comment {
   updated_at: string;
   /** "verification" marks evidence recorded when the issue was closed.
    *  Absent from a server too old to send it. */
-  kind?: "comment" | "verification";
+  kind?: "comment" | "verification" | "decision";
 }
 
 // ── Activity / audit log (LIF-156/157) ─────────────────
@@ -1417,9 +1417,11 @@ async function commentPage(
   path: string,
   before: CommentCursor | null,
   pageSize: number,
+  kind?: "decision",
 ): Promise<RequestResult<CommentPage>> {
   const size = Math.max(1, Math.min(pageSize, COMMENT_MAX_LIMIT - 1));
   const params = new URLSearchParams({ order: "desc", limit: String(size + 1) });
+  if (kind) params.set("kind", kind);
   if (before) {
     params.set("before_created_at", before.created_at);
     params.set("before_id", String(before.id));
@@ -1445,14 +1447,15 @@ export async function listComments(
   issueId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/issues/${issueId}/comments`, before, pageSize);
+  return commentPage(`/issues/${issueId}/comments`, before, pageSize, kind);
 }
 
-export async function createComment(issueId: number, content: string) {
+export async function createComment(issueId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/issues/${issueId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 
@@ -1460,14 +1463,15 @@ export async function listPageComments(
   pageId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/pages/${pageId}/comments`, before, pageSize);
+  return commentPage(`/pages/${pageId}/comments`, before, pageSize, kind);
 }
 
-export async function createPageComment(pageId: number, content: string) {
+export async function createPageComment(pageId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/pages/${pageId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 

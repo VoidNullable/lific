@@ -26,6 +26,7 @@ fn require_comment_viewer(
 
 #[derive(Default, serde::Deserialize)]
 pub(super) struct ListCommentsQuery {
+    pub(super) kind: Option<CommentKind>,
     /// Exact author username (case-insensitive).
     pub(super) author: Option<String>,
     /// Creation-time sort direction: asc (default) or desc.
@@ -161,7 +162,7 @@ fn list_for_parent(
     let project_id = parent_project_id(db, parent)?;
     require_comment_viewer(db, identity, project_id)?;
     let page = with_read(db, |conn| {
-        comments::list_comments_keyset(
+        comments::list_comments_by_kind(
             conn,
             parent,
             q.author.as_deref(),
@@ -169,6 +170,7 @@ fn list_for_parent(
             Some(limit),
             Some(offset),
             cursor.as_ref(),
+            q.kind,
         )
     })?;
     let headers = paging_headers(&page, cursor.is_some(), q.order.as_deref() == Some("desc"));
@@ -181,6 +183,7 @@ fn create_for_parent(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     parent: CommentParent,
     content: &str,
+    kind: CommentWriteKind,
 ) -> Result<Json<Comment>, LificError> {
     let user = require_user(identity)?;
     let (comment, project_id) = db.transaction(|conn| {
@@ -188,7 +191,7 @@ fn create_for_parent(
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
         let member_scoped = authz::authz_enforced_conn(conn)?;
         let actor = CommentActor::from(&user);
-        let comment = comments::create_comment_with_mentions(
+        let comment = comments::create_typed_comment_with_mentions(
             conn,
             parent,
             project_id,
@@ -196,6 +199,7 @@ fn create_for_parent(
             AttachmentActor::Authenticated(actor),
             content,
             member_scoped,
+            kind,
         )?;
         Ok((comment, project_id))
     })?;
@@ -233,6 +237,7 @@ pub(super) async fn create_comment(
         &identity,
         CommentParent::Issue(issue_id),
         &input.content,
+        input.kind,
     )
 }
 
@@ -258,6 +263,7 @@ pub(super) async fn create_page_comment(
         &identity,
         CommentParent::Page(page_id),
         &input.content,
+        input.kind,
     )
 }
 
@@ -460,6 +466,7 @@ mod tests {
         let data = parse_json(resp).await;
         assert_eq!(data["content"], "Hello from test");
         assert_eq!(data["author"], "commenter");
+        assert_eq!(data["kind"], "comment");
 
         // Create another
         let body = serde_json::json!({"content": "Second comment"});
@@ -482,6 +489,86 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Hello from test");
         assert_eq!(comments[1]["content"], "Second comment");
+    }
+
+    #[tokio::test]
+    async fn decision_comments_filter_before_paging_and_preserve_kind_on_edit() {
+        let (app, issue_id, _) = setup_comment_test();
+        let path = format!("/api/issues/{issue_id}/comments");
+        for (content, kind) in [
+            ("First choice", "decision"),
+            ("Discussion", "comment"),
+            ("Second choice", "decision"),
+        ] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({
+                    "content": content, "kind": kind
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(parse_json(response).await["kind"], kind);
+        }
+        let get = |query: String| {
+            let app = app.clone();
+            let path = path.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(format!("{path}?{query}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let response = get("kind=decision&order=desc&limit=1".into()).await;
+        assert_eq!(response.headers()[super::HAS_MORE_HEADER], "true");
+        let newest = parse_json(response).await;
+        assert_eq!(newest[0]["content"], "Second choice");
+        let response = get(format!(
+            "kind=decision&order=desc&limit=1&before_id={}&before_created_at={}",
+            newest[0]["id"],
+            newest[0]["created_at"]
+                .as_str()
+                .unwrap()
+                .replace(' ', "%20"),
+        ))
+        .await;
+        assert_eq!(response.headers()[super::HAS_MORE_HEADER], "false");
+        assert_eq!(parse_json(response).await[0]["content"], "First choice");
+        let response = get("kind=decision&order=desc&limit=1&offset=1".into()).await;
+        assert_eq!(parse_json(response).await[0]["content"], "First choice");
+        let id = newest[0]["id"].as_i64().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/comments/{id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"content":"Revised choice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(parse_json(response).await["kind"], "decision");
+        for kind in ["verification", "note"] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({"content":"invalid", "kind":kind}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(
+            get("kind=unknown".into()).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     // ── LIF-421: the paging answer travels in headers ───────────
@@ -1348,6 +1435,36 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Comment on the page");
         assert_eq!(comments[1]["content"], "Another");
+    }
+
+    #[tokio::test]
+    async fn page_comments_accept_and_filter_decisions() {
+        let (app, page_id, _) = setup_page_comment_test();
+        let path = format!("/api/pages/{page_id}/comments");
+        for kind in ["comment", "decision"] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({
+                    "content": "Page note", "kind": kind
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(parse_json(response).await["kind"], kind);
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{path}?kind=decision"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let data = parse_json(response).await;
+        assert_eq!(data.as_array().unwrap().len(), 1);
+        assert_eq!(data[0]["kind"], "decision");
     }
 
     #[tokio::test]

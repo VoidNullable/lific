@@ -933,6 +933,7 @@ impl HttpBackend {
                 identifier,
                 content,
                 user,
+                kind,
             } => {
                 user.as_ref().map_or(Ok(()), |_| {
                     Err(anyhow!(
@@ -945,6 +946,7 @@ impl HttpBackend {
                     &format!("/api/issues/{}/comments", issue.id),
                     &models::CreateComment {
                         content: content.clone(),
+                        kind: *kind,
                     },
                 )
                 .await
@@ -2315,6 +2317,27 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn http_comment_add_carries_decision_kind() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let value = backend
+            .execute(
+                &Command::Comment {
+                    action: CommentAction::Add {
+                        identifier: fixture.issue_identifier.clone(),
+                        content: "Use SQLite".into(),
+                        user: None,
+                        kind: models::CommentWriteKind::Decision,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["kind"], "decision");
+    }
+
     /// LIF-421: the server answers the continuation question in headers, and
     /// this backend believes it rather than probing or guessing.
     #[tokio::test]
@@ -2327,6 +2350,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,
@@ -2476,6 +2500,7 @@ mod tests {
             .execute(
                 &Command::Comment {
                     action: CommentAction::Add {
+                        kind: Default::default(),
                         identifier: issue.clone(),
                         content: "A remark\nover two lines".into(),
                         user: None,
@@ -2637,6 +2662,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,

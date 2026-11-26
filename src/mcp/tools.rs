@@ -705,6 +705,8 @@ impl Display for CommentLines<'_> {
             write!(formatter, "[{}] ", comment.created_at)?;
             if comment.kind == models::CommentKind::Verification {
                 formatter.write_str("[verification] ")?;
+            } else if comment.kind == models::CommentKind::Decision {
+                formatter.write_str("[decision] ")?;
             }
             write!(
                 formatter,
@@ -2720,7 +2722,7 @@ No issues found."
         require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
         let context = current_issue_link_context();
         // Load exactly the rows the chosen mode renders, never the whole
-        // thread. `none` reads no comment rows at all, `recent` reads three,
+        // thread. `none` reads no comment bodies, `recent` reads three,
         // and `all` is capped at the shared page limit: a comment body may be
         // 256 KiB, so "every comment" is not a bounded read and get_issue is
         // the one tool an agent calls reflexively.
@@ -2737,7 +2739,7 @@ No issues found."
         // bytes an agent's context window pays for. Charging them to the
         // budget first is the difference between a bounded response and a
         // bounded *half* of one.
-        let preamble = try_render(|output| {
+        let mut preamble = try_render(|output| {
             writeln!(
                 output,
                 "{} — {}\nStatus: {} | Priority: {} | Module: {} | seq: {}",
@@ -2801,6 +2803,14 @@ No issues found."
                 .map(|_| ())
         })
         .map_err(|error| format!("failed to format response: {error}"))?;
+        let decisions = self.read(|conn| queries::comments::decision_summaries(conn, issue.id))?;
+        if !decisions.is_empty() {
+            preamble.push_str("\nDecisions:\n");
+            for (id, summary) in decisions {
+                writeln!(preamble, "- #{id}: {summary}")
+                    .map_err(|error| format!("failed to format response: {error}"))?;
+            }
+        }
         // An issue too big to render before a single comment is refused by
         // name rather than served as a truncated document. Nothing here is
         // silently cut.
@@ -5265,7 +5275,7 @@ No issues found."
             )?;
             let member_scoped = crate::authz::authz_enforced_conn(conn)?;
             let author = models::CommentActor::from(&actor.user);
-            let comment = queries::comments::create_comment_with_mentions(
+            let comment = queries::comments::create_typed_comment_with_mentions(
                 conn,
                 parent,
                 project_id,
@@ -5273,6 +5283,7 @@ No issues found."
                 models::AttachmentActor::Authenticated(author),
                 &input.content,
                 member_scoped,
+                input.kind,
             )?;
             let event = comment_updated_event(parent, project_id);
             Ok((comment, parent, parent_identifier, event))
@@ -7005,6 +7016,8 @@ mod relation_visibility_tests;
 #[cfg(test)]
 mod roles_tests;
 
+#[cfg(test)]
+mod tests_decisions;
 #[cfg(test)]
 mod tests_verification;
 
@@ -9123,6 +9136,7 @@ mod tests {
         }));
         assert!(page.starts_with("Created FMT-DOC-1"), "got: {page}");
         let comment = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "FMT-1".into(),
             content: "Comment mixedformatneedle".into(),
         }));
@@ -9161,6 +9175,7 @@ mod tests {
 
         let result = crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "SRC-1".into(),
                 content: "Unique comment needle".into(),
             }));
@@ -9915,6 +9930,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Hello from MCP".into(),
         }));
@@ -9929,6 +9945,7 @@ mod tests {
         );
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Second comment".into(),
         }));
@@ -9972,6 +9989,7 @@ mod tests {
         };
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "cc @ada and @ghost".into(),
         }));
@@ -10226,6 +10244,7 @@ mod tests {
         let _user_guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATC-1".into(),
             content: format!("here: /api/attachments/{att}"),
         }));
@@ -10248,6 +10267,7 @@ mod tests {
         let _user_guard = seed_user(&m);
 
         let created = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATD-1".into(),
             content: format!("/api/attachments/{old}"),
         }));
@@ -10279,6 +10299,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Visible in get_issue".into(),
         }));
@@ -10297,6 +10318,7 @@ mod tests {
     fn seed_comment_trail(m: &LificMcp, n: usize) {
         for i in 1..=n {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("comment number {i}"),
             }));
@@ -10309,6 +10331,7 @@ mod tests {
     fn seed_large_comments(m: &LificMcp, n: usize, size: usize) {
         for i in 1..=n {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: format!("body {i} {}", "x".repeat(size)),
             }));
@@ -10934,6 +10957,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "NOPE-999".into(),
             content: "Orphan".into(),
         }));
@@ -10958,6 +10982,7 @@ mod tests {
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = None;
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Comment via stdio fallback".into(),
         }));
@@ -10982,6 +11007,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PGC-DOC-01".into(),
             content: "Comment on a page".into(),
         }));
@@ -11017,6 +11043,7 @@ mod tests {
         drain_realtime(&mut rx);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PCO-DOC-1".into(),
             content: "original".into(),
         }));
@@ -11061,10 +11088,12 @@ mod tests {
         let _guard = seed_user(&m);
 
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "MIX-1".into(),
             content: "issue thread".into(),
         }));
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "MIX-DOC-1".into(),
             content: "page thread".into(),
         }));
@@ -11108,6 +11137,7 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "DOC-1".into(),
             content: "comment on workspace page".into(),
         }));
@@ -12431,6 +12461,7 @@ mod tests {
         seed_issue(&m, "PRJ", "Authored");
         let _guard = seed_user(&m);
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "Mine".into(),
         }));
@@ -12461,10 +12492,12 @@ mod tests {
         seed_issue(&m, "PRJ", "Threaded");
         let _guard = seed_user(&m);
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "first".into(),
         }));
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "second".into(),
         }));
@@ -12549,6 +12582,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
         }));
@@ -12593,6 +12627,7 @@ mod tests {
 
         let oversized = "x".repeat(queries::comments::MAX_COMMENT_BYTES + 1);
         let rejected = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: oversized.clone(),
         }));
@@ -12602,6 +12637,7 @@ mod tests {
         );
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "keep me".into(),
         }));
@@ -12637,6 +12673,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "delete me".into(),
         }));
@@ -12675,6 +12712,7 @@ mod tests {
         let (comment_id, edited, deleted) =
             crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 let added = m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "PRJ-1".into(),
                     content: "original".into(),
                 }));
@@ -12714,6 +12752,7 @@ mod tests {
         let _guard = act_as(&author);
 
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: "original".into(),
         }));
@@ -12755,6 +12794,7 @@ mod tests {
         let cid = {
             let _g = act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "mine".into(),
             }));
@@ -12800,6 +12840,7 @@ mod tests {
         let author = make_user(m, "author", false);
         let guard = act_as(&author);
         let added = m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "PRJ-1".into(),
             content: body.into(),
         }));
@@ -12953,6 +12994,7 @@ mod tests {
         let cid = {
             let _g = act_as(&author);
             let added = m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "PRJ-1".into(),
                 content: "regular user's comment".into(),
             }));
@@ -13254,6 +13296,7 @@ mod tests {
         let (project, page, issue) =
             crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "TST-1".into(),
                     content: "Audit comment".into(),
                 }));
@@ -14431,6 +14474,7 @@ mod tests {
 
         let raw_comment = r#"needs & review of <T> before "ship""#;
         m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ESC-1".into(),
             content: raw_comment.into(),
         }));
@@ -14723,6 +14767,7 @@ mod tests {
             ..Default::default()
         }));
         let comment_id = comment_id_from(&m.add_comment(Parameters(AddCommentInput {
+            kind: Default::default(),
             identifier: "ATT-1".into(),
             content: "see attached".into(),
         })));
@@ -16420,6 +16465,7 @@ mod authz_gating_tests {
 
         let allowed = as_user(&viewer, || {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "viewers can comment".into(),
             }))
@@ -16431,6 +16477,7 @@ mod authz_gating_tests {
 
         let denied = as_user(&non_member, || {
             m.add_comment(Parameters(AddCommentInput {
+                kind: Default::default(),
                 identifier: "MEM-1".into(),
                 content: "should not land".into(),
             }))
@@ -16465,6 +16512,7 @@ mod authz_gating_tests {
         .map(|(author, content)| {
             comment_id_from(&as_user(author, || {
                 m.add_comment(Parameters(AddCommentInput {
+                    kind: Default::default(),
                     identifier: "MEM-1".into(),
                     content: content.into(),
                 }))

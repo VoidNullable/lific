@@ -78,6 +78,7 @@ fn ordinary_comments_stay_unmarked() {
     seed_project(&m, "Verify", "VER");
     seed_issue(&m, "VER", "Ship it");
     m.add_comment(Parameters(AddCommentInput {
+        kind: Default::default(),
         identifier: "VER-1".into(),
         content: "a plain note".into(),
     }));

@@ -34,6 +34,7 @@ import { checkPaletteSearch } from "./palette-search";
 import { checkDuplicateRelations } from "./duplicate-relations";
 import { checkRelationEditing } from "./relation-editing";
 import { checkIssueWaits } from "./issue-waits";
+import { checkDecisionComments } from "./decision-comments";
 import { checkLoginRedirect } from "./login-redirect";
 import { Database } from "bun:sqlite";
 
@@ -235,6 +236,7 @@ async function main(): Promise<number> {
     await checkDuplicateRelations(context, base);
     await checkRelationEditing(context, base);
     await checkIssueWaits(context, base, "smoke-operator");
+    await checkDecisionComments(context, base);
     await checkLoginRedirect(browser, base, "smoke-operator", PASSWORD);
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------

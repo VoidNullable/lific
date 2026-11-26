@@ -91,6 +91,8 @@
     // Comments (optional)
     comments,
     onNewComment,
+    decisionsOnly = false,
+    onFilterDecisions,
     currentUser = null,
     onUpdateComment,
     onDeleteComment,
@@ -162,7 +164,9 @@
     onDelete?: () => Promise<boolean>;
     menuItems?: MenuItem[];
     comments?: Comment[];
-    onNewComment?: (content: string) => Promise<Comment | null>;
+    onNewComment?: (content: string, kind?: "comment" | "decision") => Promise<Comment | null>;
+    decisionsOnly?: boolean;
+    onFilterDecisions?: (enabled: boolean) => void;
     currentUser?: AuthUser | null;
     onUpdateComment?: (id: number, content: string) => Promise<Comment | null>;
     onDeleteComment?: (id: number) => Promise<boolean>;
@@ -583,8 +587,10 @@
         {comments}
         {currentUser}
         editable={commentsEnabled}
-        onSubmit={async (content) => {
-          const created = await onNewComment(content);
+        {decisionsOnly}
+        {onFilterDecisions}
+        onSubmit={async (content, kind) => {
+          const created = await onNewComment(content, kind);
           if (created) attachmentRefresh += 1;
           return created;
         }}

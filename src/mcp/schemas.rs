@@ -516,6 +516,11 @@ pub struct AddCommentInput {
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
+    #[serde(default)]
+    #[schemars(
+        description = "comment (default) or decision. Decisions always appear in get_issue."
+    )]
+    pub kind: crate::db::models::CommentWriteKind,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

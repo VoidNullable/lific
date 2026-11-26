@@ -349,7 +349,7 @@ Filters combine, so `--status todo --label bug` shows issues that match both.
 
 ```shell
 lific comment list <IDENTIFIER> [--limit <LIMIT>] [--offset <OFFSET>] [--order desc|asc]
-lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>]
+lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>] [--kind comment|decision]
 ```
 
 `list` shows one page of an issue's comments, newest first, and never the whole thread at once. When more comments exist past the page, the last line says which offset to ask for next:

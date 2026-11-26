@@ -498,6 +498,7 @@ fn list_comments_for(
             Some(limit),
             Some(offset),
             cursor.as_ref(),
+            query.kind,
         )
     })?;
     let headers = paging_headers(

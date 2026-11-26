@@ -354,6 +354,48 @@ pub fn list_comments(
     list_comments_exhaustive(conn, parent, author, order, None, None)
 }
 
+/// Decision summaries bypass the comment window without loading full bodies.
+pub fn decision_summaries(
+    conn: &Connection,
+    issue_id: i64,
+) -> Result<Vec<(i64, String)>, LificError> {
+    decision_summaries_within(conn, issue_id, row_budget())
+}
+
+fn decision_summaries_within(
+    conn: &Connection,
+    issue_id: i64,
+    budget: usize,
+) -> Result<Vec<(i64, String)>, LificError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, substr(trim(content, char(10) || char(13) || char(9) || ' '), 1, 321)
+         FROM comments WHERE issue_id = ?1 AND kind = 'decision' AND deleted_at IS NULL
+         ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([issue_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut summaries = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        let (id, text) = row?;
+        let line = text.lines().next().unwrap_or("").trim();
+        let mut summary: String = line.chars().take(320).collect();
+        if line.chars().count() > 320 {
+            summary.push('…');
+        }
+        bytes += summary.len() + 64;
+        if bytes > budget {
+            return Err(LificError::PayloadTooLarge(
+                "Decision summaries exceed the response budget. Read decisions with list_comments."
+                    .into(),
+            ));
+        }
+        summaries.push((id, summary));
+    }
+    Ok(summaries)
+}
+
 /// Count comments for an issue or page after applying the same optional
 /// author filter as `list_comments_paginated`.
 pub fn count_comments(
@@ -415,6 +457,7 @@ pub fn list_comments_exhaustive(
         conn,
         &CommentScan {
             parent,
+            kind: None,
             author,
             order,
             limit,
@@ -486,6 +529,7 @@ pub struct CommentPage {
 /// tells a reader nothing about which knob is which.
 struct CommentScan<'a> {
     parent: CommentParent,
+    kind: Option<CommentKind>,
     author: Option<&'a str>,
     order: Option<&'a str>,
     limit: Option<i64>,
@@ -529,10 +573,25 @@ pub fn list_comments_keyset(
     offset: Option<i64>,
     before: Option<&CommentCursor>,
 ) -> Result<CommentPage, LificError> {
+    list_comments_by_kind(conn, parent, author, order, limit, offset, before, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_comments_by_kind(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    before: Option<&CommentCursor>,
+    kind: Option<CommentKind>,
+) -> Result<CommentPage, LificError> {
     scan_comments(
         conn,
         &CommentScan {
             parent,
+            kind,
             author,
             order,
             limit,
@@ -564,6 +623,7 @@ pub fn list_comments_page_within(
         conn,
         &CommentScan {
             parent,
+            kind: None,
             author,
             order,
             limit,
@@ -746,6 +806,10 @@ impl CommentQuery {
              WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
         );
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
+        if let Some(kind) = scan.kind {
+            tail.push_str(&format!(" AND c.kind = ?{}", values.len() + 1));
+            values.push(Box::new(kind));
+        }
         if let Some(username) = scan.author {
             tail.push_str(&format!(
                 " AND COALESCE(c.imported_author, u.username) = ?{} COLLATE NOCASE",
@@ -1233,6 +1297,41 @@ pub fn create_comment_with_mentions(
     )
 }
 
+/// Caller-selected kinds share the ordinary comment reconciliation path.
+#[allow(clippy::too_many_arguments)]
+pub fn create_typed_comment_with_mentions(
+    conn: &Connection,
+    parent: CommentParent,
+    project_id: Option<i64>,
+    author: CommentActor,
+    attachments: AttachmentActor,
+    content: &str,
+    member_scoped: bool,
+    kind: crate::db::models::CommentWriteKind,
+) -> Result<Comment, LificError> {
+    match kind {
+        crate::db::models::CommentWriteKind::Comment => create_comment_with_mentions(
+            conn,
+            parent,
+            project_id,
+            author,
+            attachments,
+            content,
+            member_scoped,
+        ),
+        crate::db::models::CommentWriteKind::Decision => create_reconciled_comment(
+            conn,
+            parent,
+            project_id,
+            author,
+            attachments,
+            content,
+            member_scoped,
+            kind.into(),
+        ),
+    }
+}
+
 /// Record verification evidence on an issue (LIF-486): a comment of kind
 /// `verification`, reconciled exactly like any other comment. The caller owns
 /// the rule that evidence only accompanies a close.
@@ -1400,6 +1499,40 @@ mod tests {
 
         drop(conn);
         (pool, issue.id, page.id, user.id)
+    }
+
+    #[test]
+    fn decision_summaries_bound_unicode_lines_and_refuse_partial_results() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for text in [
+            format!("\n \t{}\nRationale", "界".repeat(320)),
+            "界".repeat(321),
+        ] {
+            insert_comment_row(
+                &conn,
+                CommentParent::Issue(issue_id),
+                user_id,
+                &text,
+                CommentKind::Decision,
+            )
+            .unwrap();
+        }
+        let summaries = decision_summaries(&conn, issue_id).unwrap();
+        assert_eq!(summaries[0].1, "界".repeat(320));
+        assert_eq!(summaries[1].1, format!("{}…", "界".repeat(320)));
+        let exact = summaries
+            .iter()
+            .map(|(_, summary)| summary.len() + 64)
+            .sum::<usize>();
+        assert_eq!(
+            decision_summaries_within(&conn, issue_id, exact)
+                .unwrap()
+                .len(),
+            2
+        );
+        let error = decision_summaries_within(&conn, issue_id, exact - 1).unwrap_err();
+        assert!(matches!(error, LificError::PayloadTooLarge(_)));
     }
 
     #[test]
@@ -2875,6 +3008,7 @@ mod tests {
         // The planner reads sizes, not bodies: the statement it runs never
         // names `c.content` except inside `length(...)`.
         let query = CommentQuery::build(&CommentScan {
+            kind: None,
             parent: CommentParent::Issue(issue_id),
             author: None,
             order: Some("asc"),

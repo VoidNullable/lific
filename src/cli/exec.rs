@@ -775,6 +775,7 @@ fn comment(
             identifier,
             content,
             user,
+            kind,
         } => {
             let conn = pool.write()?;
             let issue_id = queries::resolve_identifier(&conn, identifier)?;
@@ -804,7 +805,7 @@ fn comment(
             // body's references borrow.
             let project_id = parent.project_id(&conn)?;
             let member_scoped = crate::authz::authz_enforced_conn(&conn)?;
-            let comment = queries::comments::create_comment_with_mentions(
+            let comment = queries::comments::create_typed_comment_with_mentions(
                 &conn,
                 parent,
                 project_id,
@@ -812,6 +813,7 @@ fn comment(
                 AttachmentActor::TrustedLocal,
                 content,
                 member_scoped,
+                *kind,
             )?;
             drop(conn);
 
@@ -1481,6 +1483,7 @@ mod tests {
 
         let cmd = Command::Comment {
             action: CommentAction::Add {
+                kind: Default::default(),
                 identifier: "TST-1".into(),
                 content: "Looking into this".into(),
                 user: Some("testuser".into()),
@@ -1497,6 +1500,31 @@ mod tests {
             },
         };
         run(&pool, &cmd, false, None).unwrap();
+    }
+
+    #[test]
+    fn exec_comment_add_decision() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Choose storage");
+        seed_user(&pool);
+        let cli = <crate::cli::Cli as clap::Parser>::try_parse_from([
+            "lific",
+            "comment",
+            "add",
+            "TST-1",
+            "--content",
+            "Use SQLite",
+            "--kind",
+            "decision",
+        ])
+        .unwrap();
+        run(&pool, &cli.command, false, None).unwrap();
+        let conn = pool.read().unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM comments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kind, "decision");
     }
 
     /// Seed `n` comments on TST-1 with distinct timestamps, so ordering
@@ -2103,6 +2131,7 @@ mod tests {
             &pool,
             &Command::Comment {
                 action: CommentAction::Add {
+                    kind: Default::default(),
                     identifier: "TST-1".into(),
                     content: format!("@testuser look at {}", body(shot)),
                     user: Some("testuser".into()),
@@ -2374,6 +2403,7 @@ mod tests {
             &pool,
             &Command::Comment {
                 action: CommentAction::Add {
+                    kind: Default::default(),
                     identifier: "TST-1".into(),
                     content: "orphan".into(),
                     user: None,

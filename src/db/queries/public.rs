@@ -278,9 +278,11 @@ pub fn public_comments(
     limit: Option<i64>,
     offset: Option<i64>,
     before: Option<&CommentCursor>,
+    kind: Option<crate::db::models::CommentKind>,
 ) -> Result<CommentPage, LificError> {
-    let mut page =
-        super::comments::list_comments_keyset(conn, parent, None, order, limit, offset, before)?;
+    let mut page = super::comments::list_comments_by_kind(
+        conn, parent, None, order, limit, offset, before, kind,
+    )?;
     for comment in &mut page.items {
         scrub_comment(comment);
     }
@@ -566,10 +568,47 @@ mod tests {
             .unwrap();
         }
         let conn = db.read().unwrap();
-        let page =
-            public_comments(&conn, CommentParent::Issue(mine.id), None, None, None, None).unwrap();
+        let page = public_comments(
+            &conn,
+            CommentParent::Issue(mine.id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].author_display_name, "Owner");
+        assert_eq!(page.items[0].author, "");
+        assert_eq!(page.items[0].user_id, 0);
+    }
+
+    #[test]
+    fn public_decision_filter_keeps_kind_but_scrubs_identity() {
+        let (db, public, _) = fixture();
+        let mine = issue(&db, public.id, "Mine");
+        let conn = db.write().unwrap();
+        for kind in ["comment", "decision"] {
+            conn.execute(
+                "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(?1,1,'Choice',?2)",
+                rusqlite::params![mine.id, kind],
+            )
+            .unwrap();
+        }
+        let page = public_comments(
+            &conn,
+            CommentParent::Issue(mine.id),
+            None,
+            Some(1),
+            None,
+            None,
+            Some(crate::db::models::CommentKind::Decision),
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert!(!page.has_more);
+        assert_eq!(page.items[0].kind, crate::db::models::CommentKind::Decision);
         assert_eq!(page.items[0].author, "");
         assert_eq!(page.items[0].user_id, 0);
     }

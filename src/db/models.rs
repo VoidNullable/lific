@@ -1039,7 +1039,7 @@ pub struct Comment {
     /// pages. See [`Issue::seq`].
     #[serde(default)]
     pub seq: i64,
-    /// LIF-486: `verification` for evidence recorded by closing an issue.
+    /// Ordinary discussion, a decision, or evidence recorded by closing an issue.
     #[serde(default)]
     pub kind: CommentKind,
 }
@@ -1053,6 +1053,7 @@ pub enum CommentKind {
     Comment,
     /// Completion evidence written by `update_issue` alongside a close.
     Verification,
+    Decision,
 }
 
 impl CommentKind {
@@ -1060,6 +1061,7 @@ impl CommentKind {
         match self {
             CommentKind::Comment => "comment",
             CommentKind::Verification => "verification",
+            CommentKind::Decision => "decision",
         }
     }
 }
@@ -1069,6 +1071,7 @@ impl rusqlite::types::FromSql for CommentKind {
         match value.as_str()? {
             "comment" => Ok(CommentKind::Comment),
             "verification" => Ok(CommentKind::Verification),
+            "decision" => Ok(CommentKind::Decision),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         }
     }
@@ -1083,6 +1086,29 @@ impl rusqlite::types::ToSql for CommentKind {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateComment {
     pub content: String,
+    #[serde(default)]
+    pub kind: CommentWriteKind,
+}
+
+/// Kinds callers can write directly. Verification is reserved for closing issues.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
+pub enum CommentWriteKind {
+    #[default]
+    Comment,
+    Decision,
+}
+
+impl From<CommentWriteKind> for CommentKind {
+    fn from(kind: CommentWriteKind) -> Self {
+        match kind {
+            CommentWriteKind::Comment => Self::Comment,
+            CommentWriteKind::Decision => Self::Decision,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

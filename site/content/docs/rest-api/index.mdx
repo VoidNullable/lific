@@ -221,7 +221,7 @@ These records appear across many endpoints. Other shapes are described with the 
 
 ### Comment
 
-`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at`, `seq` and `kind`. `kind` is `comment`, or `verification` for the evidence an agent recorded while closing an issue through MCP `update_issue`. A verification comment otherwise behaves like any other: its author can edit or delete it.
+`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at`, `seq` and `kind`. `kind` is `comment`, `decision`, or `verification` for the evidence an agent recorded while closing an issue through MCP `update_issue`. Typed comments otherwise behave like any other: their authors can edit or delete them.
 
 ### Module, label and folder
 

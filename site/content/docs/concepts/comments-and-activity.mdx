@@ -11,7 +11,15 @@ A comment belongs to exactly one issue or one page, workspace pages included. It
 
 A comment written by a connected agent is authored by that agent, not by the person who connected it.
 
-A comment has a kind: `comment`, or `verification` when it holds the evidence an agent gave while closing an issue with `update_issue(status="done", evidence=...)`. MCP output marks these `[verification]`, and the web UI shows a Verification badge, so whoever reviews the close can see what was checked. Otherwise a verification comment behaves like any other: its author can edit or delete it.
+A comment has a kind: `comment` (the default), `decision`, or `verification` when it holds the evidence an agent gave while closing an issue with `update_issue(status="done", evidence=...)`. MCP output marks verification evidence `[verification]`, and the web UI shows a Verification badge. Its author can edit or delete it like any other comment.
+
+### Decisions
+
+Use `add_comment` with `kind: "decision"`, pass the same field when posting a comment over REST, or run `lific comment add APP-1 --content "Use SQLite" --kind decision`. In the web composer, check **Record as decision** before posting. Decision comments carry a **Decision** badge; **Decisions only** filters the whole thread, including older pages.
+
+`get_issue` always includes a **Decisions** section when the issue has decisions, even with `include_comments: "none"` or when the comment trail is trimmed. Each entry names the comment id and shows its first nonblank line, shortened to 320 characters with an ellipsis if necessary. Keep that first line useful on its own and put the rationale below it. Deleted decisions disappear from the section. If the summaries cannot fit the response budget, the read fails explicitly rather than silently dropping decisions.
+
+Decision kinds survive project archive export and import. Editing a comment's text preserves its kind.
 
 ### Comment ids and links
 
@@ -58,7 +66,7 @@ Page with `offset`. The MCP tool and the CLI print the offset of the next page w
 
 REST comment lists also accept a keyset cursor (`before_created_at` plus `before_id`) that pages backwards from a comment already seen. An offset drifts under a live thread: one comment posted above a reader shifts every offset by one, so the next page repeats a comment or skips one. The web UI uses the cursor for that reason.
 
-`get_issue` carries a comment trail too, bounded the same way: `recent` (the default) shows the last three, `all` shows the most recent 500, and `none` reports only the count, including when that count is zero. A thread longer than the `all` window says so and points at `list_comments`.
+`get_issue` carries a comment trail too, bounded the same way: `recent` (the default) shows the last three, `all` shows the most recent 500, and `none` reports the count without comment bodies, including when that count is zero. The separate Decisions section appears in every mode. A thread longer than the `all` window says so and points at `list_comments`.
 
 MCP counts rendered links, escaped text and the `get_issue` preamble against its response budget. If a comment cannot fit by itself, the read fails with instructions for continuing; it does not silently skip the comment.
 

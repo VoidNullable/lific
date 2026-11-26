@@ -1418,7 +1418,7 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
                 }
                 if !matches!(
                     s.get(row, "kind").as_str(),
-                    Some("comment" | "verification")
+                    Some("comment" | "verification" | "decision")
                 ) {
                     return Err(invalid("invalid comment kind"));
                 }

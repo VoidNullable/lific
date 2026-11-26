@@ -195,6 +195,7 @@ One page of the comments on an issue or a page. Returns a `Comment` array.
 | `order` | `asc` (default, oldest first) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 | `author` | Only comments by this username. |
+| `kind` | Only `comment`, `decision`, or `verification` comments. Applied before pagination. |
 | `before_created_at`, `before_id` | A cursor: only comments older than the one you name. |
 
 The default page of a long thread is its oldest comments; pass `order=desc` for the newest.
@@ -216,7 +217,7 @@ If even the first comment is larger than the budget, the answer is `413` with th
 
 ### POST `/api/pages/{page_id}/comments`
 
-Adds a comment. Body: `content` (Markdown). A comment added here is always of kind `comment`; `verification` comments come only from closing an issue with evidence through MCP `update_issue`. A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
+Adds a comment. Body: `content` (Markdown), and optional `kind` (`comment` by default, or `decision`). `verification` comments come only from closing an issue with evidence through MCP `update_issue`; that kind and unknown kinds are rejected here with `422`. A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
 
 ### PUT `/api/comments/{id}`
 
