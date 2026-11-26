@@ -606,6 +606,106 @@ async fn anonymous_reads_are_rate_limited_and_signed_in_reads_are_not() {
     assert_eq!(signed_in.status(), StatusCode::OK);
 }
 
+/// A read with only these headers, as a browser sends it.
+async fn with_headers(app: &Router, uri: &str, headers: &[(&str, String)]) -> Response {
+    let mut request = axum::http::Request::builder().uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, value.as_str());
+    }
+    app.clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+fn session_cookie(token: &str) -> (&'static str, String) {
+    ("cookie", format!("lific_token={token}"))
+}
+
+/// A request signed in with the web app's session cookie is not anonymous:
+/// it spends none of the anonymous budget, and is served once that budget
+/// is gone.
+#[tokio::test]
+async fn a_valid_session_cookie_is_not_an_anonymous_read() {
+    let d = deploy();
+    let cookie = [session_cookie(&d.stranger_session)];
+    for _ in 0..crate::api::anonymous::READS_PER_MINUTE {
+        let response = with_headers(&d.app, "/api/projects", &cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        anonymous(&d.app, "GET", "/api/projects").await.status(),
+        StatusCode::OK,
+        "cookie reads spent the anonymous budget"
+    );
+
+    let mut exhausted = false;
+    for _ in 0..(crate::api::anonymous::READS_PER_MINUTE + 50) {
+        if anonymous(&d.app, "GET", "/api/projects").await.status() == StatusCode::TOO_MANY_REQUESTS
+        {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "the anonymous budget never ran out");
+    let signed_in = with_headers(&d.app, "/api/projects", &cookie).await;
+    assert_eq!(signed_in.status(), StatusCode::OK);
+    assert_ne!(
+        signed_in
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store, no-cache, must-revalidate"),
+        "a signed-in read did not leave through the anonymous path"
+    );
+}
+
+/// A cookie whose session expired or was revoked is no credential: the
+/// browser keeps sending it, so it reads the published project anonymously,
+/// and writes stay 401.
+#[tokio::test]
+async fn a_dead_session_cookie_reads_anonymously() {
+    let d = deploy();
+    let dead = [session_cookie("lific_sess_expired_or_revoked")];
+    let read = with_headers(&d.app, &format!("/api/issues/{}", d.issue), &dead).await;
+    assert_eq!(read.status(), StatusCode::OK);
+    assert_eq!(
+        read.headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store, no-cache, must-revalidate")
+    );
+    let private = with_headers(&d.app, &format!("/api/issues/{}", d.private_issue), &dead).await;
+    assert_eq!(private.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        with_headers(&d.app, "/api/auth/me", &dead).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Only a Bearer header is a Lific credential. A basic-auth proxy's header
+/// leaves a visitor anonymous; an unusable Bearer is a 401 even on a
+/// published read, never a fall back to anonymous.
+#[tokio::test]
+async fn only_a_bearer_header_changes_who_reads() {
+    let d = deploy();
+    let uri = format!("/api/issues/{}", d.issue);
+    let basic = with_headers(&d.app, &uri, &[("authorization", "Basic eDp5".into())]).await;
+    assert_eq!(basic.status(), StatusCode::OK);
+    for bad in ["Bearer", "bearer lific_sess_wrong"] {
+        let response = with_headers(
+            &d.app,
+            &uri,
+            &[
+                ("authorization", bad.into()),
+                session_cookie(&d.stranger_session),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{bad}");
+    }
+}
+
 #[tokio::test]
 async fn an_anonymous_download_is_bounded_and_sandboxed() {
     let d = deploy();
