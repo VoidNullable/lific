@@ -44,6 +44,12 @@
 //!    holds locked = warn (inconclusive, not corrupt). `--repair` opts into
 //!    applying pending migrations through the normal database opener.
 //!
+//!    **project_access** follows it, only on a database that went through the
+//!    3.0 upgrade from legacy authorization (it records who lost access then).
+//!    Anyone still without a role in a project they could reach before = warn,
+//!    naming them and the `lific member add` command that restores access;
+//!    everyone restored or gone = pass. Read-only, like the database check.
+//!
 //!    Read-only inspection is a **logical** contract: it opens the file with
 //!    `SQLITE_OPEN_READ_ONLY`, bounds contention with a busy timeout, and reads
 //!    both facts inside one deferred transaction, so it never runs migrations
@@ -399,6 +405,7 @@ async fn build_report(
         cfg.database.path = path.to_owned();
     }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
+    checks.extend(check_project_access(&cfg.database.path));
     checks.extend(check_backups(&cfg));
     checks.push(service_check);
     checks.extend(check_remote(&cfg, key).await);
@@ -848,6 +855,57 @@ fn dir_is_writable(dir: &Path) -> bool {
 }
 
 // ── Check 3: backups ─────────────────────────────────────────────────────
+
+/// How many users the warning names before summarizing the rest.
+const ACCESS_LOSS_LISTED: usize = 10;
+
+/// LIF-518: who could reach a project before roles were enforced everywhere
+/// and still holds no role in it. Omitted when the database can't be read or
+/// never went through that upgrade (a fresh install records nothing).
+fn check_project_access(path: &Path) -> Option<Check> {
+    let conn = open_inspection_connection(path, DATABASE_BUSY_TIMEOUT).ok()?;
+    let recorded: i64 = conn
+        .query_row("SELECT COUNT(*) FROM authz_upgrade_losses", [], |row| {
+            row.get(0)
+        })
+        .ok()?;
+    if recorded == 0 {
+        return None;
+    }
+    let losses = crate::db::queries::access_losses::unresolved(&conn).ok()?;
+    Some(project_access_check(&losses))
+}
+
+fn project_access_check(losses: &[crate::db::queries::access_losses::AccessLoss]) -> Check {
+    if losses.is_empty() {
+        return Check::new(
+            "project_access",
+            Status::Pass,
+            "everyone left without a role by the 3.0 upgrade has a role again or is gone",
+        );
+    }
+    let lines = crate::db::queries::access_losses::summarize(losses);
+    let mut listed = lines
+        .iter()
+        .take(ACCESS_LOSS_LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if lines.len() > ACCESS_LOSS_LISTED {
+        listed.push_str(&format!("; and {} more", lines.len() - ACCESS_LOSS_LISTED));
+    }
+    Check::new(
+        "project_access",
+        Status::Warn,
+        format!(
+            "{} user{} could reach these projects before 3.0 and hold no role in them now: \
+             {listed}. Restore anyone who needs access with `lific member add --project <PROJECT> \
+             --user <name> --role maintainer`",
+            lines.len(),
+            plural(lines.len()),
+        ),
+    )
+}
 
 /// Returns `None` when backups are disabled (the check is omitted entirely).
 fn check_backups(cfg: &Config) -> Option<Check> {
@@ -1605,6 +1663,56 @@ mod tests {
         let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
         assert!(c.detail.contains("no migrations run"));
+    }
+
+    #[test]
+    fn project_access_is_omitted_without_an_upgrade_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        let _pool = crate::db::open(&db_path).unwrap();
+        assert!(check_project_access(&db_path).is_none());
+        assert!(check_project_access(&tmp.path().join("missing.db")).is_none());
+    }
+
+    #[test]
+    fn project_access_names_who_is_still_left_out_until_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        let pool = crate::db::open(&db_path).unwrap();
+        let project_id = {
+            let conn = pool.write().unwrap();
+            conn.execute_batch(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('bob', 'bob@test.local', 'x', 'Bob', 0, 0);
+                 INSERT INTO projects (name, identifier) VALUES ('Api', 'API');
+                 INSERT INTO authz_upgrade_losses (user_id, project_id)
+                 SELECT u.id, p.id FROM users u, projects p;",
+            )
+            .unwrap();
+            conn.query_row("SELECT id FROM projects", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+
+        let c = check_project_access(&db_path).expect("recorded losses are reported");
+        assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
+        assert!(c.detail.contains("bob: API"), "detail: {}", c.detail);
+        assert!(
+            c.detail.contains("lific member add"),
+            "detail: {}",
+            c.detail
+        );
+
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO project_members (project_id, user_id, role)
+                 SELECT ?1, id, 'viewer' FROM users WHERE username = 'bob'",
+                [project_id],
+            )
+            .unwrap();
+        }
+        let c = check_project_access(&db_path).unwrap();
+        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
     }
 
     #[test]

@@ -589,6 +589,22 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let conn = pool.write()?;
         db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
 
+        // LIF-518: name, once, everyone the 3.0 upgrade left without a role
+        // in a project they could reach before.
+        let losses = db::queries::access_losses::take_unlogged(&conn)?;
+        if !losses.is_empty() {
+            warn!(
+                users_projects = losses.len(),
+                "project roles are now enforced on every instance. These users could reach \
+                 these projects before and hold no role in them now. Restore anyone who \
+                 needs access with `lific member add --project <PROJECT> --user <name> --role \
+                 maintainer`; `lific doctor` lists whoever is still left out."
+            );
+            for line in db::queries::access_losses::summarize(&losses) {
+                warn!("lost project access: {line}");
+            }
+        }
+
         // LIF-215: single-user web auto-login hands an admin session to
         // anyone who can load the page. It shares login-free mode's
         // threat model, so it gets the same guard rail (PR #23 review):
