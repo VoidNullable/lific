@@ -79,7 +79,7 @@ An instance that still had the setting off used to let anyone who could sign in 
 
 - A project's primary lead gets `lead`, even if an existing membership gave them less.
 - Anyone who wrote in a project gets `maintainer`. Writing means creating or changing an issue, page, comment, plan or plan step there, as recorded in the [activity log](/docs/concepts/comments-and-activity#activity-log), or having authored a comment there. Work done by a connected tool counts for the person who owns it.
-- Existing memberships stay as they are. Administrators need no membership and get none.
+- Existing memberships stay as they are. Administrators need no membership and get none, except that an administrator who is a project's primary lead gets a `lead` membership there like any other lead.
 - Everyone else gets no role. Someone who only ever read a project loses access to it.
 
 The activity log is the evidence, so if you set `[backup] audit_retention_days`, work older than that was already pruned and does not count.
