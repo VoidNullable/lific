@@ -483,34 +483,33 @@ async fn events_ws(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, LificError> {
-    // LIF-583: no session cookie at all is an anonymous reader, who may follow
-    // published projects. A cookie that is present but invalid is still the
-    // 403 below, so a signed-out tab learns its session is gone.
-    if websocket_origin_allowed(&headers, &allowed_origins)
-        && websocket_session_token(&headers).is_none()
-        && auth_config.is_some_and(|Extension(config)| config.required)
-        && let Some(Extension(reads)) = anonymous
-    {
-        reads.admit(
-            peer.map(|Extension(axum::extract::ConnectInfo(addr))| addr),
-            &headers,
-        )?;
-        let Some(permit) = realtime.try_acquire_anonymous_socket() else {
-            return Ok((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": "websocket connection limit reached" })),
-            )
-                .into_response());
-        };
-        return Ok(upgrade_events_socket(
-            ws,
-            realtime,
-            db,
-            crate::realtime::SocketViewer::Anonymous,
-            permit,
-        ));
-    }
-    let validated = validate_websocket_request(&db, &headers, &allowed_origins)?;
+    // LIF-583: a socket with no usable session is an anonymous reader, who may
+    // follow published projects. That covers no cookie at all and a cookie
+    // whose session has expired or been revoked: the REST API already reads
+    // such a request anonymously, and the cookie is httpOnly, so the browser
+    // cannot clear it and a 403 here would leave a reader with no live
+    // updates until they sign in again. Downgrading rather than answering
+    // with a clearing Set-Cookie keeps one rule for REST and the socket, and
+    // does not depend on a browser applying cookies from a refused upgrade.
+    // A wrong origin is still refused outright.
+    let anonymous = anonymous
+        .filter(|_| websocket_origin_allowed(&headers, &allowed_origins))
+        .filter(|_| auth_config.is_some_and(|Extension(config)| config.required));
+    let validated = match validate_websocket_request(&db, &headers, &allowed_origins) {
+        Ok(validated) => validated,
+        Err(LificError::Forbidden(message)) => {
+            let no_session = websocket_session_token(&headers).is_none()
+                || message == crate::db::queries::users::INVALID_SESSION_MESSAGE;
+            return match anonymous {
+                Some(Extension(reads)) if no_session => {
+                    let peer = peer.map(|Extension(axum::extract::ConnectInfo(addr))| addr);
+                    anonymous_events_socket(&reads, peer, &headers, ws, realtime, db)
+                }
+                _ => Err(LificError::Forbidden(message)),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let Some(permit) = realtime.try_acquire_socket(validated.user.id) else {
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
@@ -526,6 +525,33 @@ async fn events_ws(
             token: validated.session_token,
             user: validated.user,
         },
+        permit,
+    ))
+}
+
+/// LIF-583: an events socket for a reader with no session, charged against
+/// the anonymous rate limit and the shared anonymous socket budget.
+fn anonymous_events_socket(
+    reads: &AnonymousReads,
+    peer: Option<std::net::SocketAddr>,
+    headers: &HeaderMap,
+    ws: WebSocketUpgrade,
+    realtime: crate::realtime::RealtimeHub,
+    db: DbPool,
+) -> Result<Response, LificError> {
+    reads.admit(peer, headers)?;
+    let Some(permit) = realtime.try_acquire_anonymous_socket() else {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "websocket connection limit reached" })),
+        )
+            .into_response());
+    };
+    Ok(upgrade_events_socket(
+        ws,
+        realtime,
+        db,
+        crate::realtime::SocketViewer::Anonymous,
         permit,
     ))
 }
@@ -3098,6 +3124,59 @@ mod authz_gating_tests {
         let event = next_realtime_event(&mut socket).await;
         assert_eq!(event["type"], "project.updated", "{event}");
         assert_eq!(event["project_id"], published, "{event}");
+        server.abort();
+    }
+
+    /// The session cookie is httpOnly, so a browser whose session expired
+    /// cannot drop it. Its socket reads as anonymous, like its REST reads,
+    /// rather than being refused.
+    #[tokio::test]
+    async fn a_socket_with_a_dead_session_reads_as_anonymous() {
+        let (db, token) = websocket_session();
+        let published = {
+            let conn = db.write().unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "PUB".into(),
+                    identifier: "PUB".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [project.id],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM sessions", []).unwrap();
+            assert!(crate::db::queries::users::validate_session(&conn, &token).is_err());
+            project.id
+        };
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = anonymous_websocket_server(db, realtime.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .expect("a dead session cookie downgrades to an anonymous socket");
+        request_activity_baseline(&mut socket).await;
+        realtime.send(crate::realtime::RealtimeEvent::ProjectUpdated {
+            project_id: published,
+        });
+        let event = next_realtime_event(&mut socket).await;
+        assert_eq!(event["project_id"], published, "{event}");
+
+        // A foreign origin is still refused, cookie or not.
+        let mut foreign = websocket_request(&url, &token);
+        foreign.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        match tokio_tungstenite::connect_async(foreign).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+            other => panic!("a foreign origin must be refused, got {other:?}"),
+        }
         server.abort();
     }
 
