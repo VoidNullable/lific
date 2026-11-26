@@ -199,11 +199,10 @@
   // The component still owns the data layer (issues, project, fetches).
   const view = new IssueListState();
 
-  // LIF-234: content mutation gate. When false (a viewer, enforcement on),
-  // hide create affordances, disable board drag, and drop the inline
-  // status/priority/bulk controls — the server denies these anyway, this
-  // just stops offering them. True while enforcement is off / for admins /
-  // maintainer+.
+  // LIF-234: content mutation gate. When false (a viewer), hide create
+  // affordances, disable board drag, and drop the inline status/priority/bulk
+  // controls. The server denies these anyway; this just stops offering them.
+  // True for admins and maintainer+, and while the role is still unknown.
   const canEdit = $derived(projectRole.canEdit);
 
   // LIF-246: shared duration for every animate:flip / dndzone

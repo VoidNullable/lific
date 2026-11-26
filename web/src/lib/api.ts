@@ -286,10 +286,6 @@ export interface InstanceSettings {
   session_lifetime_days: number;
   login_message: string | null;
   web_auto_login: boolean;
-  /** LIF-197: operator toggle for project-scoped authorization (epic
-   *  LIF-194). Off by default — see src/authz.rs for the legacy vs
-   *  enforced mode split. */
-  authz_enforced: boolean;
 }
 
 export interface InstanceSettingsPatch {
@@ -301,7 +297,6 @@ export interface InstanceSettingsPatch {
   /** "" clears. */
   login_message?: string;
   web_auto_login?: boolean;
-  authz_enforced?: boolean;
 }
 
 export async function getInstanceSettings() {
@@ -584,9 +579,8 @@ export async function reactivateUser(id: number) {
 // ── Project members (LIF-199 / LIF-200) ─────────────────────
 //
 // Project-scoped roles: viewer < maintainer < lead. See LIF-DOC-7 for the
-// authorization design. `GET` is visible to any project member (and to
-// everyone while `authz_enforced` is off); writes are lead-only (or
-// instance admin).
+// authorization design. `GET` is visible to any project member; writes are
+// lead-only (or instance admin).
 
 export type ProjectRole = "viewer" | "maintainer" | "lead";
 
@@ -632,8 +626,8 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 // ── My effective role (LIF-234) ─────────────────────────────
 //
-// The caller's own role on one project, plus whether enforcement is on and
-// whether they're a workspace admin. Drives role-aware UI affordances
+// The caller's own role on one project, plus whether they're a workspace
+// admin. Drives role-aware UI affordances
 // (`lib/projectRole.svelte.ts`) — one Viewer-gated call per project switch,
 // so a plain viewer can learn what to hide/disable without reading the full
 // roster or the admin-only instance settings. `role` is null for a
@@ -641,9 +635,6 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 export interface MyProjectRole {
   role: ProjectRole | null;
-  /** Whether the instance's project-scoped authorization is enforced. When
-   *  false (legacy/local-first default), the UI stays fully interactive. */
-  enforced: boolean;
   /** Workspace admin — bypasses all gating, UI stays fully interactive. */
   is_admin: boolean;
 }
@@ -654,9 +645,9 @@ export async function getMyProjectRole(projectId: number) {
 
 // ── @mention candidates (LIF-263) ───────────────────────────
 //
-// The users a comment composer may `@`-mention in this project. Scoped to
-// project members when `authz_enforced` is on, all non-bot users otherwise
-// — the server never returns anyone who can't see the project.
+// The users a comment composer may `@`-mention in this project: its members
+// and the instance admins, never a bot. The server never returns anyone who
+// can't see the project.
 
 export interface MentionCandidate {
   user_id: number;

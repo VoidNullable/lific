@@ -66,7 +66,7 @@ async function instance(name: string, seed: boolean) {
   }
   const sql = new Database(db);
   const admin = sql.query("SELECT username FROM users WHERE is_admin=1 AND is_bot=0").get() as { username: string };
-  sql.run("UPDATE instance_settings SET web_auto_login=0, authz_enforced=0");
+  sql.run("UPDATE instance_settings SET web_auto_login=0");
   if (seed) sql.run("UPDATE projects SET is_public=1 WHERE identifier='ARC'");
   sql.close();
   const port = await freePort();
@@ -93,7 +93,7 @@ async function instance(name: string, seed: boolean) {
     assert(res.headers.get("content-type")?.includes("application/json"), `${method} ${path} did not return JSON. Rebuild the backend with the archive routes before running this test.`);
     return res.json();
   };
-  return { base, token, api, login };
+  return { base, token, api, login, cli };
 }
 
 function watch(page: Page) {
@@ -300,6 +300,9 @@ async function main() {
   await destination.unroute("**/api/project-archives");
   console.log("ok  in-flight navigation and duplicate-submit guard, lost response remains unknown after reload, no automatic retry");
 
+  // A viewer on the imported project: it can read the settings page and
+  // nothing on it lets it export or import.
+  b.cli(["member", "add", "--project", "ARC", "--user", "regular", "--role", "viewer"]);
   const regularToken = await b.login("regular");
   const regular = await signedPage(b.base, regularToken, 390);
   await visible(regular, "New project");
@@ -310,7 +313,7 @@ async function main() {
   const deniedForm = new FormData();
   deniedForm.append("archive", new File([await Bun.file(archivePath).bytes()], "ARC.lific.tar.gz", { type: "application/gzip" }));
   const denied = await fetch(`${b.base}/api/project-archives`, { method: "POST", headers: { Authorization: `Bearer ${regularToken}` }, body: deniedForm });
-  assert.equal(denied.status, 403, "non-admin archive POST is refused in legacy mode");
+  assert.equal(denied.status, 403, "non-admin archive POST is refused");
   await regular.goto(`${b.base}/ARC/settings`);
   await visible(regular, "Archive specimen");
   assert.equal(await regular.getByRole("button", { name: "Download project archive" }).count(), 0);
@@ -389,7 +392,7 @@ async function main() {
   assert.equal(await destination.evaluate((key) => sessionStorage.getItem(key), secondKey), "1");
   console.log("ok  pending warnings isolated by user ID, old-account progress/report hidden, own-only reset, session-refresh and logout retention");
   assert.equal(errors.length, 0, errors.join("\n"));
-  console.log("ok  regular-user controls hidden and POST denied in legacy mode, mobile export, no unexpected console errors");
+  console.log("ok  regular-user controls hidden and POST denied, mobile export, no unexpected console errors");
 }
 
 main().then(() => finish(0)).catch((error) => finish(1, String(error)));

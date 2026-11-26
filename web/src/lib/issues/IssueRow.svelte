@@ -115,7 +115,7 @@
     onHoverStatusOption: (si: number) => void;
     onHoverPriorityOption: (pi: number) => void;
     onHoverModuleOption: (mi: number) => void;
-    /** LIF-234: when false (a viewer, enforcement on), the row is read-only:
+    /** LIF-234: when false (a viewer), the row is read-only:
      *  the selection checkbox is hidden and the inline status/priority/module
      *  pickers render as static icons (no dropdown). Opening the issue and
      *  peeking still work. */

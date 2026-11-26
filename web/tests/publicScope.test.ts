@@ -108,7 +108,7 @@ describe("the mirror rule", () => {
     expect(publicSynthetic("/auth/me")?.status).toBe(401);
     expect(publicSynthetic("/projects/3/my-role")).toEqual({
       status: 200,
-      body: { role: null, enforced: true, is_admin: false },
+      body: { role: null, is_admin: false },
     });
     expect(publicSynthetic("/issues/9/activity?limit=100")).toEqual({
       status: 200,

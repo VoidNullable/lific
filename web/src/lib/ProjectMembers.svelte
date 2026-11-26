@@ -50,8 +50,7 @@
   let loadError = $state("");
 
   // Am I allowed to manage membership? Instance admin, or a `lead` row for
-  // this project. Read-only for everyone else (viewer/maintainer/non-member
-  // who can still see the list while enforcement is off).
+  // this project. Read-only for everyone else (viewer/maintainer).
   let amLead = $derived(
     !!currentUser?.is_admin ||
       members.some((m) => m.user_id === currentUser?.id && m.role === "lead"),

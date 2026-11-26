@@ -43,7 +43,7 @@
     onChange?: () => void;
     /** Navigate to the issue list filtered by this label (#1). */
     onOpenLabel?: (name: string) => void;
-    /** LIF-234: when false (a viewer on this project, enforcement on), the
+    /** LIF-234: when false (a viewer on this project), the
      *  create row and all per-row mutate controls (recolor, rename, delete,
      *  merge) are hidden; labels render as read-only chips whose usage count
      *  still links out. Structure edits are maintainer-gated server-side. */

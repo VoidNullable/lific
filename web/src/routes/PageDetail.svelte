@@ -70,7 +70,7 @@
   });
 
   // LIF-234: a project page follows that project's role; a workspace page
-  // (no project) is admin-only once enforcement is on.
+  // (no project) is admin-only.
   const isWorkspacePage = $derived(page != null && page.project_id === null);
   const editable = $derived(
     editableProp ?? (isWorkspacePage ? projectRole.canEditWorkspacePage : projectRole.canEdit),
@@ -344,13 +344,11 @@
   });
 
   const readOnlyNote = $derived(
-    (isWorkspacePage ? projectRole.globalEnforced : projectRole.enforced)
-      ? inPublicScope()
-        ? "Read-only. This is the public view of the project; sign in to edit or comment."
-        : isWorkspacePage
-          ? "Workspace pages can only be edited by an admin."
-          : "You're a viewer on this project. You can still comment."
-      : null,
+    inPublicScope()
+      ? "Read-only. This is the public view of the project; sign in to edit or comment."
+      : isWorkspacePage
+        ? "Workspace pages can only be edited by an admin."
+        : "You're a viewer on this project. You can still comment.",
   );
 </script>
 
