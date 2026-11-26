@@ -1518,10 +1518,20 @@ export interface UploadResponse {
 
 export type AttachmentEntity = "issue" | "page" | "comment";
 
-/** Upload one file. Optionally link it to an entity immediately (used by the
- *  detail-view "Attach" affordance); otherwise it stays unlinked until the
- *  entity's markdown is saved and re-scanned server-side. Returns a discrete
- *  result so callers can surface the exact server reason via a toast. */
+/** Fetch a public image only after the person accepts the paste offer. */
+export function importImageAttachment(
+  url: string,
+  link: { entity_type: AttachmentEntity; entity_id: number } | null,
+  signal: AbortSignal,
+): Promise<RequestResult<UploadResponse>> {
+  return request("/attachments/import", {
+    method: "POST",
+    body: JSON.stringify({ url, ...link }),
+    signal,
+  });
+}
+
+/** Upload one file, optionally linking it to an existing entity. */
 export async function uploadAttachment(
   file: File,
   link?: { entity_type: AttachmentEntity; entity_id: number },

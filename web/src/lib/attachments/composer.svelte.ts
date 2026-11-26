@@ -15,14 +15,16 @@
 // renders the shared chrome around whatever markup the caller passes.
 
 import type { AttachmentEntity } from "../api";
+import { importImageAttachment } from "../api";
 import {
   createUploadController,
   type ComposerText,
   type UploadController,
   type UploadSource,
 } from "./uploads.svelte";
-import { filesFromClipboard, insertSnippetAt } from "./compose";
+import { filesFromClipboard, insertSnippetAt, markdownFor } from "./compose";
 import { describePaste, isBigPaste, pasteFileFrom } from "./bigPaste";
+import { imageUrlFromPaste, replacePastedUrl } from "./imageUrl";
 
 export type { ComposerText, UploadSource };
 
@@ -52,6 +54,9 @@ export interface PendingPaste {
 }
 
 export interface ComposerAttachments {
+  readonly imagePaste: { url: string; busy: boolean; error: string | null } | null;
+  importImage: () => void;
+  keepImageUrl: () => void;
   readonly uploads: UploadController;
   /** Non-null while a big paste is waiting on Enter (attach) or Esc (inline). */
   readonly pendingPaste: PendingPaste | null;
@@ -85,6 +90,8 @@ export function createComposerAttachments(
   opts: ComposerAttachmentsOptions,
 ): ComposerAttachments {
   let pendingPaste = $state<PendingPaste | null>(null);
+  let imagePaste = $state<{ url: string; offset: number; busy: boolean; error: string | null } | null>(null);
+  let imageRequest: AbortController | null = null;
   let fileInput: HTMLInputElement | null = null;
 
   /** Splice `insert` in over the current selection, verbatim (no markdown
@@ -111,6 +118,7 @@ export function createComposerAttachments(
   }
 
   const uploads = createUploadController({
+    externalPending: () => imagePaste?.busy ?? false,
     link: opts.link,
     onInsert: insertMarkdown,
     text: opts.text,
@@ -128,6 +136,14 @@ export function createComposerAttachments(
       return;
     }
     const text = e.clipboardData?.getData("text/plain") ?? "";
+    const imageUrl = imageUrlFromPaste(text);
+    if (imageUrl && !imagePaste?.busy) {
+      e.preventDefault();
+      const offset = opts.el()?.selectionStart ?? opts.text.read().length;
+      spliceAtCaret(text);
+      imagePaste = { url: imageUrl, offset: offset + text.indexOf(imageUrl), busy: false, error: null };
+      return;
+    }
     if (!isBigPaste(text)) return;
     // Hold the text rather than dropping it in. Nothing is lost either way:
     // both answers put the content somewhere, and the textarea keeps focus so
@@ -154,6 +170,13 @@ export function createComposerAttachments(
   }
 
   function handleKeydown(e: KeyboardEvent): boolean {
+    if (imagePaste && !imagePaste.busy && (e.key === "Enter" || e.key === "Escape")) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Enter") void importImage();
+      else imagePaste = null;
+      return true;
+    }
     if (!pendingPaste) return false;
     if (e.key === "Enter") {
       e.preventDefault();
@@ -187,12 +210,38 @@ export function createComposerAttachments(
     }
   }
 
+  async function importImage() {
+    const held = imagePaste;
+    if (!held || held.busy) return;
+    held.busy = true;
+    held.error = null;
+    const request = new AbortController();
+    imageRequest = request;
+    const result = await importImageAttachment(held.url, opts.link?.() ?? null, request.signal);
+    if (request.signal.aborted) return;
+    imageRequest = null;
+    if (!result.ok) {
+      held.busy = false;
+      held.error = result.error;
+      return;
+    }
+    const snippet = markdownFor(result.data, result.data.filename);
+    const replacement = replacePastedUrl(opts.text.read(), held.url, held.offset, snippet);
+    if (replacement) opts.text.write(replacement.text, replacement.caret);
+    imagePaste = null;
+  }
+
   function destroy() {
+    imageRequest?.abort();
+    imagePaste = null;
     pendingPaste = null;
     uploads.destroy();
   }
 
   return {
+    get imagePaste() { return imagePaste; },
+    importImage: () => { void importImage(); },
+    keepImageUrl: () => { imagePaste = null; opts.el()?.focus(); },
     get uploads() {
       return uploads;
     },
