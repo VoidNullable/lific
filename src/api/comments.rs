@@ -186,7 +186,6 @@ fn create_for_parent(
     let (comment, project_id) = db.transaction(|conn| {
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
-        let member_scoped = authz::authz_enforced_conn(conn)?;
         let actor = CommentActor::from(&user);
         let comment = comments::create_comment_with_mentions(
             conn,
@@ -195,7 +194,6 @@ fn create_for_parent(
             actor,
             AttachmentActor::Authenticated(actor),
             content,
-            member_scoped,
         )?;
         Ok((comment, project_id))
     })?;
@@ -263,18 +261,17 @@ pub(super) async fn create_page_comment(
 
 /// GET /api/projects/{id}/mention-candidates — the users who may be
 /// `@`-mentioned in this project's comments. Viewer-gated (same as reading
-/// any project data); a non-member is denied when enforcement is on, and the
-/// candidate list itself is member-scoped in that mode so it never leaks a
-/// user who can't see the project. Powers the composer autocomplete.
+/// any project data); a non-member is denied, and the candidate list itself
+/// is member-scoped so it never leaks a user who can't see the project.
+/// Powers the composer autocomplete.
 pub(super) async fn mention_candidates(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<MentionCandidate>>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let member_scoped = authz::authz_enforced(&db)?;
     with_read(&db, |conn| {
-        comments::mention_candidates(conn, Some(project_id), member_scoped)
+        comments::mention_candidates(conn, Some(project_id))
     })
     .map(Json)
 }
@@ -310,7 +307,6 @@ pub(super) async fn update_comment_handler(
         // before ownership (the Viewer gate above runs first, so a comment the
         // caller can't see never reveals whether they wrote it), now checked
         // in the same transaction as the write (PR #31).
-        let member_scoped = authz::authz_enforced_conn(conn)?;
         // The *editor's* reach, not the original author's: pulling a new
         // attachment reference into the body is the editor's act.
         let comment = comments::update_comment_with_mentions(
@@ -319,7 +315,6 @@ pub(super) async fn update_comment_handler(
             project_id,
             AttachmentActor::Authenticated(CommentActor::from(&user)),
             &input.content,
-            member_scoped,
         )?;
         Ok((comment, context))
     })?;
@@ -408,6 +403,8 @@ mod tests {
             },
         )
         .unwrap();
+        crate::db::queries::members::upsert_member(&conn, project.id, user.id, Role::Viewer)
+            .unwrap();
 
         let issue = crate::db::queries::create_issue(
             &conn,
@@ -1082,6 +1079,7 @@ mod tests {
                 "Mine",
             )
             .unwrap();
+            grant(&conn, project.id, &[owner.id, other.id]);
             (other, comment.id)
         };
 
@@ -1245,6 +1243,14 @@ mod tests {
 
     /// Set up a test app with a user, project, and page pre-seeded.
     /// Returns (app, page_id, user_id).
+    /// Give each user a maintainer role in `project_id`.
+    fn grant(conn: &rusqlite::Connection, project_id: i64, users: &[i64]) {
+        for &user_id in users {
+            crate::db::queries::members::upsert_member(conn, project_id, user_id, Role::Maintainer)
+                .unwrap();
+        }
+    }
+
     fn setup_page_comment_test() -> (axum::Router, i64, i64) {
         let db = crate::db::open_memory().expect("test db");
 
@@ -1274,6 +1280,7 @@ mod tests {
             )
             .unwrap();
 
+            grant(&conn, project.id, &[user.id]);
             let page = crate::db::queries::create_page(
                 &conn,
                 &CreatePage {
@@ -1473,6 +1480,7 @@ mod tests {
                 "Owner's page comment",
             )
             .unwrap();
+            grant(&conn, project.id, &[owner.id, other.id]);
             (other, comment.id)
         };
 
@@ -1668,6 +1676,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[author.id, mentioned.id]);
             (author, mentioned, issue.id, project.id)
         };
 
@@ -1769,6 +1778,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[author.id, ada.id, bob.id]);
             (author, ada, bob, issue.id)
         };
 
@@ -1804,10 +1814,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mention_candidates_endpoint_open_lists_all_non_bots() {
+    async fn mention_candidates_endpoint_lists_members() {
         let (app, _issue_id, _) = setup_comment_test();
         // setup_comment_test creates exactly one project (id 1) in a fresh
-        // in-memory DB. Flag is OFF (default), so all non-bot users list.
+        // in-memory DB, with the commenter as its member.
         let resp = json_get(&app, "/api/projects/1/mention-candidates").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let cands = parse_json(resp).await;
@@ -1817,8 +1827,8 @@ mod tests {
 
     #[tokio::test]
     async fn authz_scoping_excludes_non_member_from_candidates_and_resolution() {
-        // Enforcement ON: only members are candidates, and a mention of a
-        // non-member never resolves.
+        // Only members are candidates, and a mention of a non-member never
+        // resolves.
         let (db, _admin, lead, _maintainer, _viewer, non_member, project_id) =
             setup_membership_test();
 
@@ -2021,6 +2031,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[user.id]);
             (user, issue.id, page.id)
         };
 

@@ -23,7 +23,7 @@ The id is also the comment's anchor: `#comment-7` on its issue or page scrolls t
 
 Write `@username` to mention someone. A mention starts at `@` after a space, punctuation or the start of the text, followed by letters, digits, underscores and hyphens, so an email address such as `ada@example.com` is not a mention.
 
-Lific resolves mentions when a comment is saved or edited, matching usernames without case and counting each person once. Who can be mentioned depends on [enforcement](/docs/concepts/projects#when-membership-is-enforced): while it is on, only the project's human members; while it is off, any human account. Connected agents cannot be mentioned. A token that matches nobody stays as plain text.
+Lific resolves mentions when a comment is saved or edited, matching usernames without case and counting each person once. Only people who can see the project can be mentioned: its human members and the instance administrators. Connected agents cannot be mentioned. A token that matches nobody stays as plain text.
 
 A resolved mention is recorded on the comment, shown as a mention in the web UI, and written to the activity log. Lific sends no email or other notification.
 
@@ -39,7 +39,7 @@ Only a comment's author or an instance administrator can edit or delete it, and 
 
 Deleting a comment moves it to the trash, and it disappears from threads, search and public projects at once. There is no way to restore a single deleted comment. Comments deleted together with their issue or page come back when it is restored; a comment deleted on its own stays in the trash until the [retention sweep](/docs/configuration#retention) removes it.
 
-Anyone who can read an issue or page can comment on it. For a workspace page, while enforcement is on, that means administrators.
+Anyone who can read an issue or page can comment on it. For a workspace page, that means administrators.
 
 ## Reading a thread
 

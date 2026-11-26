@@ -42,11 +42,33 @@ pub(crate) const MAX_REQUEST_BODY_BYTES: usize =
 #[cfg(test)]
 static MCP_HANDLER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Per-request user identity storage.
-/// Protected from races by MCP_HANDLER_LOCK ensuring serial access.
-/// Uses unwrap_or_else to recover from poison (e.g. if a handler panics).
+/// Per-request user identity storage for direct-call tests, one slot per test
+/// thread.
+///
+/// It used to be one process-wide slot. Tests that hold `MCP_HANDLER_LOCK`
+/// serialized among themselves, but a test that calls a tool with no user
+/// set (expecting the first-admin fallback) could read whatever user another
+/// thread's test had just written. Legacy authorization let any user write
+/// anything, so the leak never showed; with roles always enforced it turns
+/// into spurious 403s. Each test thread now sees only what it set.
 #[cfg(test)]
-static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
+pub(crate) struct ThreadRequestUser;
+
+#[cfg(test)]
+impl ThreadRequestUser {
+    pub(crate) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'static, Option<AuthUser>>> {
+        thread_local! {
+            static SLOT: &'static Mutex<Option<AuthUser>> =
+                Box::leak(Box::new(Mutex::new(None)));
+        }
+        SLOT.with(|slot| slot.lock())
+    }
+}
+
+#[cfg(test)]
+pub(crate) static MCP_REQUEST_USER: ThreadRequestUser = ThreadRequestUser;
 
 /// Per-request external origin used for structured resource links.
 /// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
@@ -1180,14 +1202,6 @@ mod tests {
         let unbound_key = crate::auth::create_api_key(&pool, "mcp-operator", None).unwrap();
         let project = {
             let conn = pool.write().unwrap();
-            crate::db::queries::settings::update(
-                &conn,
-                crate::db::queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {

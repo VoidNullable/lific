@@ -32,19 +32,6 @@ pub struct InstanceSettings {
     /// the first admin without a password (see `/api/auth/auto-login`). Browser
     /// scope only — REST/MCP are unaffected. Dangerous on a public instance.
     pub web_auto_login: bool,
-    /// LIF-196: runtime flip for project-scoped default-deny authorization
-    /// (epic LIF-194). When true, `authz::require_role` enforces the full
-    /// viewer/maintainer/lead membership matrix, including gated reads.
-    /// See `src/authz.rs` and LIF-DOC-7.
-    ///
-    /// LIF-261: the *seed* default now depends on the install. `ensure` sets it
-    /// on for a fresh DB (zero users at row-creation time) and off for an
-    /// upgrade (users already exist); the code-level fallback in [`defaults`]
-    /// stays off for a never-seeded read. Once the row exists it's
-    /// authoritative — flip it at runtime via [`update`]. The agent-first flow
-    /// keeps working with the default on because unbound API keys are
-    /// operator-trusted.
-    pub authz_enforced: bool,
     /// LIF-492: an active issue whose `updated_at` is at least this many days
     /// old is "stale": claimed, then left. The briefing lists such issues on
     /// their own and `list_issues(stale=true)` finds them.
@@ -64,27 +51,15 @@ pub struct InstanceSettingsPatch {
     pub session_lifetime_days: Option<i64>,
     pub login_message: Option<String>,
     pub web_auto_login: Option<bool>,
-    pub authz_enforced: Option<bool>,
     pub stale_active_days: Option<i64>,
     pub stale_active_reset_days: Option<i64>,
 }
 
 /// Seed the settings row if it does not exist yet, using `allow_signup` as the
 /// initial value (sourced from TOML at startup). No-op once the row exists.
-///
-/// LIF-261: on **row creation only**, `authz_enforced` is seeded to whether the
-/// DB has zero users at that moment. A fresh install (no users yet) enforces
-/// project-scoped authorization by default; an upgrade from a pre-2.0 instance
-/// (users already exist) seeds it off, preserving today's behavior. Because
-/// this is `INSERT OR IGNORE`, the row is authoritative once written — a later
-/// `ensure` (e.g. every `lific start`) never re-evaluates or flips it, so an
-/// admin who turns enforcement off stays off. The zero-user agent-first flow
-/// still works with the default on because unbound API keys are
-/// operator-trusted (see `src/authz.rs`).
 pub fn ensure(conn: &Connection, allow_signup: bool) -> Result<(), LificError> {
     conn.execute(
-        "INSERT OR IGNORE INTO instance_settings (id, allow_signup, authz_enforced)
-         VALUES (1, ?1, (SELECT COUNT(*) FROM users) = 0)",
+        "INSERT OR IGNORE INTO instance_settings (id, allow_signup) VALUES (1, ?1)",
         params![allow_signup],
     )?;
     Ok(())
@@ -100,7 +75,6 @@ fn defaults() -> InstanceSettings {
         session_lifetime_days: 30,
         login_message: None,
         web_auto_login: false,
-        authz_enforced: false,
         stale_active_days: 3,
         stale_active_reset_days: 14,
     }
@@ -113,7 +87,7 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
     match conn.query_row(
         "SELECT allow_signup, instance_name, signup_email_domains,
                     session_lifetime_days, login_message, web_auto_login,
-                    authz_enforced, stale_active_days, stale_active_reset_days
+                    stale_active_days, stale_active_reset_days
              FROM instance_settings WHERE id = 1",
         [],
         |row| {
@@ -125,9 +99,8 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
                 session_lifetime_days: row.get(3)?,
                 login_message: row.get(4)?,
                 web_auto_login: row.get::<_, i64>(5)? != 0,
-                authz_enforced: row.get::<_, i64>(6)? != 0,
-                stale_active_days: row.get(7)?,
-                stale_active_reset_days: row.get(8)?,
+                stale_active_days: row.get(6)?,
+                stale_active_reset_days: row.get(7)?,
             })
         },
     ) {
@@ -180,7 +153,6 @@ pub fn update(
     };
 
     let web_auto_login = patch.web_auto_login.unwrap_or(cur.web_auto_login);
-    let authz_enforced = patch.authz_enforced.unwrap_or(cur.authz_enforced);
 
     let stale_active_days = match patch.stale_active_days {
         Some(d) => {
@@ -210,7 +182,7 @@ pub fn update(
         "UPDATE instance_settings
          SET allow_signup = ?1, instance_name = ?2, signup_email_domains = ?3,
              session_lifetime_days = ?4, login_message = ?5, web_auto_login = ?6,
-             authz_enforced = ?7, stale_active_days = ?8, stale_active_reset_days = ?9,
+             stale_active_days = ?7, stale_active_reset_days = ?8,
              updated_at = datetime('now')
          WHERE id = 1",
         params![
@@ -220,7 +192,6 @@ pub fn update(
             session_lifetime_days,
             login_message,
             web_auto_login,
-            authz_enforced,
             stale_active_days,
             stale_active_reset_days,
         ],
@@ -313,10 +284,6 @@ mod tests {
             !s.web_auto_login,
             "single-user auto-login is off by default"
         );
-        assert!(
-            !s.authz_enforced,
-            "authorization enforcement is off by default"
-        );
     }
 
     #[test]
@@ -342,87 +309,6 @@ mod tests {
         assert!(
             !get(&c).unwrap().allow_signup,
             "row already existed, left intact"
-        );
-    }
-
-    // ── LIF-261: authz_enforced seed default depends on the install ──────
-
-    /// Insert a user directly so `ensure`'s `COUNT(*) FROM users` sees a
-    /// non-fresh DB. Password hash content is irrelevant to the seed logic.
-    fn seed_a_user(c: &Connection) {
-        c.execute(
-            "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
-             VALUES ('someone', 'someone@test.local', 'x', 'Someone', 0, 0)",
-            [],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn ensure_seeds_authz_enforced_on_for_a_fresh_install() {
-        let pool = conn();
-        let c = pool.write().unwrap();
-        // Zero users at seed time → fresh install → enforce by default.
-        ensure(&c, true).unwrap();
-        assert!(
-            get(&c).unwrap().authz_enforced,
-            "a fresh DB (no users) must seed authz_enforced ON"
-        );
-    }
-
-    #[test]
-    fn ensure_seeds_authz_enforced_off_when_users_already_exist() {
-        let pool = conn();
-        let c = pool.write().unwrap();
-        // An upgrade from a pre-2.0 instance: users predate the seed.
-        seed_a_user(&c);
-        ensure(&c, true).unwrap();
-        assert!(
-            !get(&c).unwrap().authz_enforced,
-            "a DB that already has users must seed authz_enforced OFF (preserve behavior)"
-        );
-    }
-
-    #[test]
-    fn ensure_never_flips_authz_enforced_after_the_row_exists() {
-        let pool = conn();
-        let c = pool.write().unwrap();
-        // First ensure on a fresh DB seeds ON and writes the row.
-        ensure(&c, true).unwrap();
-        assert!(get(&c).unwrap().authz_enforced);
-        // Now users appear (people sign up). A later ensure — as every `lific
-        // start` runs — must NOT re-evaluate and flip enforcement off.
-        seed_a_user(&c);
-        ensure(&c, true).unwrap();
-        assert!(
-            get(&c).unwrap().authz_enforced,
-            "the seeded row is authoritative — a later ensure must never flip it"
-        );
-    }
-
-    #[test]
-    fn admin_can_turn_seeded_on_enforcement_back_off() {
-        let pool = conn();
-        let c = pool.write().unwrap();
-        ensure(&c, true).unwrap();
-        assert!(get(&c).unwrap().authz_enforced, "fresh install seeds ON");
-
-        // An admin flips it off at runtime…
-        let s = update(
-            &c,
-            InstanceSettingsPatch {
-                authz_enforced: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(!s.authz_enforced);
-
-        // …and a subsequent ensure (next `lific start`) leaves that choice intact.
-        ensure(&c, true).unwrap();
-        assert!(
-            !get(&c).unwrap().authz_enforced,
-            "ensure must respect the admin's later opt-out"
         );
     }
 
@@ -620,43 +506,5 @@ mod tests {
         )
         .unwrap();
         assert!(!s.web_auto_login);
-    }
-
-    // LIF-196: the authz_enforced runtime flag round-trips and defaults off.
-    #[test]
-    fn update_toggles_authz_enforced() {
-        let pool = conn();
-        let c = pool.write().unwrap();
-        assert!(!get(&c).unwrap().authz_enforced);
-
-        let s = update(
-            &c,
-            InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(s.authz_enforced);
-        // Persisted, and an unrelated patch leaves it intact.
-        let s = update(
-            &c,
-            InstanceSettingsPatch {
-                instance_name: Some("Solo".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(s.authz_enforced, "unrelated patch must not clear the flag");
-
-        let s = update(
-            &c,
-            InstanceSettingsPatch {
-                authz_enforced: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(!s.authz_enforced);
     }
 }

@@ -1,6 +1,6 @@
 //! `lific member <action>`: project membership from the CLI.
 //!
-//! LIF-290: with authorization enforcement on, this is how an operator grants
+//! LIF-290: this is how an operator grants
 //! a new user access to existing projects without touching the web UI.
 
 use crate::cli::{MemberAction, term, ui};

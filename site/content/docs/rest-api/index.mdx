@@ -85,17 +85,9 @@ A role is held on one project. Each role includes everything below it. The [proj
 
 A connected tool or OAuth client acts with the access of the person who owns it and never more. An operation that touches two projects, such as linking issues across them, needs the role in both.
 
-Each endpoint in this reference names the minimum role it checks. That is the rule when the instance setting `authz_enforced` is on, which is the default for new installs. With it on, a caller without the role gets `403`, and a project they cannot read is simply missing from lists, search and cross-project reads rather than appearing as an error.
+Each endpoint in this reference names the minimum role it checks. A caller without the role gets `403`, and a project they cannot read is simply missing from lists, search and cross-project reads rather than appearing as an error. Workspace pages (pages with no project) are administrator-only, for reads as well as writes.
 
-With `authz_enforced` off, which is how an instance upgraded from a version before project membership starts:
-
-- Endpoints that need `viewer` or `maintainer` accept any authenticated caller.
-- Endpoints that need `lead` accept the project's primary lead, any `lead` member or an administrator. A project with no lead can only be changed by an administrator.
-- Module, label and folder changes need `lead` instead of `maintainer`.
-- Deleting a project needs an administrator.
-- Workspace pages (pages with no project) are open to every caller. With enforcement on they are administrator-only, for reads as well as writes.
-
-`GET /api/projects/{id}/my-role` tells a client which role it holds and whether enforcement is on.
+`GET /api/projects/{id}/my-role` tells a client which role it holds.
 
 ## Requests
 

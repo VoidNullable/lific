@@ -1053,50 +1053,38 @@ pub fn extract_mention_usernames(body: &str) -> Vec<String> {
 
 /// List the users who may be `@`-mentioned in a given project's comments.
 ///
-/// When `member_scoped` is true (the caller passes the live `authz_enforced`
-/// flag), the candidate list is exactly the project's members — nobody who
-/// can't see the project is ever suggested. When false, every user is a
-/// candidate (legacy mode has no concept of project-hidden users). Bots are
+/// The candidates are the people who belong to the project, its members and
+/// the instance admins ([`crate::authz::BELONGS_TO_PROJECT_SQL`]), so nobody
+/// who can't see it is ever suggested. Bots are
 /// excluded: an `@`-mention targets a person, and a connected tool isn't one
 /// a human would address in a thread.
 ///
-/// `project_id = None` (workspace-level page) has no membership list, so the
-/// member-scoped branch returns an empty set — matching the design decision
-/// that workspace pages are admin-only surfaces.
+/// `project_id = None` (workspace-level page) has no membership list, so it
+/// returns an empty set, matching the design decision that workspace pages
+/// are admin-only surfaces.
 pub fn mention_candidates(
     conn: &Connection,
     project_id: Option<i64>,
-    member_scoped: bool,
 ) -> Result<Vec<crate::db::models::MentionCandidate>, LificError> {
-    let map_row = |row: &rusqlite::Row| {
-        Ok(crate::db::models::MentionCandidate {
-            user_id: row.get(0)?,
-            username: row.get(1)?,
-            display_name: row.get(2)?,
-        })
+    let Some(pid) = project_id else {
+        return Ok(Vec::new());
     };
-
-    let rows: Vec<crate::db::models::MentionCandidate> = if member_scoped {
-        let Some(pid) = project_id else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = conn.prepare_cached(
-            "SELECT u.id, u.username, u.display_name
-             FROM project_members m
-             JOIN users u ON u.id = m.user_id
-             WHERE m.project_id = ?1 AND u.is_bot = 0
-             ORDER BY u.username COLLATE NOCASE",
-        )?;
-        stmt.query_map(params![pid], map_row)?
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, username, display_name FROM users
-             WHERE is_bot = 0 ORDER BY username COLLATE NOCASE",
-        )?;
-        stmt.query_map([], map_row)?
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT u.id, u.username, u.display_name
+         FROM users u
+         WHERE u.is_bot = 0 AND {}
+         ORDER BY u.username COLLATE NOCASE",
+        crate::authz::BELONGS_TO_PROJECT_SQL
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::named_params! { ":project_id": pid }, |row| {
+            Ok(crate::db::models::MentionCandidate {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                display_name: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -1219,7 +1207,6 @@ pub fn create_comment_with_mentions(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     create_reconciled_comment(
         conn,
@@ -1228,7 +1215,6 @@ pub fn create_comment_with_mentions(
         author,
         attachments,
         content,
-        member_scoped,
         CommentKind::Comment,
     )
 }
@@ -1243,7 +1229,6 @@ pub fn create_verification_comment(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     create_reconciled_comment(
         conn,
@@ -1252,12 +1237,10 @@ pub fn create_verification_comment(
         author,
         attachments,
         content,
-        member_scoped,
         CommentKind::Verification,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_reconciled_comment(
     conn: &Connection,
     parent: CommentParent,
@@ -1265,11 +1248,10 @@ fn create_reconciled_comment(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
     kind: CommentKind,
 ) -> Result<Comment, LificError> {
     super::savepoint(conn, "create_comment_with_mentions", || {
-        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let candidates = mention_candidates(conn, project_id)?;
         let comment = insert_comment_row(conn, parent, author.user_id, content, kind)?;
         sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         super::attachments::sync_links(
@@ -1294,10 +1276,9 @@ pub fn update_comment_with_mentions(
     project_id: Option<i64>,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     super::savepoint(conn, "update_comment_with_mentions", || {
-        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let candidates = mention_candidates(conn, project_id)?;
         let comment = write_comment_content(conn, comment_id, content)?;
         sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         super::attachments::sync_links(
@@ -1542,7 +1523,6 @@ mod tests {
             editor,
             AttachmentActor::Authenticated(editor),
             &content,
-            true,
         )
         .unwrap();
         assert!(
@@ -1564,7 +1544,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(editor),
             &content,
-            true,
         )
         .unwrap();
         assert_eq!(
@@ -2529,10 +2508,11 @@ mod tests {
     }
 
     #[test]
-    fn mention_candidates_all_users_when_not_scoped() {
-        let (pool, _, _, _user_id) = setup();
+    fn mention_candidates_are_the_projects_human_members() {
+        let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
-        queries::users::create_user(
+        let project_id = queries::get_issue(&conn, issue_id).unwrap().project_id;
+        let ada = queries::users::create_user(
             &conn,
             &CreateUser {
                 username: "ada".into(),
@@ -2544,8 +2524,8 @@ mod tests {
             },
         )
         .unwrap();
-        // A bot must never be a candidate.
-        queries::users::create_user(
+        // A bot must never be a candidate, even as a member.
+        let botty = queries::users::create_user(
             &conn,
             &CreateUser {
                 username: "botty".into(),
@@ -2557,8 +2537,11 @@ mod tests {
             },
         )
         .unwrap();
+        for id in [user_id, ada.id, botty.id] {
+            queries::members::upsert_member(&conn, project_id, id, Role::Viewer).unwrap();
+        }
 
-        let cands = mention_candidates(&conn, None, false).unwrap();
+        let cands = mention_candidates(&conn, Some(project_id)).unwrap();
         let names: Vec<&str> = cands.iter().map(|c| c.username.as_str()).collect();
         assert!(names.contains(&"blake"));
         assert!(names.contains(&"ada"));
@@ -2569,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_candidates_member_scoped_excludes_non_members() {
+    fn mention_candidates_exclude_non_members_but_not_admins() {
         let pool = crate::db::open_memory().expect("test db");
         let conn = pool.write().unwrap();
         let project = queries::create_project(
@@ -2606,17 +2589,30 @@ mod tests {
         )
         .unwrap();
         queries::members::upsert_member(&conn, project.id, member.id, Role::Viewer).unwrap();
+        let admin = queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: "boss".into(),
+                email: "boss@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
 
-        let cands = mention_candidates(&conn, Some(project.id), true).unwrap();
+        let cands = mention_candidates(&conn, Some(project.id)).unwrap();
         let ids: Vec<i64> = cands.iter().map(|c| c.user_id).collect();
         assert!(ids.contains(&member.id));
+        assert!(ids.contains(&admin.id), "an admin sees every project");
         assert!(
             !ids.contains(&outsider.id),
             "non-member must not be a candidate"
         );
 
-        // A workspace page (no project) member-scoped yields nothing.
-        assert!(mention_candidates(&conn, None, true).unwrap().is_empty());
+        // A workspace page (no project) yields nothing.
+        assert!(mention_candidates(&conn, None).unwrap().is_empty());
     }
 
     #[test]
@@ -3115,7 +3111,6 @@ mod tests {
             actor,
             AttachmentActor::Authenticated(actor),
             "before",
-            false,
         )
         .unwrap();
 
@@ -3126,7 +3121,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(actor),
             &over_cap,
-            false,
         )
         .expect_err("reconciling a truncated reference set would unlink live attachments");
         assert!(
@@ -3146,7 +3140,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(actor),
             &at_cap,
-            false,
         )
         .expect("the cap itself is allowed");
     }

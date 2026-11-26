@@ -42,8 +42,8 @@
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import { getContext, tick } from "svelte";
-  // LIF-234: role-aware affordance gating. `canManage` = lead/admin (or
-  // enforcement off): identity edits, members, import and the danger zone.
+  // LIF-234: role-aware affordance gating. `canManage` = lead/admin:
+  // identity edits, members, import and the danger zone.
   // `canEdit` = maintainer/admin: label management.
   import { projectRole, loadProjectRole, deriveCanPublish } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
@@ -344,16 +344,14 @@
 
   const canManage = $derived(projectRole.canManage);
 
-  // LIF-465: publication is NOT a `canManage` affordance. `canManage` is true
-  // for everyone while `authz_enforced` is off, but the server's publication
-  // gate is the Lead gate, the one check legacy mode still enforces. Derived
-  // from the real answer instead: instance admin, a `lead` membership, or
-  // the project's own lead pointer (which a pre-LIF-195 project can have
-  // without a membership row).
+  // LIF-465: publication is NOT a `canManage` affordance. `canManage` fails
+  // open while the role is unknown, but the server's publication gate is the
+  // Lead gate. Derived from the real answer instead: instance admin, a `lead`
+  // membership, or the project's own lead pointer (which a pre-LIF-195
+  // project can have without a membership row).
   const canPublish = $derived(
     deriveCanPublish({
       role: projectRole.role,
-      enforced: projectRole.enforced,
       isAdmin: projectRole.isAdmin,
       isLead: project != null && currentUserId != null && project.lead_user_id === currentUserId,
     }),
@@ -558,7 +556,7 @@
       </nav>
 
       <div class="flex-1 min-w-0 max-w-[780px] flex flex-col gap-12">
-        {#if !canManage && projectRole.enforced}
+        {#if !canManage}
           <p class="flex items-center gap-2 text-body-sm text-[var(--text-muted)] rounded-lg bg-[var(--bg-subtle)] px-3.5 py-2.5">
             <Lock size={14} class="shrink-0" />
             Only a project lead or an admin can change these settings. Your sidebar group is yours to set.

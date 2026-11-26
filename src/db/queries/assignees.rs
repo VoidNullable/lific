@@ -99,16 +99,15 @@ pub fn assignments_by_issue(
     Ok(by_issue)
 }
 
-/// Whether `user_id` can see `project_id`: an admin, a member, or anyone
-/// while project authorization is off.
+/// Whether `user_id` belongs to `project_id` (see
+/// [`crate::authz::BELONGS_TO_PROJECT_SQL`]).
 fn can_see_project(conn: &Connection, user_id: i64, project_id: i64) -> Result<bool, LificError> {
-    if !crate::db::queries::settings::get(conn)?.authz_enforced {
-        return Ok(true);
-    }
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = ?1 AND is_admin = 1)
-             OR EXISTS(SELECT 1 FROM project_members WHERE user_id = ?1 AND project_id = ?2)",
-        params![user_id, project_id],
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM users u WHERE u.id = :user_id AND {})",
+            crate::authz::BELONGS_TO_PROJECT_SQL
+        ),
+        rusqlite::named_params! { ":user_id": user_id, ":project_id": project_id },
         |row| row.get(0),
     )?)
 }

@@ -29,7 +29,6 @@ pub fn run(
             session_days,
             login_message,
             auto_login,
-            authz_enforced,
             stale_active_days,
             stale_active_reset_days,
         } => {
@@ -56,7 +55,6 @@ pub fn run(
                 session_lifetime_days: session_days,
                 login_message,
                 web_auto_login: auto_login,
-                authz_enforced,
                 stale_active_days,
                 stale_active_reset_days,
             };
@@ -155,7 +153,6 @@ mod tests {
             session_days: None,
             login_message: None,
             auto_login,
-            authz_enforced: None,
             stale_active_days: None,
             stale_active_reset_days: None,
         }

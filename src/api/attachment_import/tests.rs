@@ -344,11 +344,6 @@ async fn import_stores_bytes_metadata_and_entity_link_and_checks_permissions_fir
             [],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO instance_settings (id, authz_enforced) VALUES (1, 1)",
-            [],
-        )
-        .unwrap();
         Some(ResolvedIdentity {
             user: AuthUser {
                 id: 1,

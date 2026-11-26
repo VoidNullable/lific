@@ -115,10 +115,10 @@ export function publicSynthetic(path: string): { status: number; body: unknown }
   const pathname = path.split("?")[0];
   // No account. Components treat a 401 here as "not signed in".
   if (pathname === "/auth/me") return { status: 401, body: { error: "not signed in" } };
-  // A stranger is below Viewer with enforcement on: nothing may be changed
-  // and nothing may be said.
+  // A stranger is below Viewer: nothing may be changed and nothing may be
+  // said.
   if (/^\/projects\/\d+\/my-role$/.test(pathname)) {
-    return { status: 200, body: { role: null, enforced: true, is_admin: false } };
+    return { status: 200, body: { role: null, is_admin: false } };
   }
   // History is not public. The timeline simply has nothing in it.
   if (/^\/(issues|pages)\/\d+\/activity$/.test(pathname)) {

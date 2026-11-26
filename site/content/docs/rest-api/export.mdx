@@ -7,7 +7,7 @@ An **export** is for reading: Markdown files you can keep in a repository or ope
 
 ## Exports
 
-Exports need **viewer** on the project, or an administrator for a workspace page when enforcement is on. Two exports run at a time across the instance; a third is refused with `429` and `Retry-After: 30`. A download that makes no progress for 30 seconds, or runs longer than 30 minutes, is ended. Very large exports are refused with `400` before anything is written; [Limits](/docs/limits#exports) lists the ceilings.
+Exports need **viewer** on the project, or an administrator for a workspace page. Two exports run at a time across the instance; a third is refused with `429` and `Retry-After: 30`. A download that makes no progress for 30 seconds, or runs longer than 30 minutes, is ended. Very large exports are refused with `400` before anything is written; [Limits](/docs/limits#exports) lists the ceilings.
 
 ### GET `/api/export/issues/{identifier}`
 
@@ -69,7 +69,7 @@ Downloads the project as `<identifier>.lific.tar.gz` (`application/gzip`). **Lea
 
 ### POST `/api/project-archives`
 
-Imports an archive as a new project. **Administrator**, even when enforcement is off, because it creates a project and makes you its lead.
+Imports an archive as a new project. **Administrator**, because it creates a project and makes you its lead.
 
 Send `multipart/form-data` with exactly one field, named `archive`, holding the file. Any other field, or a second copy, is `400`. An upload over 128 MiB is `413`. An upload that stalls for 20 seconds, or takes longer than two minutes, is `400`.
 

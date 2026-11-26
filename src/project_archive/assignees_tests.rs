@@ -15,6 +15,8 @@ fn source() -> (DbPool, tempfile::TempDir, AttachmentStore) {
                       (2,'blake','blake@example.test','x',0),
                       (3,'outsider','outsider@example.test','x',0);
              INSERT INTO projects(id,name,identifier) VALUES (10,'Portable','LIF');
+             INSERT INTO project_members(project_id,user_id,role)
+               VALUES (10,2,'maintainer'),(10,3,'viewer');
              INSERT INTO issues(id,project_id,sequence,title)
                VALUES (30,10,1,'Named'),(31,10,2,'Anyone'),(32,10,3,'Stranger'),(33,10,4,'Free');",
         )

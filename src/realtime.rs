@@ -1946,14 +1946,6 @@ mod tests {
         let db = crate::db::open_memory().unwrap();
         let (auth_user, project_id, token) = {
             let conn = db.write().unwrap();
-            crate::db::queries::settings::update(
-                &conn,
-                crate::db::queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
             let user = crate::db::queries::users::create_user(
                 &conn,
                 &crate::db::models::CreateUser {

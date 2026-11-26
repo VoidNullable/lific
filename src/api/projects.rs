@@ -24,17 +24,7 @@ pub(super) fn sidebar_visibility(
 ) -> Result<Option<HashSet<i64>>, LificError> {
     let fresh = crate::auth::fresh_caller(conn, user_id)?;
     let effective = authz::effective_user(conn, &Some(crate::auth::fresh_auth_user(&fresh)));
-    if matches!(&effective, Some(user) if user.is_admin) || !authz::authz_enforced_conn(conn)? {
-        return Ok(None);
-    }
-    let Some(user) = effective else {
-        return Ok(Some(HashSet::new()));
-    };
-    Ok(Some(
-        crate::db::queries::members::list_project_ids_for_user(conn, user.id)?
-            .into_iter()
-            .collect(),
-    ))
+    authz::visible_project_ids_conn(conn, &effective)
 }
 
 /// REST ranks describe positions in the visible response, not storage ranks.
@@ -249,10 +239,7 @@ pub(super) async fn delete_project_handler(
     let event = RealtimeEvent::ProjectDeleted {
         project_id: project.id,
     };
-    match audience {
-        Some(user_ids) => realtime.send_to_users(event, user_ids),
-        None => realtime.send(event),
-    }
+    realtime.send_to_users(event, audience);
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -841,9 +828,9 @@ mod tests {
         assert_eq!(board["unassigned"].as_array().unwrap().len(), 1);
     }
 
-    /// LIF-364 (dr.leech's report): with `authz_enforced` ON, an instance
-    /// admin must see every project in `GET /api/projects` — including ones
-    /// they are not a member of — while a plain non-member sees none. This
+    /// LIF-364 (dr.leech's report): an instance admin must see every project
+    /// in `GET /api/projects`, including ones they are not a member of, while
+    /// a plain non-member sees none. This
     /// pins the full REST stack (identity extension → visible_project_ids →
     /// filter_visible), not just the authz unit.
     #[tokio::test]
@@ -942,26 +929,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_admin_can_delete_project() {
-        let (db, admin, lead, _, project_id) = setup_lead_test();
-
-        // Lead cannot delete
-        let lead_app = app_as_user(db.clone(), &lead);
-        let resp = lead_app
-            .clone()
-            .oneshot(
+    async fn only_the_lead_or_an_admin_can_delete_a_project() {
+        let (db, admin, lead, regular, project_id) = setup_lead_test();
+        let delete = |app: axum::Router, id: i64| async move {
+            app.oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/projects/{project_id}"))
+                    .uri(format!("/api/projects/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            .unwrap()
+            .status()
+        };
 
-        // Admin can delete
+        assert_eq!(
+            delete(app_as_user(db.clone(), &regular), project_id).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            delete(app_as_user(db.clone(), &lead), project_id).await,
+            StatusCode::OK
+        );
+
+        // An admin needs no role.
+        let other = seed_unowned_project(&db);
         let admin_app = app_as_user(db, &admin);
+        let project_id = other;
         let resp = admin_app
             .clone()
             .oneshot(
@@ -1019,13 +1014,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        let data = parse_json(resp).await;
-        // Distinct message tells the user *why* they can't edit: no lead exists.
-        assert!(
-            data["error"].as_str().unwrap_or("").contains("no lead"),
-            "expected 'no lead' in error, got: {}",
-            data["error"]
-        );
     }
 
     #[tokio::test]
@@ -1252,7 +1240,12 @@ mod tests {
     async fn reorder_allowed_for_non_lead_user() {
         // Unlike update_project (lead/admin-only), reordering is open to any
         // authenticated user with visibility since sidebar order is personal.
-        let (db, _, _, regular, _) = setup_lead_test();
+        let (db, _, _, regular, project_id) = setup_lead_test();
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::upsert_member(&conn, project_id, regular.id, Role::Viewer)
+                .unwrap();
+        }
         let app = app_as_user(db, &regular);
 
         // setup_lead_test already created project "LDT"; add a second.

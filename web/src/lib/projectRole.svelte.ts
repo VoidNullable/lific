@@ -8,18 +8,12 @@
 //
 // The store answers "what can I do on THIS project," not "who's on it":
 //   - canEdit   — may create/edit/delete content + drag on the board
-//                 (role >= maintainer, or admin, or enforcement off).
+//                 (role >= maintainer, or admin).
 //   - canManage — may touch project settings / danger zone / members /
-//                 import (role === lead, or admin, or enforcement off).
+//                 import (role === lead, or admin).
 //
-// ## Why enforcement-off keeps everything on
-//
-// When the instance setting `authz_enforced` is OFF (the local-first
-// default — see src/authz.rs), the server allows everyone effectively full
-// access, so the UI must look exactly as it always has. The derivation
-// below returns `canEdit = canManage = true` whenever `enforced` is false
-// or the user is a workspace admin. Only when enforcement is ON and the
-// user is a non-admin do we actually gate.
+// Every instance enforces project roles (LIF-518; see src/authz.rs), so the
+// derivation below always gates a non-admin by their role.
 //
 // ## Fail-open on load error
 //
@@ -35,52 +29,47 @@
 import { getMyProjectRole, me, type ProjectRole } from "./api";
 import { inPublicScope, onPublicScopeChange } from "./publicScope";
 
-/** The three inputs the pure derivation needs. Kept separate from the
- *  reactive store so the derivation can be unit-tested without runes. */
+/** The inputs the pure derivation needs. Kept separate from the reactive
+ *  store so the derivation can be unit-tested without runes. */
 export interface RoleInputs {
   role: ProjectRole | null;
-  enforced: boolean;
   isAdmin: boolean;
 }
 
 /** May the user create/edit/delete content (issues, pages, plans, modules,
- *  labels) and drag on the board? True when enforcement is off, the user is
- *  a workspace admin, or their role is maintainer-or-higher. */
+ *  labels) and drag on the board? True when the user is a workspace admin or
+ *  their role is maintainer-or-higher. */
 export function deriveCanEdit(i: RoleInputs): boolean {
-  if (!i.enforced || i.isAdmin) return true;
+  if (i.isAdmin) return true;
   return i.role === "maintainer" || i.role === "lead";
 }
 
 /** May the user manage the project itself — settings, danger zone, member
- *  management, import? True when enforcement is off, the user is a
- *  workspace admin, or their role is lead. */
+ *  management, import? True when the user is a workspace admin or their role
+ *  is lead. */
 export function deriveCanManage(i: RoleInputs): boolean {
-  if (!i.enforced || i.isAdmin) return true;
+  if (i.isAdmin) return true;
   return i.role === "lead";
 }
 
 /**
- * May the user publish this project to the open internet (LIF-465)?
- *
- * The one capability here that does NOT widen when enforcement is off. The
- * server gate is `require_role(.., Lead)`, the only level legacy mode still
- * denies, so `canManage` would show the publish panel to people the server
- * refuses. `isLead` is separate because a project whose lead predates LIF-195
- * can have `lead_user_id` set without a `project_members` row.
+ * May the user publish this project to the open internet (LIF-465)? The
+ * server gate is `require_role(.., Lead)`. Unlike `canManage` it doesn't fail
+ * open, and `isLead` counts because a project whose lead predates LIF-195 can
+ * have `lead_user_id` set without a `project_members` row.
  */
 export function deriveCanPublish(i: RoleInputs & { isLead?: boolean }): boolean {
   return i.isAdmin || i.role === "lead" || i.isLead === true;
 }
 
 /** May the user comment? Comments are Viewer-gated server-side (LIF-197),
- *  so ANY project member (viewer+) can comment — as can everyone when
- *  enforcement is off, and workspace admins. The only case that can't is a
- *  gated non-member, but they can't load the surface at all (the read is
- *  itself Viewer-gated), so in practice this is true wherever a document
- *  renders. Kept explicit so the composer stays enabled even when
- *  `canEdit` is false (the exact viewer case LIF-234 calls out). */
+ *  so ANY project member (viewer+) can comment, as can workspace admins. The
+ *  only case that can't is a non-member, but they can't load the surface at
+ *  all (the read is itself Viewer-gated), so in practice this is true
+ *  wherever a document renders. Kept explicit so the composer stays enabled
+ *  even when `canEdit` is false (the exact viewer case LIF-234 calls out). */
 export function deriveCanComment(i: RoleInputs): boolean {
-  if (!i.enforced || i.isAdmin) return true;
+  if (i.isAdmin) return true;
   return i.role === "viewer" || i.role === "maintainer" || i.role === "lead";
 }
 
@@ -95,52 +84,45 @@ class ProjectRoleState {
   /** The project this state currently describes; null before any load. */
   projectId = $state<number | null>(null);
   role = $state<ProjectRole | null>(null);
-  enforced = $state(false);
   isAdmin = $state(false);
+  /** False until a role answer for `projectId` arrives, and again when the
+   *  read fails. Every gate stays open meanwhile (see "Fail-open" above). */
+  known = $state(false);
   /** True while a fetch is in flight for the current project. */
   loading = $state(false);
   /** True once at least one load for `projectId` has resolved, so consumers
    *  can avoid flashing the gated view before we know the answer. */
   loaded = $state(false);
 
-  // ── Instance-wide signals (LIF-234), for workspace (project-less) pages ──
-  //
-  // Enforcement is an instance setting, so it's the same across projects —
-  // we keep the last-seen value here, sticky across project switches, so a
-  // workspace page (which has no project role to read) can still decide
-  // whether to gate. `null` = not yet learned from any my-role response.
-  globalEnforced = $state<boolean | null>(null);
   /** The signed-in user's workspace-admin flag, learned once via `me()`.
-   *  `null` = not yet learned. Workspace pages are admin-only once
-   *  enforcement is on, mirroring the server (authz::require_workspace_admin). */
+   *  `null` = not yet learned. Workspace pages are admin-only, mirroring the
+   *  server (authz::require_workspace_admin). */
   meIsAdmin = $state<boolean | null>(null);
 
-  /** May the user edit a WORKSPACE (project-less) page? Admin-only once
-   *  enforcement is on, exactly as the server enforces; fully open while
-   *  enforcement is off or before we've learned the flags (fail-open). */
+  /** May the user edit a WORKSPACE (project-less) page? Admin-only, exactly
+   *  as the server enforces; open before we've learned the flag (fail-open). */
   get canEditWorkspacePage(): boolean {
-    if (this.globalEnforced === false || this.globalEnforced === null) return true;
-    return this.meIsAdmin === true;
+    return this.meIsAdmin !== false;
   }
 
   private inputs(): RoleInputs {
-    return { role: this.role, enforced: this.enforced, isAdmin: this.isAdmin };
+    return { role: this.role, isAdmin: this.isAdmin };
   }
 
   get canEdit(): boolean {
-    return deriveCanEdit(this.inputs());
+    return !this.known || deriveCanEdit(this.inputs());
   }
   get canManage(): boolean {
-    return deriveCanManage(this.inputs());
+    return !this.known || deriveCanManage(this.inputs());
   }
   get canComment(): boolean {
-    return deriveCanComment(this.inputs());
+    return !this.known || deriveCanComment(this.inputs());
   }
   get readOnly(): boolean {
     return !this.canEdit;
   }
   get readOnlyReason(): string | null {
-    return readOnlyReason(this.inputs());
+    return this.known ? readOnlyReason(this.inputs()) : null;
   }
 }
 
@@ -165,7 +147,7 @@ export async function loadProjectRole(projectId: number): Promise<void> {
   // about the signed-in reader. Applied every call and never cached, so the
   // private answer is neither consulted here nor overwritten for later.
   if (inPublicScope()) {
-    apply(projectId, { role: null, enforced: true, isAdmin: false });
+    apply(projectId, { role: null, isAdmin: false });
     return;
   }
   // Already showing this project's answer.
@@ -179,10 +161,10 @@ export async function loadProjectRole(projectId: number): Promise<void> {
 
   // New project: reset visible state so a component doesn't read a stale
   // previous-project role during the fetch. Default to fail-open
-  // (enforced=false ⇒ canEdit/canManage true) until we hear otherwise.
+  // (known=false ⇒ canEdit/canManage true) until we hear otherwise.
   projectRole.projectId = projectId;
   projectRole.role = null;
-  projectRole.enforced = false;
+  projectRole.known = false;
   projectRole.isAdmin = false;
   projectRole.loaded = false;
   projectRole.loading = true;
@@ -200,21 +182,13 @@ export async function loadProjectRole(projectId: number): Promise<void> {
   // for the private view.
   if (inPublicScope()) {
     if (res.ok) {
-      cache.set(projectId, {
-        role: res.data.role,
-        enforced: res.data.enforced,
-        isAdmin: res.data.is_admin,
-      });
+      cache.set(projectId, { role: res.data.role, isAdmin: res.data.is_admin });
     }
     return;
   }
 
   if (res.ok) {
-    const inputs: RoleInputs = {
-      role: res.data.role,
-      enforced: res.data.enforced,
-      isAdmin: res.data.is_admin,
-    };
+    const inputs: RoleInputs = { role: res.data.role, isAdmin: res.data.is_admin };
     cache.set(projectId, inputs);
     apply(projectId, inputs);
   } else {
@@ -229,12 +203,10 @@ export async function loadProjectRole(projectId: number): Promise<void> {
 function apply(projectId: number, inputs: RoleInputs): void {
   projectRole.projectId = projectId;
   projectRole.role = inputs.role;
-  projectRole.enforced = inputs.enforced;
   projectRole.isAdmin = inputs.isAdmin;
+  projectRole.known = true;
   projectRole.loading = false;
   projectRole.loaded = true;
-  // Enforcement is instance-wide — remember it for workspace pages.
-  projectRole.globalEnforced = inputs.enforced;
 }
 
 // Crossing the public boundary in either direction throws the visible answer

@@ -81,7 +81,7 @@
     onOpenSearch: () => void;
     onMaybeCollapseSearch: () => void;
     onQuickCreate: () => void;
-    /** LIF-234: when false (a viewer on this project, enforcement on), the
+    /** LIF-234: when false (a viewer on this project), the
      *  "New issue" primary action is hidden — creation is maintainer-gated. */
     canEdit?: boolean;
     /** LIF-149 select-all, relocated into the sub-tab strip. How many rows

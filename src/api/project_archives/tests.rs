@@ -121,18 +121,6 @@ impl Instance {
         token
     }
 
-    fn enforce_authz(&self, on: bool) {
-        let conn = self.db.write().unwrap();
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(on),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
-
     fn project_count(&self) -> i64 {
         let conn = self.db.read().unwrap();
         conn.query_row("SELECT count(*) FROM projects", [], |r| r.get(0))
@@ -253,6 +241,11 @@ fn seed_project(instance: &Instance, lead: i64) -> i64 {
     .unwrap();
     conn.execute("UPDATE projects SET lead_user_id = ?1 WHERE id = 7", [lead])
         .unwrap();
+    conn.execute(
+        "INSERT INTO project_members (project_id, user_id, role) VALUES (7, ?1, 'lead')",
+        [lead],
+    )
+    .unwrap();
     7
 }
 
@@ -355,24 +348,17 @@ async fn capabilities_publish_the_web_profile_and_the_callers_own_import_right()
 }
 
 #[tokio::test]
-async fn a_regular_user_cannot_import_with_authorization_enforcement_either_way() {
-    for enforced in [false, true] {
-        let instance = Instance::new();
-        instance.enforce_authz(enforced);
-        let regular = instance.user("regular", false);
-        let session = instance.session(regular.id);
+async fn a_regular_user_cannot_import() {
+    let instance = Instance::new();
+    let regular = instance.user("regular", false);
+    let session = instance.session(regular.id);
 
-        let body = json(instance.get("/api/project-archives", Some(&session)).await).await;
-        assert_eq!(body["can_import"], false, "enforced={enforced}");
+    let body = json(instance.get("/api/project-archives", Some(&session)).await).await;
+    assert_eq!(body["can_import"], false);
 
-        let response = instance.upload(Some(&session), archive_body(b"junk")).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::FORBIDDEN,
-            "enforced={enforced}"
-        );
-        assert_eq!(instance.project_count(), 0);
-    }
+    let response = instance.upload(Some(&session), archive_body(b"junk")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(instance.project_count(), 0);
 }
 
 /// An admin demoted after the request was authenticated, but before the
@@ -457,7 +443,6 @@ async fn a_session_belonging_to_another_account_is_refused() {
 #[tokio::test]
 async fn export_admits_only_the_lead_and_instance_admins() {
     let instance = Instance::new();
-    instance.enforce_authz(true);
     let admin = instance.user("admin", true);
     let lead = instance.user("lead", false);
     let maintainer = instance.user("maintainer", false);
@@ -492,30 +477,6 @@ async fn export_admits_only_the_lead_and_instance_admins() {
             instance.export_status("POR", allowed.id).await,
             StatusCode::OK,
             "{} may export",
-            allowed.username
-        );
-    }
-}
-
-/// With enforcement off the classic `lead_user_id` pointer is still the gate,
-/// exactly as `require_project_lead` has always read it.
-#[tokio::test]
-async fn the_legacy_lead_gate_still_decides_when_enforcement_is_off() {
-    let instance = Instance::new();
-    let admin = instance.user("admin", true);
-    let lead = instance.user("lead", false);
-    let outsider = instance.user("outsider", false);
-    seed_project(&instance, lead.id);
-
-    assert_eq!(
-        instance.export_status("POR", outsider.id).await,
-        StatusCode::FORBIDDEN
-    );
-    for allowed in [&lead, &admin] {
-        assert_eq!(
-            instance.export_status("POR", allowed.id).await,
-            StatusCode::OK,
-            "{}",
             allowed.username
         );
     }
@@ -1015,7 +976,6 @@ async fn the_download_is_named_by_the_project_the_snapshot_exported() {
 #[tokio::test]
 async fn reassigning_an_identifier_does_not_expose_another_project() {
     let instance = Instance::new();
-    instance.enforce_authz(true);
     let lead = instance.user("lead", false);
     let project_id = seed_project(&instance, lead.id);
     {

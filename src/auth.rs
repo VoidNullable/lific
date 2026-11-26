@@ -3155,7 +3155,7 @@ mod tests {
     // ── LIF-294: [auth] required = false ─────────────────────────
 
     /// Router whose handler reports whether the request runs with the
-    /// operator bypass: with authz enforcement ON, `visible_project_ids`
+    /// operator bypass: `visible_project_ids`
     /// for a `None` user returns unrestricted (None) only inside an
     /// operator context.
     fn operator_probe_app(auth_state: AuthState, pool: db::DbPool) -> Router {
@@ -3183,7 +3183,6 @@ mod tests {
     async fn auth_not_required_credentialless_request_passes_as_operator() {
         let pool = test_db();
         seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
-        enable_enforcement(&pool);
         let mut state = test_auth_state(&pool);
         state.required = false;
 
@@ -3455,20 +3454,8 @@ mod tests {
     // user (unbound API key, legacy unbound OAuth token, "auth off" request)
     // to the first admin — so an unbound key passes the gate via
     // `identity.user.is_admin`. These drive a real route that runs
-    // `authz::require_role(.., Viewer)` in enforced mode behind the real
+    // `authz::require_role(.., Viewer)` behind the real
     // `require_api_key`: a 200 means the gate passed, a 403 means it denied.
-
-    fn enable_enforcement(pool: &db::DbPool) {
-        let conn = pool.write().unwrap();
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
 
     fn seed_project_id(pool: &db::DbPool, ident: &str) -> i64 {
         let conn = pool.write().unwrap();
@@ -3526,24 +3513,109 @@ mod tests {
         seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         let key = create_api_key(&pool, "operator", None).unwrap(); // unbound
         let project = seed_project_id(&pool, "OPM");
-        enable_enforcement(&pool);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(
             gate_status(app, &key).await,
             StatusCode::OK,
-            "an unbound (operator) API key must pass the Viewer gate in enforced mode"
+            "an unbound (operator) API key must pass the Viewer gate"
+        );
+    }
+
+    /// LIF-518: an instance that ran in legacy mode, upgraded. Roles are
+    /// enforced afterwards with nothing left to switch, an outsider is refused
+    /// a project they could read before, someone who wrote there keeps working
+    /// as a maintainer, and the operator's unbound key passes every gate it
+    /// passed in legacy mode.
+    #[tokio::test]
+    async fn a_legacy_instance_enforces_roles_after_the_upgrade() {
+        use crate::api::test_helpers::{app_as_user, json_get, json_post};
+        use crate::db::models::Role;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            crate::db::migrate::apply_up_to(&conn, 70);
+            crate::db::migrate::seed_pre_enforcement_instance(&conn, false);
+        }
+        let pool = db::open(&path).unwrap();
+
+        let user = |name: &str| {
+            let conn = pool.read().unwrap();
+            crate::db::queries::users::get_user_by_username(&conn, name).unwrap()
+        };
+        let (legacy, other) = (10, 11);
+        let issue_in =
+            |project: i64| serde_json::json!({ "project_id": project, "title": "After" });
+
+        let outsider = app_as_user(pool.clone(), &user("outsider"));
+        assert_eq!(
+            json_get(&outsider, &format!("/api/projects/{legacy}"))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_post(&outsider, "/api/issues", issue_in(legacy))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let author = user("author");
+        {
+            let conn = pool.read().unwrap();
+            assert_eq!(
+                crate::db::queries::members::get_member_role(&conn, legacy, author.id).unwrap(),
+                Some(Role::Maintainer)
+            );
+        }
+        let author_app = app_as_user(pool.clone(), &author);
+        assert_eq!(
+            json_post(&author_app, "/api/issues", issue_in(legacy))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_get(&author_app, &format!("/api/projects/{other}"))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // The unbound operator key: through the real middleware, then every
+        // gate on the identity it resolves to, on a project with no lead.
+        let key = create_api_key(&pool, "operator", None).unwrap();
+        for project in [legacy, other] {
+            let app = gate_app(test_auth_state(&pool), pool.clone(), project);
+            assert_eq!(gate_status(app, &key).await, StatusCode::OK);
+        }
+        let operator =
+            crate::resolve_caller::resolve_caller(&pool, None, crate::actor::Transport::Api)
+                .unwrap();
+        for project in [legacy, other] {
+            for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
+                crate::authz::require_role(&pool, &operator, project, min).unwrap();
+            }
+            crate::authz::require_structure_role(&pool, &operator, project).unwrap();
+            crate::authz::require_project_delete_role(&pool, &operator, project).unwrap();
+        }
+        crate::authz::require_workspace_admin(&pool, &operator).unwrap();
+        assert_eq!(
+            crate::authz::visible_project_ids(&pool, &operator).unwrap(),
+            None
         );
     }
 
     // THE test: a legacy pre-binding OAuth token also resolves to None, but it
     // is NOT an operator credential — it must stay Forbidden even in the exact
-    // same enforced-mode Viewer gate the operator key just passed.
+    // same Viewer gate the operator key just passed.
     #[tokio::test]
     async fn enforced_legacy_unbound_oauth_token_is_forbidden_via_middleware() {
         let pool = test_db();
         let project = seed_project_id(&pool, "OAM");
-        enable_enforcement(&pool);
         // Unbound OAuth token (user_id = None) — the LIF-204 legacy case.
         // No admin is seeded, so resolve_caller returns None and the enforced
         // gate default-denies. (With an admin present, resolve_caller would
@@ -3560,7 +3632,7 @@ mod tests {
     }
 
     // A key bound to a real (non-member) user is NOT an operator: even though
-    // it isn't None, it must be denied in enforced mode (no membership row),
+    // it isn't None, it must be denied (no membership row),
     // proving the operator bypass keys off the unbound binding, not the key
     // type in general.
     #[tokio::test]
@@ -3587,7 +3659,6 @@ mod tests {
             create_api_key(&pool, "bound", Some(uid)).unwrap()
         };
         let project = seed_project_id(&pool, "BNM");
-        enable_enforcement(&pool);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(

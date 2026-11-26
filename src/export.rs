@@ -321,8 +321,8 @@ fn bounded_issue_comments(conn: &Connection, issue_id: i64) -> Result<Vec<Commen
 /// The projects whose issues an export may name in relation frontmatter.
 ///
 /// `None` renders every relation: the local CLI export (whoever holds the
-/// database file already has all of it), an admin, or an instance without
-/// authorization enforcement. `Some(ids)` is a caller-scoped export over REST
+/// database file already has all of it), an admin, or the operator's unbound
+/// key. `Some(ids)` is a caller-scoped export over REST
 /// or MCP: a relation to an issue outside `ids` is left out entirely, with no
 /// placeholder or count, so the export does not reveal that the issue exists.
 /// This is the same "silently absent" rule every other cross-project read

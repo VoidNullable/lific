@@ -32,6 +32,7 @@ Read each section under [Release notes](#release-notes) for versions newer than 
 | `lific login` on other machines | Before a server moves to [v2.8](#v28) or later, upgrade those CLIs first. |
 | Multi-instance MCP | From [v2.9](#v29), every backend must have identical tool definitions. Upgrade them together before restarting the proxy. |
 | Agents running `lific mcp` over stdio | From [v2.11](#v211), stop every process that opens the database, agent sessions included, and upgrade them all together. |
+| Project permissions switched off | From [v3.0](#v30), project roles are always enforced. Roles are seeded from what people did, and anyone left out is reported. |
 
 `lific doctor` reports pending migrations without applying them. `lific doctor --repair` does apply them, so only run it after taking the backup.
 
@@ -47,7 +48,7 @@ Migrations run on this first start.
 
 1. Run `lific --version` using the executable the service actually runs, not another copy on your `PATH`.
 2. Run `lific doctor` and fix any configuration, database, backup, server, OAuth or MCP failure before letting users back in.
-3. Run `lific instance info` and confirm the database, public URL, sign-up policy and `authz_enforced` state are what you expect.
+3. Run `lific instance info` and confirm the database, public URL and sign-up policy are what you expect. On 3.0 or later, `lific doctor` also warns while anyone the [project roles upgrade](#project-roles-are-always-enforced) left without access is still waiting for a role.
 4. Review keys and memberships:
 
    ```shell
@@ -67,6 +68,37 @@ Migrations run on this first start.
 Newest first. Each section lists what changed for someone upgrading past that version.
 
 ### v3.0
+
+#### Project roles are always enforced
+
+Lific 3.0 removes the `authz_enforced` setting. Every instance checks project roles on every REST and MCP call, reads included. A user who is not a member of a project gets `403` on it, and the project is left out of their lists, search and cross-project reads. Administrators, and API keys created at the server's shell that are not bound to a user, still pass every check.
+
+An instance that already enforced roles upgrades unchanged. That covers every instance created with 2.1 or later, and any instance where an administrator turned the setting on. Run `lific instance info` on the old version first if you are not sure which kind you have.
+
+An instance that still had the setting off used to let anyone who could sign in read and write every project. So that people keep the access they actually used, migration 070 gives out roles from evidence on the first start of 3.0:
+
+- A project's primary lead gets `lead`, even if an existing membership gave them less.
+- Anyone who wrote in a project gets `maintainer`. Writing means creating or changing an issue, page, comment, plan or plan step there, as recorded in the [activity log](/docs/concepts/comments-and-activity#activity-log), or having authored a comment there. Work done by a connected tool counts for the person who owns it.
+- Existing memberships stay as they are. Administrators need no membership and get none, except that an administrator who is a project's primary lead gets a `lead` membership there like any other lead.
+- Everyone else gets no role. Someone who only ever read a project loses access to it.
+
+The activity log is the evidence, so if you set `[backup] audit_retention_days`, work older than that was already pruned and does not count.
+
+The server lists everyone who lost access in its log once, on that first start: every active account, and every connected tool without an owner, that could reach a project before and holds no role in it now, with the projects they lost. `lific doctor` shows the same list as a `project_access` warning until each entry is resolved, which happens when the user gets any role in the project, becomes an administrator, or is deactivated. To give someone their access back:
+
+```shell
+lific member add --project <PROJECT> --user <name> --role maintainer
+```
+
+Use `--role viewer` for read-only access, or `--all` in place of `--project` to add the user to every project. A project's lead can do the same from the project's Members settings.
+
+Other changes that come with it:
+
+- `PATCH /api/instance/settings` with `"authz_enforced": false` returns `400` and changes nothing. `true` is accepted and ignored. `GET /api/instance/settings` no longer returns the field, and `GET /api/projects/{id}/my-role` no longer returns `enforced`.
+- `lific instance set --authz-enforced` is gone, so a script that passes it fails. The web UI's instance settings no longer have a **Project permissions** switch.
+- The rules that only applied with the setting off are gone too. A project's lead can delete or archive it, `maintainer` can change modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only match people who can see the project.
+
+Going back to 2.11 means restoring the backup you took before upgrading: 2.11 refuses a database that 3.0 has migrated.
 
 #### Replace credential-in-path MCP connections
 
@@ -371,17 +403,9 @@ The largest upgrade since 2.0. Three things need an operator decision before you
 - `--config` is honored by `init` and service installation, and configuration/database discovery follows standard OS directories.
 - Private instances may set `[auth] required = false`; this is a shell-controlled operator setting and must remain local or firewalled.
 
-## Authorization rollout
+## Authorization
 
-An existing 2.0 instance keeps its persisted authorization setting during the upgrade. Inspect it before changing anything. With enforcement on, viewers can read and comment, maintainers can mutate project content and structure, and leads manage settings, membership, and deletion. Cross-project relations and plan-step links require the appropriate role in every project involved.
-
-To change the setting deliberately:
-
-```shell
-lific instance set --authz-enforced true
-```
-
-Before enabling it, ensure every human and bot that needs access has a project membership, and keep an operator-trusted key available for recovery. To roll back the setting on a private instance, use `--authz-enforced false` and then investigate the missing membership or role rather than distributing a broader key.
+Viewers can read and comment, maintainers can change project content and structure, and leads manage settings, membership and deletion. Cross-project relations and plan-step links require the role in every project involved. From 3.0 this is always enforced; [v3.0](#v30) explains how an instance that had it switched off is upgraded. Keep an operator-trusted key available for recovery rather than handing out a broader key when someone is missing a membership.
 
 For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe anywhere others can reach it. Startup requires a loopback bind and an absent, empty, loopback, or private-network `public_url`. Treat both settings as operator changes that require shell access and a verification step.
 

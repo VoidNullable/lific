@@ -110,7 +110,7 @@ Events are JSON objects with a `type`:
 | `project.created`, `project.updated`, `project.deleted` | `project_id`, sometimes `seq` | `project.updated` also covers pages, plans, comments, modules, labels, folders and attachments in the project. |
 | `projects.reordered` | none | Your sidebar order changed, from another tab or device. |
 | `project_groups.changed` | none | Your sidebar groups changed. |
-| `resync.required` | none | Refetch everything you show, for example after an administrator changed `authz_enforced`. |
+| `resync.required` | none | Refetch everything you show, for example after the connection fell too far behind to be sent every event. |
 | `sync_required` | `project_id` | The answer to a `resume` that can no longer be replayed. Backfill from `/changes`. |
 | `activity.baseline` | `day_count` | The answer to `activity.baseline.request`. |
 

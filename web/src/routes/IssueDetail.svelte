@@ -73,8 +73,7 @@
     editable?: boolean;
   } = $props();
 
-  // LIF-234: content edits require maintainer+ once enforcement is on;
-  // commenting stays available for viewers.
+  // LIF-234: content edits require maintainer+; commenting stays available for viewers.
   const editable = $derived(editableProp ?? projectRole.canEdit);
   const canComment = $derived(projectRole.canComment);
 
@@ -571,11 +570,9 @@
   });
 
   const readOnlyNote = $derived(
-    projectRole.enforced
-      ? inPublicScope()
-        ? "Read-only. This is the public view of the project; sign in to edit or comment."
-        : "You're a viewer on this project. You can still comment."
-      : null,
+    inPublicScope()
+      ? "Read-only. This is the public view of the project; sign in to edit or comment."
+      : "You're a viewer on this project. You can still comment.",
   );
 </script>
 

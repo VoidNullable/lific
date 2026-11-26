@@ -14,7 +14,7 @@ Most pages belong to a project. A workspace page belongs to no project and is me
 | Identifier | `APP-DOC-3`, numbered within the project | `DOC-3`, numbered across the workspace |
 | Folders | Yes | No |
 | Labels | Yes, from its project | No |
-| Who can read it | Anyone who can read the project | While [membership is enforced](/docs/concepts/projects#when-membership-is-enforced), administrators only. Otherwise everyone. |
+| Who can read it | Anyone who can read the project | Administrators only |
 | Who can change it | `maintainer` on the project | The same as reading it |
 
 A page stays where it was created. It cannot move to another project or between a project and the workspace. To move one, create it in the new place and delete the old one.
@@ -58,7 +58,7 @@ Folder names are not unique. Tools that take a folder by name, such as `folder` 
 
 Deleting a folder deletes every folder beneath it too. The pages inside are not deleted: they move to the project root. Folders have no trash.
 
-Creating, renaming and deleting folders takes `maintainer` while membership is enforced, and `lead` while it is off, the same as modules and labels.
+Creating, renaming and deleting folders takes `maintainer`, the same as modules and labels.
 
 ## Labels
 

@@ -138,6 +138,6 @@ An explicit `project` always wins. The binding never changes what a call means: 
 
 ## You are your own identity
 
-Each tool connected with `lific connect`, or approved through OAuth, gets its own bot account and credential. Your writes are attributed to that bot in the [activity log](/docs/concepts/comments-and-activity#activity-log), with `mcp` as the transport, and everyone who can see the project sees them. You act with your owner's project access and never more. Where membership is enforced, reading and commenting take `viewer`, writing issues, pages and plans takes `maintainer`, and project settings take `lead`. See [Projects](/docs/concepts/projects#members-and-roles).
+Each tool connected with `lific connect`, or approved through OAuth, gets its own bot account and credential. Your writes are attributed to that bot in the [activity log](/docs/concepts/comments-and-activity#activity-log), with `mcp` as the transport, and everyone who can see the project sees them. You act with your owner's project access and never more. Reading and commenting take `viewer`, writing issues, pages and plans takes `maintainer`, and project settings take `lead`. See [Projects](/docs/concepts/projects#members-and-roles).
 
 Comments belong to their authors. `edit_comment` and `delete_comment` refuse a comment you did not write, unless the calling account is an administrator.

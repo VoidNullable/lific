@@ -379,7 +379,7 @@ Deletes one resource.
 | `identifier` | `string` | Yes | `APP-1` for an issue, `APP-DOC-1` or `DOC-1` for a page, `APP-PLAN-2` for a plan, `APP` for a project, or the name of a module, label or folder. |
 | `project` | `string` | Depends | Required when deleting a module, label or folder, since those are found by name within a project. |
 
-A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring) with its comments. Deleting a project takes `lead`, or an administrator when membership is not enforced. An unrecognized `resource_type` returns a line naming the accepted values.
+A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring) with its comments. Deleting a project takes `lead`. An unrecognized `resource_type` returns a line naming the accepted values.
 
 ## Pages
 
@@ -425,7 +425,7 @@ Creates a page in a project, or a workspace page when `project` is omitted.
 | `status` | `string` | No | `draft` (default), `active`, `complete` or `archived`. |
 | `labels` | `string[]` | No | Label names. Labels belong to a project, so this is ignored on workspace pages. |
 
-Workspace pages take an administrator when membership is enforced.
+Workspace pages take an administrator.
 
 `create_page`, `update_page` and `edit_page` all accept content over the 30,000-character read budget of `get_page`. When the saved content is over it, the response adds one line saying so and suggesting a split, or moving old history to an archive page, because readers will get an outline instead of the whole page.
 

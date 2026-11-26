@@ -264,9 +264,8 @@ pub fn change_role(
 /// `Conflict` when the target is the project's sole lead), and then repairs
 /// `projects.lead_user_id` if the removed user was the denormalized primary
 /// lead: reassigned to the remaining lead with the lowest `user_id`
-/// (deterministic), or cleared to `NULL` if none remain (matches the
-/// existing "unowned project" carve-out — `require_lead_legacy` already
-/// handles `lead_user_id IS NULL` as admin-only). The reassignment check is
+/// (deterministic), or cleared to `NULL` if none remain (an unowned project
+/// is admin-managed until someone is made lead). The reassignment check is
 /// unconditional on the removed member's role (not just `Lead`): it's a
 /// pointer-hygiene fix-up for whoever `lead_user_id` names, independent of
 /// their current `project_members` role, which also self-heals the rare

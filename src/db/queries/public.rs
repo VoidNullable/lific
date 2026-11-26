@@ -506,7 +506,6 @@ mod tests {
                 },
                 AttachmentActor::TrustedLocal,
                 "hello",
-                false,
             )
             .unwrap();
         }
@@ -561,7 +560,6 @@ mod tests {
                 },
                 AttachmentActor::TrustedLocal,
                 "hello",
-                false,
             )
             .unwrap();
         }

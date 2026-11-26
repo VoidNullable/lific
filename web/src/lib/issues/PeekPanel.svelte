@@ -125,11 +125,7 @@
     if (token !== loadToken) return;
     permissionsChecked = true;
     permissionsFailed = !roleRes.ok;
-    editable = roleRes.ok && deriveCanEdit({
-      role: roleRes.data.role,
-      enforced: roleRes.data.enforced,
-      isAdmin: roleRes.data.is_admin,
-    });
+    editable = roleRes.ok && deriveCanEdit({ role: roleRes.data.role, isAdmin: roleRes.data.is_admin });
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
     if (cmtRes.ok) {

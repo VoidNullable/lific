@@ -37,8 +37,7 @@ enum Gate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Classification {
-    /// Denies below `Gate`; enforced identically flag-on, and (for the
-    /// legacy branch) reproduces pre-LIF-194 behavior — see `authz.rs`.
+    /// Denies below `Gate`; see `authz.rs`.
     Gated(Gate),
     /// Cross-project read: never denies, filters via
     /// `authz::visible_project_ids` instead (LIF-DOC-7's "visibility
@@ -359,7 +358,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // role-aware UI affordances.
         (("GET", "/api/projects/{id}/my-role"), Gated(Viewer)),
         // @mention autocomplete candidates (LIF-263) — Viewer-gated, and
-        // member-scoped in the query layer when enforcement is on.
+        // member-scoped in the query layer.
         (
             ("GET", "/api/projects/{id}/mention-candidates"),
             Gated(Viewer),
