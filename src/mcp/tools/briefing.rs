@@ -389,7 +389,7 @@ impl LificMcp {
         if conventions_hint {
             let _ = writeln!(
                 header,
-                "{ident} has no conventions page yet. Ask the user how this project works with agents, then create one from a template with manage_resource(resource_type='project', action='update', project='{ident}', conventions='ai_managed', 'human_managed' or 'human_owned'), or pass conventions='none' to stop this reminder."
+                "No conventions page yet. Ask the user how agents should work here, then add one with manage_resource, or set conventions='none' to stop this reminder."
             );
         }
 
@@ -1114,20 +1114,27 @@ impl LificMcp {
                     None,
                     Some("updated"),
                     Some("desc"),
-                    Some(RECENT_PAGES),
+                    Some(RECENT_PAGES + 1),
                     None,
                 )
             })?;
-            if pages.items.is_empty() {
+            // The conventions page is either printed above or turned off.
+            let pages: Vec<_> = pages
+                .items
+                .into_iter()
+                .filter(|page| !page.conventions)
+                .take(RECENT_PAGES as usize)
+                .collect();
+            if pages.is_empty() {
                 return Ok(None);
             }
             return Ok(Some(Section {
                 key: "pages",
-                items: pages.items.iter().map(page_item).collect(),
+                items: pages.iter().map(page_item).collect(),
                 heading: "Recently updated pages".into(),
                 summary: None,
-                lines: pages.items.iter().map(describe).collect(),
-                total: pages.items.len(),
+                lines: pages.iter().map(describe).collect(),
+                total: pages.len(),
                 total_is_floor: false,
                 more: format!("list_resources(resource_type='page', project='{ident}')"),
             }));

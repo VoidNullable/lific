@@ -91,7 +91,16 @@ fn delete_page(m: &LificMcp, identifier: &str) {
     assert!(!out.starts_with("Error"), "got: {out}");
 }
 
-const HINT: &str = "has no conventions page yet";
+const HINT: &str = "No conventions page yet.";
+
+/// The briefing's text and its structured response, for absence checks.
+fn briefing_everywhere(m: &LificMcp, ident: &str) -> String {
+    let out = m.get_briefing(Parameters(GetBriefingInput {
+        project: Some(ident.into()),
+        ..Default::default()
+    }));
+    format!("{}\n{}", out.text, out.structured.unwrap())
+}
 
 #[test]
 fn creating_a_project_with_each_template_starts_its_conventions_page() {
@@ -172,9 +181,21 @@ fn a_briefing_prints_a_non_empty_conventions_page_first() {
 fn an_empty_off_or_deleted_conventions_page_puts_nothing_in_the_briefing() {
     let (m, _guard) = mcp();
     create_project(&m, "OFF", None);
-    let empty = briefing(&m, "OFF");
-    assert!(!empty.contains("## Conventions"), "{empty}");
+    let empty = briefing_everywhere(&m, "OFF");
+    assert!(!empty.contains("OFF-DOC-1"), "{empty}");
+    assert!(!empty.contains("Conventions"), "{empty}");
     assert!(!empty.contains(HINT), "{empty}");
+    // Asked for by name, it is still listed like any page.
+    let named = m.get_briefing(Parameters(GetBriefingInput {
+        project: Some("OFF".into()),
+        pages: Some(vec!["OFF-DOC-1".into()]),
+        ..Default::default()
+    }));
+    assert!(
+        named.text.contains("OFF-DOC-1 Conventions"),
+        "{}",
+        named.text
+    );
 
     set_content(&m, "OFF-DOC-1", "Close issues with a comment.");
     assert!(briefing(&m, "OFF").contains("## Conventions for OFF"));
@@ -191,13 +212,14 @@ fn an_empty_off_or_deleted_conventions_page_puts_nothing_in_the_briefing() {
         )
     })
     .unwrap();
-    let off = briefing(&m, "OFF");
-    assert!(!off.contains("## Conventions"), "{off}");
+    let off = briefing_everywhere(&m, "OFF");
+    assert!(!off.contains("OFF-DOC-1"), "{off}");
+    assert!(!off.contains("Conventions"), "{off}");
     assert!(!off.contains("Close issues with a comment."), "{off}");
 
     delete_page(&m, "OFF-DOC-1");
-    let deleted = briefing(&m, "OFF");
-    assert!(!deleted.contains("## Conventions"), "{deleted}");
+    let deleted = briefing_everywhere(&m, "OFF");
+    assert!(!deleted.contains("OFF-DOC-1"), "{deleted}");
     assert!(
         !deleted.contains(HINT),
         "a deleted page is a choice: {deleted}"
@@ -238,7 +260,8 @@ fn a_project_without_a_page_gets_a_hint_until_it_has_one_or_dismisses_it() {
     let out = briefing(&m, "OLD");
     assert!(
         out.contains(
-            "OLD has no conventions page yet. Ask the user how this project works with agents"
+            "\nNo conventions page yet. Ask the user how agents should work here, then add one \
+             with manage_resource, or set conventions='none' to stop this reminder.\n"
         ),
         "{out}"
     );
@@ -284,7 +307,8 @@ fn create_page_makes_a_conventions_page_only_when_the_project_has_none() {
     assert_eq!(page.title, "House rules");
     assert_eq!(page.identifier, "CPG-DOC-2");
 
-    // Restoring the old one brings it back as an ordinary page.
+    // With a replacement made, restoring the old one brings it back as an
+    // ordinary page.
     let old = m
         .read(|conn| {
             Ok(conn.query_row(
@@ -307,6 +331,18 @@ fn create_page_makes_a_conventions_page_only_when_the_project_has_none() {
         ..Default::default()
     }));
     assert!(workspace.starts_with("Error"), "{workspace}");
+}
+
+#[test]
+fn restoring_a_deleted_conventions_page_with_no_replacement_keeps_its_role() {
+    let (m, _guard) = mcp();
+    create_project(&m, "RST", None);
+    let id = conventions(&m, "RST").unwrap().id;
+    delete_page(&m, "RST-DOC-1");
+    assert!(conventions(&m, "RST").is_none());
+    let restored = m.write(|conn| queries::restore_page(conn, id)).unwrap();
+    assert!(restored.conventions);
+    assert_eq!(conventions(&m, "RST").unwrap().id, id);
 }
 
 #[test]
