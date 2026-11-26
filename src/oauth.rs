@@ -127,17 +127,16 @@ impl AuthorizationRequest<'_> {
     }
 }
 
-/// Extract the session credential a browser would present: the `Authorization:
-/// Bearer` header first, then the `lific_token` cookie. Returns an empty string
-/// when neither is present, so the CSRF binding is still well-defined for the
+/// Extract the session credential a browser would present: an
+/// `Authorization: Bearer` header when there is one, usable or not, otherwise
+/// the `lific_token` cookie. A header with another scheme (a basic-auth proxy's)
+/// is not a Lific credential and is ignored, the same rule as
+/// [`crate::auth::require_api_key`]. Returns an empty string when there is no
+/// credential, so the CSRF binding is still well-defined for the
 /// unauthenticated case. Used to bind a CSRF token to its session both when the
 /// authorize page is rendered and when the approval is submitted.
 fn session_credential(headers: &HeaderMap) -> String {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
+    crate::auth::bearer_credential(headers)
         .or_else(|| {
             headers
                 .get("cookie")
@@ -2636,11 +2635,7 @@ async fn revoke_token(
     axum::Form(req): axum::Form<RevokeRequest>,
 ) -> Response {
     // Require authentication -- only authenticated users/tokens can revoke.
-    let caller_token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
+    let caller_token = crate::auth::bearer_credential(&headers);
 
     let is_authenticated = match &caller_token {
         Some(t) if t.starts_with("lific_sess_") => match state.db.read() {
@@ -2935,6 +2930,24 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn session_credential_reads_the_cookie_only_without_a_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "lific_token=lific_sess_cookie".parse().unwrap());
+        assert_eq!(session_credential(&headers), "lific_sess_cookie");
+
+        // Another scheme is a proxy's business; the cookie still applies.
+        for other in ["Basic eDp5", "Token abc"] {
+            headers.insert("authorization", other.parse().unwrap());
+            assert_eq!(session_credential(&headers), "lific_sess_cookie", "{other}");
+        }
+        // A Bearer header decides alone, whatever its case, even when empty.
+        headers.insert("authorization", "bearer lific_sess_header".parse().unwrap());
+        assert_eq!(session_credential(&headers), "lific_sess_header");
+        headers.insert("authorization", "Bearer".parse().unwrap());
+        assert_eq!(session_credential(&headers), "");
+    }
 
     fn test_oauth_app() -> (Router, DbPool) {
         test_oauth_app_with_register_limit(1000)

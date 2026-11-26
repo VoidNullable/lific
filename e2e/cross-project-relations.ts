@@ -66,14 +66,13 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`server did not answer at ${url} within ${timeoutMs}ms`);
 }
 
-/** Calls the REST API from inside the page, with the session's token. */
+/** Calls the REST API from inside the page, on the session cookie. */
 async function api(page: Page, path: string, body?: unknown): Promise<any> {
   return page.evaluate(
     async ([path, body]) => {
       const res = await fetch(`/api${path}`, {
         method: body === undefined ? "GET" : "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
           "Content-Type": "application/json",
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -90,8 +89,8 @@ async function login(page: Page, base: string, identity: string) {
   await page.fill("#login-identity", identity);
   await page.fill("#login-password", PASSWORD);
   await page.click("button[type=submit]");
-  await page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 15_000 });
-  await page.waitForFunction(() => !!localStorage.getItem("lific_token"));
+  // The app leaves the login route once the session cookie is set.
+  await page.waitForURL((url) => !url.hash.includes("login"), { timeout: 15_000 });
 }
 
 function relationField(page: Page, label: string) {

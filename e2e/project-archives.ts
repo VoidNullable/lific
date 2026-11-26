@@ -84,7 +84,7 @@ async function instance(name: string, seed: boolean) {
   const login = async (identity: string) => {
     const res = await fetch(`${base}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identity, password: PASSWORD }) });
     assert.equal(res.status, 200, await res.clone().text());
-    return (await res.json()).token as string;
+    return cookieSession(res);
   };
   const token = await login(admin.username);
   const api = async (path: string, method = "GET", body?: unknown) => {
@@ -102,17 +102,26 @@ function watch(page: Page) {
     if (message.type() !== "error") return;
     // Chromium reports intentional HTTP rejections and the lost-response probe.
     if (/^Failed to load resource:.*(400|403|409|422|net::ERR_FAILED)/.test(message.text())) return;
-    errors.push(message.text());
+    // A tab told another one signed out confirms it with the server, which
+    // answers that probe 401.
+    if (/^Failed to load resource:.*401/.test(message.text()) && message.location().url.endsWith("/api/auth/me")) return;
+    errors.push(`${message.text()} (${message.location().url})`);
   });
+}
+
+/** The session a sign-in response set. The body never carries it. */
+function cookieSession(res: Response): string {
+  for (const cookie of res.headers.getSetCookie()) {
+    const token = cookie.match(/^lific_token=(lific_sess_[^;]+)/)?.[1];
+    if (token) return token;
+  }
+  throw new Error(`no session cookie in ${res.url} response`);
 }
 
 async function signedPage(base: string, token: string, width = 1280) {
   const context = await browser!.newContext({ viewport: { width, height: 900 } });
   await context.addCookies([{ name: "lific_token", value: token, url: base, httpOnly: true, sameSite: "Lax" }]);
   await context.route("https://fonts.googleapis.com/**", (route) => route.fulfill({ status: 200, contentType: "text/css", body: "" }));
-  await context.addInitScript((token) => {
-    if (!localStorage.getItem("lific_token")) localStorage.setItem("lific_token", token);
-  }, token);
   const page = await context.newPage();
   watch(page);
   await page.goto(`${base}/projects/new`);
@@ -127,13 +136,15 @@ async function visible(page: Page, text: string) {
   }
 }
 
+/** Another tab signed in: the shared cookie changes and that tab says so on
+ *  the session channel. */
 async function changeSession(page: Page, base: string, token: string) {
   await page.context().addCookies([{ name: "lific_token", value: token, url: base, httpOnly: true, sameSite: "Lax" }]);
-  await page.evaluate((token) => {
-    const oldValue = localStorage.getItem("lific_token");
-    localStorage.setItem("lific_token", token);
-    window.dispatchEvent(new StorageEvent("storage", { key: "lific_token", oldValue, newValue: token }));
-  }, token);
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("lific:session");
+    channel.postMessage("signed-in");
+    channel.close();
+  });
 }
 
 async function staleDownload(page: Page, base: string, leave: () => Promise<void>) {
@@ -376,16 +387,18 @@ async function main() {
   await visible(destination, "The import may have completed");
   const refreshed = await fetch(`${b.base}/api/auth/me/refresh`, { method: "POST", headers: { Authorization: `Bearer ${secondToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ password: PASSWORD }) });
   assert.equal(refreshed.status, 200);
-  const freshToken = (await refreshed.json()).token;
+  const freshToken = cookieSession(refreshed);
   assert.notEqual(freshToken, secondToken);
   await changeSession(destination, b.base, freshToken);
   await visible(destination, "The import may have completed");
   await destination.reload();
   await visible(destination, "The import may have completed");
   assert.equal(await destination.evaluate((key) => sessionStorage.getItem(key), secondKey), "1");
+  await destination.context().clearCookies({ name: "lific_token" });
   await destination.evaluate(() => {
-    localStorage.removeItem("lific_token");
-    window.dispatchEvent(new Event("lific:session-change"));
+    const channel = new BroadcastChannel("lific:session");
+    channel.postMessage("signed-out");
+    channel.close();
   });
   // Signed out, the import page is not one a reader may stay on: the app
   // sends them to login, set to come back here afterwards.

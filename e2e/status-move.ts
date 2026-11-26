@@ -69,7 +69,6 @@ async function api(page: Page, method: string, path: string, body?: unknown): Pr
       const res = await fetch(`/api${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
           "Content-Type": "application/json",
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -88,7 +87,6 @@ async function signIn(context: BrowserContext, base: string, identity: string, p
   await page.fill("#login-password", password);
   await page.click("button[type=submit]");
   await page.waitForURL((url) => !url.href.includes("login"), { timeout: 15_000 });
-  await page.waitForFunction(() => localStorage.getItem("lific_token"), null, { timeout: 15_000 });
   return page;
 }
 

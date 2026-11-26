@@ -35,6 +35,8 @@
     saveSession,
     clearSession,
     me,
+    probeSession,
+    sessionKey,
     listProjects,
     onSessionChange,
     type Project,
@@ -199,12 +201,12 @@
     }
   }
 
-  // LIF-215: single-user mode. On a cold load with no session, ask the
-  // instance whether web auto-login is enabled; if so, silently mint an admin
-  // session before the redirect logic can bounce us to /login. We start
-  // "bootstrapping" only when there's no session, so the logged-in common case
-  // never shows a spinner.
-  let bootstrapping = $state(!hasSession());
+  // The session is an HttpOnly cookie the page cannot read, so every cold load
+  // asks the server (`/api/auth/me`) who it is before the redirect logic runs;
+  // a signed-out reader learns it is anonymous the same way (a 401 there is
+  // the normal answer, not an error). LIF-215: when it is not signed in and
+  // the instance has web auto-login on, silently mint an admin session first.
+  let bootstrapping = $state(true);
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —
@@ -255,25 +257,14 @@
 
   onMount(async () => {
     // Probe the instance once; its auto-login flag decides single-user mode.
-    const inst = await getInstance();
+    // The session probe runs alongside it.
+    const [inst] = await Promise.all([getInstance(), probeSession()]);
 
-    // LIF-215 follow-up: trust a stored session only if it still validates.
-    // `hasSession()` only checks localStorage — an expired token (server
-    // rejects with 401) would otherwise look valid, skip auto-login, and leave
-    // the user stuck with a dead session. Clear it so the flow below can self-
-    // heal in single-user mode (or fall through to /login otherwise).
-    if (hasSession()) {
-      const probe = await me();
-      if (!probe.ok && probe.status === 401) {
-        clearSession();
-      }
-    }
-
-    // Single-user mode: no valid session → silently mint a fresh admin session
-    // (covers both a cold load with no token and a just-expired one).
+    // Single-user mode: no valid session, so silently mint a fresh admin
+    // session (covers both a cold load with no cookie and an expired one).
     if (!hasSession() && inst.ok && inst.data.web_auto_login) {
       const res = await autoLogin();
-      if (res.ok) saveSession(res.data.token);
+      if (res.ok) saveSession();
     }
 
     setSignedOut(!hasSession());
@@ -491,13 +482,13 @@
     }, REALTIME_HEARTBEAT_MS);
   }
 
-  async function reconnectAfterFailedRealtimeAttempt(sessionToken: string | null) {
+  async function reconnectAfterFailedRealtimeAttempt(attemptSession: string | null) {
     const session = await me();
 
     // A stale probe must not clear a session established after this socket
     // attempt ended. Network failures have no HTTP status and must keep
     // reconnecting so a temporarily unavailable server can recover.
-    if (realtimeDisposed || localStorage.getItem("lific_token") !== sessionToken) return;
+    if (realtimeDisposed || sessionKey() !== attemptSession) return;
 
     if (!session.ok && session.status === 401) {
       clearSession();
@@ -557,7 +548,7 @@
     if (opened || isSignedOut()) {
       scheduleRealtimeReconnect();
     } else {
-      void reconnectAfterFailedRealtimeAttempt(localStorage.getItem("lific_token"));
+      void reconnectAfterFailedRealtimeAttempt(sessionKey());
     }
   }
 

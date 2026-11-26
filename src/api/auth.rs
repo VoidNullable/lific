@@ -11,12 +11,41 @@ use crate::error::LificError;
 
 use super::{require_admin, require_user, with_read, with_write};
 
+/// Whether this response's session cookie is marked `Secure`.
+///
+/// `public_url`'s scheme decides ([`crate::config::AuthConfig::from_server`]),
+/// with one exception: a request addressed to a loopback name over plain HTTP,
+/// the default local install. Safari before 27 silently drops a `Secure` cookie
+/// on `http://localhost`, and the cookie is the web app's only credential, so
+/// such a browser could never stay signed in. Loopback traffic never crosses a
+/// network, so `Secure` protects nothing there. A request that a proxy reports
+/// as HTTPS, or that names any other host, keeps the configured flag.
+fn cookie_secure(auth_cfg: &crate::config::AuthConfig, headers: &HeaderMap) -> bool {
+    if !auth_cfg.secure_cookies {
+        return false;
+    }
+    let plain_http = super::websocket_request_scheme(headers)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"));
+    let loopback = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| {
+            let host = authority.host();
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host);
+            crate::config::is_localhost_host(host)
+        });
+    !(plain_http && loopback)
+}
+
 /// Build a Set-Cookie header for the session token with security flags.
 ///
-/// LIF-207: `secure` gates the `Secure` attribute. It's on by default and only
-/// disabled for an explicitly-`http://` deployment, because browsers silently
-/// drop a `Secure` cookie over plain HTTP — which would break the OAuth approve
-/// flow (the one place the cookie is actually read) on a local-first install.
+/// LIF-207: `secure` gates the `Secure` attribute, see [`cookie_secure`].
+/// Browsers silently drop a `Secure` cookie over plain HTTP, and the cookie is
+/// how the web app stays signed in.
 fn session_cookie(token: &str, expires_at: &str, secure: bool) -> String {
     use chrono::DateTime;
     // Parse expiry for Max-Age calculation; fall back to 30 days
@@ -178,10 +207,11 @@ pub(super) async fn auth_signup(
         Ok((user, session))
     })?;
 
+    let secure = cookie_secure(&auth_cfg, &headers);
     let mut headers = HeaderMap::new();
     headers.insert(
         "set-cookie",
-        session_cookie(&session.token, &session.expires_at, auth_cfg.secure_cookies)
+        session_cookie(&session.token, &session.expires_at, secure)
             .parse()
             .unwrap(),
     );
@@ -196,7 +226,6 @@ pub(super) async fn auth_signup(
                 "display_name": user.display_name,
                 "is_admin": user.is_admin,
             },
-            "token": session.token,
             "expires_at": session.expires_at,
         })),
     ))
@@ -310,10 +339,14 @@ pub(super) async fn auth_login(
         reservation.refund();
     }
 
+    // The session token travels only in the HttpOnly cookie. Returning it in
+    // the body as well would hand it to page script, which is the one place a
+    // browser session must not be readable. Scripts use API keys.
+    let secure = cookie_secure(&auth_cfg, &headers);
     let mut headers = HeaderMap::new();
     headers.insert(
         "set-cookie",
-        session_cookie(&session.token, &session.expires_at, auth_cfg.secure_cookies)
+        session_cookie(&session.token, &session.expires_at, secure)
             .parse()
             .unwrap(),
     );
@@ -328,7 +361,6 @@ pub(super) async fn auth_login(
                 "display_name": user.display_name,
                 "is_admin": user.is_admin,
             },
-            "token": session.token,
             "expires_at": session.expires_at,
         })),
     ))
@@ -351,6 +383,7 @@ pub(super) async fn auth_login(
 pub(super) async fn auth_auto_login(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, LificError> {
     let conn = db.write()?;
     let settings = crate::db::queries::settings::get(&conn)?;
@@ -386,9 +419,13 @@ pub(super) async fn auth_auto_login(
     let mut headers = HeaderMap::new();
     headers.insert(
         "set-cookie",
-        session_cookie(&session.token, &session.expires_at, auth_cfg.secure_cookies)
-            .parse()
-            .unwrap(),
+        session_cookie(
+            &session.token,
+            &session.expires_at,
+            cookie_secure(&auth_cfg, &request_headers),
+        )
+        .parse()
+        .unwrap(),
     );
 
     Ok((
@@ -400,7 +437,6 @@ pub(super) async fn auth_auto_login(
                 "display_name": admin.display_name,
                 "is_admin": admin.is_admin,
             },
-            "token": session.token,
             "expires_at": session.expires_at,
         })),
     ))
@@ -411,23 +447,21 @@ pub(super) async fn auth_logout(
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, LificError> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v: &str| v.strip_prefix("Bearer "))
-        .map(|s: &str| s.trim())
-        .ok_or_else(|| LificError::BadRequest("missing authorization header".into()))?;
-
-    if token.starts_with("lific_sess_") {
+    // The middleware already authenticated whichever credential this is. Only
+    // a browser session, from the header or the cookie, is deleted; an API key
+    // or OAuth token just gets the cookie cleared.
+    if let Ok(token) = crate::auth::session_bearer_token(&headers) {
         let conn = db.write()?;
-        crate::db::queries::users::delete_session(&conn, token)?;
+        crate::db::queries::users::delete_session(&conn, &token)?;
     }
 
     // Clear the session cookie
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "set-cookie",
-        clear_cookie(auth_cfg.secure_cookies).parse().unwrap(),
+        clear_cookie(cookie_secure(&auth_cfg, &headers))
+            .parse()
+            .unwrap(),
     );
 
     Ok((resp_headers, Json(serde_json::json!({"logged_out": true}))))
@@ -660,9 +694,10 @@ pub(super) struct RefreshSessionRequest {
 ///
 /// So: one endpoint whose entire contract is "same user, newer session".
 ///
-/// - The caller must present a live `lific_sess_` bearer token. An API key,
-///   an OAuth token or no credential is refused: those are precisely the
-///   credentials the recency rule exists to keep out.
+/// - The caller must present a live `lific_sess_` session, in the cookie or
+///   as a bearer token. An API key, an OAuth token or no credential is
+///   refused: those are precisely the credentials the recency rule exists to
+///   keep out.
 /// - In password mode a `password` is required, verified off the writer
 ///   (Argon2 is expensive), and then re-confirmed against the stored hash
 ///   inside the transaction, so a password changed mid-request cannot be used.
@@ -673,7 +708,7 @@ pub(super) struct RefreshSessionRequest {
 ///   the account has is left alone, which is the difference between this and
 ///   the password-change lockdown.
 /// - Nothing is written and no cookie is emitted until every check has passed.
-///   A failure leaves the old bearer token and the old cookie working.
+///   A failure leaves the old session working.
 // Axum handlers take their dependencies as extractors, so the count is the
 // dependency list, not a design smell to be refactored into a struct.
 #[allow(clippy::too_many_arguments)]
@@ -823,9 +858,13 @@ pub(super) async fn refresh_session(
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "set-cookie",
-        session_cookie(&session.token, &session.expires_at, auth_cfg.secure_cookies)
-            .parse()
-            .unwrap(),
+        session_cookie(
+            &session.token,
+            &session.expires_at,
+            cookie_secure(&auth_cfg, &headers),
+        )
+        .parse()
+        .unwrap(),
     );
 
     Ok((
@@ -838,7 +877,6 @@ pub(super) async fn refresh_session(
                 "display_name": user.display_name,
                 "is_admin": user.is_admin,
             },
-            "token": session.token,
             "expires_at": session.expires_at,
         })),
     ))
@@ -853,8 +891,7 @@ pub(super) async fn refresh_session(
 /// OAuth token, in-flight authorization code and approved device grant for the
 /// user **and every bot they own** dies. A fresh session is then minted for the
 /// current browser so the legitimate caller stays logged in instead of being
-/// bounced to /login, and that replacement token comes back in the response
-/// body for clients that hold it outside the cookie.
+/// bounced to /login. It is set as the cookie and never returned in the body.
 ///
 /// Password verification and hashing run off the writer. Revalidation of the
 /// captured hash, lockdown and replacement share one transaction. SQLite
@@ -970,10 +1007,11 @@ pub(super) async fn change_password(
     }
     realtime.revoke_user(user.id);
 
+    let secure = cookie_secure(&auth_cfg, &headers);
     let mut headers = HeaderMap::new();
     headers.insert(
         "set-cookie",
-        session_cookie(&session.token, &session.expires_at, auth_cfg.secure_cookies)
+        session_cookie(&session.token, &session.expires_at, secure)
             .parse()
             .unwrap(),
     );
@@ -982,7 +1020,6 @@ pub(super) async fn change_password(
         headers,
         Json(serde_json::json!({
             "ok": true,
-            "token": session.token,
             "expires_at": session.expires_at,
         })),
     ))
@@ -1001,6 +1038,7 @@ pub(super) async fn revoke_all_sessions(
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(realtime): Extension<crate::realtime::RealtimeHub>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, LificError> {
     let user = require_user(&identity)?;
     with_write(&db, |conn| {
@@ -1012,7 +1050,9 @@ pub(super) async fn revoke_all_sessions(
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "set-cookie",
-        clear_cookie(auth_cfg.secure_cookies).parse().unwrap(),
+        clear_cookie(cookie_secure(&auth_cfg, &headers))
+            .parse()
+            .unwrap(),
     );
     Ok((resp_headers, Json(serde_json::json!({ "revoked": true }))))
 }
@@ -1488,6 +1528,22 @@ mod tests {
     use crate::api::test_helpers::*;
     use axum::http::StatusCode;
 
+    /// The session a response set in its `lific_token` cookie. The body never
+    /// carries it, so this is how a test follows a minted session.
+    fn set_cookie_session(headers: &axum::http::HeaderMap) -> Option<String> {
+        headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(|cookie| {
+                cookie
+                    .strip_prefix("lific_token=")
+                    .and_then(|rest| rest.split(';').next())
+                    .filter(|token| token.starts_with("lific_sess_"))
+                    .map(str::to_string)
+            })
+    }
+
     // ── Account lockdown, over the real middleware stack ─────────
     //
     // `test_app`/`app_as_user` inject `Extension<Option<AuthUser>>` directly,
@@ -1702,8 +1758,18 @@ mod tests {
             };
             let response = app.clone().oneshot(request).await.unwrap();
             let status = response.status();
+            let cookie_session = super::set_cookie_session(response.headers());
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            let mut parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            assert!(
+                parsed.get("token").is_none(),
+                "a session token must never appear in a response body: {parsed}"
+            );
+            // Surface a minted session under a name no handler uses, so the
+            // tests below can follow it like the browser would.
+            if let (Some(session), Some(object)) = (cookie_session, parsed.as_object_mut()) {
+                object.insert("_cookie_session".into(), session.into());
+            }
             (status, parsed)
         }
 
@@ -1771,7 +1837,7 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            let replacement = body["token"].as_str().unwrap().to_string();
+            let replacement = body["_cookie_session"].as_str().unwrap().to_string();
             assert_ne!(replacement, f.session);
 
             assert_blast_radius(&f, Some(&replacement)).await;
@@ -2304,7 +2370,7 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            let replacement = body["token"].as_str().unwrap().to_string();
+            let replacement = body["_cookie_session"].as_str().unwrap().to_string();
 
             // Reconnect with the fresh replacement session, which is recent by
             // construction.
@@ -2596,7 +2662,7 @@ mod tests {
                 Some(f.user_id),
                 "the refreshed session is for the same account"
             );
-            let replacement = body["token"].as_str().unwrap().to_string();
+            let replacement = body["_cookie_session"].as_str().unwrap().to_string();
             assert_ne!(replacement, f.session);
 
             assert_eq!(
@@ -2836,7 +2902,7 @@ mod tests {
                 let next = format!("password number {round}");
                 let (status, body) = change_password_attempt(&f, &token, &current, &next).await;
                 assert_eq!(status, StatusCode::OK, "round {round}: {body}");
-                token = body["token"].as_str().unwrap().to_string();
+                token = body["_cookie_session"].as_str().unwrap().to_string();
                 current = next;
             }
             assert!(
@@ -2926,7 +2992,7 @@ mod tests {
             for attempt in 0..4 {
                 let (status, body) = refresh(&f, &token, Some(PASSWORD)).await;
                 assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
-                token = body["token"].as_str().unwrap().to_string();
+                token = body["_cookie_session"].as_str().unwrap().to_string();
             }
             assert!(
                 !limiter.contains_key(&format!("reauth_user:{}", f.user_id)),
@@ -2968,7 +3034,7 @@ mod tests {
             for attempt in 0..3 {
                 let (status, body) = refresh(&f, &token, None).await;
                 assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
-                token = body["token"].as_str().unwrap().to_string();
+                token = body["_cookie_session"].as_str().unwrap().to_string();
             }
             assert!(!limiter.contains_key(&format!("reauth_user:{}", f.user_id)));
         }
@@ -3081,6 +3147,56 @@ mod tests {
         assert!(super::clear_cookie(true).contains("Max-Age=0"));
     }
 
+    /// The cookie is the web app's only credential, so a browser that drops a
+    /// `Secure` cookie on `http://localhost` (Safari before 27) could never
+    /// stay signed in to a default local install. Loopback over plain HTTP is
+    /// the one place `Secure` is left off; anything else keeps the config.
+    #[test]
+    fn plain_http_loopback_requests_get_a_cookie_without_secure() {
+        let secure = crate::config::AuthConfig::default();
+        let request = |host: &str, proto: Option<&str>| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("host", host.parse().unwrap());
+            if let Some(proto) = proto {
+                headers.insert("x-forwarded-proto", proto.parse().unwrap());
+            }
+            headers
+        };
+
+        for host in [
+            "localhost:3456",
+            "127.0.0.1:3456",
+            "[::1]:3456",
+            "localhost",
+        ] {
+            assert!(
+                !super::cookie_secure(&secure, &request(host, None)),
+                "{host} over plain HTTP"
+            );
+        }
+        assert!(super::cookie_secure(
+            &secure,
+            &request("localhost:3456", Some("https"))
+        ));
+        assert!(super::cookie_secure(
+            &secure,
+            &request("community.lific.dev", Some("https"))
+        ));
+        assert!(
+            super::cookie_secure(&secure, &request("lific.lan:3456", None)),
+            "a non-loopback host keeps the configured flag"
+        );
+
+        let insecure = crate::config::AuthConfig {
+            secure_cookies: false,
+            ..Default::default()
+        };
+        assert!(!super::cookie_secure(
+            &insecure,
+            &request("community.lific.dev", Some("https"))
+        ));
+    }
+
     #[tokio::test]
     async fn auth_signup_creates_user_and_returns_session() {
         let app = test_app();
@@ -3092,9 +3208,14 @@ mod tests {
         let resp = json_post(&app, "/api/auth/signup", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
+        let session = set_cookie_session(resp.headers());
         let data = parse_json(resp).await;
         assert_eq!(data["user"]["username"], "blake");
-        assert!(data["token"].as_str().unwrap().starts_with("lific_sess_"));
+        assert!(session.unwrap().starts_with("lific_sess_"));
+        assert!(
+            data.get("token").is_none(),
+            "the session lives only in the HttpOnly cookie: {data}"
+        );
         assert!(data["expires_at"].as_str().is_some());
     }
 
@@ -3473,11 +3594,13 @@ mod tests {
         let app = test_app_with_auth(false); // web_auto_login stays false in the DB
         let resp = json_post(&app, "/api/auth/auto-login", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let session = set_cookie_session(resp.headers());
         let data = parse_json(resp).await;
         assert!(
-            data["token"].as_str().unwrap().starts_with("lific_sess_"),
+            session.is_some_and(|s| s.starts_with("lific_sess_")),
             "auto-login must mint a real session under auth-optional: {data}"
         );
+        assert!(data.get("token").is_none(), "{data}");
         assert_eq!(data["user"]["username"], "test-admin");
         assert_eq!(data["user"]["is_admin"], true);
     }
@@ -3507,11 +3630,13 @@ mod tests {
 
         let resp = json_post(&app, "/api/auth/auto-login", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let session = set_cookie_session(resp.headers());
         let data = parse_json(resp).await;
         assert!(
-            data["token"].as_str().unwrap().starts_with("lific_sess_"),
+            session.is_some_and(|s| s.starts_with("lific_sess_")),
             "auto-login must mint a real session token: {data}"
         );
+        assert!(data.get("token").is_none(), "{data}");
         assert_eq!(data["user"]["is_admin"], true);
         assert_eq!(data["user"]["username"], "test-admin");
     }
@@ -3682,9 +3807,14 @@ mod tests {
         let resp = json_post(&app, "/api/auth/login", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
+        let session = set_cookie_session(resp.headers());
         let data = parse_json(resp).await;
         assert_eq!(data["user"]["username"], "logintest");
-        assert!(data["token"].as_str().unwrap().starts_with("lific_sess_"));
+        assert!(session.unwrap().starts_with("lific_sess_"));
+        assert!(
+            data.get("token").is_none(),
+            "login must not hand the session to page script: {data}"
+        );
     }
 
     #[tokio::test]
@@ -3756,7 +3886,7 @@ mod tests {
         let (status, data) = login(&app, "offloaded", "securepass123").await;
         assert_eq!(status, StatusCode::OK, "correct password: {data}");
         assert_eq!(data["user"]["username"], "offloaded");
-        assert!(data["token"].as_str().unwrap().starts_with("lific_sess_"));
+        assert!(data["expires_at"].as_str().is_some());
 
         // Email works as the identity too.
         let (status, data) = login(&app, "offloaded@test.com", "securepass123").await;
@@ -3821,8 +3951,8 @@ mod tests {
             "password": "securepass123"
         });
         let resp = json_post(&app, "/api/auth/signup", body).await;
+        let token = set_cookie_session(resp.headers()).unwrap();
         let data = parse_json(resp).await;
-        let token = data["token"].as_str().unwrap();
 
         assert_eq!(data["user"]["username"], "metest");
         assert!(token.starts_with("lific_sess_"));
@@ -3917,16 +4047,15 @@ mod tests {
         let right = serde_json::json!({ "current_password": "originalpass123", "new_password": "newpassword123" });
         let resp = json_post(&app, "/api/auth/me/password", right).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        // LIF-205: a successful change returns a fresh session token so the
+        // LIF-205: a successful change sets a fresh session cookie so the
         // current browser stays logged in after the old sessions are killed.
+        let session = set_cookie_session(resp.headers());
         let data = parse_json(resp).await;
         assert!(
-            data["token"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("lific_sess_"),
-            "password change should mint a new session token: {data}"
+            session.is_some_and(|s| s.starts_with("lific_sess_")),
+            "password change should mint a new session: {data}"
         );
+        assert!(data.get("token").is_none(), "{data}");
         assert!(data["expires_at"].as_str().is_some());
     }
 
@@ -3974,8 +4103,8 @@ mod tests {
         });
         let resp = json_post(&app, "/api/auth/me/password", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let data = parse_json(resp).await;
-        let fresh = data["token"].as_str().unwrap();
+        let fresh = set_cookie_session(resp.headers()).unwrap();
+        let fresh = fresh.as_str();
 
         let conn = db.write().unwrap();
         assert!(

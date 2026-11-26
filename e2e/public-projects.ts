@@ -194,8 +194,14 @@ async function watchedPage(context: BrowserContext, base: string) {
   const unauthorized: string[] = [];
   const limited: string[] = [];
   const pending: Promise<ApiResponse>[] = [];
+  // Every cold load asks `/api/auth/me` who it is; for a signed-out reader the
+  // answer is a 401, which is how the tab learns it is anonymous. Chromium
+  // logs that as a failed load, so it is the one 401 that is not a finding.
+  const isSessionProbe = (url: string) => url === `${base}/api/auth/me`;
   page.on("console", (msg) => {
-    if (msg.type() === "error") consoleErrors.push(msg.text());
+    if (msg.type() !== "error") return;
+    if (msg.text().includes("401") && isSessionProbe(msg.location().url)) return;
+    consoleErrors.push(msg.text());
   });
   page.on("pageerror", (err) => pageErrors.push(String(err)));
   // Off-origin requests that a rendered issue body could plausibly have
@@ -218,7 +224,7 @@ async function watchedPage(context: BrowserContext, base: string) {
     if (!url.startsWith(`${base}/api`)) return;
     // A 401 means the page asked for something that needs an account. A
     // signed-out reader's pages must not do that: the UI knows it has none.
-    if (res.status() === 401) unauthorized.push(url);
+    if (res.status() === 401 && !isSessionProbe(url)) unauthorized.push(url);
     // The anonymous budgets (429 per IP, 503 instance-wide). A scenario that
     // trips one is measuring the budget, not the feature.
     if (res.status() === 429 || res.status() === 503) limited.push(`${res.status()} ${url}`);
@@ -457,8 +463,8 @@ async function main(): Promise<number> {
       if ((await w.page.locator("[data-sign-in]:visible").count()) === 0) {
         fail(name, "no Sign in button was shown");
       }
-      if (await w.page.evaluate(() => localStorage.getItem("lific_token"))) {
-        fail(name, "a session token was minted for an anonymous visitor");
+      if ((await w.page.context().cookies()).some((cookie) => cookie.name === "lific_token")) {
+        fail(name, "a session was minted for an anonymous visitor");
       }
       for (const u of w.unauthorized) fail(name, `asked for something that needs an account: ${u}`);
       for (const err of w.pageErrors) fail(name, `uncaught page error: ${err}`);

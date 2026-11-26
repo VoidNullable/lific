@@ -6,7 +6,6 @@ export async function checkDuplicateRelations(context: BrowserContext, base: str
     await page.goto(`${base}/DEMO/issues/DEMO-1`);
     const [source, target] = await page.evaluate(async () => {
       const headers = {
-        Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
         "Content-Type": "application/json",
       };
       const request = async (path: string, body?: unknown) => {

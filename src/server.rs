@@ -446,6 +446,10 @@ pub(crate) fn build_app_with_store(
             auth_state,
             auth_middleware_wrapper,
         ))
+        // Outside the auth middleware so its cookie origin check can read it.
+        .layer(axum::Extension(auth::CookieOrigins(
+            cfg.server.cors_origins.clone().into(),
+        )))
         // LIF-583: outside the auth middleware so it can hand a credential-less
         // read of a published project to the anonymous budgets, and the
         // events socket can charge an anonymous connection against them.
@@ -2525,5 +2529,375 @@ mod mcp_http_upload_tests {
             .unwrap();
         let (status, body) = put(&url, png(64)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+}
+
+#[cfg(test)]
+mod cookie_session_tests {
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const PUBLIC: &str = "https://lific.example";
+    const EXTRA: &str = "https://other.lific.example";
+
+    struct Deployed {
+        app: Router,
+        session: String,
+        api_key: String,
+    }
+
+    fn deploy() -> Deployed {
+        let pool = db::open_memory().expect("test db");
+        let (session, api_key) = {
+            let conn = pool.write().unwrap();
+            let user = db::queries::users::create_user(
+                &conn,
+                &db::models::CreateUser {
+                    username: "writer".into(),
+                    email: "writer@test.local".into(),
+                    password: "writerpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let session = db::queries::users::create_session(&conn, user.id, None)
+                .unwrap()
+                .token;
+            drop(conn);
+            let key = auth::create_api_key(&pool, "script", Some(user.id)).unwrap();
+            (session, key)
+        };
+
+        let mut cfg = Config::default();
+        cfg.auth.required = true;
+        cfg.server.host = "127.0.0.1".into();
+        cfg.server.public_url = Some(PUBLIC.into());
+        cfg.server.cors_origins = vec![EXTRA.into()];
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app(&cfg, pool, realtime::RealtimeHub::new(), trusted_proxies);
+        Deployed {
+            app,
+            session,
+            api_key,
+        }
+    }
+
+    enum Credential<'a> {
+        Cookie(&'a str),
+        Bearer(&'a str),
+    }
+
+    async fn create_project(
+        app: &Router,
+        credential: Credential<'_>,
+        origin: Option<&str>,
+        identifier: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("host", "lific.example")
+            .header("x-forwarded-proto", "https")
+            .header("content-type", "application/json");
+        builder = match credential {
+            Credential::Cookie(token) => builder.header("cookie", format!("lific_token={token}")),
+            Credential::Bearer(token) => builder.header("authorization", format!("Bearer {token}")),
+        };
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let body = serde_json::json!({ "name": identifier, "identifier": identifier });
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_post_riding_the_cookie_is_refused() {
+        let d = deploy();
+        let (status, body) = create_project(
+            &d.app,
+            Credential::Cookie(&d.session),
+            Some("https://evil.example"),
+            "EVIL",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cross-origin"),
+            "{body}"
+        );
+
+        // Nothing was written.
+        let (status, _) =
+            create_project(&d.app, Credential::Cookie(&d.session), Some(PUBLIC), "EVIL").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the refused request created nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_without_an_origin_is_refused() {
+        let d = deploy();
+        let (status, body) =
+            create_project(&d.app, Credential::Cookie(&d.session), None, "BARE").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_from_the_public_url_or_a_cors_origin_is_allowed() {
+        let d = deploy();
+        for (origin, identifier) in [(PUBLIC, "MINE"), (EXTRA, "PEER")] {
+            let (status, body) = create_project(
+                &d.app,
+                Credential::Cookie(&d.session),
+                Some(origin),
+                identifier,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+        }
+    }
+
+    /// API keys and OAuth tokens are not ambient: a page on another site
+    /// cannot attach someone's Authorization header, so they skip the check.
+    #[tokio::test]
+    async fn an_api_key_write_is_unaffected_by_origin() {
+        let d = deploy();
+        for (origin, identifier) in [(None, "KEYA"), (Some("https://evil.example"), "KEYB")] {
+            let (status, body) =
+                create_project(&d.app, Credential::Bearer(&d.api_key), origin, identifier).await;
+            assert_eq!(status, StatusCode::OK, "{origin:?}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cookie_alone_signs_in_the_web_app() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Logout is a cookie write like any other, and it ends the session on
+    /// the server: the cookie stops working even if a copy survives.
+    #[tokio::test]
+    async fn logout_with_the_cookie_ends_the_session_and_clears_it() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(cleared.contains("; Secure"), "{cleared}");
+
+        let after = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn me_status(
+        app: &Router,
+        authorization: Option<&str>,
+        cookie: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().uri("/api/auth/me");
+        if let Some(authorization) = authorization {
+            builder = builder.header("authorization", authorization);
+        }
+        if let Some(session) = cookie {
+            builder = builder.header("cookie", format!("lific_token={session}"));
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn logout(app: &Router, authorization: &str, session: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("authorization", authorization)
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A header with another scheme (a basic-auth proxy in front of Lific) is
+    /// not a Lific credential: the cookie still signs the web app in.
+    #[tokio::test]
+    async fn a_non_bearer_authorization_header_leaves_the_cookie_in_charge() {
+        let d = deploy();
+        for header in ["Basic eDp5", "Token abc"] {
+            assert_eq!(
+                me_status(&d.app, Some(header), Some(&d.session)).await,
+                StatusCode::OK,
+                "{header}"
+            );
+            assert_eq!(
+                me_status(&d.app, Some(header), None).await,
+                StatusCode::UNAUTHORIZED,
+                "{header} alone is no credential"
+            );
+        }
+    }
+
+    /// And logout behind such a proxy ends the cookie's session.
+    #[tokio::test]
+    async fn logout_with_a_basic_auth_header_ends_the_cookie_session() {
+        let d = deploy();
+        let response = logout(&d.app, "Basic eDp5", &d.session).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::UNAUTHORIZED,
+            "the session was deleted on the server"
+        );
+    }
+
+    /// A Bearer header, in any case, decides the request on its own: a good
+    /// one works without the cookie, and an unusable one is a 401 that never
+    /// falls back to the cookie.
+    #[tokio::test]
+    async fn a_bearer_header_in_any_case_decides_alone() {
+        let d = deploy();
+        let lowercase = format!("bearer {}", d.session);
+        assert_eq!(
+            me_status(&d.app, Some(&lowercase), None).await,
+            StatusCode::OK
+        );
+        for header in [
+            "Bearer",
+            "bearer",
+            "bearer lific_sess_wrong",
+            "Bearer lific_sk-live-wrong",
+        ] {
+            assert_eq!(
+                me_status(&d.app, Some(header), Some(&d.session)).await,
+                StatusCode::UNAUTHORIZED,
+                "{header}"
+            );
+        }
+    }
+
+    /// Logout with an unusable Bearer header is refused rather than answering
+    /// 200 while the cookie's session lives on.
+    #[tokio::test]
+    async fn logout_with_an_unusable_bearer_header_is_refused_and_changes_nothing() {
+        let d = deploy();
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let response = logout(&d.app, header, &d.session).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{header}");
+            assert!(response.headers().get("set-cookie").is_none(), "{header}");
+        }
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::OK
+        );
+    }
+
+    /// `[auth] required = false` treats a missing credential as the operator,
+    /// and a non-Bearer header as missing; an unusable Bearer header is still a
+    /// broken client, not "no credential".
+    #[tokio::test]
+    async fn an_unusable_bearer_header_is_refused_when_auth_is_optional() {
+        let pool = db::open_memory().expect("test db");
+        let mut cfg = Config::default();
+        cfg.auth.required = false;
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app(&cfg, pool, realtime::RealtimeHub::new(), trusted_proxies);
+        let request = |authorization: Option<&str>| {
+            let mut builder = Request::builder().uri("/api/projects");
+            if let Some(authorization) = authorization {
+                builder = builder.header("authorization", authorization);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let refused = app.clone().oneshot(request(Some(header))).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{header}");
+        }
+        for header in [None, Some("Basic eDp5")] {
+            let anonymous = app.clone().oneshot(request(header)).await.unwrap();
+            assert_eq!(anonymous.status(), StatusCode::OK, "{header:?}");
+        }
     }
 }

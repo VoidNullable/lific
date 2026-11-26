@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "smoke": "bun smoke.ts",
+    "cookie-session": "bun cookie-session.ts",
     "public": "bun public-projects.ts",
     "archives": "bun project-archives.ts",
     "status-move": "bun status-move.ts",

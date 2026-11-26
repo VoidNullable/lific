@@ -80,7 +80,7 @@ The files linked to one item. Query: `entity_type` (`issue`, `page` or `comment`
 
 The file itself.
 
-This is the one REST route that also accepts the `lific_token` session cookie, and only when the request has no `Authorization` header, so a browser `<img>` or `<video>` tag can load it.
+Like every REST route, it accepts the `lific_token` session cookie when the request has no `Authorization` header, so a browser `<img>` or `<video>` tag can load it.
 
 The response uses the stored type, except that SVG is sent as `application/octet-stream`. Images, video and audio are sent `inline`; everything else, SVG included, as a download. Every response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`, so an uploaded file cannot run script on your instance. It may be cached privately for a year, since an id always returns the same bytes.
 

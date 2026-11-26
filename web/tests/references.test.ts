@@ -67,6 +67,14 @@ let fetchIssueCached: typeof import("../src/lib/references").fetchIssueCached;
 let fetchModuleCached: typeof import("../src/lib/references").fetchModuleCached;
 let invalidateReferenceCache: typeof import("../src/lib/references").invalidateReferenceCache;
 let subscribeIssueStatus: typeof import("../src/lib/references").subscribeIssueStatus;
+let saveSession: typeof import("../src/lib/api").saveSession;
+
+/** Start a new browser session. The label only names it for the reader: the
+ *  session is an HttpOnly cookie, and the app tells sessions apart by the
+ *  sign-in that started them. */
+function signIn(_label: string) {
+  saveSession();
+}
 
 let storage: MemoryStorage;
 let status = "todo";
@@ -118,6 +126,7 @@ beforeEach(async () => {
   (globalThis as { document: unknown }).document = new BrowserDocument();
   ({ fetchIssueCached, fetchModuleCached, invalidateReferenceCache, subscribeIssueStatus } =
     await import("../src/lib/references"));
+  ({ saveSession } = await import("../src/lib/api"));
   storage = new MemoryStorage();
   (globalThis as { localStorage: unknown }).localStorage = storage;
   calls = 0;
@@ -166,13 +175,13 @@ afterEach(() => {
 
 describe("fetchIssueCached", () => {
   test("does not reuse an account's issue snapshot after the session changes", async () => {
-    storage.setItem("lific_token", "account-a");
+    signIn("account-a");
     status = "done";
     const first = await fetchIssueCached("LIF-1");
     expect(first.status).toBe("ok");
     if (first.status === "ok") expect(first.issue.status).toBe("done");
 
-    storage.setItem("lific_token", "account-b");
+    signIn("account-b");
     status = "todo";
     const second = await fetchIssueCached("LIF-1");
     expect(second.status).toBe("ok");
@@ -181,7 +190,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("retries a transient failure", async () => {
-    storage.setItem("lific_token", "retry");
+    signIn("retry");
     fail = true;
     expect((await fetchIssueCached("LIF-2")).status).toBe("unavailable");
 
@@ -194,7 +203,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("caches stable not-found responses", async () => {
-    storage.setItem("lific_token", "not-found");
+    signIn("not-found");
     fail = true;
     failureStatus = 404;
     expect((await fetchIssueCached("LIF-404")).status).toBe("unavailable");
@@ -203,7 +212,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("re-fetches a status after realtime invalidation", async () => {
-    storage.setItem("lific_token", "realtime");
+    signIn("realtime");
     status = "todo";
     await fetchIssueCached("LIF-3");
 
@@ -252,7 +261,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("returns but does not cache a direct response invalidated in the same session", async () => {
-    storage.setItem("lific_token", "same-session");
+    signIn("same-session");
     status = "todo";
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const controller = new AbortController();
@@ -273,13 +282,13 @@ describe("fetchIssueCached", () => {
   });
 
   test("suppresses a direct response from an old session", async () => {
-    storage.setItem("lific_token", "direct-account-a");
+    signIn("direct-account-a");
     gatePath = "LIF-5";
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const stale = fetchIssueCached("LIF-5");
     await Promise.resolve();
 
-    storage.setItem("lific_token", "direct-account-b");
+    signIn("direct-account-b");
     await fetchIssueCached("LIF-7");
     releaseGate!();
 
@@ -288,7 +297,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("drops unsubscribed status work before it reaches the server", async () => {
-    storage.setItem("lific_token", "cancelled");
+    signIn("cancelled");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     let settled = 0;
     const done = Promise.withResolvers<void>();
@@ -308,7 +317,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("caps concurrent issue resolution", async () => {
-    storage.setItem("lific_token", "bounded");
+    signIn("bounded");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     let settled = 0;
     const done = Promise.withResolvers<void>();
@@ -327,7 +336,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("releases active status work when its last subscriber leaves", async () => {
-    storage.setItem("lific_token", "active-cancelled");
+    signIn("active-cancelled");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const stops = Array.from({ length: 6 }, (_, i) =>
       subscribe(`LIF-${i + 60}`, () => {}),
@@ -347,7 +356,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("restarts a status request after immediate same-key resubscription", async () => {
-    storage.setItem("lific_token", "status-resubscribe");
+    signIn("status-resubscribe");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const first = subscribe("LIF-98", () => {});
     await Promise.resolve();
@@ -370,7 +379,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("an old cleanup cannot remove a replacement same-key subscription", async () => {
-    storage.setItem("lific_token", "idempotent-cleanup");
+    signIn("idempotent-cleanup");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const first = subscribe("LIF-97", () => {});
     await Promise.resolve();
@@ -388,7 +397,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("releases queue slots after abortable direct consumers leave", async () => {
-    storage.setItem("lific_token", "direct-cancelled");
+    signIn("direct-cancelled");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const controllers = Array.from({ length: 6 }, () => new AbortController());
     const abandoned = controllers.map((controller, i) =>
@@ -411,7 +420,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("does not join an aborted queued request for the same identifier", async () => {
-    storage.setItem("lific_token", "direct-same-key");
+    signIn("direct-same-key");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const blockers = Array.from({ length: 6 }, (_, i) =>
       fetchIssueCached(`LIF-${i + 80}`, new AbortController().signal),
@@ -432,7 +441,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("refreshes subscribers after the session changes during a request", async () => {
-    storage.setItem("lific_token", "subscriber-account-a");
+    signIn("subscriber-account-a");
     status = "done";
     gatePath = "LIF-6";
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -447,7 +456,7 @@ describe("fetchIssueCached", () => {
     });
     await Promise.resolve();
 
-    storage.setItem("lific_token", "subscriber-account-b");
+    signIn("subscriber-account-b");
     status = "todo";
     await fetchIssueCached("LIF-7");
     releaseGate!();
@@ -459,7 +468,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("shares one browser refresh listener and removes it after teardown", async () => {
-    storage.setItem("lific_token", "listener");
+    signIn("listener");
     let deliveries = 0;
     let expectedDeliveries = 2;
     let delivered = Promise.withResolvers<void>();
@@ -494,7 +503,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("keeps a shared request alive for a direct caller after status teardown", async () => {
-    storage.setItem("lific_token", "shared-direct");
+    signIn("shared-direct");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const stop = subscribe("LIF-9", () => {});
     await Promise.resolve();
@@ -508,7 +517,7 @@ describe("fetchIssueCached", () => {
   });
 
   test("caps direct cached issue resolution", async () => {
-    storage.setItem("lific_token", "direct-bounded");
+    signIn("direct-bounded");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const pending = Array.from({ length: 12 }, (_, i) => fetchIssueCached(`LIF-${i + 40}`));
 
@@ -522,7 +531,7 @@ describe("fetchIssueCached", () => {
 
 describe("fetchModuleCached", () => {
   test("returns but does not cache module data invalidated in the same session", async () => {
-    storage.setItem("lific_token", "same-session-module");
+    signIn("same-session-module");
     moduleName = "Module A";
     gatePath = "/modules/";
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -539,11 +548,11 @@ describe("fetchModuleCached", () => {
   });
 
   test("does not return or cache module data from an old session", async () => {
-    storage.setItem("lific_token", "account-a");
+    signIn("account-a");
     gate = new Promise<void>((resolve) => { releaseGate = resolve; });
     const stale = fetchModuleCached(1);
 
-    storage.setItem("lific_token", "account-b");
+    signIn("account-b");
     moduleName = "Module B";
     const current = fetchModuleCached(1);
     releaseGate!();

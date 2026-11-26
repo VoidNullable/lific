@@ -10,9 +10,10 @@ export interface AuthUser {
   is_admin: boolean;
 }
 
+/** What signing in returns. The session itself is the HttpOnly `lific_token`
+ *  cookie the same response sets; page script never sees it. */
 export interface AuthResponse {
   user: AuthUser;
-  token: string;
   expires_at: string;
 }
 
@@ -34,19 +35,24 @@ async function requestWithHeaders<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<HeadedResult<T>> {
-  const token = localStorage.getItem("lific_token");
+  // The session cookie the browser attaches on its own authenticates the
+  // request; page script holds no credential.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-
   try {
     const res = await fetch(`${BASE}${path}`, { ...options, headers });
-    const body = await res.json();
+    let body;
+    try {
+      body = await res.json();
+    } catch (error) {
+      // The authentication layer answers 401 in plain text. Keep the status,
+      // so a caller can tell "signed out" from "couldn't reach the server".
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, status: res.status };
+      throw error;
+    }
 
     if (!res.ok) {
       return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
@@ -71,11 +77,7 @@ async function request<T>(
 }
 
 export async function download(path: string, filename?: string) {
-  const token = localStorage.getItem("lific_token");
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const res = await fetch(`${BASE}${path}`, { headers });
+  const res = await fetch(`${BASE}${path}`);
   if (!res.ok) {
     let error = `HTTP ${res.status}`;
     try {
@@ -131,9 +133,8 @@ export const getArchiveCapabilities = () => request<ArchiveCapabilities>("/proje
 
 export async function downloadProjectArchive(identifier: string, signal: AbortSignal) {
   try {
-    const token = localStorage.getItem("lific_token");
     const response = await fetch(`${BASE}/project-archives/${encodeURIComponent(identifier)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}, signal, cache: "no-store",
+      signal, cache: "no-store",
     });
     if (!response.ok) {
       const body = await response.json();
@@ -162,11 +163,9 @@ export function importProjectArchive(
   onProgress: (percent: number | null) => void,
   onProcessing: () => void,
 ): Promise<RequestResult<ArchiveImportResult>> {
-  const token = localStorage.getItem("lific_token");
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/project-archives`);
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.upload.onprogress = (event) => onProgress(event.lengthComputable
       ? Math.min(100, Math.round(event.loaded / event.total * 100)) : null);
     xhr.upload.onload = onProcessing;
@@ -280,8 +279,8 @@ export async function autoLogin() {
  *  in here, and the server sets no cookie until it has established that.
  *
  *  `password` is required on a password instance and may be omitted on a
- *  passwordless one. A failure changes nothing: the current token and cookie
- *  keep working. */
+ *  passwordless one. A failure changes nothing: the current session keeps
+ *  working. */
 export async function refreshSession(password?: string) {
   return request<AuthResponse>("/auth/me/refresh", {
     method: "POST",
@@ -289,9 +288,16 @@ export async function refreshSession(password?: string) {
   });
 }
 
-export async function logout() {
-  const result = await request("/auth/logout", { method: "POST" });
-  clearSession();
+/** End this browser's session. The tab is marked signed out only once the
+ *  server confirms it, or answers 401 because there was no session left to
+ *  end. Any other failure leaves the HttpOnly cookie valid, so the tab stays
+ *  signed in and the caller shows the error. */
+export async function logout(): Promise<RequestResult<{ logged_out: boolean }>> {
+  const result = await request<{ logged_out: boolean }>("/auth/logout", { method: "POST" });
+  if (result.ok || result.status === 401) {
+    clearSession();
+    return { ok: true, data: { logged_out: true } };
+  }
   return result;
 }
 
@@ -309,29 +315,24 @@ export async function updateProfile(input: { display_name?: string; email?: stri
 
 export interface ChangePasswordResponse {
   ok: boolean;
-  /** The replacement session token. See below. */
-  token: string;
   expires_at: string;
 }
 
-/** Change the password, and adopt the replacement session it returns.
+/** Change the password.
  *
  *  A password change is a full account lockdown on the server: every session,
  *  API key, OAuth session and connected tool belonging to this account is
  *  revoked, including the session that made this very request. The server
- *  mints exactly one replacement so the person who just typed their password
- *  is not thrown back to the login screen, and returns it here.
- *
- *  Saving it is not optional. This helper used to ignore the field, which left
- *  the tab holding a token the server had just killed: every later request
- *  401'd and the UI looked like the password change had broken the account. */
+ *  mints exactly one replacement and sets it as this browser's cookie, so the
+ *  person who just typed their password stays signed in. The session changed,
+ *  so in-flight work keyed to the old one is told. */
 export async function changePassword(input: { current_password: string; new_password: string }) {
   const result = await request<ChangePasswordResponse>("/auth/me/password", {
     method: "POST",
     body: JSON.stringify(input),
   });
-  if (result.ok && result.data.token) {
-    saveSession(result.data.token);
+  if (result.ok) {
+    saveSession();
   }
   return result;
 }
@@ -339,9 +340,9 @@ export async function changePassword(input: { current_password: string; new_pass
 /** Sign out everywhere and revoke access: every session, API key, OAuth
  *  session and connected tool for this account, with no replacement.
  *
- *  The local token is cleared only when the server confirms it. Clearing it on
+ *  The tab is marked signed out only when the server confirms it. Doing so on
  *  a failed request (a network drop, a 500) would log the tab out of a session
- *  that is still perfectly valid, and leave nothing to retry with. */
+ *  that is still perfectly valid. */
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
   if (result.ok) {
@@ -350,34 +351,105 @@ export async function revokeAllSessions() {
   return result;
 }
 
-const sessionListeners = new Set<() => void>();
+// ── Session state ────────────────────────────────────────────
+//
+// The session is the HttpOnly `lific_token` cookie the server sets when you
+// sign in, and no script on the page can read it, so a cross-site script
+// cannot walk off with it. What the app keeps is only whether this tab is
+// signed in, learned from `/api/auth/me` at startup, and a counter that moves
+// on every change so work started under one session can tell it has ended.
 
-export function saveSession(token: string) {
-  localStorage.setItem("lific_token", token);
+const sessionListeners = new Set<() => void>();
+let signedIn = false;
+/** False between another tab's notice that the session changed and this
+ *  tab's own `/api/auth/me` answer. */
+let sessionKnown = true;
+let sessionGeneration = 0;
+
+// Before 3.0 the token itself lived in localStorage. Drop any copy left over
+// from an older version so it stops being readable.
+try {
+  globalThis.localStorage?.removeItem("lific_token");
+} catch {
+  // Storage can be unavailable (private mode); nothing was stored there then.
+}
+
+const SESSION_CHANNEL = "lific:session";
+const sessionChannel: BroadcastChannel | null =
+  typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(SESSION_CHANNEL);
+
+function notifySession() {
   for (const listener of sessionListeners) listener();
 }
 
+function setSession(next: boolean, broadcast: boolean) {
+  signedIn = next;
+  sessionKnown = true;
+  sessionGeneration += 1;
+  if (broadcast) sessionChannel?.postMessage("changed");
+  notifySession();
+}
+
+// The cookie is shared by every tab, so a sign-in or sign-out in one changes
+// it for all of them. A message only says that something changed, never what:
+// this tab forgets which account it is on and asks the server, which is the
+// only authority on what the cookie now holds.
+sessionChannel?.addEventListener("message", () => {
+  sessionKnown = false;
+  sessionGeneration += 1;
+  notifySession();
+  void probeSession();
+});
+
+/** Mark this tab signed in, after a response that set the session cookie. */
+export function saveSession() {
+  setSession(true, true);
+}
+
+/** Mark this tab signed out. The cookie itself is cleared by the server
+ *  (`logout`, `revokeAllSessions`); this only stops the app acting signed in. */
 export function clearSession() {
-  localStorage.removeItem("lific_token");
-  for (const listener of sessionListeners) listener();
+  setSession(false, true);
 }
 
 export function onSessionChange(listener: () => void) {
   sessionListeners.add(listener);
-  const storage = (event: StorageEvent) => {
-    if (event.key === "lific_token" || event.key === null) listener();
-  };
   window.addEventListener("lific:session-change", listener);
-  window.addEventListener("storage", storage);
   return () => {
     sessionListeners.delete(listener);
     window.removeEventListener("lific:session-change", listener);
-    window.removeEventListener("storage", storage);
   };
 }
 
 export function hasSession(): boolean {
-  return !!localStorage.getItem("lific_token");
+  return signedIn;
+}
+
+/** An opaque name for the current session, or null when signed out or while
+ *  another tab's change is being confirmed. It changes on every sign-in,
+ *  sign-out and session swap, so code that started work under one session can
+ *  compare it afterwards and drop a stale answer. */
+export function sessionKey(): string | null {
+  return signedIn && sessionKnown ? `session:${sessionGeneration}` : null;
+}
+
+/** Learn whether the browser's cookie is a live session. A 401 means signed
+ *  out. Any other failure (the server unreachable) is no evidence either way:
+ *  the tab keeps what it last knew, and a later probe or request corrects it. */
+export async function probeSession(): Promise<RequestResult<AuthUser>> {
+  const started = sessionGeneration;
+  const result = await me();
+  // A sign-in, sign-out or cross-tab notice that landed while the probe was
+  // out is newer than its answer.
+  if (started !== sessionGeneration) return result;
+  if (result.ok) {
+    if (!signedIn || !sessionKnown) setSession(true, false);
+  } else if (result.status === 401) {
+    if (signedIn || !sessionKnown) setSession(false, false);
+  } else if (!sessionKnown) {
+    setSession(signedIn, false);
+  }
+  return result;
 }
 
 // ── API Key management ──────────────────────────────────────
@@ -1485,19 +1557,15 @@ export async function uploadAttachment(
   file: File,
   link?: { entity_type: AttachmentEntity; entity_id: number },
 ): Promise<{ ok: true; data: UploadResponse } | { ok: false; error: string }> {
-  const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
   if (link) {
     form.append("entity_type", link.entity_type);
     form.append("entity_id", String(link.entity_id));
   }
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
     const res = await fetch(`${BASE}/attachments`, {
       method: "POST",
-      headers,
       body: form,
     });
     const body = await res.json();
@@ -1545,7 +1613,6 @@ export function uploadAttachmentWithProgress(
     onProgress?: (p: UploadProgress) => void;
   } = {},
 ): UploadHandle {
-  const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
   if (opts.link) {
@@ -1564,7 +1631,6 @@ export function uploadAttachmentWithProgress(
     };
 
     xhr.open("POST", `${BASE}/attachments`);
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
     xhr.upload.onprogress = (e) => {
       opts.onProgress?.({
@@ -1775,9 +1841,8 @@ export async function getAttachmentLinks(id: number) {
 // ── Attachment viewers (LIF-418) ─────────────────────────────
 
 /** Raw bytes URL. Safe to use directly as an `<img>`/`<video>`/`<audio>` src:
- *  this exact path shape accepts the `lific_token` session cookie, which is
- *  how the browser authenticates subresource loads that cannot carry an
- *  Authorization header (see src/auth.rs, LIF-267). */
+ *  the browser sends the session cookie with the load like any other
+ *  same-origin request. */
 export function attachmentUrl(id: number): string {
   return `${BASE}/attachments/${id}`;
 }
@@ -1818,17 +1883,12 @@ export async function getAttachmentPreview(id: number) {
   return request<AttachmentPreview>(`/attachments/${id}/preview`);
 }
 
-/** Fetch an attachment's bytes as text, for the inline text/diff/data viewers.
- *  Uses the bearer token like every other authenticated read; the cookie
- *  fallback exists for subresource loads, not for fetches. */
+/** Fetch an attachment's bytes as text, for the inline text/diff/data viewers. */
 export async function fetchAttachmentText(
   id: number,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const token = localStorage.getItem("lific_token");
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
-    const res = await fetch(`${BASE}/attachments/${id}`, { headers });
+    const res = await fetch(`${BASE}/attachments/${id}`);
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, text: await res.text() };
   } catch {
