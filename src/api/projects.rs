@@ -24,17 +24,13 @@ pub(super) fn sidebar_visibility(
 ) -> Result<Option<HashSet<i64>>, LificError> {
     let fresh = crate::auth::fresh_caller(conn, user_id)?;
     let effective = authz::effective_user(conn, &Some(crate::auth::fresh_auth_user(&fresh)));
-    if matches!(&effective, Some(user) if user.is_admin) || !authz::authz_enforced_conn(conn)? {
+    let Some(mut visible) = authz::visible_project_ids_conn(conn, &effective)? else {
         return Ok(None);
-    }
-    let Some(user) = effective else {
-        return Ok(Some(HashSet::new()));
     };
-    Ok(Some(
-        crate::db::queries::members::list_project_ids_for_user(conn, user.id)?
-            .into_iter()
-            .collect(),
-    ))
+    // Published projects are readable by every account (LIF-583), so they
+    // belong in everyone's sidebar alongside the caller's memberships.
+    visible.extend(crate::db::queries::published_project_ids(conn)?);
+    Ok(Some(visible))
 }
 
 /// REST ranks describe positions in the visible response, not storage ranks.
@@ -51,10 +47,11 @@ pub(super) async fn list_projects(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    // A valid unbound key can precede the first user. There is no preference
-    // owner in that case; preserve the existing visibility-filtered listing.
+    // No caller: an anonymous reader, or a valid unbound key that precedes the
+    // first user. There is no preference owner, so list what may be read:
+    // the published projects.
     if identity.is_none() {
-        let visible = authz::visible_project_ids(&db, &identity)?;
+        let visible = authz::readable_project_ids(&db, &identity)?;
         let projects = with_read(&db, crate::db::queries::list_projects)?;
         return Ok(Json(filter_visible(projects, &visible, |p| Some(p.id))));
     }
@@ -76,7 +73,7 @@ pub(super) async fn get_project(
     Path(id): Path<i64>,
 ) -> Result<Json<Project>, LificError> {
     let project = with_read(&db, |conn| crate::db::queries::get_project(conn, id))?;
-    authz::require_role(&db, &identity, project.id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project.id)?;
     Ok(Json(project))
 }
 
@@ -108,6 +105,10 @@ pub(super) async fn create_project(
     Json(mut input): Json<CreateProject>,
 ) -> Result<Json<Project>, LificError> {
     let caller = super::require_user(&identity)?;
+    // LIF-524: every project made here starts with a conventions page.
+    input
+        .conventions
+        .get_or_insert(crate::conventions::Template::Empty);
     // Only parsed when the body asks for a lead that might not be the caller;
     // resolving "might not be" needs the effective user, which needs the
     // transaction, so the token is captured here and judged there.
@@ -249,10 +250,7 @@ pub(super) async fn delete_project_handler(
     let event = RealtimeEvent::ProjectDeleted {
         project_id: project.id,
     };
-    match audience {
-        Some(user_ids) => realtime.send_to_users(event, user_ids),
-        None => realtime.send(event),
-    }
+    realtime.send_to_users(event, audience);
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -264,7 +262,7 @@ pub(super) async fn issue_counts(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<IssueStatusCounts>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     with_read(&db, |conn| {
         crate::db::queries::count_issues_by_status(conn, project_id)
     })
@@ -287,7 +285,7 @@ pub(super) async fn get_board(
     Path(project_id): Path<i64>,
     Query(q): Query<BoardQuery>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     let mut issues = with_read(&db, |conn| {
         crate::db::queries::list_issues(
             conn,
@@ -841,9 +839,9 @@ mod tests {
         assert_eq!(board["unassigned"].as_array().unwrap().len(), 1);
     }
 
-    /// LIF-364 (dr.leech's report): with `authz_enforced` ON, an instance
-    /// admin must see every project in `GET /api/projects` — including ones
-    /// they are not a member of — while a plain non-member sees none. This
+    /// LIF-364 (dr.leech's report): an instance admin must see every project
+    /// in `GET /api/projects`, including ones they are not a member of, while
+    /// a plain non-member sees none. This
     /// pins the full REST stack (identity extension → visible_project_ids →
     /// filter_visible), not just the authz unit.
     #[tokio::test]
@@ -942,26 +940,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_admin_can_delete_project() {
-        let (db, admin, lead, _, project_id) = setup_lead_test();
-
-        // Lead cannot delete
-        let lead_app = app_as_user(db.clone(), &lead);
-        let resp = lead_app
-            .clone()
-            .oneshot(
+    async fn only_the_lead_or_an_admin_can_delete_a_project() {
+        let (db, admin, lead, regular, project_id) = setup_lead_test();
+        let delete = |app: axum::Router, id: i64| async move {
+            app.oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/projects/{project_id}"))
+                    .uri(format!("/api/projects/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            .unwrap()
+            .status()
+        };
 
-        // Admin can delete
+        assert_eq!(
+            delete(app_as_user(db.clone(), &regular), project_id).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            delete(app_as_user(db.clone(), &lead), project_id).await,
+            StatusCode::OK
+        );
+
+        // An admin needs no role.
+        let other = seed_unowned_project(&db);
         let admin_app = app_as_user(db, &admin);
+        let project_id = other;
         let resp = admin_app
             .clone()
             .oneshot(
@@ -1019,13 +1025,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        let data = parse_json(resp).await;
-        // Distinct message tells the user *why* they can't edit: no lead exists.
-        assert!(
-            data["error"].as_str().unwrap_or("").contains("no lead"),
-            "expected 'no lead' in error, got: {}",
-            data["error"]
-        );
     }
 
     #[tokio::test]
@@ -1252,7 +1251,12 @@ mod tests {
     async fn reorder_allowed_for_non_lead_user() {
         // Unlike update_project (lead/admin-only), reordering is open to any
         // authenticated user with visibility since sidebar order is personal.
-        let (db, _, _, regular, _) = setup_lead_test();
+        let (db, _, _, regular, project_id) = setup_lead_test();
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::upsert_member(&conn, project_id, regular.id, Role::Viewer)
+                .unwrap();
+        }
         let app = app_as_user(db, &regular);
 
         // setup_lead_test already created project "LDT"; add a second.

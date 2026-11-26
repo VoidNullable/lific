@@ -243,46 +243,73 @@ fn recent_auth_required() -> crate::error::LificError {
     crate::error::LificError::Forbidden("recent authentication required".into())
 }
 
-/// Pull the browser session token out of an `Authorization: Bearer` header for
-/// a route that mints durable credentials.
+/// The credential in an `Authorization: Bearer` header.
+///
+/// The scheme is matched case-insensitively (RFC 9110 section 11.1).
+/// `Some("")` is a Bearer header with nothing usable after it, which callers
+/// refuse like any wrong token. A header with any other scheme, such as the
+/// `Basic` credentials a browser attaches for an HTTP basic-auth proxy in
+/// front of Lific, is not a Lific credential: it yields `None`, the same as no
+/// header, so the session cookie (or anonymous access) applies.
+pub(crate) fn bearer_credential(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(axum::http::header::AUTHORIZATION)?.as_bytes();
+    let split = value
+        .iter()
+        .position(|byte| *byte == b' ' || *byte == b'\t')
+        .unwrap_or(value.len());
+    let (scheme, rest) = value.split_at(split);
+    if !scheme.eq_ignore_ascii_case(b"bearer") {
+        return None;
+    }
+    Some(
+        std::str::from_utf8(rest)
+            .map(|credential| credential.trim().to_string())
+            .unwrap_or_default(),
+    )
+}
+
+/// Pull the browser session token out of the request for a route that mints
+/// durable credentials.
 ///
 /// Minting an API key or connecting a tool is an account-level action, so it
 /// requires the thing a human just typed a password into: a browser session.
-/// An API key, an OAuth access token, a cookie, or no credential at all is
-/// refused here regardless of what the authentication middleware made of it.
-/// This is a *shape* check only; validity, freshness and ownership are
-/// re-established by [`revalidate_recent_session`] inside the write
-/// transaction, because anything checked before that transaction opens can be
-/// revoked out from under the write.
+/// An API key, an OAuth access token, or no credential at all is refused here
+/// regardless of what the authentication middleware made of it. This is a
+/// *shape* check only; validity, freshness and ownership are re-established by
+/// [`revalidate_recent_session`] inside the write transaction, because
+/// anything checked before that transaction opens can be revoked out from
+/// under the write.
 pub fn recent_session_token(headers: &HeaderMap) -> Result<String, crate::error::LificError> {
     session_bearer_token(headers).map_err(|_| recent_auth_required())
 }
 
-/// The browser session token from an `Authorization: Bearer` header, or a
-/// `Forbidden` naming what is missing.
+/// The browser session token the request authenticated with, or a `Forbidden`
+/// naming what is missing.
+///
+/// Same precedence as [`require_api_key`]: a `Bearer` header wins, and only a
+/// request without one is read from the `lific_token` cookie. A Bearer header
+/// carrying an API key is refused rather than falling back to the cookie, so
+/// this always names the credential the middleware actually accepted.
 ///
 /// Shape only: this says the caller presented something session-shaped, not
 /// that it is live or whose it is. Split out from [`recent_session_token`] so
 /// `POST /api/auth/me/refresh` can require a session without also requiring it
 /// to be recent, which is the one thing it exists to fix.
 pub fn session_bearer_token(headers: &HeaderMap) -> Result<String, crate::error::LificError> {
-    let token = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        .ok_or_else(|| {
-            crate::error::LificError::Forbidden(
-                "this action requires a signed-in browser session".into(),
-            )
-        })?;
+    let refused = || {
+        crate::error::LificError::Forbidden(
+            "this action requires a signed-in browser session".into(),
+        )
+    };
+    let token = match bearer_credential(headers) {
+        Some(token) => token,
+        None => session_cookie_token(headers).ok_or_else(refused)?,
+    };
 
     if !token.starts_with("lific_sess_") {
-        return Err(crate::error::LificError::Forbidden(
-            "this action requires a signed-in browser session".into(),
-        ));
+        return Err(refused());
     }
-    Ok(token.to_string())
+    Ok(token)
 }
 
 /// Re-establish, on `conn`, that `token` is a live browser session belonging to
@@ -555,13 +582,12 @@ pub struct ApiKeyInfo {
     pub unsupported_format: bool,
 }
 
-/// LIF-267: parse the `lific_token` session cookie a browser sends on same-site
-/// GETs. Splits the `Cookie` header on `;`, trims each pair, and returns the
-/// `lific_token` value ONLY when it looks like a session token (`lific_sess_`
-/// prefix). API keys (`lific_sk`) and OAuth tokens (`lific_at_`) are never
-/// accepted via cookie — the cookie path authenticates the browser session and
-/// nothing else. Returns `None` when the header/cookie is absent or the value
-/// isn't a session token.
+/// Parse the `lific_token` session cookie the browser sends. Splits the
+/// `Cookie` header on `;`, trims each pair, and returns the `lific_token` value
+/// ONLY when it looks like a session token (`lific_sess_` prefix). API keys
+/// (`lific_sk`) and OAuth tokens (`lific_at_`) are never accepted via cookie:
+/// the cookie path authenticates the browser session and nothing else. Returns
+/// `None` when the header/cookie is absent or the value isn't a session token.
 fn session_cookie_token(headers: &HeaderMap) -> Option<String> {
     let cookies = headers.get("cookie").and_then(|v| v.to_str().ok())?;
     let value = cookies.split(';').find_map(|c| {
@@ -572,28 +598,56 @@ fn session_cookie_token(headers: &HeaderMap) -> Option<String> {
     value.starts_with("lific_sess_").then_some(value)
 }
 
-/// LIF-267: is this request a `GET /api/attachments/{id}` download, where `{id}`
-/// is a single numeric segment (trailing slash tolerated)? Only this exact
-/// shape is eligible for the session-cookie fallback: it's the browser-native
-/// `<img src>` subresource path. The list route `/api/attachments` (no id) and
-/// any deeper path like `/api/attachments/5/extra` are excluded, so the
-/// fallback never widens beyond a single read-only download.
+/// `[server] cors_origins`, layered as a request extension outside the auth
+/// middleware so the cookie origin check below can read it. A router built
+/// without it (most unit tests) still checks against `public_url` and the
+/// request's own origin, so a missing layer narrows the allowlist rather than
+/// opening it.
+#[derive(Clone, Debug, Default)]
+pub struct CookieOrigins(pub std::sync::Arc<[String]>);
+
+/// Methods that can change state. Everything except these reads is subject to
+/// the origin check when the session cookie is the credential.
+fn is_state_changing(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+/// `scheme://host[:port]` of a configured URL, serialized the way a browser
+/// writes an `Origin` header: lowercase, no path, default port omitted.
+fn url_origin(url: &str) -> Option<String> {
+    let uri = url.trim().parse::<axum::http::Uri>().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let authority = uri.authority()?;
+    let host = authority.host().to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    Some(match authority.port_u16() {
+        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+        _ => format!("{scheme}://{host}"),
+    })
+}
+
+/// CSRF defence for cookie-authenticated writes.
 ///
-/// LIF-418 adds one sibling, `/api/attachments/{id}/thumbnail`. It is the same
-/// read of the same blob, downscaled, and it is consumed the same way: an
-/// `<img src>` cannot set an Authorization header, so without the fallback
-/// every thumbnail in the UI would 401. Nothing else under `{id}/` is
-/// eligible, so `/links` and `/preview` still require a real credential.
-fn is_attachment_download(method: &Method, path: &str) -> bool {
-    if method != Method::GET {
+/// A browser attaches the `lific_token` cookie to any request aimed at this
+/// host, including a form another site submits. `SameSite=Lax` already keeps
+/// it off cross-site POSTs in current browsers; this is the second, explicit
+/// check. A state-changing request authenticated by the cookie must carry an
+/// `Origin` header naming this server: its `public_url`, an entry in
+/// `cors_origins`, or the same scheme and host the request was addressed to.
+/// A missing or `null` Origin is refused, because every browser that sends the
+/// cookie on a write also sends Origin. Bearer-authenticated requests never
+/// reach this: an attacker's page cannot attach someone else's header.
+fn cookie_write_origin_allowed(headers: &HeaderMap, public_url: &str, extra: &[String]) -> bool {
+    if headers.get(axum::http::header::ORIGIN).is_none() {
         return false;
     }
-    let Some(rest) = path.strip_prefix("/api/attachments/") else {
-        return false;
-    };
-    let rest = rest.strip_suffix('/').unwrap_or(rest);
-    let id = rest.strip_suffix("/thumbnail").unwrap_or(rest);
-    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+    let mut allowed: Vec<String> = extra.to_vec();
+    allowed.extend(url_origin(public_url));
+    crate::api::websocket_origin_allowed(headers, &allowed)
 }
 
 /// LIF-403: which kind of credential authenticated the current request.
@@ -742,13 +796,9 @@ pub async fn require_api_key(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Extract Bearer token from Authorization header
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
+    // A Bearer header decides the request on its own, usable or not; any
+    // other scheme is not a Lific credential (see [`bearer_credential`]).
+    let token = bearer_credential(request.headers());
 
     // Targeted diagnostics for the MCP endpoint only (keeps REST traffic quiet).
     // Lets us see, post-OAuth, whether Claude actually presents the bearer token
@@ -777,21 +827,13 @@ pub async fn require_api_key(
     );
 
     let Some(token) = token else {
-        // LIF-267: session-cookie fallback, scoped to GET /api/attachments/{id}.
-        // A browser-native `<img src="/api/attachments/N">` cannot attach an
-        // Authorization header, so inline attachment images arrived here
-        // credential-less and 401'd. When (and only when) this is the
-        // read-only attachment download route on a GET, accept the browser's
-        // `lific_token` session cookie in lieu of the header and resolve it
-        // exactly like a header-borne session token. This reopens NO CSRF
-        // surface (GET is a safe method; every mutation stays header-only) and
-        // leaks nothing cross-site (the cookie is SameSite=Lax, so it is never
-        // sent on cross-site subresource requests). The download handler still
-        // runs its own project-scoped `authorize_read`, so gating is unchanged
-        // — this just lets the browser present the credential it can.
-        if is_attachment_download(request.method(), request.uri().path())
-            && let Some(cookie_token) = session_cookie_token(request.headers())
-        {
+        // The web app's credential is the HttpOnly `lific_token` cookie set at
+        // sign-in, so no script on the page can read the session. A request
+        // with no Bearer header presents it here and is resolved
+        // exactly like a header-borne session token. `/mcp` is left out: MCP
+        // clients authenticate with a bearer token, and the cookie has no
+        // business reaching that surface.
+        if !is_mcp_request && let Some(cookie_token) = session_cookie_token(request.headers()) {
             let user = {
                 // LIF-139: validation is a pure read — take a pooled read
                 // connection instead of the single writer mutex.
@@ -805,6 +847,21 @@ pub async fn require_api_key(
                 crate::db::queries::users::validate_session(&conn, &cookie_token)
             };
             if let Ok(u) = user {
+                if is_state_changing(request.method()) {
+                    let extra = request
+                        .extensions()
+                        .get::<CookieOrigins>()
+                        .map(|origins| origins.0.clone())
+                        .unwrap_or_default();
+                    if !cookie_write_origin_allowed(request.headers(), &auth.public_url, &extra) {
+                        return crate::error::LificError::Forbidden(
+                            "cross-origin request refused: a write signed in with the browser \
+                             session must come from this server's own pages"
+                                .into(),
+                        )
+                        .into_response();
+                    }
+                }
                 let auth_user = crate::db::models::AuthUser {
                     id: u.id,
                     username: u.username,
@@ -826,7 +883,9 @@ pub async fn require_api_key(
                 request.extensions_mut().insert(Some(auth_user));
                 return crate::actor::scope(actor, next.run(request)).await;
             }
-            // Missing/invalid/expired cookie session falls through to 401 below.
+            // An invalid or expired cookie counts as no credential at all: the
+            // browser keeps sending a dead HttpOnly cookie until it expires,
+            // and script cannot remove it.
         }
 
         // LIF-294: `[auth] required = false` — a credential-less request is
@@ -860,6 +919,18 @@ pub async fn require_api_key(
                 .extensions_mut()
                 .insert(Option::<crate::db::models::AuthUser>::None);
             return crate::actor::scope(actor, next.run(request)).await;
+        }
+
+        // LIF-583: a published project is readable without an account. A
+        // credential-less read on one of the routes that allows it runs with
+        // no identity under the anonymous budgets; everything else is a 401.
+        if let Some(reads) = request
+            .extensions()
+            .get::<std::sync::Arc<crate::api::AnonymousReads>>()
+            .cloned()
+            && crate::api::is_anonymous_read(request.method(), request.uri().path())
+        {
+            return crate::api::serve_anonymous(reads, request, next).await;
         }
 
         if is_mcp_request {
@@ -3155,7 +3226,7 @@ mod tests {
     // ── LIF-294: [auth] required = false ─────────────────────────
 
     /// Router whose handler reports whether the request runs with the
-    /// operator bypass: with authz enforcement ON, `visible_project_ids`
+    /// operator bypass: `visible_project_ids`
     /// for a `None` user returns unrestricted (None) only inside an
     /// operator context.
     fn operator_probe_app(auth_state: AuthState, pool: db::DbPool) -> Router {
@@ -3183,7 +3254,6 @@ mod tests {
     async fn auth_not_required_credentialless_request_passes_as_operator() {
         let pool = test_db();
         seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
-        enable_enforcement(&pool);
         let mut state = test_auth_state(&pool);
         state.required = false;
 
@@ -3455,26 +3525,15 @@ mod tests {
     // user (unbound API key, legacy unbound OAuth token, "auth off" request)
     // to the first admin — so an unbound key passes the gate via
     // `identity.user.is_admin`. These drive a real route that runs
-    // `authz::require_role(.., Viewer)` in enforced mode behind the real
+    // `authz::require_role(.., Viewer)` behind the real
     // `require_api_key`: a 200 means the gate passed, a 403 means it denied.
-
-    fn enable_enforcement(pool: &db::DbPool) {
-        let conn = pool.write().unwrap();
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
 
     fn seed_project_id(pool: &db::DbPool, ident: &str) -> i64 {
         let conn = pool.write().unwrap();
         crate::db::queries::create_project(
             &conn,
             &crate::db::models::CreateProject {
+                conventions: None,
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
                 description: String::new(),
@@ -3526,24 +3585,109 @@ mod tests {
         seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         let key = create_api_key(&pool, "operator", None).unwrap(); // unbound
         let project = seed_project_id(&pool, "OPM");
-        enable_enforcement(&pool);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(
             gate_status(app, &key).await,
             StatusCode::OK,
-            "an unbound (operator) API key must pass the Viewer gate in enforced mode"
+            "an unbound (operator) API key must pass the Viewer gate"
+        );
+    }
+
+    /// LIF-518: an instance that ran in legacy mode, upgraded. Roles are
+    /// enforced afterwards with nothing left to switch, an outsider is refused
+    /// a project they could read before, someone who wrote there keeps working
+    /// as a maintainer, and the operator's unbound key passes every gate it
+    /// passed in legacy mode.
+    #[tokio::test]
+    async fn a_legacy_instance_enforces_roles_after_the_upgrade() {
+        use crate::api::test_helpers::{app_as_user, json_get, json_post};
+        use crate::db::models::Role;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            crate::db::migrate::apply_up_to(&conn, 70);
+            crate::db::migrate::seed_pre_enforcement_instance(&conn, false);
+        }
+        let pool = db::open(&path).unwrap();
+
+        let user = |name: &str| {
+            let conn = pool.read().unwrap();
+            crate::db::queries::users::get_user_by_username(&conn, name).unwrap()
+        };
+        let (legacy, other) = (10, 11);
+        let issue_in =
+            |project: i64| serde_json::json!({ "project_id": project, "title": "After" });
+
+        let outsider = app_as_user(pool.clone(), &user("outsider"));
+        assert_eq!(
+            json_get(&outsider, &format!("/api/projects/{legacy}"))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_post(&outsider, "/api/issues", issue_in(legacy))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let author = user("author");
+        {
+            let conn = pool.read().unwrap();
+            assert_eq!(
+                crate::db::queries::members::get_member_role(&conn, legacy, author.id).unwrap(),
+                Some(Role::Maintainer)
+            );
+        }
+        let author_app = app_as_user(pool.clone(), &author);
+        assert_eq!(
+            json_post(&author_app, "/api/issues", issue_in(legacy))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            json_get(&author_app, &format!("/api/projects/{other}"))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // The unbound operator key: through the real middleware, then every
+        // gate on the identity it resolves to, on a project with no lead.
+        let key = create_api_key(&pool, "operator", None).unwrap();
+        for project in [legacy, other] {
+            let app = gate_app(test_auth_state(&pool), pool.clone(), project);
+            assert_eq!(gate_status(app, &key).await, StatusCode::OK);
+        }
+        let operator =
+            crate::resolve_caller::resolve_caller(&pool, None, crate::actor::Transport::Api)
+                .unwrap();
+        for project in [legacy, other] {
+            for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
+                crate::authz::require_role(&pool, &operator, project, min).unwrap();
+            }
+            crate::authz::require_structure_role(&pool, &operator, project).unwrap();
+            crate::authz::require_project_delete_role(&pool, &operator, project).unwrap();
+        }
+        crate::authz::require_workspace_admin(&pool, &operator).unwrap();
+        assert_eq!(
+            crate::authz::visible_project_ids(&pool, &operator).unwrap(),
+            None
         );
     }
 
     // THE test: a legacy pre-binding OAuth token also resolves to None, but it
     // is NOT an operator credential — it must stay Forbidden even in the exact
-    // same enforced-mode Viewer gate the operator key just passed.
+    // same Viewer gate the operator key just passed.
     #[tokio::test]
     async fn enforced_legacy_unbound_oauth_token_is_forbidden_via_middleware() {
         let pool = test_db();
         let project = seed_project_id(&pool, "OAM");
-        enable_enforcement(&pool);
         // Unbound OAuth token (user_id = None) — the LIF-204 legacy case.
         // No admin is seeded, so resolve_caller returns None and the enforced
         // gate default-denies. (With an admin present, resolve_caller would
@@ -3560,7 +3704,7 @@ mod tests {
     }
 
     // A key bound to a real (non-member) user is NOT an operator: even though
-    // it isn't None, it must be denied in enforced mode (no membership row),
+    // it isn't None, it must be denied (no membership row),
     // proving the operator bypass keys off the unbound binding, not the key
     // type in general.
     #[tokio::test]
@@ -3587,7 +3731,6 @@ mod tests {
             create_api_key(&pool, "bound", Some(uid)).unwrap()
         };
         let project = seed_project_id(&pool, "BNM");
-        enable_enforcement(&pool);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(
@@ -3597,80 +3740,138 @@ mod tests {
         );
     }
 
-    // ── LIF-267: attachment-download matcher + session-cookie parsing ───────
+    // ── LIF-164: session cookie, origin check ───────────────────────────────
 
     #[test]
-    fn is_attachment_download_matches_numeric_id_get() {
-        assert!(is_attachment_download(&Method::GET, "/api/attachments/5"));
-        assert!(is_attachment_download(
-            &Method::GET,
-            "/api/attachments/12345"
+    fn url_origin_serializes_like_a_browser_origin_header() {
+        assert_eq!(
+            url_origin("https://Community.Lific.dev/").as_deref(),
+            Some("https://community.lific.dev")
+        );
+        assert_eq!(
+            url_origin("https://lific.example:443/lific").as_deref(),
+            Some("https://lific.example")
+        );
+        assert_eq!(
+            url_origin("http://127.0.0.1:3456").as_deref(),
+            Some("http://127.0.0.1:3456")
+        );
+        assert_eq!(url_origin("lific.example"), None);
+        assert_eq!(url_origin("ftp://lific.example"), None);
+    }
+
+    fn origin_headers(origin: Option<&str>, host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", host.parse().unwrap());
+        if let Some(origin) = origin {
+            headers.insert("origin", origin.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn a_cookie_write_needs_an_origin_naming_this_server() {
+        let public = "https://community.lific.dev";
+        let extra = ["https://lific-community.fly.dev".to_string()];
+        let proxied = |origin| {
+            let mut headers = origin_headers(origin, "community.lific.dev");
+            headers.insert("x-forwarded-proto", "https".parse().unwrap());
+            headers
+        };
+
+        assert!(cookie_write_origin_allowed(
+            &proxied(Some("https://community.lific.dev")),
+            public,
+            &extra
+        ));
+        assert!(cookie_write_origin_allowed(
+            &proxied(Some("https://lific-community.fly.dev")),
+            public,
+            &extra
+        ));
+        for refused in [
+            None,
+            Some("null"),
+            Some("https://evil.example"),
+            Some("http://community.lific.dev"),
+            Some("https://community.lific.dev.evil.example"),
+        ] {
+            assert!(
+                !cookie_write_origin_allowed(&proxied(refused), public, &extra),
+                "{refused:?} must be refused"
+            );
+        }
+    }
+
+    /// No `public_url`: the issuer is derived from the bind address, and a
+    /// person on `http://localhost:3456` is still on this server.
+    #[test]
+    fn a_cookie_write_from_the_servers_own_page_is_allowed_without_public_url() {
+        let issuer = "http://127.0.0.1:3456";
+        assert!(cookie_write_origin_allowed(
+            &origin_headers(Some("http://localhost:3456"), "localhost:3456"),
+            issuer,
+            &[]
+        ));
+        assert!(!cookie_write_origin_allowed(
+            &origin_headers(Some("http://localhost:5173"), "localhost:3456"),
+            issuer,
+            &[]
         ));
     }
 
     #[test]
-    fn is_attachment_download_tolerates_trailing_slash() {
-        assert!(is_attachment_download(&Method::GET, "/api/attachments/7/"));
+    fn the_presented_session_prefers_the_header_and_never_falls_back_past_it() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "lific_token=lific_sess_cookie".parse().unwrap());
+        assert_eq!(
+            session_bearer_token(&headers).unwrap(),
+            "lific_sess_cookie",
+            "with no header, the cookie is the browser session"
+        );
+
+        headers.insert("authorization", "Bearer lific_sess_header".parse().unwrap());
+        assert_eq!(session_bearer_token(&headers).unwrap(), "lific_sess_header");
+
+        headers.insert("authorization", "Bearer lific_sk-live-key".parse().unwrap());
+        assert!(
+            session_bearer_token(&headers).is_err(),
+            "an API key in the header must not borrow the cookie's session"
+        );
+
+        headers.insert("authorization", "Bearer".parse().unwrap());
+        assert!(
+            session_bearer_token(&headers).is_err(),
+            "a bare Bearer header must not borrow the cookie's session"
+        );
+
+        headers.insert("authorization", "Basic eDp5".parse().unwrap());
+        assert_eq!(
+            session_bearer_token(&headers).unwrap(),
+            "lific_sess_cookie",
+            "a proxy's basic-auth header is not a Lific credential"
+        );
     }
 
     #[test]
-    fn is_attachment_download_excludes_list_route() {
-        // The list route (no id) must stay header-only.
-        assert!(!is_attachment_download(&Method::GET, "/api/attachments"));
-        assert!(!is_attachment_download(&Method::GET, "/api/attachments/"));
-    }
-
-    #[test]
-    fn is_attachment_download_excludes_non_numeric_and_deeper_paths() {
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/abc"
-        ));
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5/extra"
-        ));
-        assert!(!is_attachment_download(&Method::GET, "/api/attachments/5x"));
-    }
-
-    /// LIF-418: a thumbnail is loaded by an `<img>` exactly like the full
-    /// image, so it needs the same cookie fallback. The other two derived
-    /// routes are XHR-only and must not get it.
-    #[test]
-    fn is_attachment_download_includes_the_thumbnail_variant() {
-        assert!(is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5/thumbnail"
-        ));
-        assert!(is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5/thumbnail/"
-        ));
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5/links"
-        ));
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5/preview"
-        ));
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/abc/thumbnail"
-        ));
-        assert!(!is_attachment_download(
-            &Method::POST,
-            "/api/attachments/5/thumbnail"
-        ));
-    }
-
-    #[test]
-    fn is_attachment_download_excludes_non_get_methods() {
-        assert!(!is_attachment_download(
-            &Method::DELETE,
-            "/api/attachments/5"
-        ));
-        assert!(!is_attachment_download(&Method::POST, "/api/attachments/5"));
+    fn bearer_credential_matches_the_scheme_case_insensitively_and_ignores_others() {
+        let read = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", value.parse().unwrap());
+            bearer_credential(&headers)
+        };
+        assert_eq!(
+            read("Bearer lific_sk-live-x").as_deref(),
+            Some("lific_sk-live-x")
+        );
+        assert_eq!(read("bearer lific_sess_x").as_deref(), Some("lific_sess_x"));
+        assert_eq!(read("BEARER  lific_at_x ").as_deref(), Some("lific_at_x"));
+        assert_eq!(read("Bearer").as_deref(), Some(""));
+        assert_eq!(read("Bearer ").as_deref(), Some(""));
+        assert_eq!(read("Basic eDp5"), None);
+        assert_eq!(read("Token abc"), None);
+        assert_eq!(read("Bearerx abc"), None);
+        assert_eq!(bearer_credential(&HeaderMap::new()), None);
     }
 
     #[test]

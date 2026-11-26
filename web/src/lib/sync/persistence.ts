@@ -105,10 +105,11 @@ function guard(tx: IDBTransaction, key: string) {
   const privateEpoch = meta.get("private-epoch");
   const local = meta.get(`epoch:${key}`);
   const scope = key.slice(0, key.lastIndexOf(":") + 1);
+  const scopeEpoch = meta.get(`epoch-scope:${scope}`);
   const projects = meta.get(`projects:${scope}`);
   return {
     ready: projects,
-    epoch: () => JSON.stringify([global.result ?? "", privateAccountKey(key) ? privateEpoch.result ?? "" : "", local.result ?? ""]),
+    epoch: () => JSON.stringify([global.result ?? "", privateAccountKey(key) ? privateEpoch.result ?? "" : "", local.result ?? "", scopeEpoch.result ?? ""]),
     allowed: () => !Array.isArray(projects.result) || projects.result.includes(Number(key.slice(scope.length))),
   };
 }
@@ -234,6 +235,11 @@ export function pruneProjectSnapshots(scope: string, projects: number[]): Promis
   const allowed = new Set(projects);
   return prune(key => key.startsWith(scope) && !allowed.has(Number(key.slice(scope.length))),
     `projects:${scope}`, projects);
+}
+
+export function removeScopeSnapshots(scope: string): Promise<void> {
+  if (typeof indexedDB === "undefined") return Promise.resolve();
+  return prune(key => key.startsWith(scope), `epoch-scope:${scope}`, generation());
 }
 
 /** Copy the arrays while the in-memory cursor still describes exactly these rows. */

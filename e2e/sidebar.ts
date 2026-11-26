@@ -135,7 +135,7 @@ class API {
           const group = this.groups.find(g => g.id === Number(path.split("/").at(-1)))!;
           group.name = body.name; data = group;
         } else if (/^\/projects\/\d+\/my-role$/.test(path) && method === "GET") {
-          data = { role: "owner", enforced: true, is_admin: false };
+          data = { role: "owner", is_admin: false };
         } else if (["/issues", "/modules", "/pages", "/plans"].includes(path) && method === "GET") {
           const projectId = Number(url.searchParams.get("project_id"));
           const project = this.projects.find(p => p.id === projectId);

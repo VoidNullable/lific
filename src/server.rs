@@ -1,7 +1,7 @@
 //! HTTP server construction and startup.
 //!
 //! [`build_app`] is the single place the production router is assembled:
-//! REST API, MCP (authed and the optional authless path token), OAuth, the
+//! REST API, authenticated MCP, OAuth, the
 //! embedded frontend, and every middleware layer and extension they depend
 //! on. [`run`] is `lific start`: guard rails, background tasks, bind, serve.
 //!
@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::any,
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
@@ -30,9 +30,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
 use crate::config::{self, Config};
-use crate::{
-    actor, api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, resolve_caller, storage,
-};
+use crate::{api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, storage};
 
 /// Embedded frontend assets compiled from web/dist/.
 /// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
@@ -59,8 +57,60 @@ mod inline_attachment_tests {
     }
 }
 
+/// LIF-583: where a link to the retired public view now lives. A published
+/// project is read at its ordinary address, so `/public/LIF/issues/LIF-1` is
+/// `/LIF/issues/LIF-1`. The two short forms the old view accepted keep their
+/// meaning: `/public/LIF` was the issue list and `/public/LIF/LIF-1` an issue.
+///
+/// `None` for anything that is not such a link, including a first segment
+/// that is not a project identifier, so the result is always a same-site
+/// path and never `//host`.
+fn legacy_public_location(path: &str, query: Option<&str>) -> Option<String> {
+    let rest = path.strip_prefix("/public/")?;
+    let mut segments = rest.splitn(2, '/');
+    let project = segments.next()?;
+    let tail = segments.next().unwrap_or("").trim_end_matches('/');
+    let is_identifier = |s: &str| {
+        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    if !is_identifier(project) || project.eq_ignore_ascii_case("api") {
+        return None;
+    }
+    let is_issue_key = |s: &str| {
+        s.rsplit_once('-').is_some_and(|(prefix, number)| {
+            is_identifier(prefix)
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    let target = if tail.is_empty() {
+        format!("/{project}/issues")
+    } else if is_issue_key(tail) {
+        format!("/{project}/issues/{tail}")
+    } else {
+        format!("/{project}/{tail}")
+    };
+    Some(match query {
+        Some(query) if !query.is_empty() => format!("{target}?{query}"),
+        _ => target,
+    })
+}
+
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
-async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
+fn serve_frontend(uri: axum::http::Uri) -> Response {
+    if let Some(location) = legacy_public_location(uri.path(), uri.query()) {
+        return (
+            StatusCode::MOVED_PERMANENTLY,
+            [(header::LOCATION, location)],
+        )
+            .into_response();
+    }
+    // The retired public API: gone, and not an SPA page.
+    if uri.path() == "/public/api" || uri.path().starts_with("/public/api/") {
+        return crate::error::LificError::NotFound("not found".into()).into_response();
+    }
     let path = uri.path().trim_start_matches('/');
 
     // Try the exact path first (e.g. assets/index-abc.js)
@@ -246,13 +296,12 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 /// Assemble the full production router.
 ///
 /// Everything a request can hit lives here: the REST API, the authed `/mcp`
-/// endpoint, the optional authless `/mcp/<token>` escape hatch, the OAuth
+/// endpoint, the OAuth
 /// routes, and the embedded frontend fallback, wrapped in the middleware and
 /// extensions they expect (auth, rate limiters, attachment storage, realtime
 /// hub, CORS, body limit, compression).
 ///
-/// Side-effect free apart from a DB read to resolve the authless MCP identity:
-/// background tasks (backups, attachment GC) are [`run`]'s business, so tests
+/// Background tasks (backups, attachment GC) are [`run`]'s business, so tests
 /// and diagnostics can build the app without spawning anything.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn build_app(
@@ -396,7 +445,17 @@ pub(crate) fn build_app_with_store(
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth_middleware_wrapper,
-        ));
+        ))
+        // Outside the auth middleware so its cookie origin check can read it.
+        .layer(axum::Extension(auth::CookieOrigins(
+            cfg.server.cors_origins.clone().into(),
+        )))
+        // LIF-583: outside the auth middleware so it can hand a credential-less
+        // read of a published project to the anonymous budgets, and the
+        // events socket can charge an anonymous connection against them.
+        .layer(axum::Extension(Arc::new(api::AnonymousReads::new(
+            trusted_proxies.clone(),
+        ))));
 
     // OAuth client registration rate limiter: 10 clients per IP per hour.
     // /oauth/register is unauthenticated per RFC 7591; without this anyone
@@ -415,82 +474,21 @@ pub(crate) fn build_app_with_store(
         issuer_is_explicit: cfg.server.public_url.is_some(),
         allowed_hosts: mcp_allowed_hosts.clone().into(),
         register_limiter: oauth_register_limiter,
-        trusted_proxies: trusted_proxies.clone(),
+        trusted_proxies,
         client_documents: Arc::new(oauth::cimd::HttpsSource),
     };
 
-    // Optional authless MCP escape hatch at /mcp/<token> (see the
-    // mcp_path_token config docs). Resolved identity for attribution:
-    // the configured username, else the first admin, else anonymous.
-    let authless_mcp_router: Option<Router> = cfg
-        .server
-        .mcp_path_token
-        .clone()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .map(|token| {
-            let authless_user: Option<db::models::AuthUser> = {
-                match pool.read() {
-                    Ok(conn) => match cfg.server.mcp_path_user.as_deref() {
-                        Some(uname) => db::queries::users::get_user_by_username(&conn, uname)
-                            .ok()
-                            .map(|u| db::models::AuthUser {
-                                id: u.id,
-                                username: u.username,
-                                display_name: u.display_name,
-                                is_admin: u.is_admin,
-                            }),
-                        // LIFIC-8: the "no credential → first admin"
-                        // fallback is consolidated in `resolve_caller`.
-                        None => {
-                            resolve_caller::resolve_caller_conn(&conn, None, actor::Transport::Mcp)
-                                .ok()
-                                .flatten()
-                                .map(|i| i.user)
-                        }
-                    },
-                    Err(_) => None,
-                }
-            };
-            info!(
-                acting_as = authless_user
-                    .as_ref()
-                    .map_or("<anonymous>", |u| u.username.as_str()),
-                "authless MCP endpoint enabled at /mcp/<token>"
-            );
-            build_authless_mcp_router(
-                pool.clone(),
-                &token,
-                authless_user,
-                mcp_allowed_hosts.clone(),
-                cfg.server.public_url.clone(),
-                realtime.clone(),
-            )
-        });
-
     let app = authed_routes.merge(oauth::router(oauth_state));
-    let app = match authless_mcp_router {
-        Some(r) => app.merge(r),
-        None => app,
-    };
-    // LIF-465: the anonymous project view. Merged here, *after* the auth
-    // middleware has been layered onto `authed_routes`, so it is genuinely
-    // outside that middleware rather than carved out of it by path. Nothing in
-    // `api::public` can see an identity extension or auth config, because
-    // neither is layered onto this router. Only
-    // published projects are reachable through it (the flag is checked in the
-    // SQL of every read), and only with `GET`.
     // An upload ticket's URL is its own credential (the MCP files
     // extension's `credentials: "omit"`), so the route sits outside the auth
-    // middleware like the public view.
+    // middleware.
     let app = app.merge(api::upload_tickets::router(
-        pool.clone(),
-        attachment_store.clone(),
+        pool,
+        attachment_store,
         realtime,
     ));
-    let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
     with_compression(
-        app.fallback(get(serve_frontend))
+        app.fallback(frontend_fallback)
             // Top-level CORS layer.
             //
             // This wraps EVERYTHING (REST API, /mcp, OAuth, frontend). Two
@@ -508,7 +506,7 @@ pub(crate) fn build_app_with_store(
             //    `last-event-id` for SSE resumption).
             //
             // This is the only CORS layer. Keeping it outside the merged router
-            // gives REST, MCP, authless MCP, OAuth, and fallback routes one
+            // gives REST, MCP, OAuth, and fallback routes one
             // equivalent policy boundary instead of wrapping every API route.
             .layer(build_global_cors(&cfg.server.cors_origins))
             .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
@@ -521,6 +519,28 @@ pub(crate) fn build_app_with_store(
             // already-compressed images, and bodies under 32 bytes.
             .layer(middleware::from_fn(add_security_headers)),
     )
+}
+
+async fn frontend_fallback(request: Request<Body>) -> Response {
+    // Removed MCP paths must not become SPA pages or authenticate credentials.
+    if request.uri().path().starts_with("/mcp/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match *request.method() {
+        Method::GET | Method::HEAD => {
+            let head = request.method() == Method::HEAD;
+            let mut response = serve_frontend(request.uri().clone());
+            if head {
+                *response.body_mut() = Body::empty();
+            }
+            response
+        }
+        _ => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET,HEAD")],
+        )
+            .into_response(),
+    }
 }
 
 /// Apply compression once around the completed router instead of asking
@@ -538,6 +558,10 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
         )
         .init();
+
+    for warning in cfg.server.removed_setting_warnings() {
+        warn!("{warning}");
+    }
 
     // Parse trusted proxy CIDRs once at startup. Invalid entries must
     // stop the server rather than quietly disabling the trust boundary
@@ -588,6 +612,22 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     {
         let conn = pool.write()?;
         db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
+
+        // LIF-518: name, once, everyone the 3.0 upgrade left without a role
+        // in a project they could reach before.
+        let losses = db::queries::access_losses::take_unlogged(&conn)?;
+        if !losses.is_empty() {
+            warn!(
+                users_projects = losses.len(),
+                "project roles are now enforced on every instance. These users could reach \
+                 these projects before and hold no role in them now. Restore anyone who \
+                 needs access with `lific member add --project <PROJECT> --user <name> --role \
+                 maintainer`; `lific doctor` lists whoever is still left out."
+            );
+            for line in db::queries::access_losses::summarize(&losses) {
+                warn!("lost project access: {line}");
+            }
+        }
 
         // LIF-215: single-user web auto-login hands an admin session to
         // anyone who can load the page. It shares login-free mode's
@@ -743,6 +783,8 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             // with `x-mcp-header`, so no `Mcp-Param-*` header is ever sent.
             HeaderName::from_static("mcp-method"),
             HeaderName::from_static("mcp-name"),
+            // LIF-526: idempotent creates.
+            HeaderName::from_static(crate::api::idempotency::KEY_HEADER),
         ])
         .expose_headers([
             header::WWW_AUTHENTICATE,
@@ -753,6 +795,7 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             HeaderName::from_static(crate::api::comments::RETURNED_HEADER),
             HeaderName::from_static(crate::api::comments::NEXT_CURSOR_AT_HEADER),
             HeaderName::from_static(crate::api::comments::NEXT_CURSOR_ID_HEADER),
+            HeaderName::from_static(crate::api::idempotency::REPLAYED_HEADER),
         ])
         .max_age(std::time::Duration::from_secs(86400));
 
@@ -790,56 +833,6 @@ fn mcp_issue_link_context(
             .get(header::HOST)
             .and_then(|value| value.to_str().ok()),
         allowed_hosts,
-    )
-}
-
-/// Build the authless MCP router mounted at `/mcp/<token>`.
-///
-/// This endpoint deliberately bypasses the OAuth/API-key auth middleware: the
-/// secret path segment IS the credential. It exists because claude.ai web's
-/// OAuth connector flow is currently broken (it finishes the OAuth dance, gets
-/// a token, then never sends the authenticated MCP request). An authless server
-/// sidesteps that path entirely. Every request is run as a fixed identity
-/// (`user`) so MCP tools that attribute actions to a user still work.
-///
-/// Security: anyone who learns the URL has full MCP access. The token must be
-/// long and random, and only served over HTTPS.
-fn build_authless_mcp_router(
-    pool: db::DbPool,
-    token: &str,
-    user: Option<db::models::AuthUser>,
-    allowed_hosts: Vec<String>,
-    public_url: Option<String>,
-    realtime: realtime::RealtimeHub,
-) -> Router {
-    let allowed_hosts_for_links = allowed_hosts.clone();
-    let config = StreamableHttpServerConfig::default()
-        .with_legacy_session_mode(false)
-        .with_json_response(true)
-        .with_max_request_body_bytes(mcp::MAX_REQUEST_BODY_BYTES)
-        .with_allowed_hosts(allowed_hosts);
-    let service = Arc::new(StreamableHttpService::new(
-        move || Ok(mcp::LificMcp::with_realtime(pool.clone(), realtime.clone())),
-        Arc::new(LocalSessionManager::default()),
-        config,
-    ));
-    Router::new().route(
-        &format!("/mcp/{token}"),
-        any(move |mut request: Request<Body>| async move {
-            let issue_links = mcp_issue_link_context(
-                public_url.as_deref(),
-                request.headers(),
-                &allowed_hosts_for_links,
-            );
-            if let Some(issue_links) = issue_links {
-                request
-                    .extensions_mut()
-                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
-            } else {
-                request.extensions_mut().insert(user);
-            }
-            service.handle(request).await.into_response()
-        }),
     )
 }
 
@@ -1269,7 +1262,7 @@ mod cors_tests {
 
     /// Production assembles one global CORS layer around every route family.
     /// Preflights must therefore remain independent of whether the request is
-    /// handled by REST, authenticated MCP, authless MCP, or the fallback.
+    /// handled by REST, authenticated MCP, or the fallback.
     #[tokio::test]
     async fn production_cors_covers_all_route_surfaces() {
         let pool = db::open_memory().expect("test db");
@@ -1277,7 +1270,6 @@ mod cors_tests {
         let mut cfg = Config::default();
         cfg.auth.required = true;
         cfg.server.cors_origins = vec!["https://client.example".into()];
-        cfg.server.mcp_path_token = Some("secret".into());
         let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
             cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
         );
@@ -1292,7 +1284,6 @@ mod cors_tests {
         for (uri, requested_method) in [
             ("/api/health", "GET"),
             ("/mcp", "POST"),
-            ("/mcp/secret", "POST"),
             ("/not-a-route", "GET"),
         ] {
             let response = app
@@ -1435,7 +1426,7 @@ mod frontend_security_headers_tests {
     #[tokio::test]
     async fn frontend_responses_cannot_be_framed_or_mime_sniffed() {
         let app = Router::new()
-            .fallback(get(serve_frontend))
+            .fallback(frontend_fallback)
             .layer(middleware::from_fn(add_security_headers));
         let response = app
             .oneshot(
@@ -1481,319 +1472,44 @@ mod frontend_security_headers_tests {
     }
 }
 
-/// LIF-465: the anonymous project view through the router `lific start`
-/// builds. `api::public`'s own tests prove the handlers and the SQL; only the
-/// assembled app can prove that mounting it did not put it behind the auth
-/// middleware, or the authenticated API in front of it.
 #[cfg(test)]
-mod public_surface_tests {
+mod public_read_tests;
+
+#[cfg(test)]
+mod authenticated_mcp_tests {
     use super::*;
-    use crate::db::models::*;
-    use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    struct Deployed {
+    #[derive(Clone)]
+    struct McpClient {
         app: Router,
-        _store_guard: tempfile::TempDir,
-        attachment_id: i64,
-        private_issue_id: i64,
-        session_token: String,
+        key: String,
     }
 
-    /// Auth required, one published project with an issue, a comment and an
-    /// attachment, and one private project holding a secret.
-    fn deploy() -> Deployed {
-        let pool = db::open_memory().expect("test db");
-        let tmp = tempfile::tempdir().expect("attachment tempdir");
-        let store = storage::AttachmentStore::new(tmp.path().to_path_buf());
-
-        let (attachment_id, private_issue_id, session_token) = {
-            let conn = pool.write().unwrap();
-            conn.execute(
-                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
-                 VALUES ('owner', 'owner@test.local', 'x', 'Owner', 1, 0)",
-                [],
-            )
-            .unwrap();
-
-            let published = db::queries::create_project(
-                &conn,
-                &CreateProject {
-                    name: "Published".into(),
-                    identifier: "PUB".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE projects SET is_public = 1 WHERE id = ?1",
-                [published.id],
-            )
-            .unwrap();
-            let private = db::queries::create_project(
-                &conn,
-                &CreateProject {
-                    name: "Private".into(),
-                    identifier: "PRIV".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-            let issue = db::queries::create_issue(
-                &conn,
-                &CreateIssue {
-                    project_id: published.id,
-                    title: "Public issue".into(),
-                    description: "A body anyone may read".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            let secret = db::queries::create_issue(
-                &conn,
-                &CreateIssue {
-                    project_id: private.id,
-                    title: "Private issue".into(),
-                    description: "classified".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            db::queries::comments::create_comment_with_mentions(
-                &conn,
-                db::queries::comments::CommentParent::Issue(issue.id),
-                None,
-                CommentActor {
-                    user_id: 1,
-                    is_admin: true,
-                },
-                AttachmentActor::TrustedLocal,
-                "A public comment",
-                false,
-            )
-            .unwrap();
-
-            let bytes = b"public attachment bytes".to_vec();
-            let sha = store.write(&bytes).unwrap();
-            let attachment = db::queries::attachments::create_attachment(
-                &conn,
-                &sha,
-                "spec.pdf",
-                "application/pdf",
-                bytes.len() as i64,
-                None,
-            )
-            .unwrap();
-            db::queries::attachments::link_attachment(
-                &conn,
-                attachment.id,
-                AttachmentEntity::Issue,
-                issue.id,
-            )
-            .unwrap();
-
-            let session = db::queries::users::create_session(&conn, 1, None).unwrap();
-            (attachment.id, secret.id, session.token)
-        };
-
-        let mut cfg = Config::default();
-        cfg.auth.required = true;
-        cfg.server.host = "127.0.0.1".into();
-        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
-            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
-        );
-        let app = build_app_with_store(
-            &cfg,
-            pool,
-            realtime::RealtimeHub::new(),
-            trusted_proxies,
-            store,
-        );
-
-        Deployed {
-            app,
-            _store_guard: tmp,
-            attachment_id,
-            private_issue_id,
-            session_token,
-        }
-    }
-
-    /// Deliberately sends no `Authorization` header and no cookie.
-    async fn anonymous(app: &Router, method: &str, uri: &str) -> axum::response::Response {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
-    async fn with_session(app: &Router, token: &str, uri: &str) -> axum::response::Response {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("cookie", format!("lific_token={token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
-    async fn body_string(response: axum::response::Response) -> String {
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        String::from_utf8_lossy(&bytes).to_string()
-    }
-
-    /// A visitor with no account reads the list, the detail, the comments
-    /// and the file, over the production middleware stack.
-    #[tokio::test]
-    async fn a_visitor_with_no_credentials_reads_a_published_project() {
-        let d = deploy();
-        for uri in [
-            "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/index".to_string(),
-            "/public/api/projects/PUB/issues/resolve/PUB-1".to_string(),
-            format!("/public/api/projects/PUB/attachments/{}", d.attachment_id),
-        ] {
-            let response = anonymous(&d.app, "GET", &uri).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::OK,
-                "{uri} must be readable without any credential"
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CACHE_CONTROL)
-                    .and_then(|v| v.to_str().ok()),
-                Some("no-store, no-cache, must-revalidate"),
-                "{uri} lost its no-store header somewhere in the stack"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_authenticated_rest_attachment_download_uses_the_scoped_store() {
-        let d = deploy();
-        let response = with_session(
-            &d.app,
-            &d.session_token,
-            &format!("/api/attachments/{}", d.attachment_id),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_string(response).await, "public attachment bytes");
-    }
-
-    /// Adding the public router loosened nothing: every ordinary API path
-    /// still answers 401, including ones serving the same content.
-    #[tokio::test]
-    async fn the_ordinary_api_is_still_closed_to_anonymous_callers() {
-        let d = deploy();
-        for uri in [
-            "/api/projects".to_string(),
-            "/api/issues".to_string(),
-            format!("/api/issues/{}", d.private_issue_id),
-            "/api/issues/resolve/PUB-1".to_string(),
-            "/api/pages".to_string(),
-            "/api/search?q=classified".to_string(),
-            "/api/auth/me".to_string(),
-            "/api/users".to_string(),
-            format!("/api/attachments/{}", d.attachment_id),
-        ] {
-            let response = anonymous(&d.app, "GET", &uri).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must still require authentication"
-            );
-        }
-    }
-
-    /// A private project is not reachable through the public prefix, and says
-    /// exactly what a project that was never created says.
-    #[tokio::test]
-    async fn a_private_project_is_not_reachable_through_the_public_prefix() {
-        let d = deploy();
-        let hidden = anonymous(&d.app, "GET", "/public/api/projects/PRIV/index").await;
-        let missing = anonymous(&d.app, "GET", "/public/api/projects/NOPE/index").await;
-        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        let (hidden, missing) = (body_string(hidden).await, body_string(missing).await);
-        assert_eq!(hidden, missing);
-        assert!(!hidden.contains("classified"));
-    }
-
-    /// Nothing on the public prefix writes, in the assembled app as much as
-    /// in the isolated router.
-    #[tokio::test]
-    async fn the_public_prefix_refuses_every_write() {
-        let d = deploy();
-        for method in ["POST", "PUT", "PATCH", "DELETE"] {
-            let response = anonymous(&d.app, method, "/public/api/projects/PUB/index").await;
-            assert_eq!(
-                response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
-                "{method} on the public prefix"
-            );
-        }
-    }
-
-    /// The load bounds are the only thing between an anonymous stranger and
-    /// the read pool, so "wired in" is asserted where the wiring happens.
-    #[tokio::test]
-    async fn public_reads_are_rate_limited_in_the_assembled_app() {
-        let d = deploy();
-        let mut refused = 0;
-        for _ in 0..300 {
-            if anonymous(&d.app, "GET", "/public/api/projects/PUB")
-                .await
-                .status()
-                == StatusCode::TOO_MANY_REQUESTS
-            {
-                refused += 1;
+    impl McpClient {
+        fn new(pool: db::DbPool, user_id: Option<i64>) -> Self {
+            let key =
+                auth::create_api_key(&pool, &format!("test-client-{user_id:?}"), user_id).unwrap();
+            let mut cfg = Config::default();
+            cfg.auth.required = true;
+            Self {
+                app: build_app(&cfg, pool, realtime::RealtimeHub::new(), Arc::from([])),
+                key,
             }
         }
-        assert!(
-            refused > 0,
-            "300 anonymous reads in a row were all served; no rate limit is wired in"
-        );
 
-        // The authenticated API is not collateral damage: it has its own
-        // limits and must not share the public bucket.
-        assert_eq!(
-            anonymous(&d.app, "GET", "/api/projects").await.status(),
-            StatusCode::UNAUTHORIZED,
-            "the ordinary API must still answer 401, not the public 429"
-        );
+        async fn oneshot(
+            self,
+            mut request: Request<Body>,
+        ) -> Result<Response, std::convert::Infallible> {
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.key).parse().unwrap(),
+            );
+            self.app.oneshot(request).await
+        }
     }
-
-    /// `/public/PUB` is the address a person shares. It is not an API route;
-    /// it falls through to the SPA, which then renders the public view from
-    /// the JSON endpoints above. The assertion is only that it is not a 401
-    /// or a 404, the same treatment `/DEMO/issues` gets.
-    #[tokio::test]
-    async fn the_shareable_address_serves_the_app_without_a_login() {
-        let d = deploy();
-        let response = anonymous(&d.app, "GET", "/public/PUB").await;
-        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-}
-
-#[cfg(test)]
-mod authless_mcp_tests {
-    use super::*;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
 
     fn initialize_body() -> Body {
         let body = serde_json::json!({
@@ -1809,25 +1525,14 @@ mod authless_mcp_tests {
         Body::from(serde_json::to_vec(&body).unwrap())
     }
 
-    /// The whole point: a request to /mcp/<token> with NO Authorization header
-    /// drives a full MCP `initialize` and returns 200. This is the path that
-    /// works around claude.ai web's broken OAuth connector flow.
     #[tokio::test]
-    async fn authless_path_serves_mcp_without_auth() {
+    async fn bearer_header_serves_mcp() {
         let pool = db::open_memory().unwrap();
-        let token = "s3cret-authless-token-abcdef";
-        let router = build_authless_mcp_router(
-            pool,
-            token,
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
+        let router = McpClient::new(pool, None);
 
         let req = Request::builder()
             .method(Method::POST)
-            .uri(format!("/mcp/{token}"))
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -1838,7 +1543,7 @@ mod authless_mcp_tests {
         assert_eq!(
             res.status(),
             StatusCode::OK,
-            "authless MCP initialize must succeed without any auth header"
+            "MCP initialize must succeed with a bearer header"
         );
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1848,7 +1553,7 @@ mod authless_mcp_tests {
         );
     }
 
-    fn router_with_project() -> Router {
+    fn router_with_project() -> McpClient {
         let pool = db::open_memory().unwrap();
         {
             let conn = pool.write().unwrap();
@@ -1863,27 +1568,20 @@ mod authless_mcp_tests {
             )
             .unwrap();
         }
-        build_authless_mcp_router(
-            pool,
-            "test-token",
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        )
+        McpClient::new(pool, None)
     }
 
     /// POST one JSON-RPC message the way a stateless client does: no session
     /// id, the version in a header, and the 2026-07-28 routing headers when
     /// the client speaks that revision.
     async fn post_mcp(
-        router: &Router,
+        router: &McpClient,
         version: &str,
         body: serde_json::Value,
     ) -> serde_json::Value {
         let mut req = Request::builder()
             .method(Method::POST)
-            .uri("/mcp/test-token")
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -2060,14 +1758,7 @@ mod authless_mcp_tests {
                 )
                 .unwrap();
             }
-            build_authless_mcp_router(
-                pool,
-                "test-token",
-                None,
-                vec!["localhost".into()],
-                None,
-                realtime::RealtimeHub::new(),
-            )
+            McpClient::new(pool, None)
         });
 
         // Alternate servers and repeat requests: each request constructs a new
@@ -2075,7 +1766,7 @@ mod authless_mcp_tests {
         for index in [0, 1, 0, 1] {
             let req = Request::builder()
                 .method(Method::POST)
-                .uri("/mcp/test-token")
+                .uri("/mcp")
                 .header("host", "localhost")
                 .header("content-type", "application/json")
                 .header("accept", "application/json, text/event-stream")
@@ -2155,24 +1846,17 @@ mod authless_mcp_tests {
         users
     }
 
-    fn user_mcp_routers(pool: &db::DbPool, users: &[db::models::AuthUser; 2]) -> [Router; 2] {
-        users.clone().map(|user| {
-            build_authless_mcp_router(
-                pool.clone(),
-                "test-token",
-                Some(user),
-                vec!["localhost".into()],
-                None,
-                realtime::RealtimeHub::new(),
-            )
-        })
+    fn user_mcp_routers(pool: &db::DbPool, users: &[db::models::AuthUser; 2]) -> [McpClient; 2] {
+        users
+            .clone()
+            .map(|user| McpClient::new(pool.clone(), Some(user.id)))
     }
 
     /// Call one MCP tool over HTTP and return its first text block.
-    async fn call_mcp_tool(router: Router, name: &str, arguments: serde_json::Value) -> String {
+    async fn call_mcp_tool(router: McpClient, name: &str, arguments: serde_json::Value) -> String {
         let request = Request::builder()
             .method(Method::POST)
-            .uri("/mcp/test-token")
+            .uri("/mcp")
             .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -2194,6 +1878,137 @@ mod authless_mcp_tests {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+
+    /// Call one MCP tool over HTTP as a client whose session header names
+    /// `session` (none for a stateless client). Returns the first text block.
+    async fn call_in_session(
+        router: &McpClient,
+        session: Option<(&str, &str)>,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> String {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18");
+        if let Some((header, value)) = session {
+            request = request.header(header, value);
+        }
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// LIF-525 over the real transport: two clients on one credential are
+    /// told apart by their session header, and a stateless client with none
+    /// claims for the whole account.
+    #[tokio::test]
+    async fn http_sessions_on_one_key_hold_claims_apart() {
+        let router = router_with_project();
+        let first = Some(("Mcp-Session-Id", "session-one"));
+        let second = Some(("X-Lific-Worker", "proxy-two"));
+        call_in_session(
+            &router,
+            None,
+            "create_issue",
+            serde_json::json!({"project": "PRO", "title": "Contested", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRO-1", "claim": true});
+        let held = call_in_session(&router, first, "update_issue", claim.clone()).await;
+        let worker = crate::db::queries::claims::worker_from_session("session-one").unwrap();
+        assert!(held.contains(&format!("as worker {worker}")), "{held}");
+        assert!(
+            held.contains("| active |"),
+            "a todo claim starts work: {held}"
+        );
+
+        let refused = call_in_session(&router, second, "update_issue", claim.clone()).await;
+        assert!(
+            refused.starts_with("Error:")
+                && refused.contains(&format!("claimed by @operator (worker {worker})")),
+            "{refused}"
+        );
+        let stateless = call_in_session(&router, None, "update_issue", claim.clone()).await;
+        assert!(stateless.starts_with("Error:"), "{stateless}");
+
+        let workable = serde_json::json!({"project": "PRO", "workable": true});
+        let own = call_in_session(&router, first, "list_issues", workable.clone()).await;
+        assert!(own.contains("Contested"), "{own}");
+        let other = call_in_session(&router, second, "list_issues", workable).await;
+        assert_eq!(other, "No issues found.");
+
+        let release = serde_json::json!({"identifier": "PRO-1", "claim": false});
+        let released = call_in_session(&router, first, "update_issue", release).await;
+        assert!(released.contains("Claim released."), "{released}");
+        let account = call_in_session(&router, None, "update_issue", claim).await;
+        assert!(
+            account.contains("for your whole account"),
+            "a stateless claim is the account's: {account}"
+        );
+    }
+
+    /// LIF-525: a new HTTP session resumes a claim by sending the worker id
+    /// the claim reported as `X-Lific-Worker`. Its claims and its reads then
+    /// agree; the `worker` argument cannot stand in for the header.
+    #[tokio::test]
+    async fn an_http_client_resumes_a_claim_by_sending_its_worker_id() {
+        let router = router_with_project();
+        call_in_session(
+            &router,
+            None,
+            "create_issue",
+            serde_json::json!({"project": "PRO", "title": "Resumed", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRO-1", "claim": true});
+        let first = Some(("Mcp-Session-Id", "session-one"));
+        call_in_session(&router, first, "update_issue", claim.clone()).await;
+        let worker = crate::db::queries::claims::worker_from_session("session-one").unwrap();
+
+        // A fresh session passing the id as an argument is told to use the
+        // header, and nothing changes.
+        let fresh = Some(("Mcp-Session-Id", "session-two"));
+        let argued = call_in_session(
+            &router,
+            fresh,
+            "update_issue",
+            serde_json::json!({"identifier": "PRO-1", "claim": true, "worker": worker}),
+        )
+        .await;
+        assert!(
+            argued.starts_with("Error:") && argued.contains(&format!("X-Lific-Worker: {worker}")),
+            "{argued}"
+        );
+
+        let resumed = Some(("X-Lific-Worker", worker.as_str()));
+        let renewed = call_in_session(&router, resumed, "update_issue", claim).await;
+        assert!(
+            renewed.contains("Claim renewed until") && renewed.contains(&worker),
+            "{renewed}"
+        );
+        let workable = serde_json::json!({"project": "PRO", "workable": true});
+        let own = call_in_session(&router, resumed, "list_issues", workable.clone()).await;
+        assert!(own.contains("Resumed"), "the resumed holder sees it: {own}");
+        let other = call_in_session(&router, fresh, "list_issues", workable).await;
+        assert_eq!(other, "No issues found.");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2281,49 +2096,69 @@ mod authless_mcp_tests {
         }
     }
 
-    /// A wrong path token does not match the route at all (no secret leak,
-    /// no MCP access) — it falls through to 404 in this isolated router.
     #[tokio::test]
-    async fn wrong_path_token_does_not_match() {
+    async fn path_credentials_never_authenticate_in_the_production_router() {
         let pool = db::open_memory().unwrap();
-        let router = build_authless_mcp_router(
-            pool,
-            "the-right-token",
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
-
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/mcp/the-wrong-token")
-            .header("host", "localhost")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .body(initialize_body())
+        let mut client = McpClient::new(pool.clone(), None);
+        let cfg: Config = toml::from_str(
+            "[server]\nmcp_path_token = 'obsolete-secret'\nmcp_path_user = 'admin'\n",
+        )
+        .unwrap();
+        client.app = build_app(&cfg, pool, realtime::RealtimeHub::new(), Arc::from([]));
+        let obsolete = client
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp/obsolete-secret")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-
-        let res = router.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(obsolete.status(), StatusCode::NOT_FOUND);
+        for method in [Method::GET, Method::HEAD, Method::POST, Method::DELETE] {
+            for with_header in [false, true] {
+                let mut req = Request::builder()
+                    .method(method.clone())
+                    .uri(format!("/mcp/{}", client.key))
+                    .header("host", "localhost");
+                if with_header {
+                    req = req.header(header::AUTHORIZATION, format!("Bearer {}", client.key));
+                }
+                let res = client
+                    .app
+                    .clone()
+                    .oneshot(req.body(initialize_body()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                assert!(res.headers().get(header::WWW_AUTHENTICATE).is_none());
+            }
+        }
+        let res = client
+            .app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn authless_path_rejects_unallowlisted_host() {
+    async fn authenticated_mcp_rejects_unallowlisted_host() {
         let pool = db::open_memory().unwrap();
-        let token = "the-right-token";
-        let router = build_authless_mcp_router(
-            pool,
-            token,
-            None,
-            vec!["localhost".into()],
-            None,
-            realtime::RealtimeHub::new(),
-        );
+        let router = McpClient::new(pool, None);
 
         let req = Request::builder()
             .method(Method::POST)
-            .uri(format!("/mcp/{token}"))
+            .uri("/mcp")
             .header("host", "spoofed.example")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
@@ -2694,5 +2529,375 @@ mod mcp_http_upload_tests {
             .unwrap();
         let (status, body) = put(&url, png(64)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+}
+
+#[cfg(test)]
+mod cookie_session_tests {
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const PUBLIC: &str = "https://lific.example";
+    const EXTRA: &str = "https://other.lific.example";
+
+    struct Deployed {
+        app: Router,
+        session: String,
+        api_key: String,
+    }
+
+    fn deploy() -> Deployed {
+        let pool = db::open_memory().expect("test db");
+        let (session, api_key) = {
+            let conn = pool.write().unwrap();
+            let user = db::queries::users::create_user(
+                &conn,
+                &db::models::CreateUser {
+                    username: "writer".into(),
+                    email: "writer@test.local".into(),
+                    password: "writerpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let session = db::queries::users::create_session(&conn, user.id, None)
+                .unwrap()
+                .token;
+            drop(conn);
+            let key = auth::create_api_key(&pool, "script", Some(user.id)).unwrap();
+            (session, key)
+        };
+
+        let mut cfg = Config::default();
+        cfg.auth.required = true;
+        cfg.server.host = "127.0.0.1".into();
+        cfg.server.public_url = Some(PUBLIC.into());
+        cfg.server.cors_origins = vec![EXTRA.into()];
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app(&cfg, pool, realtime::RealtimeHub::new(), trusted_proxies);
+        Deployed {
+            app,
+            session,
+            api_key,
+        }
+    }
+
+    enum Credential<'a> {
+        Cookie(&'a str),
+        Bearer(&'a str),
+    }
+
+    async fn create_project(
+        app: &Router,
+        credential: Credential<'_>,
+        origin: Option<&str>,
+        identifier: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("host", "lific.example")
+            .header("x-forwarded-proto", "https")
+            .header("content-type", "application/json");
+        builder = match credential {
+            Credential::Cookie(token) => builder.header("cookie", format!("lific_token={token}")),
+            Credential::Bearer(token) => builder.header("authorization", format!("Bearer {token}")),
+        };
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let body = serde_json::json!({ "name": identifier, "identifier": identifier });
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_post_riding_the_cookie_is_refused() {
+        let d = deploy();
+        let (status, body) = create_project(
+            &d.app,
+            Credential::Cookie(&d.session),
+            Some("https://evil.example"),
+            "EVIL",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cross-origin"),
+            "{body}"
+        );
+
+        // Nothing was written.
+        let (status, _) =
+            create_project(&d.app, Credential::Cookie(&d.session), Some(PUBLIC), "EVIL").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the refused request created nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_without_an_origin_is_refused() {
+        let d = deploy();
+        let (status, body) =
+            create_project(&d.app, Credential::Cookie(&d.session), None, "BARE").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_from_the_public_url_or_a_cors_origin_is_allowed() {
+        let d = deploy();
+        for (origin, identifier) in [(PUBLIC, "MINE"), (EXTRA, "PEER")] {
+            let (status, body) = create_project(
+                &d.app,
+                Credential::Cookie(&d.session),
+                Some(origin),
+                identifier,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+        }
+    }
+
+    /// API keys and OAuth tokens are not ambient: a page on another site
+    /// cannot attach someone's Authorization header, so they skip the check.
+    #[tokio::test]
+    async fn an_api_key_write_is_unaffected_by_origin() {
+        let d = deploy();
+        for (origin, identifier) in [(None, "KEYA"), (Some("https://evil.example"), "KEYB")] {
+            let (status, body) =
+                create_project(&d.app, Credential::Bearer(&d.api_key), origin, identifier).await;
+            assert_eq!(status, StatusCode::OK, "{origin:?}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cookie_alone_signs_in_the_web_app() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Logout is a cookie write like any other, and it ends the session on
+    /// the server: the cookie stops working even if a copy survives.
+    #[tokio::test]
+    async fn logout_with_the_cookie_ends_the_session_and_clears_it() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(cleared.contains("; Secure"), "{cleared}");
+
+        let after = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn me_status(
+        app: &Router,
+        authorization: Option<&str>,
+        cookie: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().uri("/api/auth/me");
+        if let Some(authorization) = authorization {
+            builder = builder.header("authorization", authorization);
+        }
+        if let Some(session) = cookie {
+            builder = builder.header("cookie", format!("lific_token={session}"));
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn logout(app: &Router, authorization: &str, session: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("authorization", authorization)
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A header with another scheme (a basic-auth proxy in front of Lific) is
+    /// not a Lific credential: the cookie still signs the web app in.
+    #[tokio::test]
+    async fn a_non_bearer_authorization_header_leaves_the_cookie_in_charge() {
+        let d = deploy();
+        for header in ["Basic eDp5", "Token abc"] {
+            assert_eq!(
+                me_status(&d.app, Some(header), Some(&d.session)).await,
+                StatusCode::OK,
+                "{header}"
+            );
+            assert_eq!(
+                me_status(&d.app, Some(header), None).await,
+                StatusCode::UNAUTHORIZED,
+                "{header} alone is no credential"
+            );
+        }
+    }
+
+    /// And logout behind such a proxy ends the cookie's session.
+    #[tokio::test]
+    async fn logout_with_a_basic_auth_header_ends_the_cookie_session() {
+        let d = deploy();
+        let response = logout(&d.app, "Basic eDp5", &d.session).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::UNAUTHORIZED,
+            "the session was deleted on the server"
+        );
+    }
+
+    /// A Bearer header, in any case, decides the request on its own: a good
+    /// one works without the cookie, and an unusable one is a 401 that never
+    /// falls back to the cookie.
+    #[tokio::test]
+    async fn a_bearer_header_in_any_case_decides_alone() {
+        let d = deploy();
+        let lowercase = format!("bearer {}", d.session);
+        assert_eq!(
+            me_status(&d.app, Some(&lowercase), None).await,
+            StatusCode::OK
+        );
+        for header in [
+            "Bearer",
+            "bearer",
+            "bearer lific_sess_wrong",
+            "Bearer lific_sk-live-wrong",
+        ] {
+            assert_eq!(
+                me_status(&d.app, Some(header), Some(&d.session)).await,
+                StatusCode::UNAUTHORIZED,
+                "{header}"
+            );
+        }
+    }
+
+    /// Logout with an unusable Bearer header is refused rather than answering
+    /// 200 while the cookie's session lives on.
+    #[tokio::test]
+    async fn logout_with_an_unusable_bearer_header_is_refused_and_changes_nothing() {
+        let d = deploy();
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let response = logout(&d.app, header, &d.session).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{header}");
+            assert!(response.headers().get("set-cookie").is_none(), "{header}");
+        }
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::OK
+        );
+    }
+
+    /// `[auth] required = false` treats a missing credential as the operator,
+    /// and a non-Bearer header as missing; an unusable Bearer header is still a
+    /// broken client, not "no credential".
+    #[tokio::test]
+    async fn an_unusable_bearer_header_is_refused_when_auth_is_optional() {
+        let pool = db::open_memory().expect("test db");
+        let mut cfg = Config::default();
+        cfg.auth.required = false;
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app(&cfg, pool, realtime::RealtimeHub::new(), trusted_proxies);
+        let request = |authorization: Option<&str>| {
+            let mut builder = Request::builder().uri("/api/projects");
+            if let Some(authorization) = authorization {
+                builder = builder.header("authorization", authorization);
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let refused = app.clone().oneshot(request(Some(header))).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{header}");
+        }
+        for header in [None, Some("Basic eDp5")] {
+            let anonymous = app.clone().oneshot(request(header)).await.unwrap();
+            assert_eq!(anonymous.status(), StatusCode::OK, "{header:?}");
+        }
     }
 }

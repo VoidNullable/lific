@@ -38,9 +38,22 @@ Every tool carries MCP annotations, so a client can decide which calls to run wi
 
 `get_briefing(since='last')` stores where you left off, and every read is counted on the Agent activity page; neither changes your issues or pages, so the reads stay read-only.
 
+## Retrying a create with `op_key`
+
+A create can commit on the server while its reply is lost to a client timeout, and calling again would file a duplicate. `create_issue` (single and batch), `add_comment`, `create_page` and `create_plan` take an optional `op_key`: any unique string, at most 255 bytes. Send the same `op_key` when you retry:
+
+- The same key and the same arguments return the first call's result, starting with `Replayed op_key "...": this call already ran, so nothing new was written.` A batch replays as a whole. The similar-issues hint is not repeated.
+- The same key with different arguments, or on a different tool, is refused with `Error: Conflict: op_key "..." was already used for a different request` and writes nothing.
+- A call that failed records no key, so a corrected retry with the same key goes through.
+- A replay needs the same permission a new create would, and a session bound to another project never gets this one's result.
+- A retry sent while the first call is still writing waits for it and gets the replay.
+- A result over 1 MiB is not kept. The retry still writes nothing and says to read what was created.
+
+The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the caller's account and are kept for 24 hours. `lific mcp --remote` adds a key to every create that lacks one and retries once after a lost connection, so agents behind it get this without sending keys themselves.
+
 ## Structured results
 
-`list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
+`list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`conventions`, `human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
 
 ## Which tools use a repository binding
 
@@ -67,9 +80,9 @@ Lists issues in one project, or across the projects of the people you name with 
 | `priority` | `string` | No | `urgent`, `high`, `medium`, `low` or `none`. |
 | `module` | `string` | No | Module name. |
 | `label` | `string` | No | Label name. |
-| `workable` | `boolean` | No | `true` returns open issues (not `done` or `cancelled`) whose blockers are all `done` and that have no wait still holding. |
+| `workable` | `boolean` | No | `true` returns open issues (not `done` or `cancelled`) whose blockers are all `done`, that have no wait still holding, and that no other worker has [claimed](/docs/concepts/issues#claims). Issues you hold stay in. |
 | `blocked` | `boolean` | No | `true` returns issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. Each row lists its open blockers as `blocked_by:APP-3,APP-7`. |
-| `stale` | `boolean` | No | `true` returns active issues nobody has touched for the instance's stale threshold (default 3 days): no edit, comment or label change since. Not with `statuses` or a `status` other than `active`. |
+| `stale` | `boolean` | No | `true` returns active issues nobody has touched for the instance's stale threshold (default 3 days): no edit, comment, label change or claim since, and no live claim. Not with `statuses` or a `status` other than `active`. |
 | `created_since` | `string` | No | ISO date or datetime, inclusive, e.g. `2026-06-01`. |
 | `created_until` | `string` | No | ISO date or datetime, exclusive. |
 | `updated_since` | `string` | No | ISO date or datetime, inclusive. |
@@ -95,7 +108,7 @@ Every row that has waits carries one token per wait, whatever the filters:
 | `due_since:2026-09-28` | A date wait whose window has started. It no longer blocks. |
 | `overdue_since:2026-09-30` | A date wait whose last day has passed, dated from the day after it. It no longer blocks. |
 
-Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker. An issue with a due date (`target_date`) carries it after the module, such as `due:2026-11-20`; an issue without one carries no token.
+Notes are left out of the tokens; `get_issue` prints them. An issue a person must do carries `for:human` (any person) or `for:@ada,@bob` (named people). Rows without the token are free for any agent; `workable` does not filter on it, so check it before picking up work, or pass `assignee="none"`. An issue whose description contains a Markdown task list ends its row with its progress, such as `checklist: 2/5`. Issues without task items carry no marker. An issue under a live claim ends its row with `| claimed by @ada (worker p-1a2b3c4d) until 2026-11-26 12:15 UTC`. An issue with a due date (`target_date`) carries it after the module, such as `due:2026-11-20`; an issue without one carries no token.
 
 #### Your work across projects
 
@@ -129,11 +142,15 @@ Returns one issue, or up to 50: title, status, priority, module, `seq`, labels, 
 | `identifiers` | `string[]` | No | Up to 50 issue identifiers to read in one call, instead of `identifier`. |
 | `include_comments` | `string` | No | `recent` (default, the newest 3), `all` (the newest 500) or `none` (the count only). Any other value is an error. Applies to every issue in a batch. |
 
+Every comment mode also includes a **Decisions** section when decisions exist. It lists the newest decision comments within 50 entries and 32 KiB, with less space used when necessary to fit the issue's description. Each summary uses the first prose line after leading Markdown headings and fenced code blocks, shortened to 320 characters. A final line counts omitted decisions and points to `list_comments identifier=APP-1 kind=decision`. This section is independent of the comment window.
+
 The status line ends with the issue's `seq`, for example `Status: active | Priority: high | Module: API | seq: 118`. Pass it to [`update_issue`](#update_issue) as `expected_seq` to refuse the write if the issue changes in the meantime.
 
 Relation lines include each related issue's current status, for example `Blocked by: APP-42 (done)`.
 
 An issue a person must do has an `Assigned: human (a person must do this)` or `Assigned: @ada, @bob (a person must do this)` line. An unassigned issue has none.
+
+An issue under a live claim has a `Claimed by @ada (worker p-1a2b3c4d) until 2026-11-26 12:15 UTC` line, ending in `(you)` when you hold it.
 
 When the description contains a Markdown task list, a `Checklist: 3/5 done` line follows the status and labels. A task item is a list item (`-`, `*`, `+`, `1.` or `1)`) that starts with `[ ]`, `[x]` or `[X]`, nested or not. Items inside fenced code blocks are not counted, so a task list quoted as an example does not become the issue's checklist.
 
@@ -169,7 +186,8 @@ Creates an issue, or up to 50 at once, and returns the new identifiers.
 | `blocks` | `string[]` | No | Issue identifiers the new issue blocks. |
 | `blocked_by` | `string[]` | No | Issue identifiers that block the new issue. |
 | `relates_to` | `string[]` | No | Issue identifiers the new issue relates to. |
-| `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project`. |
+| `issues` | `object[]` | No | A batch of 1 to 50 issues. Each item takes `title` (required) and any of the fields above except `project` and `op_key`. |
+| `op_key` | `string` | No | Retry key for the whole call. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 Attachment links (`/api/attachments/12`) in the description are linked to the new issue.
 
@@ -199,6 +217,11 @@ Changes the fields you pass and leaves the rest alone. Text fields are replaced 
 | `expected_seq` | `integer` | No | Concurrency check. The update is refused if the issue's `seq` is no longer this value. Omit for last-writer-wins. |
 | `assignees` | `string[]` | No | Replaces who must do it. `[]` frees it for agents, `["human"]` marks it for any person, usernames name people. |
 | `evidence` | `string` | No | How the work was verified, in Markdown. Only with `status: "done"` on an issue that is not already done. Saved as a verification comment. |
+| `claim` | `boolean` | No | `true` holds the issue for you for a limited time, or extends the claim you hold. `false` releases it. See [Claims](/docs/concepts/issues#claims). |
+| `claim_minutes` | `integer` | No | How long the claim lasts, 1 to 1440 minutes. Default 15. Only with `claim: true`. |
+| `worker` | `string` | No | The worker id an earlier claim reported, to resume that claim from a new stdio session, which keeps working as that worker. Only with `claim` set. Over HTTP, send the id as the `X-Lific-Worker` header instead; a `worker` that differs from the header is refused. |
+
+A claim is refused while someone else holds the issue; the error names the holder and when the claim ends, and nothing else in the call changes. A claim on a `todo` or `backlog` issue moves it to `active` unless the call sets `status`. A `done` or `cancelled` issue cannot be claimed. The response ends with `Claim held until 2026-11-26 12:15 UTC as worker p-1a2b3c4d.` (or `Claim renewed ...`); call again before that time to keep it. Releasing a claim nobody holds succeeds with `No live claim to release.`; releasing someone else's is refused.
 
 A refused `expected_seq` returns an error naming the current `seq` and a one-line summary of the issue's current state. Moving an issue to or from `done` completes or reopens the plan steps that mirror it, and the response lists those steps.
 
@@ -216,7 +239,7 @@ Moves an issue to another project. Needs maintainer rights on both projects.
 | `project` | `string` | Yes | Target project identifier. Never taken from a binding. |
 | `module` | `string` | No | Module in the target project. Omitted: a module with the same name as the current one is kept, otherwise the module is cleared. |
 
-The issue takes the next number in the target project, and its old identifier keeps resolving: `get_issue`, links and `search` all find the issue by either. Comments, relations, waits, history, attachments and plan steps stay attached. Labels are matched by name in the target project. The response starts with `Moved APP-12 to OPS-4:`, and names any label the target has no label of that name for, a module it cleared, and any assignee who cannot see the target project and was unassigned. `get_issue` lists the identifiers an issue had before under `Formerly:`. Moving an issue to the project it is already in is an error.
+The issue takes the next number in the target project, and its old identifier keeps resolving: `get_issue`, links and `search` all find the issue by either. Comments, relations, waits, history, attachments and plan steps stay attached. Labels are matched by name in the target project. The response starts with `Moved APP-12 to OPS-4:`, and names any label the target has no label of that name for, a module it cleared, and any assignee who cannot see the target project and was unassigned. A claim on the issue ends with the move. `get_issue` lists the identifiers an issue had before under `Formerly:`. Moving an issue to the project it is already in is an error.
 
 ### `bulk_update`
 
@@ -329,6 +352,8 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | `show_members` | `string[]` | No | Projects only: roles whose members are all named, uncapped: `lead`, `maintainer`, `viewer` or `all`. `[]` prints only counts per role. |
 | `verbose` | `boolean` | No | Projects only: print each description in full. By default a row shows the description's first line, up to 100 characters, with `…` when anything was left out. |
 
+A project's [conventions page](/docs/concepts/pages#conventions-page) is marked in page listings: its line ends with `(this project's conventions page)`, or `(this project's conventions page, turned off)`, and its structured row has `conventions: true`.
+
 Projects are sorted by recent activity, and each row carries a one-line description, its workable-issue count, active-plan count and how long ago anything happened. It then shows the project's members by role, your own role, and its issue count per status:
 
 ```text
@@ -355,11 +380,12 @@ Creates or updates a project, module, label or folder. Deletion is `delete`.
 | `status` | `string` | No | Modules only: `backlog`, `planned`, `active` (default on create), `paused`, `done` or `cancelled`. |
 | `color` | `string` | No | Labels only: hex color, e.g. `#EF4444`. Defaults to `#6B7280` on create. |
 | `emoji` | `string` | No | Project or module icon: `lucide:<Name>` or a literal emoji. Omit to leave it unchanged; pass `""` to clear it. |
+| `conventions` | `string` | No | Projects only. The [conventions page](/docs/concepts/pages#conventions-page) template: `empty` (default on create), `ai_managed`, `human_managed` or `human_owned`. On update, also `none`. |
 
 | Resource and action | Required | Fields applied |
 | --- | --- | --- |
-| project, create | `name`, `identifier` | `description`, `emoji`. An authenticated caller becomes the project's primary lead. |
-| project, update | `project` | `name`, `identifier`, `description`, `emoji`. Passing `current_name` without `project` is an error. |
+| project, create | `name`, `identifier` | `description`, `emoji`, `conventions`. An authenticated caller becomes the project's primary lead. The project starts with a **Conventions** page holding the chosen template. |
+| project, update | `project` | `name`, `identifier`, `description`, `emoji`, `conventions`. Passing `current_name` without `project` is an error. |
 | module, create | `project`, `name` | `description`, `status`, `emoji` |
 | module, update | `project`, `current_name` | `name`, `description`, `status`, `emoji` |
 | label, create | `project`, `name` | `color` |
@@ -368,6 +394,8 @@ Creates or updates a project, module, label or folder. Deletion is `delete`.
 | folder, update | `project`, `current_name` | `name` |
 
 Updating a project takes `lead`. Module, label and folder changes take `maintainer`. An unsupported pair returns a line naming the accepted types and actions.
+
+On a project update, a `conventions` template creates the conventions page for a project that has none, and `none` stops the briefing reminding you that it has none. Both are refused while the project has a conventions page. The tool's description asks the agent to check with the user how the project will work with agents before it picks a template.
 
 ### `delete`
 
@@ -379,13 +407,13 @@ Deletes one resource.
 | `identifier` | `string` | Yes | `APP-1` for an issue, `APP-DOC-1` or `DOC-1` for a page, `APP-PLAN-2` for a plan, `APP` for a project, or the name of a module, label or folder. |
 | `project` | `string` | Depends | Required when deleting a module, label or folder, since those are found by name within a project. |
 
-A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring) with its comments. Deleting a project takes `lead`, or an administrator when membership is not enforced. An unrecognized `resource_type` returns a line naming the accepted values.
+A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring) with its comments. Deleting a project takes `lead`. An unrecognized `resource_type` returns a line naming the accepted values.
 
 ## Pages
 
 ### `get_page`
 
-Returns one page: its status, folder, `seq` (what [`update_page`](#update_page) checks `expected_seq` against), labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
+Returns one page: whether it is the project's conventions page, its status, folder, `seq` (what [`update_page`](#update_page) checks `expected_seq` against), labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -424,8 +452,10 @@ Creates a page in a project, or a workspace page when `project` is omitted.
 | `folder` | `string` | No | Folder name. Needs `project`. |
 | `status` | `string` | No | `draft` (default), `active`, `complete` or `archived`. |
 | `labels` | `string[]` | No | Label names. Labels belong to a project, so this is ignored on workspace pages. |
+| `conventions` | `boolean` | No | Make it the project's [conventions page](/docs/concepts/pages#conventions-page). Refused while the project has one, and on workspace pages. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
-Workspace pages take an administrator when membership is enforced.
+Workspace pages take an administrator.
 
 `create_page`, `update_page` and `edit_page` all accept content over the 30,000-character read budget of `get_page`. When the saved content is over it, the response adds one line saying so and suggesting a split, or moving old history to an archive page, because readers will get an outline instead of the whole page.
 
@@ -470,6 +500,7 @@ Creates a plan and its whole step tree in one call. See [Plans](/docs/concepts/p
 | `title` | `string` | Yes | Plan title. |
 | `anchor_issue` | `string` | No | Issue this plan breaks down, e.g. `APP-42`. Moving it to `done` archives the plan. |
 | `steps` | `PlanStep[]` | No | The nested step tree. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 A `PlanStep` object:
 
@@ -542,6 +573,8 @@ Adds a comment to an issue or page, authored by the caller. Returns the comment'
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | `APP-1` for an issue, `APP-DOC-1` for a project page, `DOC-1` for a workspace page. |
 | `content` | `string` | Yes | Markdown. At most 262144 bytes. |
+| `kind` | `string` | No | `comment` (default) or `decision`. Decisions appear in the separate `get_issue` summary section. |
+| `op_key` | `string` | No | Retry key. See [Retrying a create](#retrying-a-create-with-op_key). |
 
 Commenting takes `viewer`. `@username` [mentions](/docs/concepts/comments-and-activity#mentions) in the body are resolved when the comment is saved.
 
@@ -552,6 +585,7 @@ Returns one page of a thread, newest first by default.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue, project page or workspace page identifier. |
+| `kind` | `string` | No | Filter to `comment`, `decision`, or `verification` before counting and pagination. Preserve it when following continuation offsets. |
 | `author` | `string` | No | Only comments by this username. |
 | `order` | `string` | No | `desc` (default, newest first) or `asc` (oldest first). |
 | `limit` | `integer` | No | Default 50, capped at 500. |
@@ -585,7 +619,7 @@ Deletes a comment. Only the author or an administrator can delete.
 
 ### `get_briefing`
 
-Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters. Call it first in a session, as `get_briefing(project='APP', since='last')`, instead of rebuilding the picture from searches, pages, issue lists and plans.
+Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters plus the project's conventions. Call it first in a session, as `get_briefing(project='APP', since='last')`, instead of rebuilding the picture from searches, pages, issue lists and plans.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -601,15 +635,16 @@ Sections follow in this order, and a section with nothing to report is left out:
 
 | Section | What it lists |
 | --- | --- |
+| Conventions | The project's [conventions page](/docs/concepts/pages#conventions-page), when it has text and is turned on, with its headings moved one level down. Up to 4,000 characters, cut at a line break, then how much was shown and the `get_page` call that reads the rest. This section does not count against the 6,000-character budget. A project that has never had a conventions page gets a one-line reminder in the header instead, naming the `manage_resource` call that creates one or turns the reminder off. |
 | Human queue | Open issues assigned to a person (`human` or named people) in every project you can view, not only this one. Ranked by how many open issues each blocks, then due date (undated last), then age, oldest first. Each line shows who it is for, how many it blocks, its due date, the day it was opened, and other queue items with the same title as possible duplicates. Counts stop at 500. |
 | Since your last briefing, or since the date | Only with `since`. Counts of issues created, closed (`done` or `cancelled`) and otherwise moved, pages edited, and comments added, then the most recent of each kind with who made it (`by @name`; system writes name no one). A comment shows its first line. Status changes are net per issue, so an issue moved and moved back is not listed. Changes to deleted issues, pages and comments are left out. When nothing changed, the header says so instead. |
 | Active plans | Each with its progress and the next open step: the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named. |
 | Due to check | Open issues with a date wait whose window has arrived, most overdue first, each with its wait line. These no longer block, so this is where the follow-up surfaces; clear the wait with `unlink_issues` when it is done. |
 | Blocked | Open issues with an unresolved blocker or a wait still holding, each naming its blocking issues and their status, and its holding waits (`waiting on @ada-lovelace (note)`, `waiting until 2026-09-28..29`). A blocker in a project you cannot view is counted, not named. |
-| Workable, not yet active | Issues ready to start, highest priority first. Active issues have their own section. |
-| Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. |
-| Active | Active issues touched within the stale threshold, highest priority first, each with how long it has been idle (`idle 2d`, `idle 5h`, `idle <1h`). |
-| Stale active | Active issues nobody has touched for the instance's stale threshold (default 3 days), each with its idle age. An active issue claims work in progress; these are claims whose sessions likely ended. Resume one, or move it back to `todo`. `list_issues(stale=true)` lists them all. The server moves any left alone for 14 days (`stale_active_reset_days`) back to `todo` itself, with a comment. |
+| Workable, not yet active | Issues ready to start, highest priority first, leaving out any another worker has claimed. Active issues have their own section. |
+| Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. The recently updated list leaves out the conventions page; name it in `pages` to have it listed. |
+| Active | Active issues touched or claimed within the stale threshold, highest priority first, each with how long it has been idle (`idle 2d`, `idle 5h`, `idle <1h`). |
+| Stale active | Active issues nobody has touched or claimed for the instance's stale threshold (default 3 days), each with its idle age. An active issue says work is in progress; these are ones whose sessions likely ended. Resume one, or move it back to `todo`. `list_issues(stale=true)` lists them all. The server moves any left alone for 14 days (`stale_active_reset_days`) back to `todo` itself, with a comment. |
 | Needs triage | Active plans with no activity for 30 days or more (the plan itself, or any step created or edited), longest idle first, with progress and the date of the last activity; then active modules with no open issue, by name, each with how many closed issues it holds. Nothing here is changed for you: finish, archive or close each, or plan its next work. |
 
 Issue sections show up to 8 lines, plans up to 5, each kind of change up to 5, the triage section up to 3 plans and 3 modules, and titles are cut at 80 characters. If the whole response is still over 6,000 characters, lines are dropped from the longest section until it fits. A section that shows fewer items than it has ends with how many were left out and the call that lists them all, such as `(+12 more: list_issues(project='APP', blocked=true))`. Issue and plan counts stop at 100; `100+` means at least that many.
@@ -633,6 +668,8 @@ An attachment matches on its filename or on the extracted text of a small text u
 In `fts` mode every word is a required prefix term. When no result in the requested scope contains every word, the search runs again with any word allowed, ranks those hits by relevance (or recency, with `sort=recent`), and opens with `No result contains every word; showing partial matches ranked by relevance.` (or `most recent first.`). Paging walks the same partial list. A one-word query and `literal` mode never fall back.
 
 A project you cannot see returns `No results found.`, the same as a project with no matches.
+
+With `sort=relevance` in `fts` mode, a project's turned-on [conventions page](/docs/concepts/pages#conventions-page) counts double, so it comes first when it covers the query about as well as anything else. An issue that matches the query much better still ranks above it.
 
 ### `get_activity`
 

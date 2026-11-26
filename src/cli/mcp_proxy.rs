@@ -62,6 +62,9 @@ pub(crate) fn is_get_attachment_call(body: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ForwardError {
     pub(crate) message: String,
+    /// The request or its reply was lost in transit, so the remote may or may
+    /// not have run it. Only such a failure is worth retrying (LIF-526).
+    pub(crate) transport: bool,
 }
 
 impl ForwardError {
@@ -70,6 +73,15 @@ impl ForwardError {
     pub(crate) fn unreachable(detail: impl std::fmt::Display) -> Self {
         Self {
             message: format!("remote lific unreachable: {}", tidy(&detail.to_string())),
+            transport: false,
+        }
+    }
+
+    /// The connection failed or timed out before a whole reply arrived.
+    pub(crate) fn lost(detail: impl std::fmt::Display) -> Self {
+        Self {
+            transport: true,
+            ..Self::unreachable(detail)
         }
     }
 
@@ -81,6 +93,7 @@ impl ForwardError {
                 "remote lific rejected the credential (HTTP {status}): run `lific login` for this \
                  server, or set LIFIC_API_KEY to a valid API key"
             ),
+            transport: false,
         }
     }
 }
@@ -159,17 +172,67 @@ struct HttpForwarder {
     client: reqwest::Client,
     endpoint: String,
     credential: Option<String>,
+    /// LIF-525: one id for this proxy process, sent as `X-Lific-Worker` on
+    /// every request so the server tells this session's claims apart from
+    /// another session's on the same key, as it does for local stdio. A
+    /// claim that resumes another worker replaces it, as `lific mcp` does.
+    worker: std::sync::Mutex<String>,
+}
+
+impl HttpForwarder {
+    fn new(client: reqwest::Client, endpoint: String, credential: Option<String>) -> Self {
+        Self {
+            client,
+            endpoint,
+            credential,
+            worker: std::sync::Mutex::new(crate::db::queries::claims::mint_worker("r")),
+        }
+    }
+
+    fn worker(&self) -> String {
+        self.worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// LIF-525: the worker an `update_issue` call resumes with its `worker`
+/// argument. The proxy sends that call as that worker, and keeps it once the
+/// call succeeds, since over HTTP the header is what names the worker.
+fn resumed_worker(body: &str) -> Option<String> {
+    let message = serde_json::from_str::<Value>(body).ok()?;
+    let params = message.get("params")?;
+    if message.get("method")?.as_str()? != "tools/call"
+        || params.get("name")?.as_str()? != "update_issue"
+    {
+        return None;
+    }
+    let worker = params.get("arguments")?.get("worker")?.as_str()?;
+    crate::db::queries::claims::validate_worker(worker)
+        .is_ok()
+        .then(|| worker.to_owned())
+}
+
+fn is_tool_success(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        value.get("result").is_some_and(Value::is_object)
+            && value["result"].get("isError").and_then(Value::as_bool) != Some(true)
+    })
 }
 
 impl Forwarder for HttpForwarder {
     async fn forward(&self, body: String) -> Result<String, ForwardError> {
         let inline_attachment = is_get_attachment_call(&body);
         let routing = routing_headers(&body);
+        let resumed = resumed_worker(&body);
+        let worker = resumed.clone().unwrap_or_else(|| self.worker());
         let mut request = self
             .client
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
+            .header("x-lific-worker", worker)
             .body(body);
         for (name, value) in routing {
             request = request.header(name, value);
@@ -181,7 +244,7 @@ impl Forwarder for HttpForwarder {
             request = request.bearer_auth(credential);
         }
 
-        let response = request.send().await.map_err(ForwardError::unreachable)?;
+        let response = request.send().await.map_err(ForwardError::lost)?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ForwardError::rejected(status));
@@ -219,7 +282,13 @@ impl Forwarder for HttpForwarder {
             )));
         }
 
-        response.text().await.map_err(ForwardError::unreachable)
+        let text = response.text().await.map_err(ForwardError::lost)?;
+        if let Some(worker) = resumed
+            && is_tool_success(&text)
+        {
+            *self.worker.lock().unwrap_or_else(|e| e.into_inner()) = worker;
+        }
+        Ok(text)
     }
 }
 
@@ -422,6 +491,73 @@ pub(crate) fn inject_bound_project(message: &Value, bound: Option<&str>) -> Opti
     Some(encode(&patched))
 }
 
+/// The tools a relayed `tools/list` result says take an `op_key` (LIF-526):
+/// creates the server replays rather than repeats when the same key comes
+/// back. Learned from the server rather than hardcoded, because a server older
+/// than the proxy rejects the parameter it does not know.
+pub(crate) fn op_key_tools(response: &Value) -> Vec<String> {
+    response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| tool.pointer("/inputSchema/properties/op_key").is_some())
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+/// A random `op_key`, one per forwarded create.
+pub(crate) fn new_op_key() -> String {
+    format!("lific-proxy-{:032x}", rand::random::<u128>())
+}
+
+/// Prepare a create for one retry. A call to a tool in `keyable` without an
+/// `op_key` gets a fresh one, so a retry after a lost reply replays the first
+/// result instead of writing twice. Returns the message to forward when it
+/// may be retried. Anything else is `None`, forwarded once and untouched; a
+/// malformed call is the server's to reject.
+pub(crate) fn keyed_for_retry(
+    message: &Value,
+    keyable: &std::collections::HashSet<String>,
+) -> Option<Value> {
+    if message.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+    let params = message.get("params")?.as_object()?;
+    let name = params.get("name")?.as_str()?;
+    let arguments = params.get("arguments")?.as_object()?;
+    match arguments.get("op_key") {
+        // The client chose its own key, so it already knows the server takes
+        // one; a retry with it is as safe as with ours.
+        Some(Value::String(_)) => Some(message.clone()),
+        None | Some(Value::Null) if keyable.contains(name) => {
+            let mut patched = message.clone();
+            patched["params"]["arguments"]["op_key"] = Value::String(new_op_key());
+            Some(patched)
+        }
+        _ => None,
+    }
+}
+
+/// Forward `request`, and forward it once more if the first attempt was lost
+/// in transit and `retry` says the request is safe to repeat.
+async fn forward_with_retry<F: Forwarder + Sync>(
+    forwarder: &F,
+    request: String,
+    retry: bool,
+) -> Result<String, ForwardError> {
+    if !retry {
+        return forwarder.forward(request).await;
+    }
+    match forwarder.forward(request.clone()).await {
+        Err(error) if error.transport => {
+            tracing::warn!(error = %error.message, "retrying a create with its op_key");
+            forwarder.forward(request).await
+        }
+        other => other,
+    }
+}
+
 /// Append this session's binding status to a relayed `initialize` result.
 ///
 /// Returns the rewritten response body, or `None` to relay the original bytes.
@@ -469,6 +605,7 @@ where
 {
     let mut lines = input.lines();
     let mut output = output;
+    let mut keyable = std::collections::HashSet::new();
 
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -494,6 +631,7 @@ where
         };
 
         let is_initialize = message.get("method").and_then(Value::as_str) == Some("initialize");
+        let is_tools_list = message.get("method").and_then(Value::as_str) == Some("tools/list");
         // A path upload is read here, on the agent's machine, so the bytes
         // reach the server without passing through the model.
         let (message, line) = match inline_upload_path(&message, max_upload_bytes()) {
@@ -507,14 +645,25 @@ where
                 continue;
             }
         };
+        let (message, line, retry) = match keyed_for_retry(&message, &keyable) {
+            Some(keyed) => {
+                let line = encode(&keyed);
+                (keyed, line, true)
+            }
+            None => (message, line, false),
+        };
         let request = inject_bound_project(&message, bound).unwrap_or(line);
 
-        let outcome = match forwarder.forward(request).await {
+        let outcome = match forward_with_retry(forwarder, request, retry).await {
             // Validate before relaying: a body that is not JSON is a broken
             // remote, and the client deserves an error carrying its own id
             // rather than a garbage frame.
             Ok(body) => match serde_json::from_str::<Value>(&body) {
                 Ok(value) if is_initialize => augment_initialize(&value, bound).unwrap_or(body),
+                Ok(value) if is_tools_list => {
+                    keyable.extend(op_key_tools(&value));
+                    body
+                }
                 Ok(_) => body,
                 Err(error) => encode(&internal_error_response(
                     &id,
@@ -575,11 +724,7 @@ pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn 
     let bound = resolve_binding(&client, &url, credential.as_deref()).await;
 
     let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
-    let forwarder = HttpForwarder {
-        client,
-        endpoint,
-        credential,
-    };
+    let forwarder = HttpForwarder::new(client, endpoint, credential);
 
     tracing::info!(
         endpoint = %forwarder.endpoint,
@@ -870,11 +1015,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: format!("http://{address}/mcp"),
-            credential: None,
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            format!("http://{address}/mcp"),
+            None,
+        );
 
         let requests = format!(
             "{}\n{}\n",
@@ -911,11 +1056,11 @@ mod tests {
     #[tokio::test]
     async fn remote_stdio_serves_legacy_and_2026_07_28_clients() {
         let served = server::test_server::serve("Proxy project", "PRX").await;
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: served.endpoint.clone(),
-            credential: Some(served.key.clone()),
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            served.endpoint.clone(),
+            Some(served.key.clone()),
+        );
 
         let meta = crate::mcp::protocol_tests::modern_meta();
         let list_projects = serde_json::json!({
@@ -976,6 +1121,86 @@ mod tests {
         }
     }
 
+    /// LIF-525: two `lific mcp --remote` processes on one key are two
+    /// workers, so the second cannot claim what the first holds.
+    #[tokio::test]
+    async fn two_remote_stdio_processes_on_one_key_claim_apart() {
+        let served = server::test_server::serve("Proxy project", "PRX").await;
+        let process = || {
+            HttpForwarder::new(
+                reqwest::Client::new(),
+                served.endpoint.clone(),
+                Some(served.key.clone()),
+            )
+        };
+        let (first, second) = (process(), process());
+        async fn run(forwarder: &HttpForwarder, name: &str, arguments: Value) -> String {
+            let mut stdout = Vec::new();
+            pump(
+                BufReader::new(call(name, arguments).as_bytes()),
+                &mut stdout,
+                forwarder,
+                None,
+            )
+            .await
+            .unwrap();
+            let reply: Value = serde_json::from_slice(&stdout).unwrap();
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+        run(
+            &first,
+            "create_issue",
+            serde_json::json!({"project": "PRX", "title": "Contested", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRX-1", "claim": true});
+        let held = run(&first, "update_issue", claim.clone()).await;
+        assert!(held.contains("Claim held"), "{held}");
+        let refused = run(&second, "update_issue", claim).await;
+        assert!(
+            refused.starts_with("Error:") && refused.contains("is claimed by"),
+            "{refused}"
+        );
+
+        // A restarted proxy resumes by passing the id back, and from then on
+        // its reads see the claim as its own.
+        let worker = first.worker();
+        assert!(held.contains(&format!("as worker {worker}")), "{held}");
+        let restarted = process();
+        let workable = serde_json::json!({"project": "PRX", "workable": true});
+        assert_eq!(
+            run(&restarted, "list_issues", workable.clone()).await,
+            "No issues found."
+        );
+        let resumed = run(
+            &restarted,
+            "update_issue",
+            serde_json::json!({"identifier": "PRX-1", "claim": true, "worker": worker}),
+        )
+        .await;
+        assert!(resumed.contains("Claim renewed"), "{resumed}");
+        assert_eq!(restarted.worker(), worker);
+        let listed = run(&restarted, "list_issues", workable.clone()).await;
+        assert!(listed.contains("Contested"), "{listed}");
+        assert_eq!(
+            run(&second, "list_issues", workable).await,
+            "No issues found."
+        );
+
+        // A resume the server refuses leaves the proxy's own id alone.
+        let own = second.worker();
+        run(
+            &second,
+            "update_issue",
+            serde_json::json!({"identifier": "PRX-1", "claim": true, "worker": "p-00000000"}),
+        )
+        .await;
+        assert_eq!(second.worker(), own);
+    }
+
     /// Noise, so the PNG encoder cannot shrink it below the size under test.
     fn noisy_png(width: u32, height: u32) -> Vec<u8> {
         let mut state = 0x2545_f491_u32;
@@ -1002,11 +1227,11 @@ mod tests {
         use sha2::Digest;
 
         let served = server::test_server::serve("Proxy project", "PRX").await;
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: served.endpoint.clone(),
-            credential: Some(served.key.clone()),
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            served.endpoint.clone(),
+            Some(served.key.clone()),
+        );
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("screen.png");
         let png = noisy_png(1000, 1000);
@@ -1429,5 +1654,185 @@ mod tests {
         ] {
             assert_eq!(binding_from_resolution(&answer), None, "{answer}");
         }
+    }
+
+    // ── LIF-526: op_key on creates, and one retry after a lost reply ──
+
+    const KEYED_TOOLS_LIST: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[
+        {"name":"create_issue","inputSchema":{"properties":{"title":{},"op_key":{}}}},
+        {"name":"list_issues","inputSchema":{"properties":{"project":{}}}}]}}"#;
+
+    fn list_tools() -> String {
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.to_owned()
+    }
+
+    /// A remote that loses the first `tools/call` in transit and answers
+    /// everything else.
+    fn losing_first_call() -> MockForwarder {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        MockForwarder::new(move |body| {
+            if body.contains("tools/list") {
+                return Ok(KEYED_TOOLS_LIST.replace('\n', ""));
+            }
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(ForwardError::lost("operation timed out"));
+            }
+            Ok(r#"{"jsonrpc":"2.0","id":2,"result":{"content":[]}}"#.to_owned())
+        })
+    }
+
+    fn forwarded_calls(forwarder: &MockForwarder) -> Vec<Value> {
+        forwarder
+            .received()
+            .iter()
+            .map(|body| serde_json::from_str::<Value>(body).unwrap())
+            .filter(|message| message["method"] == "tools/call")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_lost_create_is_retried_once_with_the_same_generated_op_key() {
+        let forwarder = losing_first_call();
+        let create = call("create_issue", serde_json::json!({"title": "Once"}));
+
+        let out = run_pump(&format!("{}\n{create}\n", list_tools()), &forwarder).await;
+
+        let calls = forwarded_calls(&forwarder);
+        assert_eq!(calls.len(), 2, "one retry");
+        let key = calls[0]["params"]["arguments"]["op_key"]
+            .as_str()
+            .expect("the proxy gave the create a key");
+        assert!(key.starts_with("lific-proxy-"), "{key}");
+        assert_eq!(calls[0], calls[1], "the retry is the same request");
+        assert!(
+            out[1].get("result").is_some(),
+            "the retry's reply is relayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_create_the_client_keyed_is_retried_with_its_own_key() {
+        let forwarder = losing_first_call();
+        let create = call(
+            "create_issue",
+            serde_json::json!({"title": "Once", "op_key": "mine"}),
+        );
+
+        run_pump(&format!("{}\n{create}\n", list_tools()), &forwarder).await;
+
+        let calls = forwarded_calls(&forwarder);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["params"]["arguments"]["op_key"], "mine");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_does_not_list_op_key_gets_creates_untouched_and_unretried() {
+        let forwarder = losing_first_call();
+        let create = call("create_issue", serde_json::json!({"title": "Once"}));
+
+        // No tools/list first: the proxy does not know this server takes keys.
+        let out = run_pump(&format!("{create}\n"), &forwarder).await;
+
+        let calls = forwarded_calls(&forwarder);
+        assert_eq!(calls.len(), 1, "never retried without a key");
+        assert!(calls[0]["params"]["arguments"].get("op_key").is_none());
+        assert_eq!(out[0]["error"]["code"], serde_json::json!(-32603));
+    }
+
+    #[tokio::test]
+    async fn a_lost_read_is_not_retried_and_no_tool_without_op_key_gets_one() {
+        let forwarder = losing_first_call();
+        let read = call("list_issues", serde_json::json!({"project": "LIF"}));
+
+        run_pump(&format!("{}\n{read}\n", list_tools()), &forwarder).await;
+
+        let calls = forwarded_calls(&forwarder);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0]["params"]["arguments"].get("op_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_create_the_remote_answered_with_an_http_error_is_not_retried() {
+        let forwarder = MockForwarder::new(|body| {
+            if body.contains("tools/list") {
+                return Ok(KEYED_TOOLS_LIST.replace('\n', ""));
+            }
+            Err(ForwardError::unreachable("HTTP 500 Internal Server Error"))
+        });
+        let create = call("create_issue", serde_json::json!({"title": "Once"}));
+
+        run_pump(&format!("{}\n{create}\n", list_tools()), &forwarder).await;
+
+        assert_eq!(forwarded_calls(&forwarder).len(), 1);
+    }
+
+    /// The real server commits the first create but its reply is lost; the
+    /// proxy's retry gets the same issue back and the database holds one.
+    #[tokio::test]
+    async fn remote_stdio_retry_after_a_lost_reply_creates_the_issue_once() {
+        struct LosesFirstReply {
+            inner: HttpForwarder,
+            lost: std::sync::atomic::AtomicBool,
+        }
+        impl Forwarder for LosesFirstReply {
+            async fn forward(&self, body: String) -> Result<String, ForwardError> {
+                let reply = self.inner.forward(body.clone()).await;
+                if body.contains("create_issue")
+                    && !self.lost.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(ForwardError::lost("connection reset after the write"));
+                }
+                reply
+            }
+        }
+
+        let served = server::test_server::serve("Proxy project", "PRX").await;
+        let forwarder = LosesFirstReply {
+            inner: HttpForwarder::new(
+                reqwest::Client::new(),
+                served.endpoint.clone(),
+                Some(served.key.clone()),
+            ),
+            lost: std::sync::atomic::AtomicBool::new(false),
+        };
+        let create = call(
+            "create_issue",
+            serde_json::json!({"project": "PRX", "title": "Exactly once"}),
+        );
+        let mut stdout = Vec::new();
+        pump(
+            BufReader::new(format!("{}\n{create}\n", list_tools()).as_bytes()),
+            &mut stdout,
+            &forwarder,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let output: Vec<Value> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let text = output[1]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Replayed op_key"), "{text}");
+        assert!(text.contains("PRX-1"), "{text}");
+        let issues: i64 = served
+            .pool
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE title = 'Exactly once'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(issues, 1);
+    }
+
+    #[test]
+    fn op_key_tools_are_learned_from_the_advertised_schemas() {
+        let listed: Value = serde_json::from_str(KEYED_TOOLS_LIST).unwrap();
+        assert_eq!(op_key_tools(&listed), ["create_issue"]);
     }
 }

@@ -36,9 +36,7 @@ fn fixture() -> Fixture {
              INSERT INTO users (username, email, password_hash, is_bot, owner_id)
              VALUES ('blake-codex', 'bot@t.local', 'x', 1,
                      (SELECT id FROM users WHERE username = 'blake'));
-             UPDATE users SET is_active = 0 WHERE username = 'gone';
-             INSERT OR REPLACE INTO instance_settings (id, allow_signup, authz_enforced)
-             VALUES (1, 0, 1);",
+             UPDATE users SET is_active = 0 WHERE username = 'gone';",
         )
         .unwrap();
         let project = queries::create_project(
@@ -215,18 +213,6 @@ fn a_refused_name_writes_nothing() {
     set(&f, &["alice"]).unwrap();
     set(&f, &["bob", "carol"]).unwrap_err();
     assert_eq!(read(&f), (true, names(&["alice"])));
-}
-
-#[test]
-fn without_enforcement_anyone_active_and_human_can_be_named() {
-    let f = fixture();
-    f.db.write()
-        .unwrap()
-        .execute("UPDATE instance_settings SET authz_enforced = 0", [])
-        .unwrap();
-    set(&f, &["carol"]).unwrap();
-    assert_eq!(read(&f), (true, names(&["carol"])));
-    assert!(set(&f, &["blake-codex"]).is_err());
 }
 
 #[test]

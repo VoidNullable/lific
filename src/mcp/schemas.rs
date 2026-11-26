@@ -1,6 +1,6 @@
 use rmcp::schemars;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // LIF-474: every input denies unknown fields, nested ones included, so a
 // misspelled optional parameter fails instead of being silently dropped.
@@ -124,7 +124,7 @@ pub struct GetBriefingInput {
     pub pages: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIssueInput {
     #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
@@ -166,6 +166,11 @@ pub struct CreateIssueInput {
     // `issues` as required, so strict clients sent a batch on every call.
     #[serde(default)]
     pub issues: Option<Vec<CreateIssueItem>>,
+    #[serde(default, skip_serializing)]
+    #[schemars(
+        description = "Any unique string. When retrying after a timeout or lost reply, reuse it: the first result comes back and nothing is written twice"
+    )]
+    pub op_key: Option<String>,
 }
 
 /// The published shape of `CreateIssueInput::issues`: objects that need a
@@ -182,7 +187,7 @@ fn create_issue_items_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sch
 
 /// One issue in a `create_issue` batch (LIF-478). Field meanings match
 /// [`CreateIssueInput`].
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIssueItem {
     pub title: String,
@@ -232,6 +237,16 @@ pub struct UpdateIssueInput {
         description = "How you verified the work (markdown), only with status=done. Saved as a verification comment"
     )]
     pub evidence: Option<String>,
+    #[schemars(
+        description = "true holds it for you (others are refused until it expires; todo or backlog becomes active; again to extend). false releases it"
+    )]
+    pub claim: Option<bool>,
+    #[schemars(description = "Claim length in minutes, 1 to 1440 (default 15)")]
+    pub claim_minutes: Option<i64>,
+    #[schemars(
+        description = "The worker id a claim returned, to resume it in a new stdio session. Over HTTP send it as the X-Lific-Worker header instead"
+    )]
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -334,7 +349,7 @@ pub struct GetPageInput {
     pub offset: Option<usize>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePageInput {
     #[schemars(description = "Project ID; omit for a workspace page")]
@@ -349,6 +364,15 @@ pub struct CreatePageInput {
     pub status: Option<String>,
     #[schemars(description = "Label names (project pages only)")]
     pub labels: Option<Vec<String>>,
+    #[schemars(
+        description = "Make it the project's conventions page; only when the project has none"
+    )]
+    pub conventions: Option<bool>,
+    #[serde(default, skip_serializing)]
+    #[schemars(
+        description = "Any unique string. When retrying after a timeout or lost reply, reuse it: the first result comes back and nothing is written twice"
+    )]
+    pub op_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -486,6 +510,10 @@ pub struct ManageResourceInput {
     pub color: Option<String>,
     #[schemars(description = "Project or module icon: 'lucide:<Name>' or an emoji; \"\" clears")]
     pub emoji: Option<String>,
+    #[schemars(
+        description = "Project conventions page, the rules for working in its tracker: empty (default), ai_managed (agents file, edit and close issues), human_managed (people write issues, agents close them) or human_owned (people write and close issues). On update, a template creates the missing page and none stops the briefing suggesting one"
+    )]
+    pub conventions: Option<String>,
 }
 
 impl ManageResourceInput {
@@ -504,23 +532,36 @@ impl ManageResourceInput {
             status: self.status.map(unquote),
             color: self.color.map(unquote),
             emoji: self.emoji.map(unquote),
+            conventions: self.conventions.map(unquote),
             ..self
         }
     }
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddCommentInput {
     #[schemars(description = "Issue (LIF-1), page (LIF-DOC-1), or workspace page (DOC-1) ID")]
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
+    #[serde(default)]
+    #[schemars(
+        description = "comment (default) or decision. Decisions always appear in get_issue."
+    )]
+    pub kind: crate::db::models::CommentWriteKind,
+    #[serde(default, skip_serializing)]
+    #[schemars(
+        description = "Any unique string. When retrying after a timeout or lost reply, reuse it: the first result comes back and nothing is written twice"
+    )]
+    pub op_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListCommentsInput {
+    #[schemars(description = "Only comments of this kind: comment, decision, or verification")]
+    pub kind: Option<crate::db::models::CommentKind>,
     #[schemars(description = "Issue (LIF-1), page (LIF-DOC-1), or workspace page (DOC-1) ID")]
     pub identifier: String,
     #[schemars(description = "Only this author's comments")]
@@ -565,7 +606,7 @@ pub struct DeleteCommentInput {
 
 // ── Plans (LIF-168/169/170/171) ──────────────────────────────
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanStepInput {
     #[schemars(description = "Step title, short and imperative")]
@@ -580,7 +621,7 @@ pub struct PlanStepInput {
     pub steps: Option<Vec<PlanStepInput>>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePlanInput {
     #[schemars(description = "Project ID, e.g. LIF. Optional in a repo-bound session")]
@@ -593,6 +634,11 @@ pub struct CreatePlanInput {
         description = "Full nested step tree. Each step: {title, description?, issue?, done?, steps?[]}"
     )]
     pub steps: Option<Vec<PlanStepInput>>,
+    #[serde(default, skip_serializing)]
+    #[schemars(
+        description = "Any unique string. When retrying after a timeout or lost reply, reuse it: the first result comes back and nothing is written twice"
+    )]
+    pub op_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

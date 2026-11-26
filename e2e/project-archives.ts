@@ -66,7 +66,7 @@ async function instance(name: string, seed: boolean) {
   }
   const sql = new Database(db);
   const admin = sql.query("SELECT username FROM users WHERE is_admin=1 AND is_bot=0").get() as { username: string };
-  sql.run("UPDATE instance_settings SET web_auto_login=0, authz_enforced=0");
+  sql.run("UPDATE instance_settings SET web_auto_login=0");
   if (seed) sql.run("UPDATE projects SET is_public=1 WHERE identifier='ARC'");
   sql.close();
   const port = await freePort();
@@ -84,7 +84,7 @@ async function instance(name: string, seed: boolean) {
   const login = async (identity: string) => {
     const res = await fetch(`${base}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identity, password: PASSWORD }) });
     assert.equal(res.status, 200, await res.clone().text());
-    return (await res.json()).token as string;
+    return cookieSession(res);
   };
   const token = await login(admin.username);
   const api = async (path: string, method = "GET", body?: unknown) => {
@@ -93,7 +93,7 @@ async function instance(name: string, seed: boolean) {
     assert(res.headers.get("content-type")?.includes("application/json"), `${method} ${path} did not return JSON. Rebuild the backend with the archive routes before running this test.`);
     return res.json();
   };
-  return { base, token, api, login };
+  return { base, token, api, login, cli };
 }
 
 function watch(page: Page) {
@@ -102,17 +102,26 @@ function watch(page: Page) {
     if (message.type() !== "error") return;
     // Chromium reports intentional HTTP rejections and the lost-response probe.
     if (/^Failed to load resource:.*(400|403|409|422|net::ERR_FAILED)/.test(message.text())) return;
-    errors.push(message.text());
+    // A tab told another one signed out confirms it with the server, which
+    // answers that probe 401.
+    if (/^Failed to load resource:.*401/.test(message.text()) && message.location().url.endsWith("/api/auth/me")) return;
+    errors.push(`${message.text()} (${message.location().url})`);
   });
+}
+
+/** The session a sign-in response set. The body never carries it. */
+function cookieSession(res: Response): string {
+  for (const cookie of res.headers.getSetCookie()) {
+    const token = cookie.match(/^lific_token=(lific_sess_[^;]+)/)?.[1];
+    if (token) return token;
+  }
+  throw new Error(`no session cookie in ${res.url} response`);
 }
 
 async function signedPage(base: string, token: string, width = 1280) {
   const context = await browser!.newContext({ viewport: { width, height: 900 } });
   await context.addCookies([{ name: "lific_token", value: token, url: base, httpOnly: true, sameSite: "Lax" }]);
   await context.route("https://fonts.googleapis.com/**", (route) => route.fulfill({ status: 200, contentType: "text/css", body: "" }));
-  await context.addInitScript((token) => {
-    if (!localStorage.getItem("lific_token")) localStorage.setItem("lific_token", token);
-  }, token);
   const page = await context.newPage();
   watch(page);
   await page.goto(`${base}/projects/new`);
@@ -127,13 +136,15 @@ async function visible(page: Page, text: string) {
   }
 }
 
+/** Another tab signed in: the shared cookie changes and that tab says so on
+ *  the session channel. */
 async function changeSession(page: Page, base: string, token: string) {
   await page.context().addCookies([{ name: "lific_token", value: token, url: base, httpOnly: true, sameSite: "Lax" }]);
-  await page.evaluate((token) => {
-    const oldValue = localStorage.getItem("lific_token");
-    localStorage.setItem("lific_token", token);
-    window.dispatchEvent(new StorageEvent("storage", { key: "lific_token", oldValue, newValue: token }));
-  }, token);
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("lific:session");
+    channel.postMessage("signed-in");
+    channel.close();
+  });
 }
 
 async function staleDownload(page: Page, base: string, leave: () => Promise<void>) {
@@ -300,6 +311,9 @@ async function main() {
   await destination.unroute("**/api/project-archives");
   console.log("ok  in-flight navigation and duplicate-submit guard, lost response remains unknown after reload, no automatic retry");
 
+  // A viewer on the imported project: it can read the settings page and
+  // nothing on it lets it export or import.
+  b.cli(["member", "add", "--project", "ARC", "--user", "regular", "--role", "viewer"]);
   const regularToken = await b.login("regular");
   const regular = await signedPage(b.base, regularToken, 390);
   await visible(regular, "New project");
@@ -310,7 +324,7 @@ async function main() {
   const deniedForm = new FormData();
   deniedForm.append("archive", new File([await Bun.file(archivePath).bytes()], "ARC.lific.tar.gz", { type: "application/gzip" }));
   const denied = await fetch(`${b.base}/api/project-archives`, { method: "POST", headers: { Authorization: `Bearer ${regularToken}` }, body: deniedForm });
-  assert.equal(denied.status, 403, "non-admin archive POST is refused in legacy mode");
+  assert.equal(denied.status, 403, "non-admin archive POST is refused");
   await regular.goto(`${b.base}/ARC/settings`);
   await visible(regular, "Archive specimen");
   assert.equal(await regular.getByRole("button", { name: "Download project archive" }).count(), 0);
@@ -373,23 +387,30 @@ async function main() {
   await visible(destination, "The import may have completed");
   const refreshed = await fetch(`${b.base}/api/auth/me/refresh`, { method: "POST", headers: { Authorization: `Bearer ${secondToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ password: PASSWORD }) });
   assert.equal(refreshed.status, 200);
-  const freshToken = (await refreshed.json()).token;
+  const freshToken = cookieSession(refreshed);
   assert.notEqual(freshToken, secondToken);
   await changeSession(destination, b.base, freshToken);
   await visible(destination, "The import may have completed");
   await destination.reload();
   await visible(destination, "The import may have completed");
   assert.equal(await destination.evaluate((key) => sessionStorage.getItem(key), secondKey), "1");
+  await destination.context().clearCookies({ name: "lific_token" });
   await destination.evaluate(() => {
-    localStorage.removeItem("lific_token");
-    window.dispatchEvent(new Event("lific:session-change"));
+    const channel = new BroadcastChannel("lific:session");
+    channel.postMessage("signed-out");
+    channel.close();
   });
-  await destination.getByText("Sign in to import a project archive.", { exact: true }).waitFor();
+  // Signed out, the import page is not one a reader may stay on: the app
+  // sends them to login, set to come back here afterwards.
+  await destination.waitForURL((url) => {
+    const href = decodeURIComponent(url.href);
+    return href.includes("login") && href.includes("next=/projects/import");
+  });
   assert.equal(await destination.getByText("The import may have completed", { exact: false }).count(), 0);
   assert.equal(await destination.evaluate((key) => sessionStorage.getItem(key), secondKey), "1");
   console.log("ok  pending warnings isolated by user ID, old-account progress/report hidden, own-only reset, session-refresh and logout retention");
   assert.equal(errors.length, 0, errors.join("\n"));
-  console.log("ok  regular-user controls hidden and POST denied in legacy mode, mobile export, no unexpected console errors");
+  console.log("ok  regular-user controls hidden and POST denied, mobile export, no unexpected console errors");
 }
 
 main().then(() => finish(0)).catch((error) => finish(1, String(error)));

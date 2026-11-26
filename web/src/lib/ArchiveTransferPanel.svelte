@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { downloadProjectArchive, getArchiveCapabilities, me, onSessionChange, saveArchiveDownload } from "./api";
+  import { downloadProjectArchive, getArchiveCapabilities, me, onSessionChange, saveArchiveDownload, sessionKey } from "./api";
   import { Download } from "lucide-svelte";
 
   let { projectId, identifier }: { projectId: number; identifier: string } = $props();
@@ -19,11 +19,11 @@
       const current = ++generation;
       controller?.abort(); controller = null;
       eligible = false; confirmed = false; busy = false; error = ""; userId = null;
-      session = localStorage.getItem("lific_token");
+      session = sessionKey();
       const token = session;
       if (!token) return;
       const [caps, user] = await Promise.all([getArchiveCapabilities(), me()]);
-      if (current !== generation || id !== projectId || ident !== identifier || token !== localStorage.getItem("lific_token")) return;
+      if (current !== generation || id !== projectId || ident !== identifier || token !== sessionKey()) return;
       if (caps.ok && user.ok) { userId = user.data.id; eligible = true; }
     }
     void initialize();
@@ -36,7 +36,7 @@
     const current = generation;
     const id = projectId, ident = identifier, owner = userId, token = session;
     const live = () => current === generation && id === projectId && ident === identifier
-      && owner === userId && token === session && token === localStorage.getItem("lific_token");
+      && owner === userId && token === session && token === sessionKey();
     if (!live()) return;
     controller = new AbortController();
     busy = true; error = "";

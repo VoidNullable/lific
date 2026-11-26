@@ -56,7 +56,7 @@ To close issues on a server, use the HTTP backend:
 git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook
 ```
 
-It authenticates the way every HTTP-backend command does: `--api-key` or `LIFIC_API_KEY` if given, otherwise the token `lific login` stored for that server. `--url` can come from `LIFIC_URL` too. The server checks each issue separately. With project permissions on, the caller must be a maintainer or lead of the issue's project; an issue in a project the caller can read but not change is skipped as `forbidden`, and an issue in a project the caller cannot see is reported as `not found`, exactly like one that does not exist. Closures made through the server appear live in open browsers.
+It authenticates the way every HTTP-backend command does: `--api-key` or `LIFIC_API_KEY` if given, otherwise the token `lific login` stored for that server. `--url` can come from `LIFIC_URL` too. The server checks each issue separately. The caller must be a maintainer or lead of the issue's project; an issue in a project the caller can read but not change is skipped as `forbidden`, and an issue in a project the caller cannot see is reported as `not found`, exactly like one that does not exist. Closures made through the server appear live in open browsers.
 
 ### Output
 

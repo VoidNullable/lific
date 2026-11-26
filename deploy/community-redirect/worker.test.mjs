@@ -12,7 +12,8 @@ test("the Worker replaces spoofable identity headers with an authenticated clien
   };
 
   try {
-    const request = new Request("https://community.lific.dev/public/api/projects/LIF", {
+    // An anonymous read of a published project: no credential, ordinary route.
+    const request = new Request("https://community.lific.dev/api/issues/resolve/LIF-1", {
       headers: {
         "cf-connecting-ip": "203.0.113.7",
         "x-forwarded-for": "192.0.2.1",
@@ -130,6 +131,36 @@ test("WebSockets are limited to the event route and never follow redirects", asy
     });
     assert.equal((await worker.fetch(wrongMethod, env)).status, 400);
     assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the session cookie and Origin reach Lific and Set-Cookie comes back unchanged", async () => {
+  let forwarded;
+  const originalFetch = globalThis.fetch;
+  const setCookie =
+    "lific_token=lific_sess_example; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000; Secure";
+  globalThis.fetch = async (_target, init) => {
+    forwarded = new Headers(init.headers);
+    return new Response("{}", { status: 200, headers: { "set-cookie": setCookie } });
+  };
+
+  try {
+    const request = new Request("https://community.lific.dev/api/issues", {
+      method: "POST",
+      headers: {
+        "cf-connecting-ip": "203.0.113.7",
+        cookie: "lific_token=lific_sess_example",
+        origin: "https://community.lific.dev",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+    const response = await worker.fetch(request, { LIFIC_TRUSTED_PROXY_SECRET: "correct-secret" });
+    assert.equal(forwarded.get("cookie"), "lific_token=lific_sess_example");
+    assert.equal(forwarded.get("origin"), "https://community.lific.dev");
+    assert.deepEqual(response.headers.getSetCookie(), [setCookie]);
   } finally {
     globalThis.fetch = originalFetch;
   }

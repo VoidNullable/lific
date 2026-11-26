@@ -13,10 +13,9 @@
 //!   into an entity in the same request, are gated separately by
 //!   [`authorize_link`] — that part *is* a mutation of someone else's issue,
 //!   page or comment.
-//! - **Download** requires `Viewer` on the owning project when
-//!   `authz_enforced` is on. An unlinked attachment (not yet referenced
-//!   anywhere) is readable only by its uploader / an admin — there's no
-//!   project to gate on yet.
+//! - **Download** requires `Viewer` on the owning project. An unlinked
+//!   attachment (not yet referenced anywhere) is readable only by its
+//!   uploader or an admin, since there's no project to gate on yet.
 //! - **Delete** requires the uploader, or `Maintainer` on any owning project,
 //!   or an admin.
 
@@ -505,10 +504,7 @@ pub(super) async fn list_entity_attachments(
     // The entity's owning project gates the read (Viewer). Workspace-level
     // pages (no project) fall back to workspace-admin.
     let project_id = resolve_entity_project(&db, entity, query.entity_id)?;
-    match project_id {
-        Some(pid) => authz::require_role(&db, &identity, pid, Role::Viewer)?,
-        None => authz::require_workspace_admin(&db, &identity)?,
-    }
+    authz::require_read_or_workspace(&db, &identity, project_id)?;
 
     let items = with_read(&db, |conn| {
         q::list_for_entity(conn, entity, query.entity_id)
@@ -569,7 +565,7 @@ pub(super) async fn list_project_attachments(
     Path(project_id): Path<i64>,
     Query(query): Query<ProjectAttachmentQuery>,
 ) -> Result<axum::Json<ProjectAttachmentPage>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     with_read(&db, |conn| {
         q::list_project_attachments(conn, project_id, &query)
     })
@@ -620,15 +616,24 @@ pub(super) async fn download_attachment(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Response, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
 
-    // Authorize: the caller must be able to view SOME project this attachment
-    // is linked into (Viewer), or be the uploader / an admin for a still-
-    // unlinked attachment.
+    // Authorize: the caller must be able to read SOME project this attachment
+    // is linked into, or be the uploader / an admin for a still-unlinked
+    // attachment.
     authorize_read(&db, &identity, &attachment)?;
+
+    // LIF-583: an anonymous reader gets a bounded stream rather than the whole
+    // file in memory, under the anonymous download budget.
+    if identity.is_none()
+        && let Some(Extension(reads)) = anonymous
+    {
+        return super::anonymous::download(&reads, &store, &attachment);
+    }
 
     let bytes = store.read(&attachment.sha256)?;
     let total = bytes.len() as u64;
@@ -798,6 +803,7 @@ pub(super) async fn attachment_thumbnail(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     Path(id): Path<i64>,
 ) -> Result<Response, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
@@ -809,9 +815,35 @@ pub(super) async fn attachment_thumbnail(
         ));
     }
 
-    let thumb = match store.read_thumb(&attachment.sha256)? {
-        Some(bytes) => bytes,
-        None => {
+    let anonymous = anonymous
+        .filter(|_| identity.is_none())
+        .map(|Extension(reads)| reads);
+    let thumb = match (store.read_thumb(&attachment.sha256)?, anonymous) {
+        (Some(bytes), _) => bytes,
+        // LIF-583: an anonymous reader may have one generated only within the
+        // anonymous size ceiling and derivation budget, off the runtime.
+        (None, Some(reads)) => {
+            let permit = super::anonymous::derivation_permit(&reads, &attachment)?;
+            let store = store.clone();
+            let sha256 = attachment.sha256.clone();
+            super::anonymous::run_derivation(permit, move || {
+                let source = store.read(&sha256)?;
+                let bytes = match storage::generate_thumbnail(&source) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) | Err(_) => {
+                        return Err(LificError::NotFound(
+                            "no thumbnail for this attachment".into(),
+                        ));
+                    }
+                };
+                if let Err(e) = store.write_thumb(&sha256, &bytes) {
+                    tracing::warn!(error = %e, "failed to cache attachment thumbnail");
+                }
+                Ok(bytes)
+            })
+            .await?
+        }
+        (None, None) => {
             let source = store.read(&attachment.sha256)?;
             match storage::generate_thumbnail(&source) {
                 Ok(Some(bytes)) => {
@@ -1046,10 +1078,7 @@ fn visible_links(
         let Ok(project_id) = resolve_entity_project(db, entity, entity_id) else {
             continue;
         };
-        let visible = match project_id {
-            Some(pid) => authz::require_role(db, identity, pid, Role::Viewer).is_ok(),
-            None => authz::require_workspace_admin(db, identity).is_ok(),
-        };
+        let visible = authz::require_read_or_workspace(db, identity, project_id).is_ok();
         if !visible {
             continue;
         }
@@ -1136,10 +1165,24 @@ pub(super) async fn attachment_preview(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     Path(id): Path<i64>,
 ) -> Result<axum::Json<crate::preview::Preview>, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
     authorize_read(&db, &identity, &attachment)?;
+
+    if identity.is_none()
+        && let Some(Extension(reads)) = anonymous
+    {
+        let permit = super::anonymous::derivation_permit(&reads, &attachment)?;
+        let sha256 = attachment.sha256.clone();
+        let preview = super::anonymous::run_derivation(permit, move || {
+            let bytes = store.read(&sha256)?;
+            crate::preview::preview_bytes(&bytes)
+        })
+        .await?;
+        return Ok(axum::Json(preview));
+    }
 
     let bytes = store.read(&attachment.sha256)?;
     Ok(axum::Json(crate::preview::preview_bytes(&bytes)?))
@@ -1310,9 +1353,7 @@ pub(crate) fn authorize_link_conn(
 }
 
 /// Read gate: Viewer on any owning project, or uploader/admin for an unlinked
-/// attachment. When enforcement is off, `require_role(.., Viewer)` is an
-/// unconditional allow (legacy mode), so this reduces to today's open read
-/// behavior — matching every other GET while the flag is off.
+/// attachment.
 pub(crate) fn authorize_read(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -1321,9 +1362,7 @@ pub(crate) fn authorize_read(
     let project_ids = with_read(db, |conn| owning_project_ids(conn, attachment.id))?;
 
     if project_ids.is_empty() {
-        // Unlinked: only the uploader or an admin can read it. (When
-        // enforcement is off we still restrict unlinked reads to the uploader
-        // to avoid an enumeration hole on freshly-uploaded blobs.)
+        // Unlinked: only the uploader or an admin can read it.
         match identity.as_ref().map(|i| &i.user) {
             Some(u) if u.is_admin => Ok(()),
             Some(u) if Some(u.id) == attachment.uploader_id => Ok(()),
@@ -1332,10 +1371,11 @@ pub(crate) fn authorize_read(
             )),
         }
     } else {
-        // Viewer on ANY linked project is enough to read.
+        // Read access to ANY linked project is enough: Viewer, or the
+        // project being published.
         let mut last_err = None;
         for pid in project_ids {
-            match authz::require_role(db, identity, pid, Role::Viewer) {
+            match authz::require_read(db, identity, pid) {
                 Ok(()) => return Ok(()),
                 Err(e) => last_err = Some(e),
             }
@@ -3859,29 +3899,28 @@ mod cookie_fallback_tests {
         assert_eq!(resp.headers().get("content-type").unwrap(), "image/webp");
     }
 
-    // 1c) The two XHR-only derived routes stay header-only.
+    // 1c) The web app reads every route with the cookie, the XHR-only derived
+    //     routes included: it holds no bearer token to send instead.
     #[tokio::test]
-    async fn cookie_authed_links_and_preview_are_unauthorized() {
+    async fn cookie_authed_links_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "derivuser");
         let att_id = upload_png(&app, &session).await;
 
-        for suffix in ["links", "preview"] {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/api/attachments/{att_id}/{suffix}"))
-                        .header("cookie", format!("lific_token={session}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{suffix}");
-        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/attachments/{att_id}/links"))
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // 2) Garbage cookie value → 401.
@@ -3935,33 +3974,58 @@ mod cookie_fallback_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 4) Cookie-authed DELETE → 401 (method not GET; mutations stay header-only).
+    async fn cookie_delete(
+        app: &axum::Router,
+        att_id: i64,
+        session: &str,
+        origin: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/attachments/{att_id}"))
+            .header("host", "example.com")
+            .header("x-forwarded-proto", "https")
+            .header("cookie", format!("lific_token={session}"));
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    // 4) A cookie-authed DELETE is a write: it needs an Origin naming this
+    //    server, so a page on another site cannot ride the cookie.
     #[tokio::test]
-    async fn cookie_authed_delete_is_unauthorized() {
+    async fn cookie_authed_delete_needs_this_servers_origin() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "deleteuser");
         let att_id = upload_png(&app, &session).await;
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/attachments/{att_id}"))
-                    .header("cookie", format!("lific_token={session}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            cookie_delete(&app, att_id, &session, None).await,
+            StatusCode::FORBIDDEN,
+            "no Origin"
+        );
+        assert_eq!(
+            cookie_delete(&app, att_id, &session, Some("https://evil.example")).await,
+            StatusCode::FORBIDDEN,
+            "foreign Origin"
+        );
+        assert!(
+            cookie_delete(&app, att_id, &session, Some("https://example.com"))
+                .await
+                .is_success(),
+            "this server's own page may delete"
+        );
     }
 
-    // 5) Cookie-authed GET on the list route → 401 (path is not the download
-    //    route; the list endpoint stays header-only).
+    // 5) The list route reads with the cookie like every other route.
     #[tokio::test]
-    async fn cookie_authed_list_route_is_unauthorized() {
+    async fn cookie_authed_list_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "listuser");
@@ -3978,12 +4042,12 @@ mod cookie_fallback_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 6) Cookie-authed GET on an unrelated route → 401.
+    // 6) An unrelated read authenticates with the cookie too.
     #[tokio::test]
-    async fn cookie_authed_unrelated_route_is_unauthorized() {
+    async fn cookie_authed_unrelated_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "otheruser");
@@ -4000,6 +4064,6 @@ mod cookie_fallback_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

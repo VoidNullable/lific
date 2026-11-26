@@ -256,6 +256,7 @@ in
           cwd = "${repoRoot}/e2e";
           exec = ''
             bun run smoke
+            bun run cookie-session
             bun run archives
             bun run status-move
             bun run public

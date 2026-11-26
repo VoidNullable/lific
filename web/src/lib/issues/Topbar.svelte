@@ -17,6 +17,8 @@
     Square, SquareMinus, SquareCheck, X,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
+  import SignInButton from "../SignInButton.svelte";
+  import { isSignedOut } from "../signedOut";
   import SubTabs, { type SubTab } from "../SubTabs.svelte";
   import Breadcrumbs from "../Breadcrumbs.svelte";
   import StatusIcon from "../StatusIcon.svelte";
@@ -81,7 +83,7 @@
     onOpenSearch: () => void;
     onMaybeCollapseSearch: () => void;
     onQuickCreate: () => void;
-    /** LIF-234: when false (a viewer on this project, enforcement on), the
+    /** LIF-234: when false (a viewer on this project), the
      *  "New issue" primary action is hidden — creation is maintainer-gated. */
     canEdit?: boolean;
     /** LIF-149 select-all, relocated into the sub-tab strip. How many rows
@@ -499,6 +501,9 @@
         </div>
       {/if}
     </div>
+    {:else if isSignedOut()}
+      <!-- LIF-583: where New issue would be, for a signed-out reader. -->
+      <SignInButton />
     {/if}
   </div>
 

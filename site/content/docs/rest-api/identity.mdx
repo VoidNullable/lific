@@ -15,7 +15,7 @@ Answers the plain text `ok` with status `200`. No credential. Use it for health 
 
 What a sign-in screen needs before anyone is signed in. No credential.
 
-Returns `allow_signup` (boolean), `has_users` (whether any human account exists yet), `instance_name`, `login_message` and `web_auto_login`. `web_auto_login` is also `true` when the server runs with `[auth] required = false`, because that is the signal the web UI uses to sign in without a form.
+Returns `allow_signup` (boolean), `has_users` (whether any human account exists yet), `instance_name`, `login_message`, `web_auto_login` and `capabilities`. `web_auto_login` is also `true` when the server runs with `[auth] required = false`, because that is the signal the web UI uses to sign in without a form. `capabilities` lists behaviour a client may rely on: `idempotency-key` means creates honor an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key), so a lost create can be resent safely. An older server leaves the field out.
 
 ```json
 {
@@ -23,7 +23,8 @@ Returns `allow_signup` (boolean), `has_users` (whether any human account exists 
   "has_users": true,
   "instance_name": "Lific",
   "login_message": "",
-  "web_auto_login": false
+  "web_auto_login": false,
+  "capabilities": ["idempotency-key"]
 }
 ```
 
@@ -31,13 +32,13 @@ Returns `allow_signup` (boolean), `has_users` (whether any human account exists 
 
 The full instance settings. **Administrator.**
 
-Returns `allow_signup`, `instance_name`, `signup_email_domains` (string array; empty allows any domain), `session_lifetime_days`, `login_message`, `web_auto_login`, `authz_enforced` and `stale_active_days` (1 to 365, default 3: how many days an active issue may go untouched before the briefing and `list_issues(stale=true)` call it stale) and `stale_active_reset_days` (0 to 365, default 14: how many days an active issue may go untouched before the server moves it back to `todo` once a day, with a comment from `Lific` saying why; `0` turns this off). This reports the stored `web_auto_login` flag, not the combined value `/api/instance` shows.
+Returns `allow_signup`, `instance_name`, `signup_email_domains` (string array; empty allows any domain), `session_lifetime_days`, `login_message`, `web_auto_login`, `stale_active_days` (1 to 365, default 3: how many days an active issue may go untouched before the briefing and `list_issues(stale=true)` call it stale) and `stale_active_reset_days` (0 to 365, default 14: how many days an active issue may go untouched before the server moves it back to `todo` once a day, with a comment from `Lific` saying why; `0` turns this off). This reports the stored `web_auto_login` flag, not the combined value `/api/instance` shows.
 
 ### PATCH `/api/instance/settings`
 
 Changes any of the settings above. Every field is optional. **Administrator, from a recent browser session**, for every change rather than a chosen few, because several of these fields widen who can reach the instance. The administrator check and the write happen in one transaction. Returns the full settings object.
 
-Turning `web_auto_login` on is refused with `400` when the instance is reachable from outside the machine (a non-loopback bind address, or a `public_url` that is not local), since it hands an administrator session to anyone who loads the page. Changing `authz_enforced` tells every connected realtime client to refetch.
+Turning `web_auto_login` on is refused with `400` when the instance is reachable from outside the machine (a non-loopback bind address, or a `public_url` that is not local), since it hands an administrator session to anyone who loads the page. `"authz_enforced": false` is refused with `400`: project roles are always enforced since 3.0, and `true` is accepted and ignored.
 
 ```bash
 curl -X PATCH "$LIFIC/api/instance/settings" \
@@ -64,7 +65,7 @@ Signs in with a username or email and a password. No credential.
 
 Body: `identity` (username or email) and `password`.
 
-Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`), `token` (the session token to send as a bearer token) and `expires_at`. Also sets the `lific_token` cookie, which the REST API uses only in the [few places listed](/docs/rest-api#get-a-credential).
+Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`) and `expires_at`. The session itself is only in the HttpOnly `lific_token` cookie this sets; see [Get a credential](/docs/rest-api#get-a-credential) for how the cookie is used. A script should use an API key instead.
 
 ```json
 {
@@ -75,7 +76,6 @@ Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`), `token` 
     "display_name": "Alex",
     "is_admin": false
   },
-  "token": "lific_sess_9f2c...",
   "expires_at": "2026-08-13 12:00:00"
 }
 ```
@@ -88,7 +88,7 @@ Signs in as the first administrator with no password. No credential. Works only 
 
 ### POST `/api/auth/logout`
 
-Ends the session named in the `Authorization` header and clears the cookie. Any credential is accepted; only a session token is deleted. Returns `{"logged_out": true}`.
+Ends the session that made the request, from the `Authorization` header or, without one, the cookie, and clears the cookie. Any credential is accepted; only a session is deleted. Returns `{"logged_out": true}`.
 
 ### GET `/api/auth/me`
 
@@ -110,7 +110,7 @@ In the same write as the password change, for you **and every connected tool you
 
 Unbound operator API keys, other people's credentials, the bot accounts themselves and registered OAuth clients are untouched.
 
-Returns `ok`, `token` and `expires_at`. `token` is a new session and the only credential that still works afterwards, so store it before the next request. It is also set as the cookie. Reconnect your tools and replace any API keys your scripts used.
+Returns `ok` and `expires_at`, and sets a new session as the cookie. That session is the only credential that still works afterwards. Reconnect your tools and replace any API keys your scripts used.
 
 Rate-limited per account and per source address on a budget of its own. A wrong current password spends from it; a successful change gives the attempt back. Over the limit answers `400` with the seconds to wait.
 

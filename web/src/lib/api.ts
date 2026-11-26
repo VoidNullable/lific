@@ -1,50 +1,8 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
-import { inPublicScope, publicMirror, publicSynthetic } from "./publicScope";
-import { clearReadModelAccount, readModelAccountRevision, readModelScope, reconcileReadModelProjects, setReadModelAccount } from "./sync/account";
-import { clearPrivateSnapshots, pruneProjectSnapshots } from "./sync/persistence";
+import { clearReadModelAccount, invalidateReadModelAccount, readModelAccount, readModelAccountRevision, readModelScope, reconcileReadModelProjects, setReadModelAccount } from "./sync/account";
+import { clearPrivateSnapshots, pruneProjectSnapshots, removeScopeSnapshots } from "./sync/persistence";
 
 const BASE = "/api";
-
-// ── LIF-471: the public-scope chokepoint ─────────────────────
-//
-// Every request in this file resolves its URL through `resolveRequest` (or
-// `resolveUrl` for the `src=`/`href=` builders). In public scope that means
-// one of three things: the path is answered synthetically (no account, no
-// role, no history), it is rewritten onto `/public/api/projects/{P}/...` and
-// sent with NO credential, or it is refused outright. A path with no public
-// mirror never reaches `/api` from a public page, so a component that grows
-// a new fetch fails visibly in the public view instead of quietly sending a
-// signed-in reader's token somewhere a stranger could not follow.
-
-type Resolved =
-  | { kind: "private"; url: string }
-  | { kind: "public"; url: string }
-  | { kind: "synthetic"; status: number; body: unknown }
-  | { kind: "refused" };
-
-function resolveRequest(path: string): Resolved {
-  if (!inPublicScope()) return { kind: "private", url: `${BASE}${path}` };
-  const synthetic = publicSynthetic(path);
-  if (synthetic) return { kind: "synthetic", ...synthetic };
-  const mirrored = publicMirror(path);
-  if (mirrored) return { kind: "public", url: mirrored };
-  return { kind: "refused" };
-}
-
-/** The URL a browser subresource (`<img src>`, `<a href>`) should load for a
- *  private `/api` path. In public scope an unmirrored path resolves to a URL
- *  that cannot succeed, rather than to the private one. */
-function resolveUrl(path: string): string {
-  const r = resolveRequest(path);
-  if (r.kind === "private" || r.kind === "public") return r.url;
-  return "/public/api/refused";
-}
-
-const REFUSED: { ok: false; error: string; status: number } = {
-  ok: false,
-  error: "This isn't available in the public view.",
-  status: 403,
-};
 
 export interface AuthUser {
   id: number;
@@ -54,9 +12,10 @@ export interface AuthUser {
   is_admin: boolean;
 }
 
+/** What signing in returns. The session itself is the HttpOnly `lific_token`
+ *  cookie the same response sets; page script never sees it. */
 export interface AuthResponse {
   user: AuthUser;
-  token: string;
   expires_at: string;
 }
 
@@ -78,36 +37,24 @@ async function requestWithHeaders<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<HeadedResult<T>> {
-  const resolved = resolveRequest(path);
-  if (resolved.kind === "refused") return REFUSED;
-  if (resolved.kind === "synthetic") {
-    if (resolved.status >= 400) {
-      const body = resolved.body as { error?: string };
-      return { ok: false, error: body?.error ?? `HTTP ${resolved.status}`, status: resolved.status };
-    }
-    return { ok: true, data: resolved.body as T, headers: new Headers() };
-  }
-
+  // The session cookie the browser attaches on its own authenticates the
+  // request; page script holds no credential.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
-  // The public surface never sees a credential: not the bearer token, and
-  // (via `credentials: "omit"`) not the session cookie either. A signed-in
-  // reader and a stranger must get byte-identical answers.
-  const credentials: RequestCredentials | undefined =
-    resolved.kind === "public" ? "omit" : undefined;
-  if (resolved.kind === "private") {
-    const token = localStorage.getItem("lific_token");
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-  }
 
   try {
-    const res = await fetch(resolved.url, { ...options, headers, credentials });
-    let body = await res.json();
-    // `/projects` mirrors onto the one published project; the callers expect
-    // the list shape.
-    if (resolved.kind === "public" && path === "/projects" && res.ok) body = [body];
+    const res = await fetch(`${BASE}${path}`, { ...options, headers });
+    let body;
+    try {
+      body = await res.json();
+    } catch (error) {
+      // The authentication layer answers 401 in plain text. Keep the status,
+      // so a caller can tell "signed out" from "couldn't reach the server".
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, status: res.status };
+      throw error;
+    }
 
     if (!res.ok) {
       return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
@@ -132,20 +79,7 @@ async function request<T>(
 }
 
 export async function download(path: string, filename?: string) {
-  const resolved = resolveRequest(path);
-  if (resolved.kind !== "private" && resolved.kind !== "public") {
-    return { ok: false as const, error: REFUSED.error };
-  }
-  const headers: Record<string, string> = {};
-  if (resolved.kind === "private") {
-    const token = localStorage.getItem("lific_token");
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-  }
-
-  const res = await fetch(resolved.url, {
-    headers,
-    credentials: resolved.kind === "public" ? "omit" : undefined,
-  });
+  const res = await fetch(`${BASE}${path}`);
   if (!res.ok) {
     let error = `HTTP ${res.status}`;
     try {
@@ -201,9 +135,8 @@ export const getArchiveCapabilities = () => request<ArchiveCapabilities>("/proje
 
 export async function downloadProjectArchive(identifier: string, signal: AbortSignal) {
   try {
-    const token = localStorage.getItem("lific_token");
     const response = await fetch(`${BASE}/project-archives/${encodeURIComponent(identifier)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}, signal, cache: "no-store",
+      signal, cache: "no-store",
     });
     if (!response.ok) {
       const body = await response.json();
@@ -232,11 +165,9 @@ export function importProjectArchive(
   onProgress: (percent: number | null) => void,
   onProcessing: () => void,
 ): Promise<RequestResult<ArchiveImportResult>> {
-  const token = localStorage.getItem("lific_token");
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/project-archives`);
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.upload.onprogress = (event) => onProgress(event.lengthComputable
       ? Math.min(100, Math.round(event.loaded / event.total * 100)) : null);
     xhr.upload.onload = onProcessing;
@@ -288,10 +219,6 @@ export interface InstanceSettings {
   session_lifetime_days: number;
   login_message: string | null;
   web_auto_login: boolean;
-  /** LIF-197: operator toggle for project-scoped authorization (epic
-   *  LIF-194). Off by default — see src/authz.rs for the legacy vs
-   *  enforced mode split. */
-  authz_enforced: boolean;
 }
 
 export interface InstanceSettingsPatch {
@@ -303,7 +230,6 @@ export interface InstanceSettingsPatch {
   /** "" clears. */
   login_message?: string;
   web_auto_login?: boolean;
-  authz_enforced?: boolean;
 }
 
 export async function getInstanceSettings() {
@@ -326,7 +252,7 @@ export async function signup(
     method: "POST",
     body: JSON.stringify({ username, email, password }),
   });
-  if (result.ok) setReadModelAccount(result.data.user.id);
+  if (result.ok) await confirmNewSession();
   return result;
 }
 
@@ -335,7 +261,7 @@ export async function login(identity: string, password: string) {
     method: "POST",
     body: JSON.stringify({ identity, password }),
   });
-  if (result.ok) setReadModelAccount(result.data.user.id);
+  if (result.ok) await confirmNewSession();
   return result;
 }
 
@@ -348,7 +274,7 @@ export async function login(identity: string, password: string) {
  *  `refreshSession`, whose entire contract is "same user". */
 export async function autoLogin() {
   const result = await request<AuthResponse>("/auth/auto-login", { method: "POST" });
-  if (result.ok) setReadModelAccount(result.data.user.id);
+  if (result.ok) await confirmNewSession();
   return result;
 }
 
@@ -361,8 +287,8 @@ export async function autoLogin() {
  *  in here, and the server sets no cookie until it has established that.
  *
  *  `password` is required on a password instance and may be omitted on a
- *  passwordless one. A failure changes nothing: the current token and cookie
- *  keep working. */
+ *  passwordless one. A failure changes nothing: the current session keeps
+ *  working. */
 export async function refreshSession(password?: string) {
   return request<AuthResponse>("/auth/me/refresh", {
     method: "POST",
@@ -370,26 +296,21 @@ export async function refreshSession(password?: string) {
   });
 }
 
-export async function logout() {
-  const result = await request("/auth/logout", { method: "POST" });
-  await clearSession();
+/** End this browser's session. The tab is marked signed out only once the
+ *  server confirms it, or answers 401 because there was no session left to
+ *  end. Any other failure leaves the HttpOnly cookie valid, so the tab stays
+ *  signed in and the caller shows the error. */
+export async function logout(): Promise<RequestResult<{ logged_out: boolean }>> {
+  const result = await request<{ logged_out: boolean }>("/auth/logout", { method: "POST" });
+  if (result.ok || result.status === 401) {
+    await clearSession();
+    return { ok: true, data: { logged_out: true } };
+  }
   return result;
 }
 
 export async function me() {
-  const before = readModelAccountRevision();
-  const publicScope = inPublicScope();
-  const result = await request<AuthUser>("/auth/me");
-  if (!publicScope && before === readModelAccountRevision()) {
-    if (result.ok) setReadModelAccount(result.data.id);
-    else if (result.status === 401) {
-      localStorage.removeItem("lific_token");
-      setReadModelAccount(null);
-      for (const listener of sessionListeners) listener();
-      await clearPrivateSnapshots();
-    }
-  }
-  return result;
+  return readSession(readModelAccount(), false);
 }
 
 // LIF-190: account settings.
@@ -402,29 +323,24 @@ export async function updateProfile(input: { display_name?: string; email?: stri
 
 export interface ChangePasswordResponse {
   ok: boolean;
-  /** The replacement session token. See below. */
-  token: string;
   expires_at: string;
 }
 
-/** Change the password, and adopt the replacement session it returns.
+/** Change the password.
  *
  *  A password change is a full account lockdown on the server: every session,
  *  API key, OAuth session and connected tool belonging to this account is
  *  revoked, including the session that made this very request. The server
- *  mints exactly one replacement so the person who just typed their password
- *  is not thrown back to the login screen, and returns it here.
- *
- *  Saving it is not optional. This helper used to ignore the field, which left
- *  the tab holding a token the server had just killed: every later request
- *  401'd and the UI looked like the password change had broken the account. */
+ *  mints exactly one replacement and sets it as this browser's cookie, so the
+ *  person who just typed their password stays signed in. The session changed,
+ *  so in-flight work keyed to the old one is told. */
 export async function changePassword(input: { current_password: string; new_password: string }) {
   const result = await request<ChangePasswordResponse>("/auth/me/password", {
     method: "POST",
     body: JSON.stringify(input),
   });
-  if (result.ok && result.data.token) {
-    saveSession(result.data.token);
+  if (result.ok) {
+    saveSession();
   }
   return result;
 }
@@ -432,9 +348,9 @@ export async function changePassword(input: { current_password: string; new_pass
 /** Sign out everywhere and revoke access: every session, API key, OAuth
  *  session and connected tool for this account, with no replacement.
  *
- *  The local token is cleared only when the server confirms it. Clearing it on
+ *  The tab is marked signed out only when the server confirms it. Doing so on
  *  a failed request (a network drop, a 500) would log the tab out of a session
- *  that is still perfectly valid, and leave nothing to retry with. */
+ *  that is still perfectly valid. */
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
   if (result.ok) {
@@ -443,36 +359,138 @@ export async function revokeAllSessions() {
   return result;
 }
 
-const sessionListeners = new Set<() => void>();
+// ── Session state ────────────────────────────────────────────
+//
+// The session is the HttpOnly `lific_token` cookie the server sets when you
+// sign in, and no script on the page can read it, so a cross-site script
+// cannot walk off with it. What the app keeps is only whether this tab is
+// signed in, learned from `/api/auth/me` at startup, and a counter that moves
+// on every change so work started under one session can tell it has ended.
 
-export function saveSession(token: string) {
-  localStorage.setItem("lific_token", token);
+const sessionListeners = new Set<() => void>();
+let signedIn = false;
+/** False between another tab's notice that the session changed and this
+ *  tab's own `/api/auth/me` answer. */
+let sessionKnown = true;
+let sessionGeneration = 0;
+
+// Before 3.0 the token itself lived in localStorage. Drop any copy left over
+// from an older version so it stops being readable.
+try {
+  globalThis.localStorage?.removeItem("lific_token");
+} catch {
+  // Storage can be unavailable (private mode); nothing was stored there then.
+}
+
+const SESSION_CHANNEL = "lific:session";
+const sessionChannel: BroadcastChannel | null =
+  typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(SESSION_CHANNEL);
+
+function notifySession() {
   for (const listener of sessionListeners) listener();
 }
 
+function setSession(next: boolean, broadcast: boolean) {
+  signedIn = next;
+  sessionKnown = true;
+  sessionGeneration += 1;
+  if (broadcast) sessionChannel?.postMessage("changed");
+  notifySession();
+}
+
+// The cookie is shared by every tab, so a sign-in or sign-out in one changes
+// it for all of them. A message only says that something changed, never what:
+// this tab forgets which account it is on and asks the server, which is the
+// only authority on what the cookie now holds.
+sessionChannel?.addEventListener("message", () => {
+  const previousAccount = readModelAccount();
+  sessionKnown = false;
+  sessionGeneration += 1;
+  const cleared = invalidateReadModelAccount();
+  notifySession();
+  void cleared.then(() => probeSession(previousAccount));
+});
+
+async function confirmNewSession(): Promise<void> {
+  const previousAccount = readModelAccount();
+  sessionKnown = false;
+  sessionGeneration += 1;
+  const cleared = invalidateReadModelAccount();
+  notifySession();
+  await cleared;
+  await readSession(previousAccount, false);
+}
+
+/** Mark this tab signed in, after a response that set the session cookie. */
+export function saveSession() {
+  if (readModelAccount() === null) setReadModelAccount(undefined);
+  setSession(true, true);
+}
+
+/** Mark this tab signed out. The cookie itself is cleared by the server
+ *  (`logout`, `revokeAllSessions`); this only stops the app acting signed in. */
 export function clearSession() {
-  localStorage.removeItem("lific_token");
   const cleared = clearReadModelAccount();
-  for (const listener of sessionListeners) listener();
+  setSession(false, true);
   return cleared;
 }
 
 export function onSessionChange(listener: () => void) {
   sessionListeners.add(listener);
-  const storage = (event: StorageEvent) => {
-    if (event.key === "lific_token" || event.key === null) listener();
-  };
   window.addEventListener("lific:session-change", listener);
-  window.addEventListener("storage", storage);
   return () => {
     sessionListeners.delete(listener);
     window.removeEventListener("lific:session-change", listener);
-    window.removeEventListener("storage", storage);
   };
 }
 
 export function hasSession(): boolean {
-  return !!localStorage.getItem("lific_token");
+  return signedIn;
+}
+
+/** An opaque name for the current session, or null when signed out or while
+ *  another tab's change is being confirmed. It changes on every sign-in,
+ *  sign-out and session swap, so code that started work under one session can
+ *  compare it afterwards and drop a stale answer. */
+export function sessionKey(): string | null {
+  return signedIn && sessionKnown ? `session:${sessionGeneration}` : null;
+}
+
+/** Learn whether the browser's cookie is a live session. A 401 means signed
+ *  out. Any other failure (the server unreachable) is no evidence either way:
+ *  the tab keeps what it last knew, and a later probe or request corrects it. */
+export async function probeSession(previousAccount = readModelAccount()): Promise<RequestResult<AuthUser>> {
+  return readSession(previousAccount, true);
+}
+
+async function readSession(
+  previousAccount: number | null | undefined,
+  publishSession: boolean,
+): Promise<RequestResult<AuthUser>> {
+  const started = sessionGeneration;
+  const accountRevision = readModelAccountRevision();
+  const account = readModelAccount();
+  const result = await request<AuthUser>("/auth/me");
+  // A sign-in, sign-out or cross-tab notice that landed while the probe was
+  // out is newer than its answer.
+  if (started !== sessionGeneration || accountRevision !== readModelAccountRevision()) return result;
+  if (result.ok) {
+    if (typeof previousAccount === "number" && previousAccount !== result.data.id) {
+      setReadModelAccount(undefined);
+      const clearingRevision = readModelAccountRevision();
+      await removeScopeSnapshots(`private:${previousAccount}:`);
+      if (started !== sessionGeneration || clearingRevision !== readModelAccountRevision()) return result;
+    }
+    setReadModelAccount(result.data.id);
+    if (publishSession && (!signedIn || !sessionKnown || account !== result.data.id)) setSession(true, false);
+  } else if (result.status === 401) {
+    setReadModelAccount(null);
+    if (publishSession && (signedIn || !sessionKnown || account !== null)) setSession(false, false);
+    await clearPrivateSnapshots();
+  } else if (publishSession && !sessionKnown) {
+    setSession(signedIn, false);
+  }
+  return result;
 }
 
 // ── API Key management ──────────────────────────────────────
@@ -606,9 +624,8 @@ export async function reactivateUser(id: number) {
 // ── Project members (LIF-199 / LIF-200) ─────────────────────
 //
 // Project-scoped roles: viewer < maintainer < lead. See LIF-DOC-7 for the
-// authorization design. `GET` is visible to any project member (and to
-// everyone while `authz_enforced` is off); writes are lead-only (or
-// instance admin).
+// authorization design. `GET` is visible to any project member; writes are
+// lead-only (or instance admin).
 
 export type ProjectRole = "viewer" | "maintainer" | "lead";
 
@@ -654,8 +671,8 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 // ── My effective role (LIF-234) ─────────────────────────────
 //
-// The caller's own role on one project, plus whether enforcement is on and
-// whether they're a workspace admin. Drives role-aware UI affordances
+// The caller's own role on one project, plus whether they're a workspace
+// admin. Drives role-aware UI affordances
 // (`lib/projectRole.svelte.ts`) — one Viewer-gated call per project switch,
 // so a plain viewer can learn what to hide/disable without reading the full
 // roster or the admin-only instance settings. `role` is null for a
@@ -663,9 +680,6 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 export interface MyProjectRole {
   role: ProjectRole | null;
-  /** Whether the instance's project-scoped authorization is enforced. When
-   *  false (legacy/local-first default), the UI stays fully interactive. */
-  enforced: boolean;
   /** Workspace admin — bypasses all gating, UI stays fully interactive. */
   is_admin: boolean;
 }
@@ -676,9 +690,9 @@ export async function getMyProjectRole(projectId: number) {
 
 // ── @mention candidates (LIF-263) ───────────────────────────
 //
-// The users a comment composer may `@`-mention in this project. Scoped to
-// project members when `authz_enforced` is on, all non-bot users otherwise
-// — the server never returns anyone who can't see the project.
+// The users a comment composer may `@`-mention in this project: its members
+// and the instance admins, never a bot. The server never returns anyone who
+// can't see the project.
 
 export interface MentionCandidate {
   user_id: number;
@@ -703,8 +717,8 @@ export interface Project {
   sort_order: number;
   created_at: string;
   updated_at: string;
-  /** LIF-465: whether anyone can read this project's current issues at
-   *  `/public/{identifier}` without an account. Default false. */
+  /** LIF-465: whether anyone can read this project at its normal links
+   *  without an account (LIF-583). Default false. */
   is_public: boolean;
 }
 
@@ -739,6 +753,9 @@ export interface CreateProjectInput {
   description?: string;
   emoji?: string;
   lead_user_id?: number;
+  /** LIF-524: the template the project's conventions page starts from.
+   *  The server defaults to `"empty"`. */
+  conventions?: ConventionTemplateKey;
 }
 
 export async function createProject(input: CreateProjectInput) {
@@ -933,8 +950,25 @@ export interface Issue {
   /** LIF-147: the named people. Absent for unassigned issues and for
    *  issues marked for any person. Always human accounts. */
   assignees?: IssueAssignee[];
+  /** LIF-525: the live claim, when a worker holds the issue right now.
+   *  Absent otherwise, including once a claim has expired. */
+  claim?: IssueClaim;
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+}
+
+/** LIF-525: a worker's time-limited hold on an issue. Timestamps are UTC
+ *  `YYYY-MM-DD HH:MM:SS`. */
+export interface IssueClaim {
+  user_id: number;
+  username: string;
+  display_name?: string | null;
+  /** The session holding it. Absent when the whole account holds it. */
+  worker?: string;
+  /** When this holder first claimed it; re-claims keep it. */
+  claimed_at: string;
+  /** Each re-claim moves it. */
+  expires_at: string;
 }
 
 // ── Assignment (LIF-147) ───────────────────────────────────
@@ -1007,6 +1041,8 @@ export async function addIssueWait(issueId: number, input: CreateWaitInput) {
 export interface ServerClock {
   today: string;
   utc_offset_minutes: number;
+  /** LIF-525: the server's current time in epoch milliseconds. */
+  now_ms: number;
 }
 
 export async function getServerClock() {
@@ -1324,7 +1360,7 @@ export interface Comment {
   updated_at: string;
   /** "verification" marks evidence recorded when the issue was closed.
    *  Absent from a server too old to send it. */
-  kind?: "comment" | "verification";
+  kind?: "comment" | "verification" | "decision";
 }
 
 // ── Activity / audit log (LIF-156/157) ─────────────────
@@ -1447,9 +1483,11 @@ async function commentPage(
   path: string,
   before: CommentCursor | null,
   pageSize: number,
+  kind?: "decision",
 ): Promise<RequestResult<CommentPage>> {
   const size = Math.max(1, Math.min(pageSize, COMMENT_MAX_LIMIT - 1));
   const params = new URLSearchParams({ order: "desc", limit: String(size + 1) });
+  if (kind) params.set("kind", kind);
   if (before) {
     params.set("before_created_at", before.created_at);
     params.set("before_id", String(before.id));
@@ -1475,14 +1513,15 @@ export async function listComments(
   issueId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/issues/${issueId}/comments`, before, pageSize);
+  return commentPage(`/issues/${issueId}/comments`, before, pageSize, kind);
 }
 
-export async function createComment(issueId: number, content: string) {
+export async function createComment(issueId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/issues/${issueId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 
@@ -1490,14 +1529,15 @@ export async function listPageComments(
   pageId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/pages/${pageId}/comments`, before, pageSize);
+  return commentPage(`/pages/${pageId}/comments`, before, pageSize, kind);
 }
 
-export async function createPageComment(pageId: number, content: string) {
+export async function createPageComment(pageId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/pages/${pageId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 
@@ -1548,28 +1588,33 @@ export interface UploadResponse {
 
 export type AttachmentEntity = "issue" | "page" | "comment";
 
-/** Upload one file. Optionally link it to an entity immediately (used by the
- *  detail-view "Attach" affordance); otherwise it stays unlinked until the
- *  entity's markdown is saved and re-scanned server-side. Returns a discrete
- *  result so callers can surface the exact server reason via a toast. */
+/** Fetch a public image only after the person accepts the paste offer. */
+export function importImageAttachment(
+  url: string,
+  link: { entity_type: AttachmentEntity; entity_id: number } | null,
+  signal: AbortSignal,
+): Promise<RequestResult<UploadResponse>> {
+  return request("/attachments/import", {
+    method: "POST",
+    body: JSON.stringify({ url, ...link }),
+    signal,
+  });
+}
+
+/** Upload one file, optionally linking it to an existing entity. */
 export async function uploadAttachment(
   file: File,
   link?: { entity_type: AttachmentEntity; entity_id: number },
 ): Promise<{ ok: true; data: UploadResponse } | { ok: false; error: string }> {
-  if (inPublicScope()) return { ok: false, error: REFUSED.error };
-  const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
   if (link) {
     form.append("entity_type", link.entity_type);
     form.append("entity_id", String(link.entity_id));
   }
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
     const res = await fetch(`${BASE}/attachments`, {
       method: "POST",
-      headers,
       body: form,
     });
     const body = await res.json();
@@ -1617,15 +1662,6 @@ export function uploadAttachmentWithProgress(
     onProgress?: (p: UploadProgress) => void;
   } = {},
 ): UploadHandle {
-  // A public page cannot upload: settle without opening a request, so not
-  // even the session cookie travels.
-  if (inPublicScope()) {
-    return {
-      result: Promise.resolve({ ok: false, error: REFUSED.error, status: 403, canceled: false }),
-      abort: () => {},
-    };
-  }
-  const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
   if (opts.link) {
@@ -1644,7 +1680,6 @@ export function uploadAttachmentWithProgress(
     };
 
     xhr.open("POST", `${BASE}/attachments`);
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
     xhr.upload.onprogress = (e) => {
       opts.onProgress?.({
@@ -1855,17 +1890,16 @@ export async function getAttachmentLinks(id: number) {
 // ── Attachment viewers (LIF-418) ─────────────────────────────
 
 /** Raw bytes URL. Safe to use directly as an `<img>`/`<video>`/`<audio>` src:
- *  this exact path shape accepts the `lific_token` session cookie, which is
- *  how the browser authenticates subresource loads that cannot carry an
- *  Authorization header (see src/auth.rs, LIF-267). */
+ *  the browser sends the session cookie with the load like any other
+ *  same-origin request. */
 export function attachmentUrl(id: number): string {
-  return resolveUrl(`/attachments/${id}`);
+  return `${BASE}/attachments/${id}`;
 }
 
 /** Server-generated webp preview. 404s when the attachment has none, so every
  *  consumer must have an onerror path back to the full asset. */
 export function attachmentThumbnailUrl(id: number): string {
-  return resolveUrl(`/attachments/${id}/thumbnail`);
+  return `${BASE}/attachments/${id}/thumbnail`;
 }
 
 export interface ZipPreviewEntry {
@@ -1898,26 +1932,12 @@ export async function getAttachmentPreview(id: number) {
   return request<AttachmentPreview>(`/attachments/${id}/preview`);
 }
 
-/** Fetch an attachment's bytes as text, for the inline text/diff/data viewers.
- *  Uses the bearer token like every other authenticated read; the cookie
- *  fallback exists for subresource loads, not for fetches. */
+/** Fetch an attachment's bytes as text, for the inline text/diff/data viewers. */
 export async function fetchAttachmentText(
   id: number,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const resolved = resolveRequest(`/attachments/${id}`);
-  if (resolved.kind !== "private" && resolved.kind !== "public") {
-    return { ok: false, error: REFUSED.error };
-  }
-  const headers: Record<string, string> = {};
-  if (resolved.kind === "private") {
-    const token = localStorage.getItem("lific_token");
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-  }
   try {
-    const res = await fetch(resolved.url, {
-      headers,
-      credentials: resolved.kind === "public" ? "omit" : undefined,
-    });
+    const res = await fetch(`${BASE}/attachments/${id}`);
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, text: await res.text() };
   } catch {
@@ -1964,6 +1984,27 @@ export interface Page {
   labels: string[];
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+  /** LIF-524: true only for the project's conventions page. */
+  conventions?: boolean;
+  /** LIF-524: whether agents get the conventions page in their briefing.
+   *  Meaningful only when `conventions` is true. */
+  conventions_enabled?: boolean;
+}
+
+/** LIF-524: the starting points for a conventions page, in server order. */
+export type ConventionTemplateKey = "empty" | "ai_managed" | "human_managed" | "human_owned";
+
+export interface ConventionTemplate {
+  key: ConventionTemplateKey;
+  name: string;
+  /** One line describing who the template suits. */
+  summary: string;
+  /** The Markdown body; `""` for the empty template. */
+  content: string;
+}
+
+export async function listConventionTemplates() {
+  return request<ConventionTemplate[]>("/conventions/templates");
 }
 
 export interface Folder {
@@ -2012,6 +2053,9 @@ export interface CreatePageInput {
   status?: string;
   /** LIF-105: label names to attach. Ignored on workspace pages. */
   labels?: string[];
+  /** LIF-524: make this the project's conventions page. 409 when the
+   *  project already has one. */
+  conventions?: boolean;
 }
 
 export async function createPage(input: CreatePageInput) {
@@ -2033,6 +2077,9 @@ export interface UpdatePageInput {
   labels?: string[];
   /** LIF-441: refuse the write (409) unless the page still has this seq. */
   expected_seq?: number;
+  /** LIF-524: turn a conventions page on or off for agents. 400 on any
+   *  other page. */
+  conventions_enabled?: boolean;
 }
 
 export async function updatePage(id: number, input: UpdatePageInput) {
@@ -2568,6 +2615,18 @@ export interface HomeOverview {
   since: SinceSummary | null;
   /** Issues the caller or their agents moved to done, last 84 days. */
   my_done: DayCount[];
+  /** LIF-525: open issues under a live claim, most recently claimed first. */
+  claims: ClaimedIssue[];
+}
+
+export interface ClaimedIssue {
+  issue_id: number;
+  project_id: number;
+  identifier: string;
+  title: string;
+  status: string;
+  priority: string;
+  claim: IssueClaim;
 }
 
 /** With `projectId`, every aggregate covers that one project (the project

@@ -28,8 +28,8 @@ import {
 import { toast } from "../toast/toast.svelte";
 
 export interface CommentThreadApi {
-  list: (parentId: number, before: CommentCursor | null, size?: number) => Promise<RequestResult<CommentPage>>;
-  create: (parentId: number, content: string) => Promise<RequestResult<Comment>>;
+  list: (parentId: number, before: CommentCursor | null, size?: number, kind?: "decision") => Promise<RequestResult<CommentPage>>;
+  create: (parentId: number, content: string, kind?: "comment" | "decision") => Promise<RequestResult<Comment>>;
   update: (id: number, content: string) => Promise<RequestResult<Comment>>;
   remove: (id: number) => Promise<RequestResult<unknown>>;
   /** The route generation; bumped by the route on every navigation. */
@@ -46,6 +46,7 @@ export class CommentThread {
   comments = $state<Comment[]>([]);
   hasOlder = $state(false);
   loadingOlder = $state(false);
+  decisionsOnly = $state(false);
 
   #op = 0;
   #epoch = 0;
@@ -73,6 +74,16 @@ export class CommentThread {
     this.#claim();
     this.comments = [];
     this.hasOlder = false;
+    this.decisionsOnly = false;
+  }
+
+  async filterDecisions(enabled: boolean) {
+    this.#claim();
+    this.decisionsOnly = enabled;
+    this.comments = [];
+    this.hasOlder = false;
+    const parentId = this.#api.currentId();
+    if (parentId !== null) await this.load(parentId, this.#api.gen());
   }
 
   /** Read the newest window for `parentId`. A background refresh re-reads as
@@ -82,8 +93,14 @@ export class CommentThread {
     // Untracked: a route effect may call this synchronously, and reading the
     // list it is about to replace would make that effect depend on it.
     const rows = background ? untrack(() => this.comments.length) : 0;
-    const res = await loadCommentWindow((before, size) => this.#api.list(parentId, before, size), rows);
-    if (!res.ok) return;
+    const kind = untrack(() => this.decisionsOnly ? "decision" as const : undefined);
+    const res = await loadCommentWindow((before, size) => this.#api.list(parentId, before, size, kind), rows);
+    if (!res.ok) {
+      if (commentOpIsCurrent(token, this.#api.gen(), this.#op)) {
+        toast(`Couldn't load comments: ${res.error}`, { kind: "error" });
+      }
+      return;
+    }
     const outcome = commentWindowOutcome(token, this.#api.gen(), this.#op, this.#epoch);
     if (outcome === "apply") this.#merge(res.data);
     else if (outcome === "retry") void this.#restabilize(parentId, gen);
@@ -95,8 +112,9 @@ export class CommentThread {
     for (let attempt = 0; attempt < COMMENT_WINDOW_RETRY_LIMIT; attempt += 1) {
       if (gen !== this.#api.gen() || !this.#api.isCurrent(parentId)) return;
       const token = { route: gen, op: this.#claim(), epoch: this.#epoch };
+      const kind = this.decisionsOnly ? "decision" : undefined;
       const res = await loadCommentWindow(
-        (before, size) => this.#api.list(parentId, before, size),
+        (before, size) => this.#api.list(parentId, before, size, kind),
         this.comments.length,
       );
       if (!res.ok) return;
@@ -116,7 +134,7 @@ export class CommentThread {
     this.loadingOlder = true;
     // Keyed on the oldest comment on screen, so a comment posted meanwhile
     // cannot shift what "the previous page" means.
-    const res = await this.#api.list(parentId, olderCursor(this.comments));
+    const res = await this.#api.list(parentId, olderCursor(this.comments), undefined, this.decisionsOnly ? "decision" : undefined);
     if (!commentOpIsCurrent({ route: gen, op }, this.#api.gen(), this.#op)) return;
     this.loadingOlder = false;
     if (!res.ok) {
@@ -137,15 +155,19 @@ export class CommentThread {
     this.#api.onMutated?.(parentId);
   }
 
-  async create(content: string): Promise<Comment | null> {
+  async create(content: string, kind: "comment" | "decision" = "comment"): Promise<Comment | null> {
     const parentId = this.#api.currentId();
     if (parentId === null) return null;
-    const res = await this.#api.create(parentId, content);
+    const res = await this.#api.create(parentId, content, kind);
     if (!res.ok) {
       toast(`Couldn't add comment: ${res.error}`, { kind: "error" });
       return null;
     }
-    this.#fold(parentId, () => (this.comments = upsertComment(this.comments, res.data)));
+    this.#fold(parentId, () => {
+      if (!this.decisionsOnly || res.data.kind === "decision") {
+        this.comments = upsertComment(this.comments, res.data);
+      }
+    });
     return res.data;
   }
 
@@ -157,7 +179,11 @@ export class CommentThread {
       toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
       return null;
     }
-    this.#fold(parentId, () => (this.comments = upsertComment(this.comments, res.data)));
+    this.#fold(parentId, () => {
+      if (!this.decisionsOnly || res.data.kind === "decision") {
+        this.comments = upsertComment(this.comments, res.data);
+      }
+    });
     return res.data;
   }
 

@@ -1,4 +1,4 @@
-import { ARCHIVE_UNKNOWN, importProjectArchive, onSessionChange, type ArchiveImportResult } from "./api";
+import { ARCHIVE_UNKNOWN, importProjectArchive, onSessionChange, sessionKey, type ArchiveImportResult } from "./api";
 
 const pendingKey = (userId: number) => `lific:archive-import-pending:${userId}`;
 let owner: number | null = null;
@@ -21,7 +21,7 @@ export function hideArchiveImport() {
 }
 
 export function restoreArchiveImport(userId: number, token: string) {
-  if (!Number.isSafeInteger(userId) || userId <= 0 || token !== localStorage.getItem("lific_token")) return;
+  if (!Number.isSafeInteger(userId) || userId <= 0 || token !== sessionKey()) return;
   if (!watchingSession) {
     onSessionChange(hideArchiveImport);
     watchingSession = true;
@@ -37,12 +37,12 @@ export function restoreArchiveImport(userId: number, token: string) {
 }
 
 export async function startArchiveImport(file: File) {
-  if (owner === null || !session || session !== localStorage.getItem("lific_token")) return;
+  if (owner === null || !session || session !== sessionKey()) return;
   if (["uploading", "processing", "unknown", "success"].includes(archiveImport.phase)) return;
   const current = ++generation;
   const userId = owner, token = session;
   const key = pendingKey(userId);
-  const live = () => current === generation && owner === userId && session === token && token === localStorage.getItem("lific_token");
+  const live = () => current === generation && owner === userId && session === token && token === sessionKey();
   archiveImport.phase = "uploading";
   archiveImport.progress = 0;
   archiveImport.error = "";
@@ -63,7 +63,7 @@ export async function startArchiveImport(file: File) {
 }
 
 export function resetArchiveImport() {
-  if (owner === null || session !== localStorage.getItem("lific_token")) return;
+  if (owner === null || session !== sessionKey()) return;
   if (["uploading", "processing"].includes(archiveImport.phase)) return;
   generation++;
   sessionStorage.removeItem(pendingKey(owner));

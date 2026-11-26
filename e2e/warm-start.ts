@@ -10,21 +10,18 @@ const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/WarmStartFixture.svelte";
 const fixture = `<script>
   import {onMount} from 'svelte';
-  import {ensureProjectModel} from './lib/sync/readModel.svelte';
+  import {ensureProjectModel, handleRealtimeEvent} from './lib/sync/readModel.svelte';
   import * as cache from './lib/sync/persistence';
-  import {setPublicProject} from './lib/publicScope';
   import {me, logout, login, saveSession, listProjects} from './lib/api';
   let model = $state(null);
-  const isPublic = new URLSearchParams(location.search).has('public');
-  setPublicProject(isPublic ? 'APP' : null);
   onMount(async () => {
-    if (!isPublic) await me();
+    await me();
     model = ensureProjectModel(1);
     window.fixture = {
-      cache, model: () => model, logout, listProjects,
-      login: async (persistToken = true) => {
+      cache, model: () => model, logout, listProjects, handleRealtimeEvent,
+      login: async () => {
         const result = await login('other', 'password');
-        if (result.ok && persistToken) saveSession(result.data.token);
+        if (result.ok) saveSession();
         model = ensureProjectModel(1);
       },
     };
@@ -103,9 +100,12 @@ try {
       } });
     }
     if (url.pathname === "/api/auth/login") return route.fulfill({ json: {
-      user: { id: userId }, token: `token-${userId}`, expires_at: "2099-01-01",
+      user: { id: userId }, expires_at: "2099-01-01",
     } });
-    if (url.pathname === "/api/auth/logout") return route.fulfill({ json: {} });
+    if (url.pathname === "/api/auth/logout") {
+      userId = null;
+      return route.fulfill({ json: { logged_out: true } });
+    }
     if (url.pathname === "/api/projects") return route.fulfill({ json: [{ id: 1, identifier: "APP" }] });
     if (url.pathname.endsWith("/index")) {
       indexCount++;
@@ -309,12 +309,12 @@ try {
   userId = 2;
   holdIndex = true;
   // No localStorage write: cookie-auth siblings must receive the change too.
-  const switching = page.evaluate(() => (window as any).fixture.login(false));
+  const switching = page.evaluate(() => (window as any).fixture.login());
   await waitHeld("index");
   await previousAccountTab.waitForFunction(() => (window as any).fixture.model().issues.size === 0);
   await previousAccountTab.close();
   assert.equal(await page.locator("#issues").textContent(), "");
-  assert.equal((await read()).snapshot.issues[0].title, "Private saved issue");
+  assert.equal((await read()).snapshot, null);
   holdIndex = false;
   await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Other account")], pages: [] } });
   heldIndex = null;
@@ -327,7 +327,7 @@ try {
     const cache = (window as any).fixture.cache;
     const source = await cache.loadSnapshot("private:2:1");
     const result: Record<string, any> = {};
-    for (const key of ["private:2:99", "private:2:88", "private:1:99", "public:signed-out:APP:99"]) {
+    for (const key of ["private:2:99", "private:2:88", "private:1:99", "signed-out:99"]) {
       const { epoch } = await cache.loadSnapshot(key);
       result[key] = { snapshot: source.snapshot, epoch };
       if (key !== "private:2:88") await cache.storeSnapshot(key, source.snapshot, epoch);
@@ -351,13 +351,27 @@ try {
   assert.equal((await read("private:2:99")).snapshot, null);
   assert((await read("private:2:1")).snapshot);
   assert((await read("private:1:99")).snapshot);
-  assert((await read("public:signed-out:APP:99")).snapshot);
+  assert((await read("signed-out:99")).snapshot);
   for (const removed of ["private:2:99", "private:2:88"]) {
     assert.equal(await page.evaluate(async ({ key, stale }) =>
       (window as any).fixture.cache.storeSnapshot(key, stale.snapshot, stale.epoch),
     { key: removed, stale: pruneSeed[removed] }), false);
   }
   pass("project-list reconciliation prunes only the current scope and rejects queued writes for removed projects");
+
+  const beforeResync = indexCount;
+  holdIndex = true;
+  await page.evaluate(() => (window as any).fixture.handleRealtimeEvent({ type: "resync.required" }));
+  await waitHeld("index");
+  holdIndex = false;
+  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Other account")], pages: [] } });
+  heldIndex = null;
+  await ready();
+  await durable(10, "private:2:1");
+  assert.equal(indexCount, beforeResync + 1);
+  assert((await read("private:1:99")).snapshot);
+  assert((await read("signed-out:99")).snapshot);
+  pass("resync.required clears and reloads only the current account scope");
 
   const sibling = await context.newPage();
   sibling.on("pageerror", error => errors.push(error.message));
@@ -374,6 +388,7 @@ try {
   pass("sign-out clears all cached accounts and fences another tab's queued write");
 
   // A request started before sign-out must not repopulate memory or disk.
+  userId = 2;
   holdIndex = true;
   await page.reload();
   await waitHeld("index");
@@ -390,24 +405,10 @@ try {
   await page.reload();
   await ready();
   await durable(10);
-  const privateCalls = calls.filter(call => call.startsWith("/api/")).length;
-  holdIndex = true;
-  await page.goto(`${origin}/?public`);
-  await waitHeld("index");
-  assert.equal(await page.locator("#issues").textContent(), "");
-  assert.equal(calls.filter(call => call.startsWith("/api/")).length, privateCalls);
-  holdIndex = false;
-  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Public summary")], pages: [] } });
-  heldIndex = null;
-  await ready();
-  await durable(10, "public:signed-out:APP:1");
-  assert.equal(await page.locator("#issues").textContent(), "Public summary");
-  pass("signed-out public scope never hydrates private data or calls private APIs");
-
   const anonymousSeed = await page.evaluate(async () => {
     const cache = (window as any).fixture.cache;
     const source = await cache.loadSnapshot("private:1:1");
-    for (const key of ["private:9:1", "private:signed-out:99"]) {
+    for (const key of ["private:9:1", "signed-out:99"]) {
       const { epoch } = await cache.loadSnapshot(key);
       await cache.storeSnapshot(key, source.snapshot, epoch);
     }
@@ -421,8 +422,7 @@ try {
   assert.equal(await page.locator("#issues").textContent(), "");
   assert.equal((await read("private:1:1")).snapshot, null);
   assert.equal((await read("private:9:1")).snapshot, null);
-  assert((await read("private:signed-out:99")).snapshot);
-  assert((await read("public:signed-out:APP:1")).snapshot);
+  assert((await read("signed-out:99")).snapshot);
   assert.equal(await page.evaluate(async stale =>
     (window as any).fixture.cache.storeSnapshot("private:1:1", stale.snapshot, stale.epoch),
   anonymousSeed), false);
@@ -431,7 +431,7 @@ try {
   await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Signed-out summary")], pages: [] } });
   heldIndex = null;
   await ready();
-  await durable(10, "private:signed-out:1");
+  await durable(10, "signed-out:1");
   const beforeSignedOutReload = indexCount;
   await page.reload();
   await ready();

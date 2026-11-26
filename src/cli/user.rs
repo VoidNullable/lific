@@ -38,9 +38,8 @@ pub fn run(
             // LIF-261: seed the settings row NOW, before this user
             // exists, so a CLI-first admin creation (`lific user create
             // --admin` before any `lific start`) still counts the DB as
-            // fresh and gets authz_enforced on by default. `ensure` is a
-            // no-op once the row exists, so this never overrides a prior
-            // seed or an admin's later choice.
+            // fresh. `ensure` is a no-op once the row exists, so this never
+            // overrides a prior seed or an admin's later choice.
             db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
             let user = db::queries::users::create_user(
                 &conn,

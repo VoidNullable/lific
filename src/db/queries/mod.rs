@@ -1,9 +1,11 @@
+pub(crate) mod access_losses;
 pub(crate) mod activity;
 pub(crate) mod agents;
 pub(crate) mod assignees;
 pub(crate) mod attachments;
 pub(crate) mod briefing;
 pub(crate) mod changes;
+pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod home;
 pub(crate) mod human_queue;
@@ -11,12 +13,13 @@ pub(crate) mod insights;
 pub(crate) mod issue_move;
 mod issues;
 pub(crate) mod members;
+pub(crate) mod number_sequences;
+pub(crate) mod op_keys;
 mod pages;
 pub(crate) mod plans;
 pub(crate) mod project_groups;
 mod projects;
 /// Anonymous reads use explicit project publication predicates.
-pub(crate) mod public;
 pub(crate) mod repo_bindings;
 mod resources;
 mod search;

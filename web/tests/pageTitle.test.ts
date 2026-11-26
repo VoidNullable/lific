@@ -55,11 +55,6 @@ describe("routePageTitle", () => {
     expect(routePageTitle({ type: "app", page: "module-detail", project: "NEWS" })).toBe("Module · NEWS · Lific");
   });
 
-  it("resolves a public route to its inner page", () => {
-    expect(routePageTitle({ type: "public", project: "NEWS", inner: { type: "app", page: "issue-detail", project: "NEWS", identifier: "NEWS-18" } }))
-      .toBe("NEWS-18 · NEWS · Lific");
-  });
-
   it("maps not-found and degrades unknown pages to the bare name", () => {
     expect(routePageTitle({ type: "not-found" })).toBe("Not found · Lific");
     expect(routePageTitle({ type: "app", page: "something-new" })).toBe("Lific");

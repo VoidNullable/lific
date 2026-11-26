@@ -9,7 +9,7 @@
     changePassword,
     revokeAllSessions,
     logout,
-    clearSession,
+    sessionKey,
     getInstance,
     TOOL_TEMPLATES,
     type Bot,
@@ -217,6 +217,8 @@
   // not belong behind a single click.
   let confirmingSignOutAll = $state(false);
   let signOutAllError = $state("");
+  let loggingOut = $state(false);
+  let logoutError = $state("");
 
   $effect(() => {
     accentPref = getAccent();
@@ -236,7 +238,7 @@
   async function saveProfile() {
     if (!user || !hasProfileChanges || profileSaving) return;
     const revision = getUserRevision();
-    const session = localStorage.getItem("lific_token");
+    const session = sessionKey();
     profileSaving = true;
     profileError = "";
     const input: { display_name?: string; email?: string } = {};
@@ -244,7 +246,7 @@
     if (profileEmail.trim().toLowerCase() !== user.email) input.email = profileEmail.trim();
     const res = await updateProfile(input);
     profileSaving = false;
-    if (session !== localStorage.getItem("lific_token")) return;
+    if (session !== sessionKey()) return;
     if (res.ok) {
       if (!publishUser(res.data, revision)) return;
       profileName = res.data.display_name;
@@ -314,27 +316,36 @@
       navigate("/login");
       return;
     }
-    // The local token is still valid (the helper only clears it on success),
+    // The session is still valid (the helper only clears it on success),
     // so stay put, keep the confirm open, and let them try again.
     signOutAllError = res.error;
   }
 
   async function logoutNow() {
-    await logout();
-    clearSession();
-    currentUser.set(null);
-    navigate("/login");
+    if (loggingOut) return;
+    loggingOut = true;
+    logoutError = "";
+    const res = await logout();
+    loggingOut = false;
+    if (res.ok) {
+      currentUser.set(null);
+      navigate("/login");
+      return;
+    }
+    // The cookie is still valid (the helper only clears the session once the
+    // server confirms), so stay signed in and let them try again.
+    logoutError = `Couldn't sign out: ${res.error}`;
   }
 
   async function loadUser() {
     const revision = getUserRevision();
-    const session = localStorage.getItem("lific_token");
+    const session = sessionKey();
     // Whether this instance signs in without a password decides how a stale
     // session is recovered below, so it is read once with the profile.
     const instance = await getInstance();
     if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     const result = await me();
-    if (session !== localStorage.getItem("lific_token")) return;
+    if (session !== sessionKey()) return;
     if (result.ok) {
       publishUser(result.data, revision);
       profileName = user?.display_name ?? "";
@@ -916,11 +927,12 @@
             <button
               class="inline-flex items-center gap-1.5 text-body-sm font-medium text-[var(--text)]
                      border border-[var(--border)] px-3 py-1.5 rounded-md
-                     hover:bg-[var(--bg-subtle)] transition-colors"
+                     hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+              disabled={loggingOut}
               onclick={logoutNow}
             >
               <LogOut size={14} />
-              Sign out
+              {loggingOut ? "Signing out" : "Sign out"}
             </button>
             <button
               class="inline-flex items-center gap-1.5 text-body-sm text-[var(--error)] border border-[var(--error)]
@@ -932,6 +944,11 @@
               Sign out everywhere and revoke access
             </button>
           </div>
+          {#if logoutError}
+            <p class="mt-2 text-caption text-[var(--error)] flex items-center gap-1" role="alert">
+              <AlertTriangle size={12} /> {logoutError}
+            </p>
+          {/if}
           <!-- Inline confirm (never a browser confirm()), matching the
                attachment-delete pattern: the consequence is spelled out where
                the second click happens. -->

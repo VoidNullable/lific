@@ -85,6 +85,9 @@ struct HttpBackend {
     /// comments, the one arm that has an answer leaves it here for the one
     /// renderer that wants it, which then takes it.
     comment_paging: Mutex<Option<CommentPaging>>,
+    /// Whether the server replays a create retried with its key (LIF-526),
+    /// once it has said.
+    replays_creates: Mutex<Option<bool>>,
 }
 
 /// The server's own answer about what lies past a comment page.
@@ -167,6 +170,7 @@ impl HttpBackend {
             link_context,
             api_key: api_key.map(str::to_owned),
             comment_paging: Mutex::new(None),
+            replays_creates: Mutex::new(None),
         })
     }
 
@@ -481,7 +485,7 @@ impl HttpBackend {
                     // the authenticated caller (LIF-409).
                     ..Default::default()
                 };
-                self.send_json(Method::POST, "/api/issues", &body).await
+                self.send_create("/api/issues", &body).await
             }
             IssueAction::Update {
                 identifier,
@@ -563,6 +567,7 @@ impl HttpBackend {
                 name,
                 identifier,
                 description,
+                conventions,
             } => {
                 self.send_json(
                     Method::POST,
@@ -573,6 +578,7 @@ impl HttpBackend {
                         description: description.clone(),
                         emoji: None,
                         lead_user_id: None,
+                        conventions: Some(crate::conventions::Template::parse(conventions)?),
                     },
                 )
                 .await
@@ -704,6 +710,7 @@ impl HttpBackend {
                             description: String::new(),
                             emoji: None,
                             lead_user_id: None,
+                            conventions: Some(crate::conventions::Template::Empty),
                         },
                     )
                     .await?;
@@ -850,8 +857,7 @@ impl HttpBackend {
                 let (project_id, folder_id) = self
                     .page_scope(project.as_deref(), folder.as_deref())
                     .await?;
-                self.send_json(
-                    Method::POST,
+                self.send_create(
                     "/api/pages",
                     &models::CreatePage {
                         project_id,
@@ -933,6 +939,7 @@ impl HttpBackend {
                 identifier,
                 content,
                 user,
+                kind,
             } => {
                 user.as_ref().map_or(Ok(()), |_| {
                     Err(anyhow!(
@@ -940,15 +947,25 @@ impl HttpBackend {
                     ))
                 })?;
                 let issue = self.issue_identity(identifier).await?;
-                self.send_json(
-                    Method::POST,
-                    &format!("/api/issues/{}/comments", issue.id),
-                    &models::CreateComment {
-                        content: content.clone(),
-                    },
-                )
-                .await
-                .map(|value| (value, issue.identifier))
+                let value = self
+                    .send_create(
+                        &format!("/api/issues/{}/comments", issue.id),
+                        &models::CreateComment {
+                            content: content.clone(),
+                            kind: *kind,
+                        },
+                    )
+                    .await?;
+                let expected = models::CommentKind::from(*kind).as_str();
+                let returned = value["kind"].as_str().unwrap_or("comment");
+                if returned != expected {
+                    return Err(anyhow!(
+                        "The server stored comment #{} as {returned}, but {expected} was requested. \
+                         Upgrade the server before recording decisions. The comment was already created; do not retry blindly.",
+                        value["id"],
+                    ));
+                }
+                Ok((value, issue.identifier))
             }
         }
     }
@@ -1389,6 +1406,79 @@ impl HttpBackend {
             .await?)
     }
 
+    /// POST a create with a fresh `Idempotency-Key`, and POST it once more
+    /// with the same key when the first attempt is lost in transit (LIF-526).
+    /// If that attempt had committed, the server replays its result instead
+    /// of writing twice. A server that does not say it replays keys gets no
+    /// second attempt: it would ignore the key and write a duplicate.
+    async fn send_create<T: Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<Value> {
+        let key = format!("lific-cli-{:032x}", rand::random::<u128>());
+        // The error, and whether the server may have acted without our
+        // hearing the answer.
+        let post = || async {
+            let response = self
+                .send(
+                    self.request_builder(Method::POST, path)
+                        .header(crate::api::idempotency::KEY_HEADER, &key)
+                        .json(body),
+                )
+                .await
+                .map_err(|error| {
+                    let lost = lost_in_transit(&error);
+                    (error, lost)
+                })?;
+            // A body cut short is a lost reply; reqwest calls it a decode
+            // error, so the bytes are read apart from the parse.
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| (anyhow::Error::from(error), true))?;
+            serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+                (
+                    anyhow!("HTTP backend returned a reply that is not JSON: {error}"),
+                    false,
+                )
+            })
+        };
+        match post().await {
+            Err((_, true)) if self.server_replays_creates().await => {
+                post().await.map_err(|(error, _)| error)
+            }
+            other => other.map_err(|(error, _)| error),
+        }
+    }
+
+    /// Whether the server advertises [`crate::api::idempotency::CAPABILITY`]
+    /// in `/api/instance`. Asked only after a create is lost, and kept for the
+    /// process once the server answers; a probe that fails is not kept.
+    async fn server_replays_creates(&self) -> bool {
+        if let Some(known) = self.replays_creates.lock().ok().and_then(|slot| *slot) {
+            return known;
+        }
+        let Ok(response) = self
+            .send(self.request_builder(Method::GET, "/api/instance"))
+            .await
+        else {
+            return false;
+        };
+        let Ok(info) = response.json::<Value>().await else {
+            return false;
+        };
+        let supported = info["capabilities"].as_array().is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == crate::api::idempotency::CAPABILITY)
+        });
+        if let Ok(mut slot) = self.replays_creates.lock() {
+            *slot = Some(supported);
+        }
+        supported
+    }
+
     /// Delete a resource and answer with the shape the SQL backend prints
     /// (LIF-341). The server replies `204 No Content`, so the name the user
     /// asked us to delete is the only thing left to report, and both backends
@@ -1420,6 +1510,15 @@ impl HttpBackend {
             None => request,
         }
     }
+}
+
+/// Whether a request failed before a reply's status arrived, so the server
+/// may or may not have acted on it. An HTTP error status is an answer, not a
+/// loss.
+fn lost_in_transit(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+        error.is_connect() || error.is_timeout() || error.is_request() || error.is_body()
+    })
 }
 
 /// The `aliases` array both repo endpoints take.
@@ -2315,6 +2414,69 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn http_comment_add_rejects_a_server_that_drops_decision_kind() {
+        for returned in [json!({"id": 7, "kind": "comment"}), json!({"id": 7})] {
+            let router = Router::new()
+                .route("/api/issues/resolve/{identifier}", get(issue_response))
+                .route(
+                    "/api/issues/42/comments",
+                    any(move || {
+                        let returned = returned.clone();
+                        async move { Json(returned) }
+                    }),
+                );
+            let (url, server) = spawn_server(router).await;
+            let backend = HttpBackend::new(&url, None).unwrap();
+            let error = backend
+                .execute(
+                    &Command::Comment {
+                        action: CommentAction::Add {
+                            identifier: "LIF-42".into(),
+                            content: "Use SQLite".into(),
+                            user: None,
+                            kind: models::CommentWriteKind::Decision,
+                        },
+                    },
+                    IssueLinkOutput::Url,
+                )
+                .await
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("stored comment #7 as comment"),
+                "{message}"
+            );
+            assert!(message.contains("decision was requested"), "{message}");
+            assert!(
+                message.contains("already created; do not retry blindly"),
+                "{message}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_comment_add_carries_decision_kind() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let value = backend
+            .execute(
+                &Command::Comment {
+                    action: CommentAction::Add {
+                        identifier: fixture.issue_identifier.clone(),
+                        content: "Use SQLite".into(),
+                        user: None,
+                        kind: models::CommentWriteKind::Decision,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["kind"], "decision");
+    }
+
     /// LIF-421: the server answers the continuation question in headers, and
     /// this backend believes it rather than probing or guessing.
     #[tokio::test]
@@ -2327,6 +2489,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,
@@ -2476,6 +2639,7 @@ mod tests {
             .execute(
                 &Command::Comment {
                     action: CommentAction::Add {
+                        kind: Default::default(),
                         identifier: issue.clone(),
                         content: "A remark\nover two lines".into(),
                         user: None,
@@ -2637,6 +2801,7 @@ mod tests {
                 .execute(
                     &Command::Comment {
                         action: CommentAction::Add {
+                            kind: Default::default(),
                             identifier: issue.clone(),
                             content: content.into(),
                             user: None,
@@ -2887,7 +3052,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(page["title"], "Project page");
-        assert_eq!(page["identifier"], "TST-DOC-1");
+        // TST-DOC-1 is the conventions page the project starts with.
+        assert_eq!(page["identifier"], "TST-DOC-2");
         fixture.server.abort();
     }
 
@@ -3461,6 +3627,7 @@ mod tests {
     #[test]
     fn builds_project_create_payload_with_server_defaults() {
         let payload = serde_json::to_value(models::CreateProject {
+            conventions: None,
             name: "Docs".into(),
             identifier: "DOC".into(),
             description: "Reference material".into(),
@@ -3764,6 +3931,7 @@ mod tests {
             let project = crate::db::queries::create_project(
                 &conn,
                 &models::CreateProject {
+                    conventions: None,
                     name: "Test Project".into(),
                     identifier: "TST".into(),
                     description: "integration test project".into(),
@@ -3876,5 +4044,268 @@ mod tests {
         );
         assert_eq!(value[0]["owner"]["name"], "Ada");
         assert!(value[0]["owner"].get("web_url").is_none());
+    }
+
+    /// Read one HTTP/1.1 request off `socket` and return its request line and
+    /// `Idempotency-Key`.
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Option<String>) {
+        use tokio::io::AsyncReadExt;
+        let mut raw = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                continue;
+            };
+            let header = |name: &str| {
+                head.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+            };
+            let length: usize = header("content-length").map_or(0, |v| v.parse().unwrap());
+            if body.len() >= length || read == 0 {
+                let line = head.lines().next().unwrap_or_default();
+                let line = line.rsplit_once(' ').map_or(line, |(line, _)| line);
+                return (line.to_owned(), header("idempotency-key"));
+            }
+        }
+    }
+
+    /// What the scripted server does with one connection.
+    enum Reply {
+        /// Close it without answering: the reply is lost.
+        Drop,
+        /// Answer 200 with this JSON.
+        Json(&'static str),
+        /// Promise 100 bytes of body, send 10 and close.
+        CutShort,
+    }
+
+    /// A server that answers one request per connection from `script`, then
+    /// reports every request it read and whether another one came after.
+    async fn spawn_script(
+        script: Vec<Reply>,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<(Vec<(String, Option<String>)>, bool)>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for reply in script {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_request(&mut socket).await);
+                let head = |length: usize| {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {length}\r\nconnection: close\r\n\r\n"
+                    )
+                };
+                let raw = match reply {
+                    Reply::Drop => continue,
+                    Reply::Json(body) => format!("{}{body}", head(body.len())),
+                    Reply::CutShort => format!("{}{{\"id\":1,\"", head(100)),
+                };
+                socket.write_all(raw.as_bytes()).await.unwrap();
+            }
+            let wait = std::time::Duration::from_millis(200);
+            let another = tokio::time::timeout(wait, listener.accept()).await.is_ok();
+            (requests, another)
+        });
+        (url, server)
+    }
+
+    const REPLAYS: &str = r#"{"capabilities":["idempotency-key"]}"#;
+    const CREATED: &str = r#"{"id":1,"identifier":"TST-1"}"#;
+
+    /// LIF-526: the first POST reaches the server and the connection drops
+    /// before any reply. The server says it replays keys, so the backend sends
+    /// the create again with the same key, and a server that committed the
+    /// first one replays it. The server's answer is kept: a second lost
+    /// create is resent without asking again.
+    #[tokio::test]
+    async fn a_create_lost_in_transit_is_resent_once_with_the_same_idempotency_key() {
+        let (url, server) = spawn_script(vec![
+            Reply::Drop,
+            Reply::Json(REPLAYS),
+            Reply::Json(CREATED),
+            Reply::Drop,
+            Reply::Json(CREATED),
+        ])
+        .await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        for _ in 0..2 {
+            let created = backend
+                .send_create("/api/issues", &json!({"title": "Once"}))
+                .await
+                .unwrap();
+            assert_eq!(created["identifier"], "TST-1");
+        }
+
+        let (requests, another) = server.await.unwrap();
+        assert!(!another);
+        let lines: Vec<&str> = requests.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "POST /api/issues",
+                "GET /api/instance",
+                "POST /api/issues",
+                "POST /api/issues",
+                "POST /api/issues"
+            ]
+        );
+        let first = requests[0].1.clone().expect("the create carried a key");
+        assert!(first.starts_with("lific-cli-"), "{first}");
+        assert_eq!(requests[2].1.as_deref(), Some(first.as_str()));
+        let second = requests[3].1.clone().unwrap();
+        assert_ne!(second, first, "each create has its own key");
+        assert_eq!(requests[4].1.as_deref(), Some(second.as_str()));
+    }
+
+    /// A reply whose body stops short of its Content-Length is lost too: the
+    /// server may have committed, so the create is resent with its key.
+    #[tokio::test]
+    async fn a_create_whose_reply_is_cut_short_is_resent_with_the_same_key() {
+        let (url, server) = spawn_script(vec![
+            Reply::CutShort,
+            Reply::Json(REPLAYS),
+            Reply::Json(CREATED),
+        ])
+        .await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let created = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap();
+
+        assert_eq!(created["identifier"], "TST-1");
+        let (requests, another) = server.await.unwrap();
+        assert!(!another);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].1, requests[2].1);
+    }
+
+    /// A server older than idempotency keys ignores the header, so resending
+    /// a create it may have committed would write it twice. Without the
+    /// capability the loss is reported and nothing is resent.
+    #[tokio::test]
+    async fn a_lost_create_is_not_resent_to_a_server_that_does_not_replay_keys() {
+        let (url, server) =
+            spawn_script(vec![Reply::Drop, Reply::Json(r#"{"instance_name":"Old"}"#)]).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(super::lost_in_transit(&error), "{error:#}");
+        let (requests, another) = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!another, "the create was sent again");
+    }
+
+    /// A reply that arrives whole but is not JSON is an answer, not a loss.
+    #[tokio::test]
+    async fn a_create_answered_with_bad_json_is_not_resent() {
+        let (url, server) = spawn_script(vec![Reply::Json("not json")]).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not JSON"), "{error}");
+        let (_, another) = server.await.unwrap();
+        assert!(!another);
+    }
+
+    /// The real router lists the capability the backend looks for.
+    #[tokio::test]
+    async fn the_real_api_advertises_idempotency_keys() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        assert!(backend.server_replays_creates().await);
+    }
+
+    /// An HTTP error is the server's answer, so it is reported, not resent.
+    #[tokio::test]
+    async fn a_create_the_server_refused_is_not_resent() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        let router = Router::new().route(
+            "/api/issues",
+            any(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                failed_request()
+            }),
+        );
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("request rejected"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// The commands that create send their key through the real router, which
+    /// replays a repeat of the same key instead of writing twice.
+    #[tokio::test]
+    async fn the_real_api_replays_a_repeated_cli_idempotency_key() {
+        let fixture = spawn_real_api_server().await;
+        let project_id: i64 = fixture
+            .db
+            .read()
+            .unwrap()
+            .query_row("SELECT id FROM projects", [], |row| row.get(0))
+            .unwrap();
+        let client = reqwest::Client::new();
+        let post = || async {
+            let response = client
+                .post(format!("{}/api/issues", fixture.url))
+                .header(crate::api::idempotency::KEY_HEADER, "lific-cli-fixed")
+                .json(&json!({"project_id": project_id, "title": "Twice sent"}))
+                .send()
+                .await
+                .unwrap();
+            let replayed = response.headers().contains_key("idempotent-replayed");
+            (
+                replayed,
+                response.json::<serde_json::Value>().await.unwrap(),
+            )
+        };
+        let (first_replayed, first) = post().await;
+        let (again_replayed, again) = post().await;
+
+        assert!(!first_replayed);
+        assert!(again_replayed);
+        assert_eq!(first["id"], again["id"]);
+        let count: i64 = fixture
+            .db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE title = 'Twice sent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        fixture.server.abort();
     }
 }

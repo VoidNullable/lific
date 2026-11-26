@@ -28,6 +28,12 @@ Anything else is refused.
 
 Legacy HWP is the one type the bytes cannot settle alone: its file signature is shared with other Office-era formats, so Lific also requires the name to end in `.hwp`. HWP files are always downloaded, never shown in the browser. The newer HWPX format is a ZIP file and is accepted as one.
 
+### Importing an image URL
+
+Paste a single HTTP or HTTPS URL ending in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` into an editor or comment box. Query strings are supported. **Import as attachment** asks the server to download the image and replaces the URL with attachment Markdown. **Keep URL** or Escape leaves the plain text in place. The offer also disappears when you edit or move the caret away from the URL. Modified Enter shortcuts keep their usual behavior. Nothing is fetched until you accept.
+
+Imports use the same upload size limit, account rate limit and linking permissions as file uploads. Only public hosts are allowed. Redirects are refused, so paste the final image URL. The fetch has a ten-second deadline, including DNS lookup, and checks the image's contents. A failed import keeps the URL and shows the reason with a retry button. If you remove or change the URL during a successful import, a notice explains that the image was imported without inserting it. SVG URLs stay as plain text because SVG attachments are download-only.
+
 ### Annotating a screenshot
 
 When you paste, drop or photograph a PNG, JPEG or WebP image in the web UI, it briefly offers to annotate it first. The editor can crop, draw arrows, rectangles and freehand lines, and redact. Redaction pixelates the region before the image is flattened, so the uploaded file never contains the original pixels. The editing happens in your browser: Lific receives only the finished image, and ignoring the offer uploads the original.
@@ -56,7 +62,7 @@ An attached image renders at its preview size, at most 480 pixels wide and never
 ![Login dialog|240](/api/attachments/12)
 ```
 
-The number is a ceiling between 16 and 4096: a smaller image keeps its own size. A width over 480 loads the original instead of the preview, so `|960` lets a dense screenshot fill the column. The width applies in issues, pages, comments and the public view. Other Markdown renderers, and exports, show an ordinary image whose alt text ends in `|240`. In a table cell, escape the pipe as `\|`, as with any pipe in a cell.
+The number is a ceiling between 16 and 4096: a smaller image keeps its own size. A width over 480 loads the original instead of the preview, so `|960` lets a dense screenshot fill the column. The width applies in issues, pages and comments, signed in or not. Other Markdown renderers, and exports, show an ordinary image whose alt text ends in `|240`. In a table cell, escape the pipe as `\|`, as with any pipe in a cell.
 
 An image on a line of its own with a Markdown title shows the title as a caption underneath, wrapped to the image's width:
 
@@ -70,7 +76,7 @@ Two or more images with nothing else in their paragraph render side by side as e
 
 ## Who can read an attachment
 
-A linked attachment can be read by anyone who can read a project it is linked into. An attachment that is not linked anywhere yet can be read only by its uploader and administrators. [Public projects](/docs/public-projects) serve the attachments linked from their published content.
+A linked attachment can be read by anyone who can read a project it is linked into. An attachment that is not linked anywhere yet can be read only by its uploader and administrators. Everyone can read the attachments linked into a [published project](/docs/public-projects).
 
 Browsers display PNG, JPEG, GIF and WebP images and play audio and video in place. Every other type, SVG included, is sent as a download, and every attachment response is sandboxed so it cannot run scripts on the Lific site.
 

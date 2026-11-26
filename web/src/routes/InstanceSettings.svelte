@@ -35,7 +35,7 @@
   import Skeleton from "../lib/Skeleton.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
   import { toast } from "../lib/toast/toast.svelte";
-  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users, ShieldPlus, ShieldMinus, UserMinus, UserPlus, RotateCcw, Archive, ArchiveRestore } from "lucide-svelte";
+  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, ShieldPlus, ShieldMinus, UserMinus, UserPlus, RotateCcw, Archive, ArchiveRestore } from "lucide-svelte";
   import { getContext, onMount } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -68,7 +68,6 @@
   let fSession = $state(30);
   let fMessage = $state("");
   let fAutoLogin = $state(false);
-  let fAuthzEnforced = $state(false);
 
   let saving = $state(false);
   let saveError = $state("");
@@ -82,7 +81,6 @@
     fSession = s.session_lifetime_days;
     fMessage = s.login_message ?? "";
     fAutoLogin = s.web_auto_login;
-    fAuthzEnforced = s.authz_enforced;
   }
 
   onMount(async () => {
@@ -147,7 +145,6 @@
     if (patch.login_message !== undefined) fMessage = from.login_message ?? "";
     if (patch.allow_signup !== undefined) fSignups = from.allow_signup;
     if (patch.web_auto_login !== undefined) fAutoLogin = from.web_auto_login;
-    if (patch.authz_enforced !== undefined) fAuthzEnforced = from.authz_enforced;
   }
 
   /** One save. `recover` is false once the password prompt has already
@@ -282,12 +279,6 @@
     if (settings && v !== fAutoLogin) {
       fAutoLogin = v;
       commit({ web_auto_login: v });
-    }
-  }
-  function setAuthzEnforced(v: boolean) {
-    if (settings && v !== fAuthzEnforced) {
-      fAuthzEnforced = v;
-      commit({ authz_enforced: v });
     }
   }
 
@@ -807,54 +798,6 @@
                 <div class="flex items-start gap-2 text-caption text-[var(--warn-text)] bg-[color-mix(in_oklab,var(--warn)_12%,var(--bg))] px-3 py-2 rounded-lg mt-2 max-w-[42ch]">
                   <AlertTriangle size={13} class="shrink-0 mt-0.5" />
                   <span>Anyone who can reach this site becomes admin without a password. Only enable on a private or local instance. REST and MCP are unaffected.</span>
-                </div>
-              {/if}
-            </div>
-
-            <!-- Project-scoped permissions (LIF-194/LIF-197): default-deny
-                 membership enforcement. Same divider + amber-when-on
-                 treatment as single-user mode above, since flipping this ON
-                 can just as suddenly lock people out of a project. -->
-            <div class="pt-6 mt-1 border-t border-[var(--border)]">
-              <span class="flex items-center gap-1.5 text-micro font-semibold uppercase tracking-widest text-[var(--text)] mb-1.5">
-                <Users size={12} />
-                Project permissions
-              </span>
-              <div class="inline-flex gap-1 p-1 rounded-xl bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-                <button
-                  type="button"
-                  aria-pressed={!fAuthzEnforced}
-                  class="flex items-center gap-2 px-4 py-2 rounded-lg text-body-sm font-semibold transition-all
-                         motion-safe:active:scale-[0.98]
-                         {!fAuthzEnforced
-                    ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.10)] ring-1 ring-[var(--border)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                  onclick={() => setAuthzEnforced(false)}
-                >
-                  <DoorOpen size={16} class="shrink-0" />
-                  Off
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={fAuthzEnforced}
-                  class="flex items-center gap-2 px-4 py-2 rounded-lg text-body-sm font-semibold transition-all
-                         motion-safe:active:scale-[0.98]
-                         {fAuthzEnforced
-                    ? 'bg-[color-mix(in_oklab,var(--warn)_15%,var(--bg))] text-[var(--warn-text)] shadow-[0_1px_2px_rgba(0,0,0,0.10)] ring-1 ring-[color-mix(in_oklab,var(--warn)_38%,transparent)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                  onclick={() => setAuthzEnforced(true)}
-                >
-                  <DoorClosed size={16} class="shrink-0" />
-                  Enforced
-                </button>
-              </div>
-              <span class="block text-caption text-[var(--text)] mt-2 leading-relaxed max-w-[42ch]">
-                When on, only project members can see or edit a project. Add yourself as lead to your projects before enabling.
-              </span>
-              {#if fAuthzEnforced}
-                <div class="flex items-start gap-2 text-caption text-[var(--warn-text)] bg-[color-mix(in_oklab,var(--warn)_12%,var(--bg))] px-3 py-2 rounded-lg mt-2 max-w-[42ch]">
-                  <AlertTriangle size={13} class="shrink-0 mt-0.5" />
-                  <span>Anyone not added as a project member (via that project's Settings → Members) loses access to it immediately, including you if you aren't a lead yet.</span>
                 </div>
               {/if}
             </div>

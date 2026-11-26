@@ -34,6 +34,7 @@ import { checkPaletteSearch } from "./palette-search";
 import { checkDuplicateRelations } from "./duplicate-relations";
 import { checkRelationEditing } from "./relation-editing";
 import { checkIssueWaits } from "./issue-waits";
+import { checkDecisionComments } from "./decision-comments";
 import { checkLoginRedirect } from "./login-redirect";
 import { Database } from "bun:sqlite";
 
@@ -52,7 +53,9 @@ const ROUTES: { path: string; expect?: string[] }[] = [
   // Issue detail and page detail carry the comment-window logic that broke
   // in LIF-428; the comment body must actually render.
   { path: "/DEMO/issues/DEMO-1", expect: ["Smoke issue", "First smoke comment"] },
-  { path: "/DEMO/pages/1", expect: ["Smoke page"] },
+  // The page detail route; its id comes from the seed below, since the
+  // project's conventions page is created first.
+  { path: "/DEMO/pages/:smoke-page", expect: ["Smoke page"] },
   { path: "/DEMO/board", expect: ["Smoke issue"] },
   { path: "/DEMO/graph" },
   { path: "/DEMO/files" },
@@ -143,7 +146,8 @@ async function main(): Promise<number> {
         "--json",
       ]),
     );
-    if (pageOut.id !== 1) throw new Error(`expected seeded page id 1, got ${pageOut.id}`);
+    if (!Number.isInteger(pageOut.id)) throw new Error(`seeded page has no id: ${JSON.stringify(pageOut)}`);
+    for (const route of ROUTES) route.path = route.path.replace(":smoke-page", String(pageOut.id));
 
     // ---- server --------------------------------------------------------
     const port = await freePort();
@@ -159,9 +163,9 @@ async function main(): Promise<number> {
     browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
     const context = await browser.newContext();
 
-    // Sign in the way a person does. The login flow stores the bearer token
-    // in localStorage AND receives the `lific_token` session cookie, which is
-    // the only credential the realtime WebSocket accepts.
+    // Sign in the way a person does. The login flow sets the HttpOnly
+    // `lific_token` session cookie, the web app's only credential, which the
+    // realtime WebSocket accepts too.
     {
       const page = await context.newPage();
       const loginErrors: string[] = [];
@@ -242,6 +246,7 @@ async function main(): Promise<number> {
     await checkDuplicateRelations(context, base);
     await checkRelationEditing(context, base);
     await checkIssueWaits(context, base, "smoke-operator");
+    await checkDecisionComments(context, base);
     await checkLoginRedirect(browser, base, "smoke-operator", PASSWORD);
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------

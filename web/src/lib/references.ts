@@ -7,13 +7,14 @@
 // touching api.ts / routes / lib/issues in parallel, so nothing here
 // reaches into those).
 
-import { getPublicProject, scopedRoute } from "./publicScope";
+import { isSignedOut } from "./signedOut";
 import {
   resolveIssue,
   getModule,
   listProjects,
   listIssues,
   search as searchApi,
+  sessionKey,
   type Issue,
   type Module,
   type Project,
@@ -65,14 +66,9 @@ export function projectCodeOf(identifier: string): string {
  *  pipeline is synchronous, so those link to the project's list view
  *  instead (same tradeoff the pre-LIF-239 code already made for DOC-n). */
 export function routeFor(project: string, kind: RefKind, identifier: string): string {
-  // LIF-471: inside the public view every generated link stays inside it.
-  const route =
-    kind === "page"
-      ? `/${project}/pages`
-      : kind === "plan"
-        ? `/${project}/plans`
-        : `/${project}/issues/${identifier}`;
-  return `#${scopedRoute(route)}`;
+  if (kind === "page") return `#/${project}/pages`;
+  if (kind === "plan") return `#/${project}/plans`;
+  return `#/${project}/issues/${identifier}`;
 }
 
 // ── Issue + module cache (session-scoped, module scope) ───────
@@ -103,9 +99,8 @@ type IssueInFlight = {
 
 const issueInFlight = new Map<string, IssueInFlight>();
 
-// API credentials live in localStorage, and the app can log out/in without
-// reloading this module. A cache entry therefore belongs to the current token,
-// not the browser tab. The generation also prevents an older request from
+// The app can log out/in without reloading this module. A cache entry
+// therefore belongs to the current session, not the browser tab. The generation also prevents an older request from
 // repopulating a cache which has just been invalidated by realtime.
 let cacheSession: string | null | undefined;
 let cacheGeneration = 0;
@@ -136,13 +131,9 @@ function refreshSubscribedIssueStatuses() {
 }
 
 function ensureCacheSession(): boolean {
-  const token = typeof localStorage === "undefined"
-    ? null
-    : localStorage.getItem("lific_token");
-  // LIF-471: the public view is a different audience with a different data
-  // source, so a scope change invalidates exactly like a token change would.
-  const audience = getPublicProject();
-  const session = audience === null ? token : `public:${audience}`;
+  // LIF-583: a signed-out reader sees only published projects, so crossing
+  // that line invalidates exactly like a session change would.
+  const session = isSignedOut() ? "signed-out" : sessionKey();
   if (cacheSession === session) return false;
   cacheSession = session;
   clearReferenceCaches(true);

@@ -37,6 +37,7 @@ pub(super) fn seed(pool: &DbPool, store: &AttachmentStore) {
         INSERT INTO issue_waits(id,issue_id,kind,user_id,note) VALUES(90,30,'user',1,'decide');
         INSERT INTO issue_waits(id,issue_id,kind,earliest,latest,note) VALUES(91,30,'date','2026-09-28','2026-09-29','office');
         INSERT INTO issue_assignees(id,issue_id,user_id) VALUES(95,30,1);
+        INSERT INTO project_conventions(project_id,page_id,enabled) VALUES(10,40,0);
         UPDATE issues SET status='done' WHERE id=30;
         UPDATE issues SET deleted_at='2025-02-03 00:00:00' WHERE id=31;
         UPDATE pages SET deleted_at='2025-02-03 00:00:00' WHERE id=41;").unwrap();
@@ -144,6 +145,13 @@ fn project_archive_roundtrip_preserves_graph_without_neighbor_secrets_or_account
     assert!(project > 100);
     let issue:(i64,String,String,String)=c.query_row("SELECT id,description,created_at,updated_at FROM issues WHERE project_id=?1 AND sequence=42",[project],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
     assert!(issue.0 > 100);
+    // LIF-524: the conventions flag and its off switch travel with the page.
+    let conventions = queries::conventions_page(&c, project)
+        .unwrap()
+        .expect("conventions page imported");
+    assert_eq!(conventions.title, "Guide");
+    assert!(!conventions.conventions_enabled);
+    assert!(!queries::conventions_hint_due(&c, project).unwrap());
     assert_eq!(issue.2, "2020-01-01 00:00:00");
     assert_eq!(issue.3, "2021-01-01 00:00:00");
     let att: i64 = c
@@ -580,9 +588,9 @@ fn project_archive_preserves_destination_settings_and_keeps_published_source_pri
     let settings_before = {
         let c = dest.write().unwrap();
         queries::settings::ensure(&c, false).unwrap();
-        c.execute("UPDATE instance_settings SET authz_enforced=1", [])
+        c.execute("UPDATE instance_settings SET stale_active_days=9", [])
             .unwrap();
-        c.query_row("SELECT authz_enforced FROM instance_settings", [], |r| {
+        c.query_row("SELECT stale_active_days FROM instance_settings", [], |r| {
             r.get::<_, i64>(0)
         })
         .unwrap()
@@ -590,7 +598,7 @@ fn project_archive_preserves_destination_settings_and_keeps_published_source_pri
     import(&dest, &deststore, &path, "owner").unwrap();
     let c = dest.read().unwrap();
     assert_eq!(
-        c.query_row("SELECT authz_enforced FROM instance_settings", [], |r| r
+        c.query_row("SELECT stale_active_days FROM instance_settings", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         settings_before

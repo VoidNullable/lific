@@ -46,9 +46,10 @@ renders the saved rows and catches up through `/changes` instead of downloading
 another `/index`. A closed tab can lose an unflushed cache update; the next visit
 simply catches up from the last committed cursor.
 
-Private caches are keyed by the account confirmed by `/api/auth/me`. Public
-views use a separate signed-out scope. Signing out clears the cache and prevents
-other tabs from writing back data queued before sign-out. Invalid or incompatible
+Private caches are keyed by the account confirmed by `/api/auth/me`. Signed-out
+readers use a separate scope at the same project URLs. Signing out clears private
+caches; switching accounts removes the previous account's cache. Queued writes
+cannot restore cleared data. Invalid or incompatible
 cache records, and browsers without usable IndexedDB, fall back to `/index`.
 This is a warm-start cache, not offline editing: authentication, project
 resolution, detail views and writes still use the server.
@@ -83,7 +84,7 @@ the cached rows and cursor and fetch `/index`; do not merge the replacement
 snapshot into the old rows. This handles a backup restored behind a cached
 cursor.
 
-Both endpoints, including their public mirrors, return the same opaque
+Both endpoints, for signed-in and anonymous readers, return the same opaque
 `database_id`. Save it with the rows and cursor. A different ID means this origin
 now serves another database: discard the replica and fetch `/index`, even if the
 new database has already advanced past your cursor. The ID is generated once by
@@ -93,8 +94,8 @@ imports and `lific doctor --repair` do not replace it.
 Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id`. A change with `deleted: true` carries nothing else: remove your copy. Otherwise it also has:
 
 - **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`, and `waits` when the issue has any (see [waits](/docs/rest-api/work#waits))
-- **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, `labels`
-- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment` or `verification`; not `kind`, which already names the change type)
+- **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `conventions`, `conventions_enabled`, `created_at`, `updated_at`, `preview`, `labels`
+- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment`, `decision`, or `verification`; not `kind`, which already names the change type)
 
 A comment belongs to the project of the issue or page it is on.
 
@@ -147,7 +148,7 @@ Events are JSON objects with a `type`:
 | `project.created`, `project.updated`, `project.deleted` | `project_id`, sometimes `seq` | `project.updated` also covers pages, plans, comments, modules, labels, folders and attachments in the project. |
 | `projects.reordered` | none | Your sidebar order changed, from another tab or device. |
 | `project_groups.changed` | none | Your sidebar groups changed. |
-| `resync.required` | none | Refetch everything you show, for example after an administrator changed `authz_enforced`. |
+| `resync.required` | none | Refetch everything you show, for example after the connection fell too far behind to be sent every event. |
 | `sync_required` | `project_id` | The answer to a `resume` that can no longer be replayed. Backfill from `/changes`. |
 | `activity.baseline` | `day_count` | The answer to `activity.baseline.request`. |
 

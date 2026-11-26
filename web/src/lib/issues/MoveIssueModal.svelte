@@ -80,7 +80,7 @@
       // answers a move it refuses with a clear error.
       if (
         !role.ok ||
-        deriveCanEdit({ role: role.data.role, enforced: role.data.enforced, isAdmin: role.data.is_admin })
+        deriveCanEdit({ role: role.data.role, isAdmin: role.data.is_admin })
       ) {
         writable.add(p.id);
       }

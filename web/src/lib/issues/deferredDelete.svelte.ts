@@ -93,24 +93,20 @@ async function commitViaApi(batch: PendingBatch): Promise<void> {
 
 /** Synchronous best-effort commit for the unload path. `fetch(..., {
  *  keepalive: true })` lets an authed DELETE outlive the page (sendBeacon
- *  can't set an Authorization header or a DELETE method). We can't await the
- *  responses during unload, so this is fire-and-forget; failures there are
- *  invisible (the tab is going away) but the far more common "closed the tab
- *  right after deleting" case now actually deletes instead of silently
- *  cancelling. Mirrors api.ts's token + header construction. */
+ *  can't send a DELETE method). We can't await the responses during unload,
+ *  so this is fire-and-forget; failures there are invisible (the tab is going
+ *  away) but the far more common "closed the tab right after deleting" case
+ *  now actually deletes instead of silently cancelling. The session cookie
+ *  travels with it like any same-origin request. */
 function commitViaKeepalive(batch: PendingBatch): void {
   if (batch.committed) return;
   batch.committed = true;
   if (pending === batch) setPending(null);
 
-  const token = localStorage.getItem("lific_token");
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   for (const i of batch.issues) {
     try {
       void fetch(`/api/issues/${i.id}`, {
         method: "DELETE",
-        headers,
         keepalive: true,
       });
     } catch {

@@ -593,6 +593,7 @@ mod tests {
             waits: Vec::new(),
             needs_human: false,
             assignees: Vec::new(),
+            claim: None,
         }
     }
 

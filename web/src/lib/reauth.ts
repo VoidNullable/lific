@@ -51,7 +51,7 @@ export type ReauthOutcome =
  *  look. If this ever fires now, the server is not what this client thinks it
  *  is, and refusing is still the right answer. */
 function adopt(
-  result: RequestResult<{ user: AuthUser; token: string }>,
+  result: RequestResult<{ user: AuthUser }>,
   expectedUserId: number,
   recoverable: boolean,
 ): ReauthOutcome {
@@ -63,7 +63,7 @@ function adopt(
       recoverable,
     };
   }
-  saveSession(result.data.token);
+  saveSession();
   return { ok: true };
 }
 

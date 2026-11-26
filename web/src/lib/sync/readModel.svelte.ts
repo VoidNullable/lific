@@ -23,10 +23,9 @@
 // gaps are impossible because the cursor only ever moves by applying rows.
 
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
-import { getPublicProject } from "../publicScope";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
 import { onReadModelAccountChange, onReadModelProjects, readModelAccount, readModelScope } from "./account";
-import { loadSnapshot, removeSnapshot, snapshotOf, storeSnapshot } from "./persistence";
+import { loadSnapshot, removeScopeSnapshots, removeSnapshot, snapshotOf, storeSnapshot } from "./persistence";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
  *  from one bulk mutation becomes a single request, short enough that a
@@ -39,9 +38,10 @@ export type ReadModelStatus = "cold" | "loading" | "ready";
 export class ProjectReadModel {
   readonly projectId: number;
   /** LIF-471: the registry key this model was created under. A pull only
-   *  runs while the client is still in that audience, so a public replica
-   *  is never filled from the authenticated API after a scope change (or the
-   *  reverse), however late the pull was scheduled. */
+   *  runs while the client is still in that audience (signed in or signed
+   *  out, LIF-583), so a signed-out replica is never filled with what a
+   *  session can see after signing in (or the reverse), however late the
+   *  pull was scheduled. */
   readonly key: string;
 
   /** Live issues by id. Reassigned (never mutated in place) on every apply
@@ -81,14 +81,16 @@ export class ProjectReadModel {
   private databaseId = "";
   private skipCache = false;
   private disposed = false;
+  private revision = 0;
+  private resetRun: Promise<void> | null = null;
 
   constructor(projectId: number, key: string = modelKey(projectId)) {
     this.projectId = projectId;
     this.key = key;
   }
 
-  /** False once the client has crossed the public/private boundary since
-   *  this model was created; see `key`. */
+  /** False once the client has signed in or out since this model was
+   *  created; see `key`. */
   private inScope(): boolean {
     return !this.disposed && modelKey(this.projectId) === this.key;
   }
@@ -114,6 +116,32 @@ export class ProjectReadModel {
     }, WRITE_BEHIND_MS);
   }
 
+  reset(): Promise<void> {
+    if (!this.inScope()) return Promise.resolve();
+    if (this.resetRun) return this.resetRun;
+    this.revision++;
+    this.skipCache = true;
+    if (this.writeTimer) clearTimeout(this.writeTimer);
+    if (this.pullTimer) clearTimeout(this.pullTimer);
+    this.writeTimer = this.pullTimer = null;
+    this.issues = new Map();
+    this.pages = new Map();
+    this.cursor = 0;
+    this.databaseId = "";
+    this.epoch = null;
+    this.status = "loading";
+    const pending = this.bootstrapping;
+    this.resetRun = (async () => {
+      await pending;
+      await removeSnapshot(this.key);
+      if (this.inScope()) await this.bootstrap();
+    })().finally(() => {
+      this.resetRun = null;
+      if (this.status === "ready") this.schedulePull();
+    });
+    return this.resetRun;
+  }
+
   /** Cold start. Idempotent: concurrent callers share one request, and a
    *  model that is already `ready` just catches up instead. */
   bootstrap(): Promise<void> {
@@ -124,12 +152,12 @@ export class ProjectReadModel {
       return Promise.resolve();
     }
     this.status = "loading";
+    const revision = this.revision;
     this.bootstrapping = (async () => {
-      // An unverified private session can cold-load but cannot read or write
-      // another account's disk cache. Public views have their own signed-out scope.
-      if (getPublicProject() !== null || readModelAccount() !== undefined) {
+      // Unverified sessions cannot hydrate or persist any account's disk cache.
+      if (readModelAccount() !== undefined) {
         const cached = await loadSnapshot(this.key);
-        if (!this.inScope()) return;
+        if (!this.inScope() || revision !== this.revision) return;
         this.epoch = cached.epoch;
         if (cached.snapshot && !this.skipCache) {
           this.issues = new Map(cached.snapshot.issues.map(row => [row.id, row]));
@@ -144,7 +172,7 @@ export class ProjectReadModel {
       }
       this.skipCache = false;
       const res = await getProjectIndex(this.projectId);
-      if (!this.inScope()) return;
+      if (!this.inScope() || revision !== this.revision) return;
       if (res.ok) {
         this.databaseId = res.data.database_id;
         const issues = new Map<number, IssueRow>();
@@ -178,7 +206,7 @@ export class ProjectReadModel {
   /** Queue a catch-up pull, coalescing anything scheduled in the same
    *  ~150ms window into one request. */
   schedulePull(): void {
-    if (!this.inScope()) return;
+    if (!this.inScope() || this.resetRun) return;
     if (this.bootstrapping) {
       // The snapshot in flight will land a cursor; pull from there.
       this.pullAfterBootstrap = true;
@@ -201,6 +229,10 @@ export class ProjectReadModel {
    *  has been applied, so a write the caller already saw acknowledged is in
    *  the replica by then. */
   async pull(): Promise<void> {
+    if (this.resetRun) {
+      await this.resetRun;
+      return;
+    }
     if (this.bootstrapping) {
       // Never race a snapshot with a delta: the snapshot would land second
       // and could overwrite newer rows.
@@ -232,8 +264,9 @@ export class ProjectReadModel {
         // cursor, so one call drains a large backlog.
         for (;;) {
           if (!this.inScope()) return;
+          const revision = this.revision;
           const res = await getProjectChanges(this.projectId, this.cursor);
-          if (!this.inScope()) return;
+          if (!this.inScope() || revision !== this.revision) return;
           if (!res.ok) {
             // Revoked access must not leave cached private rows on screen.
             if (res.status === 401 || res.status === 403 || res.status === 404) {
@@ -244,17 +277,7 @@ export class ProjectReadModel {
             return;
           }
           if (res.data.reset || res.data.database_id !== this.databaseId) {
-            this.skipCache = true;
-            if (this.writeTimer) clearTimeout(this.writeTimer);
-            this.writeTimer = null;
-            this.issues = new Map();
-            this.pages = new Map();
-            this.cursor = 0;
-            this.databaseId = "";
-            this.epoch = null;
-            this.status = "loading";
-            await removeSnapshot(this.key);
-            if (this.inScope()) await this.bootstrap();
+            await this.reset();
             return;
           }
           this.applyChanges(res.data);
@@ -336,10 +359,10 @@ export class ProjectReadModel {
 // single most common navigation in the app, so there is no eviction policy:
 // the whole point is that the second visit costs nothing.
 
-// LIF-471: keyed by audience as well as project. The public view of a
-// project is fed by the anonymous surface and the private view by the
-// authenticated one; the rows happen to match today, but a replica must
-// never be filled from one and served through the other.
+// LIF-471: keyed by audience as well as project. A signed-out reader and a
+// session may be shown different rows (a session can see comments and
+// projects a stranger cannot), so a replica is never filled for one and
+// served to the other (LIF-583).
 const models = new Map<string, ProjectReadModel>();
 
 function modelKey(projectId: number): string {
@@ -426,16 +449,20 @@ export function handleRealtimeEvent(event: SyncEvent): void {
   // A dropped-and-restored connection invalidates every replica's
   // assumption that it saw the intervening events.
   if (event.type === "resync.required") {
-    for (const model of models.values()) {
-      if (model.key.startsWith("private:")) model.schedulePull();
-    }
+    const current = readModelScope();
+    void removeScopeSnapshots(current).then(() => {
+      if (readModelScope() !== current) return;
+      for (const model of models.values()) {
+        if (model.key.startsWith(current)) void model.reset();
+      }
+    });
     return;
   }
 
   const projectId = typeof event.project_id === "number" ? event.project_id : null;
   if (projectId == null) return;
-  // Realtime is a private channel; it only ever feeds private replicas.
-  if (getPublicProject() !== null) return;
+  // The socket carries what the current audience may see, so it feeds that
+  // audience's replicas only.
   const model = models.get(modelKey(projectId));
   if (!model) return;
 
@@ -485,8 +512,7 @@ function installGlobalListeners(): void {
 const projectsByIdentifier = new Map<string, Project>();
 
 function projectKey(identifier: string): string {
-  const audience = modelKey(0);
-  return `${audience}:${identifier.toLowerCase()}`;
+  return `${readModelScope()}${identifier.toLowerCase()}`;
 }
 
 export function cacheProjects(projects: Project[]): void {

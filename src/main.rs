@@ -9,6 +9,7 @@ mod backup;
 mod checklist;
 mod cli;
 mod config;
+mod conventions;
 mod db;
 mod dump;
 mod error;
@@ -819,7 +820,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 // directory must be obvious here, not after the writes.
                 cli::ui::info(format!(
                     "Instance: {} {}",
-                    cli::ui::command(cli::connect::target_url(&args, &cfg)),
+                    cli::ui::command(cli::connect::target_url(&args, &cfg)?),
                     cli::ui::dim(format!(
                         "(keys minted in {})",
                         cli::connect::absolute_db_path(&cfg)
@@ -1013,6 +1014,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // once more when the session ends.
             db::agent_reads::start_flush_task(pool.clone());
             let flush_pool = pool.clone();
+            // LIF-526: the creates this session records keys for are its to
+            // expire; the server's retention sweep never runs here.
+            retention::start_op_key_expiry_task(pool.clone());
 
             let server =
                 mcp::LificMcp::for_stdio(pool, stdio_auth).with_bound_project(bound_project);
@@ -1398,8 +1402,7 @@ async fn cmd_init(
     let mut cfg = load_config_for_init(&config_path, db_flag)?;
 
     // Create + migrate the database and seed instance settings now, while the
-    // instance has zero users — this is the moment the authz-enforced default
-    // is decided. The data dir may not exist yet under the OS-dirs layout
+    // instance has zero users. The data dir may not exist yet under the OS-dirs layout
     // (LIF-295: db lives in ~/.local/share/lific/, not beside the config).
     if let Some(parent) = cfg.database.path.parent()
         && !parent.as_os_str().is_empty()

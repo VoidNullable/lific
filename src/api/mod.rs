@@ -1,17 +1,25 @@
 mod activity;
 mod agents;
+// LIF-583: budgets and boundary for reading published projects without an
+// account. Entered from the auth middleware.
+pub(crate) mod anonymous;
 mod archived_projects;
+mod attachment_import;
 /// LIF-418: the MCP attachment tools reuse this module's authorization gates
 /// and filename hygiene verbatim rather than growing a second copy, so the
 /// module is crate-visible even though its handlers stay `pub(super)`.
 pub(crate) mod attachments;
 mod auth;
+#[cfg(test)]
+mod publication_tests;
 // `pub` only for the three comment paging header names, which the global CORS
 // layer in `server` has to expose by the same names this module sets them by.
 pub mod comments;
 mod export;
 mod git_hook;
 mod home;
+/// `pub(crate)` for the header names the global CORS layer allows and exposes.
+pub(crate) mod idempotency;
 mod insights;
 mod issues;
 mod members;
@@ -20,8 +28,6 @@ mod plans;
 mod project_archives;
 mod project_groups;
 mod projects;
-// Mounted separately from the authenticated API by server::build_app.
-pub mod public;
 mod repo_bindings;
 mod resources;
 mod sync;
@@ -53,6 +59,8 @@ use crate::authz::filter_visible;
 use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 
+pub use anonymous::AnonymousReads;
+pub(crate) use anonymous::{is_anonymous_read, serve as serve_anonymous};
 pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
 
 /// Build the full API router.
@@ -186,6 +194,9 @@ fn router_impl(
         )
         // Move to another project (LIF-487): Maintainer on both ends.
         .route("/api/issues/{id}/move", post(issues::move_issue_handler))
+        // Claims (LIF-525): Maintainer, like any other issue write.
+        .route("/api/issues/{id}/claim", post(issues::claim_issue))
+        .route("/api/issues/{id}/release", post(issues::release_issue))
         // Activity (audit log read surface — LIF-156)
         .route("/api/issues/{id}/activity", get(activity::issue_activity))
         .route("/api/pages/{id}/activity", get(activity::page_activity))
@@ -221,6 +232,11 @@ fn router_impl(
         .route("/api/issues/reverse", post(issues::reverse_relation))
         // User and date blockers (LIF-484)
         .route("/api/clock", get(waits::server_clock))
+        // Conventions page templates (LIF-524)
+        .route(
+            "/api/conventions/templates",
+            get(pages::conventions_templates),
+        )
         .route(
             "/api/issues/{id}/waits",
             get(waits::list_waits).post(waits::add_wait),
@@ -335,7 +351,7 @@ fn router_impl(
         // without reading the full roster or the admin-only instance settings.
         .route("/api/projects/{id}/my-role", get(members::my_project_role))
         // @mention autocomplete candidates (LIF-263) — Viewer-gated,
-        // member-scoped when authz enforcement is on.
+        // member-scoped.
         .route(
             "/api/projects/{id}/mention-candidates",
             get(comments::mention_candidates),
@@ -430,6 +446,10 @@ fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<D
                 .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route(
+            "/api/attachments/import",
+            post(attachment_import::import_attachment),
+        )
+        .route(
             "/api/attachments/{id}",
             get(attachments::download_attachment)
                 .patch(attachments::update_attachment)
@@ -467,14 +487,44 @@ fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<D
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn events_ws(
     State(db): State<DbPool>,
     Extension(realtime): Extension<crate::realtime::RealtimeHub>,
     Extension(allowed_origins): Extension<Vec<String>>,
+    anonymous: Option<Extension<std::sync::Arc<AnonymousReads>>>,
+    auth_config: Option<Extension<crate::config::AuthConfig>>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, LificError> {
-    let validated = validate_websocket_request(&db, &headers, &allowed_origins)?;
+    // LIF-583: a socket with no usable session is an anonymous reader, who may
+    // follow published projects. That covers no cookie at all and a cookie
+    // whose session has expired or been revoked: the REST API already reads
+    // such a request anonymously, and the cookie is httpOnly, so the browser
+    // cannot clear it and a 403 here would leave a reader with no live
+    // updates until they sign in again. Downgrading rather than answering
+    // with a clearing Set-Cookie keeps one rule for REST and the socket, and
+    // does not depend on a browser applying cookies from a refused upgrade.
+    // A wrong origin is still refused outright.
+    let anonymous = anonymous
+        .filter(|_| websocket_origin_allowed(&headers, &allowed_origins))
+        .filter(|_| auth_config.is_some_and(|Extension(config)| config.required));
+    let validated = match validate_websocket_request(&db, &headers, &allowed_origins) {
+        Ok(validated) => validated,
+        Err(LificError::Forbidden(message)) => {
+            let no_session = websocket_session_token(&headers).is_none()
+                || message == crate::db::queries::users::INVALID_SESSION_MESSAGE;
+            return match anonymous {
+                Some(Extension(reads)) if no_session => {
+                    let peer = peer.map(|Extension(axum::extract::ConnectInfo(addr))| addr);
+                    anonymous_events_socket(&reads, peer, &headers, ws, realtime, db)
+                }
+                _ => Err(LificError::Forbidden(message)),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let Some(permit) = realtime.try_acquire_socket(validated.user.id) else {
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
@@ -482,25 +532,63 @@ async fn events_ws(
         )
             .into_response());
     };
+    Ok(upgrade_events_socket(
+        ws,
+        realtime,
+        db,
+        crate::realtime::SocketViewer::Session {
+            token: validated.session_token,
+            user: validated.user,
+        },
+        permit,
+    ))
+}
+
+/// LIF-583: an events socket for a reader with no session, charged against
+/// the anonymous rate limit and the shared anonymous socket budget.
+fn anonymous_events_socket(
+    reads: &AnonymousReads,
+    peer: Option<std::net::SocketAddr>,
+    headers: &HeaderMap,
+    ws: WebSocketUpgrade,
+    realtime: crate::realtime::RealtimeHub,
+    db: DbPool,
+) -> Result<Response, LificError> {
+    reads.admit(peer, headers)?;
+    let Some(permit) = realtime.try_acquire_anonymous_socket() else {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "websocket connection limit reached" })),
+        )
+            .into_response());
+    };
+    Ok(upgrade_events_socket(
+        ws,
+        realtime,
+        db,
+        crate::realtime::SocketViewer::Anonymous,
+        permit,
+    ))
+}
+
+fn upgrade_events_socket(
+    ws: WebSocketUpgrade,
+    realtime: crate::realtime::RealtimeHub,
+    db: DbPool,
+    viewer: crate::realtime::SocketViewer,
+    permit: crate::realtime::SocketPermit,
+) -> Response {
     // Realtime is server-pushed; clients send only heartbeats and bounded
     // activity-baseline requests. Cap application data far below
-    // Axum/Tungstenite's 64 MiB default so an authenticated peer cannot force
-    // large discarded message allocations.
-    Ok(ws
-        .read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
+    // Axum/Tungstenite's 64 MiB default so a peer cannot force large
+    // discarded message allocations.
+    ws.read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
         .max_message_size(crate::realtime::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
         .on_upgrade(move |socket| {
-            crate::realtime::serve_socket(
-                socket,
-                realtime,
-                db,
-                validated.session_token,
-                validated.user,
-                permit,
-            )
+            crate::realtime::serve_socket(socket, realtime, db, viewer, permit)
         })
-        .into_response())
+        .into_response()
 }
 
 struct ValidatedWebSocket {
@@ -546,7 +634,10 @@ fn validate_websocket_request(
     }
 }
 
-fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+/// Whether the request's `Origin` is one of `allowed_origins` or the same
+/// scheme and host the request was addressed to. A missing Origin passes;
+/// the cookie write check in `crate::auth` requires one before asking.
+pub(crate) fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
     match headers.get(header::ORIGIN).map(|value| value.to_str()) {
         None => true,
         Some(Ok(origin)) => {
@@ -661,7 +752,7 @@ fn retain_visible_relations(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     issues: &mut [Issue],
 ) -> Result<(), LificError> {
-    let visible = crate::authz::visible_project_ids(db, identity)?;
+    let visible = crate::authz::readable_project_ids(db, identity)?;
     with_read(db, |conn| {
         queries::retain_visible_relations(conn, issues, visible.as_ref());
         Ok(())
@@ -690,9 +781,8 @@ where
 /// LIF-196: thin wrapper over `authz::require_role(.., Role::Lead)`, the
 /// single enforcement primitive shared with MCP. Kept as its own function so
 /// existing call sites (`api/resources.rs`, `api/projects.rs`) don't churn.
-/// The behavior above is unchanged while the `authz_enforced` instance
-/// setting is off (today's default); see `src/authz.rs` for the full mode
-/// split.
+/// Since 3.0 a lead without a membership row is not enough: the role comes
+/// from `project_members` (see `src/authz.rs`).
 fn require_project_lead(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -785,7 +875,7 @@ async fn search(
     //
     // LIF-476: when no hit contains every word, the results are the ranked
     // any-word fallback and each carries `partial_match: true`.
-    let visible = crate::authz::visible_project_ids(&db, &identity)?;
+    let visible = crate::authz::readable_project_ids(&db, &identity)?;
     let results = with_read(&db, |conn| {
         queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
     })?;
@@ -1230,23 +1320,13 @@ pub(crate) mod test_helpers {
         (db, admin, lead, regular, project.id)
     }
 
-    /// LIF-197: set up a DB with `authz_enforced` ON, an admin, and a
-    /// project with a lead/maintainer/viewer member plus a non-member —
-    /// the fixture the LIF-197 flag-ON test matrix (and its LIF-198 MCP
-    /// sibling) both need. Returns
+    /// LIF-197: set up a DB with an admin and a project with a
+    /// lead/maintainer/viewer member plus a non-member: the fixture the
+    /// LIF-197 test matrix (and its LIF-198 MCP sibling) both need. Returns
     /// `(db, admin, lead, maintainer, viewer, non_member, project_id)`.
     pub fn setup_membership_test() -> (DbPool, User, User, User, User, User, i64) {
         let db = crate::db::open_memory().expect("test db");
         let conn = db.write().unwrap();
-
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
 
         let mk_user = |username: &str, is_admin: bool| {
             crate::db::queries::users::create_user(
@@ -1589,9 +1669,7 @@ mod tests {
 }
 
 /// LIF-197: project-scoped authorization enforcement across every REST
-/// handler. Flag-ON cases exercise the full viewer/maintainer/lead matrix;
-/// the flag-OFF smoke test is the regression proof that today's behavior
-/// (all 530 pre-existing tests, run flag-OFF by default) hasn't moved.
+/// handler: the full viewer/maintainer/lead matrix.
 #[cfg(test)]
 mod authz_gating_tests {
     use super::test_helpers::*;
@@ -2282,7 +2360,7 @@ mod authz_gating_tests {
     // This test closes that gap at the layer closest to production: the
     // actual `api::router` wrapped in the actual `require_api_key`
     // middleware (mirroring `main.rs`'s `authed_routes`), fed a real OAuth
-    // bearer token. Flag ON: a token bound to a project member (maintainer)
+    // bearer token. A token bound to a project member (maintainer)
     // must succeed on read AND write — the specific "member gets bricked by
     // default-deny" failure mode the design doc calls the lockout landmine.
     // A token bound to a non-member must still be denied on both.
@@ -2439,45 +2517,34 @@ mod authz_gating_tests {
         );
     }
 
-    // ── Flag OFF: byte-for-byte regression proof ──────────────────
+    // ── LIF-518: what legacy mode allowed is gone ─────────────────
 
     #[tokio::test]
-    async fn flag_off_preserves_legacy_behavior() {
-        // setup_lead_test seeds a DB with authz_enforced left at its default
-        // (off) — a random authenticated non-member.
+    async fn legacy_open_access_is_gone() {
+        // setup_lead_test: a lead, an admin, and an authenticated non-member,
+        // the caller legacy mode let read and write everything.
         let (db, admin, lead, regular, project_id) = setup_lead_test();
         let random_app = app_as_user(db.clone(), &regular);
 
-        // Reads + content mutation stay open to any authenticated user.
         assert_eq!(
             json_get(&random_app, &format!("/api/projects/{project_id}"))
                 .await
                 .status(),
-            StatusCode::OK
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             json_post(
                 &random_app,
                 "/api/issues",
-                serde_json::json!({ "project_id": project_id, "title": "Legacy open" })
-            )
-            .await
-            .status(),
-            StatusCode::OK,
-            "content mutation must stay open when the flag is off"
-        );
-
-        // Structure endpoints stay lead-gated (not loosened to Maintainer).
-        assert_eq!(
-            json_post(
-                &random_app,
-                "/api/modules",
-                serde_json::json!({"project_id": project_id, "name": "Nope"})
+                serde_json::json!({ "project_id": project_id, "title": "No longer open" })
             )
             .await
             .status(),
             StatusCode::FORBIDDEN
         );
+
+        // The lead manages structure and may delete the project, which the
+        // legacy delete gate kept for admins alone.
         let lead_app = app_as_user(db.clone(), &lead);
         assert_eq!(
             json_post(
@@ -2489,55 +2556,18 @@ mod authz_gating_tests {
             .status(),
             StatusCode::OK
         );
-
-        // Project delete stays admin-only (lead denied, matching pre-LIF-194).
+        let admin_app = app_as_user(db, &admin);
+        assert_eq!(
+            json_get(&admin_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
         assert_eq!(
             json_delete(&lead_app, &format!("/api/projects/{project_id}"))
                 .await
                 .status(),
-            StatusCode::FORBIDDEN
-        );
-        let admin_app = app_as_user(db, &admin);
-        assert_eq!(
-            json_delete(&admin_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
             StatusCode::OK
-        );
-    }
-
-    // ── Runtime toggle via PATCH /api/instance/settings ───────────
-
-    #[tokio::test]
-    async fn toggling_authz_enforced_via_patch_changes_behavior_on_next_request() {
-        let (db, admin, _lead, regular, project_id) = setup_lead_test();
-        let admin_app = app_as_user(db.clone(), &admin);
-        let regular_app = app_as_user(db.clone(), &regular);
-
-        // Flag off (default): a non-member can read the project freely.
-        assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
-            StatusCode::OK
-        );
-
-        let resp = json_patch(
-            &admin_app,
-            "/api/instance/settings",
-            serde_json::json!({"authz_enforced": true}),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(parse_json(resp).await["authz_enforced"], true);
-
-        // Same connection, next request: the non-member is now denied — no
-        // restart required (authz::authz_enforced reads the row live).
-        assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
-            StatusCode::FORBIDDEN
         );
     }
 
@@ -2736,24 +2766,14 @@ mod authz_gating_tests {
     async fn websocket_refreshes_activity_baseline_after_cache_expiry() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
+        let project_id = websocket_project(&db, "EXP");
         let (url, server) = websocket_test_server(db.clone(), realtime).await;
         let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
             .await
             .unwrap();
 
         let initial = request_activity_baseline(&mut socket).await;
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::create_project(
-                &conn,
-                &crate::db::models::CreateProject {
-                    name: "After baseline expiry".into(),
-                    identifier: "EXP".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        websocket_module(&db, project_id, "After baseline expiry");
 
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         assert_eq!(request_activity_baseline(&mut socket).await, initial + 1);
@@ -2920,24 +2940,14 @@ mod authz_gating_tests {
         // A one-slot channel lags the socket's receiver as soon as the test
         // queues more than one event without yielding to the socket task.
         let realtime = crate::realtime::RealtimeHub::with_capacity(1);
+        let project_id = websocket_project(&db, "RSNC");
         let (url, server) = websocket_test_server(db.clone(), realtime.clone()).await;
         let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
             .await
             .unwrap();
 
         let initial = request_activity_baseline(&mut socket).await;
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::create_project(
-                &conn,
-                &crate::db::models::CreateProject {
-                    name: "After resync".into(),
-                    identifier: "RSNC".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        websocket_module(&db, project_id, "After resync");
 
         // Queued synchronously: the socket task cannot drain between sends, so
         // its receiver overflows and the next recv reports a lag.
@@ -2956,10 +2966,185 @@ mod authz_gating_tests {
         server.abort();
     }
 
+    // ── LIF-583: anonymous sockets on published projects ─────────
+
+    async fn anonymous_websocket_server(
+        db: crate::db::DbPool,
+        realtime: crate::realtime::RealtimeHub,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut auth = crate::config::Config::default().auth;
+        auth.required = true;
+        let app = super::router(db, &[])
+            .layer(axum::Extension(realtime))
+            .layer(axum::Extension(auth))
+            .layer(axum::Extension(std::sync::Arc::new(
+                super::AnonymousReads::new(std::sync::Arc::from(Vec::new())),
+            )));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("ws://{address}/api/events/ws"), server)
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_socket_follows_published_projects_only() {
+        let db = crate::db::open_memory().expect("test db");
+        let (published, private) = {
+            let conn = db.write().unwrap();
+            let project = |identifier: &str| {
+                crate::db::queries::create_project(
+                    &conn,
+                    &crate::db::models::CreateProject {
+                        name: identifier.into(),
+                        identifier: identifier.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id
+            };
+            let (published, private) = (project("PUB"), project("PRIV"));
+            conn.execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [published],
+            )
+            .unwrap();
+            (published, private)
+        };
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = anonymous_websocket_server(db, realtime.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .expect("a visitor with no cookie opens a socket");
+        // The baseline round trip proves the socket loop is running before
+        // anything is sent.
+        request_activity_baseline(&mut socket).await;
+
+        // One at a time, each followed by a baseline round trip: an event the
+        // socket forwarded would arrive before the baseline answer.
+        let hidden = [
+            (
+                crate::realtime::RealtimeEvent::ProjectUpdated {
+                    project_id: private,
+                },
+                None,
+            ),
+            (
+                crate::realtime::RealtimeEvent::ProjectCreated {
+                    project_id: published,
+                },
+                Some(vec![1]),
+            ),
+        ];
+        for (event, users) in hidden {
+            match users {
+                Some(users) => realtime.send_to_users(event, users),
+                None => realtime.send(event),
+            }
+            socket
+                .send(Message::Text(ACTIVITY_BASELINE_REQUEST.into()))
+                .await
+                .unwrap();
+            let next = next_realtime_event(&mut socket).await;
+            assert_eq!(next["type"], "activity.baseline", "{next}");
+        }
+        realtime.send(crate::realtime::RealtimeEvent::ProjectUpdated {
+            project_id: published,
+        });
+        let event = next_realtime_event(&mut socket).await;
+        assert_eq!(event["type"], "project.updated", "{event}");
+        assert_eq!(event["project_id"], published, "{event}");
+        server.abort();
+    }
+
+    /// The session cookie is httpOnly, so a browser whose session expired
+    /// cannot drop it. Its socket reads as anonymous, like its REST reads,
+    /// rather than being refused.
+    #[tokio::test]
+    async fn a_socket_with_a_dead_session_reads_as_anonymous() {
+        let (db, token) = websocket_session();
+        let published = {
+            let conn = db.write().unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "PUB".into(),
+                    identifier: "PUB".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [project.id],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM sessions", []).unwrap();
+            assert!(crate::db::queries::users::validate_session(&conn, &token).is_err());
+            project.id
+        };
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = anonymous_websocket_server(db, realtime.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .expect("a dead session cookie downgrades to an anonymous socket");
+        request_activity_baseline(&mut socket).await;
+        realtime.send(crate::realtime::RealtimeEvent::ProjectUpdated {
+            project_id: published,
+        });
+        let event = next_realtime_event(&mut socket).await;
+        assert_eq!(event["project_id"], published, "{event}");
+
+        // A foreign origin is still refused, cookie or not.
+        let mut foreign = websocket_request(&url, &token);
+        foreign.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        match tokio_tungstenite::connect_async(foreign).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+            other => panic!("a foreign origin must be refused, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anonymous_sockets_share_one_bounded_budget() {
+        let hub = crate::realtime::RealtimeHub::new();
+        let held: Vec<_> = (0..crate::realtime::MAX_ANONYMOUS_SOCKETS)
+            .map(|_| hub.try_acquire_anonymous_socket().expect("within budget"))
+            .collect();
+        assert!(hub.try_acquire_anonymous_socket().is_none());
+        // Signed-in users are not crowded out.
+        assert!(hub.try_acquire_socket(1).is_some());
+        drop(held);
+        assert!(hub.try_acquire_anonymous_socket().is_some());
+    }
+
     // ── LIF-440: WebSocket event replay ──────────────────────────
 
     /// Seed a project the websocket user can see, and return its id.
+    /// A project the `websocket_session` user can see.
     fn websocket_project(db: &crate::db::DbPool, identifier: &str) -> i64 {
+        let project_id = websocket_hidden_project(db, identifier);
+        let conn = db.write().unwrap();
+        let user = crate::db::queries::users::get_user_by_username(&conn, "ws-user").unwrap();
+        crate::db::queries::members::upsert_member(&conn, project_id, user.id, Role::Viewer)
+            .unwrap();
+        project_id
+    }
+
+    /// A project the `websocket_session` user holds no role in.
+    fn websocket_hidden_project(db: &crate::db::DbPool, identifier: &str) -> i64 {
         let conn = db.write().unwrap();
         crate::db::queries::create_project(
             &conn,
@@ -2971,6 +3156,22 @@ mod authz_gating_tests {
         )
         .unwrap()
         .id
+    }
+
+    /// One new audit row in `project_id`.
+    fn websocket_module(db: &crate::db::DbPool, project_id: i64, name: &str) {
+        let conn = db.write().unwrap();
+        crate::db::queries::create_module(
+            &conn,
+            &crate::db::models::CreateModule {
+                project_id,
+                name: name.into(),
+                description: String::new(),
+                status: "active".into(),
+                emoji: None,
+            },
+        )
+        .unwrap();
     }
 
     /// Ask for the activity baseline and require it to be the very next
@@ -3090,18 +3291,7 @@ mod authz_gating_tests {
     async fn websocket_resume_on_an_invisible_project_replays_nothing() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
-        let project_id = websocket_project(&db, "HIDE");
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::settings::update(
-                &conn,
-                crate::db::queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        let project_id = websocket_hidden_project(&db, "HIDE");
         realtime.send_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,

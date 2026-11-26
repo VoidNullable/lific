@@ -20,7 +20,7 @@ Every query parameter is optional:
 | `module_id` | Only this module. |
 | `label` | Only issues carrying this label name. |
 | `assignee` | `none` (free for agents), `human` (a person must do it), `me`, or a username. |
-| `workable` | `true`: open issues whose blockers are all `done` and that have no wait still holding. |
+| `workable` | `true`: open issues whose blockers are all `done`, that have no wait still holding, and that no other worker has [claimed](#post-apiissuesidclaim). Send `X-Lific-Worker` to keep the issues your own session holds. |
 | `blocked` | `true`: issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. |
 | `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
 | `created_until`, `updated_until` | Exclusive upper bound. |
@@ -28,7 +28,7 @@ Every query parameter is optional:
 | `order` | `asc` (default) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 
-The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads. Every issue carries `needs_human`, and an issue that names people carries them in `assignees` as `{user_id, username, display_name}`; see [Assignment](/docs/concepts/issues#assignment).
+The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads. Every issue carries `needs_human`, and an issue that names people carries them in `assignees` as `{user_id, username, display_name}`; see [Assignment](/docs/concepts/issues#assignment). An issue under a live claim carries it in `claim` as `{user_id, username, display_name, worker, claimed_at, expires_at}`; an expired claim is left out.
 
 ### POST `/api/issues`
 
@@ -78,7 +78,7 @@ curl -X PUT "$LIFIC/api/issues/42" \
 
 Moves the issue and its comments to the trash. **Maintainer.** It disappears from lists, boards, search and public projects at once. Returns `{"deleted": true}`.
 
-Trashed issues are removed for good after 30 days, or whatever `trash_days` in the [`[retention]`](/docs/configuration#retention) section says. Its number is not reused while it is in the trash.
+Trashed issues are removed for good after 30 days, or whatever `trash_days` in the [`[retention]`](/docs/configuration#retention) section says. Their numbers are never reused, even after permanent removal.
 
 ### POST `/api/issues/{id}/restore`
 
@@ -90,7 +90,7 @@ There is no endpoint that lists the trash. Keep the id from the delete if you mi
 
 Moves an issue to another project. **Maintainer** on both projects. Body: `project_id` or `project` (the target's identifier), and optionally `module_id`, which must be a module of the target project. Without `module_id`, a module with the same name as the current one is kept, otherwise the module is cleared.
 
-The issue keeps its id, comments, relations, history and plan steps, and takes the next number in the target project. Its old identifier stays an alias, so `GET /api/issues/resolve/{identifier}` and search still find it. Labels are matched by name in the target project; assignees who cannot see the target project are unassigned. Moving to the project the issue is already in is `400`.
+The issue keeps its id, comments, relations, history and plan steps, and takes the next number in the target project. Its old identifier stays an alias, so `GET /api/issues/resolve/{identifier}` and search still find it. Labels are matched by name in the target project; assignees who cannot see the target project are unassigned, and a claim on the issue ends. Moving to the project the issue is already in is `400`.
 
 Returns the `Issue` under `issue`, with `previous_identifier`, `previous_project_id`, and, when something could not come along, `dropped_labels`, `dropped_module` and `dropped_assignees`.
 
@@ -100,6 +100,24 @@ curl -X POST "$LIFIC/api/issues/42/move" \
   -H "Content-Type: application/json" \
   -d '{"project":"OPS"}'
 ```
+
+### POST `/api/issues/{id}/claim`
+
+Holds the issue for your worker for a limited time, or extends the claim you hold. **Maintainer.** The body is optional and takes only `minutes` (1 to 1440, default 15). The worker is the `X-Lific-Worker` header, taken as sent when it is a valid worker id, else derived from `Mcp-Session-Id`; with neither, the claim belongs to your whole account. To take over a claim from a new client, send the worker id it reported as `X-Lific-Worker`, on the claim and on the lists alike. See [Claims](/docs/concepts/issues#claims).
+
+A `todo` or `backlog` issue becomes `active`. A live claim held by anyone else is `409`, naming the holder and when the claim ends. A `done` or `cancelled` issue, or a bad `minutes`, is `400`. Returns the `Issue` with its `claim`; a re-claim keeps `claimed_at` and moves `expires_at`.
+
+```bash
+curl -X POST "$LIFIC/api/issues/42/claim" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Lific-Worker: build-runner-7" \
+  -H "Content-Type: application/json" \
+  -d '{"minutes":30}'
+```
+
+### POST `/api/issues/{id}/release`
+
+Ends your claim on the issue. **Maintainer.** No body. The worker is the header's, as for a claim. Releasing when no claim is live succeeds; a live claim held by anyone else is `409`. Returns the `Issue`.
 
 ## Relations
 
@@ -147,7 +165,7 @@ A `Wait` has `id`, `issue_id`, `kind` (`user` or `date`), `note` (a string, empt
 }
 ```
 
-Issue responses, `/index` rows and `/changes` rows carry an issue's waits as a `waits` array, left out when there are none. The [public read API](/docs/rest-api/public) never shows them. Adding or clearing a wait moves the issue's `seq`, records the change in the issue's activity, and publishes `issue.updated`.
+Issue responses, `/index` rows and `/changes` rows carry an issue's waits as a `waits` array, left out when there are none. Adding or clearing a wait moves the issue's `seq`, records the change in the issue's activity, and publishes `issue.updated`.
 
 ### GET `/api/issues/{id}/waits`
 
@@ -182,7 +200,7 @@ The server's calendar day and its offset from UTC, which decide whether a date w
 
 ## Comments
 
-Anyone who can read a project can comment in it: **viewer**. On a workspace page, that means an administrator when enforcement is on. Deleting an issue or page takes its comments to the trash with it.
+Anyone who can read a project can comment in it: **viewer**. On a workspace page, that means an administrator. Deleting an issue or page takes its comments to the trash with it.
 
 ### GET `/api/issues/{issue_id}/comments`
 
@@ -195,6 +213,7 @@ One page of the comments on an issue or a page. Returns a `Comment` array.
 | `order` | `asc` (default, oldest first) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 | `author` | Only comments by this username. |
+| `kind` | Only `comment`, `decision`, or `verification` comments. Applied before pagination. |
 | `before_created_at`, `before_id` | A cursor: only comments older than the one you name. |
 
 The default page of a long thread is its oldest comments; pass `order=desc` for the newest.
@@ -216,7 +235,7 @@ If even the first comment is larger than the budget, the answer is `413` with th
 
 ### POST `/api/pages/{page_id}/comments`
 
-Adds a comment. Body: `content` (Markdown). A comment added here is always of kind `comment`; `verification` comments come only from closing an issue with evidence through MCP `update_issue`. A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
+Adds a comment. Body: `content` (Markdown), and optional `kind` (`comment` by default, or `decision`). `verification` comments come only from closing an issue with evidence through MCP `update_issue`; that kind and unknown kinds are rejected here with `422`. A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
 
 ### PUT `/api/comments/{id}`
 
@@ -228,7 +247,7 @@ Deletes a comment. Same rule: the author or an administrator who can read the pr
 
 ## Pages
 
-A page has a project, or none for a workspace page. With enforcement on, workspace pages are administrator-only for reading and writing.
+A page has a project, or none for a workspace page. Workspace pages are administrator-only for reading and writing.
 
 ### GET `/api/pages`
 
@@ -240,7 +259,11 @@ Query: `project_id`, `folder_id`, `label`, `status`, `order_by` (`sort_order`, `
 
 Creates a page. **Maintainer**, or administrator for a workspace page.
 
-Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `status` (`draft` by default, or `active`, `complete`, `archived`) and `labels` (names; ignored on workspace pages). Returns the `Page`.
+Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `status` (`draft` by default, or `active`, `complete`, `archived`), `labels` (names; ignored on workspace pages) and `conventions` (`true` makes it the project's [conventions page](/docs/concepts/pages#conventions-page); `409` while the project has one, `400` on a workspace page). Returns the `Page`.
+
+### GET `/api/conventions/templates`
+
+The starting texts a conventions page can be created from, in order. Any signed-in caller. Returns an array of `key` (`empty`, `ai_managed`, `human_managed`, `human_owned`), `name`, `summary` (one line on when to use it) and `content` (the Markdown the page starts with).
 
 ### GET `/api/pages/{id}`
 
@@ -252,7 +275,7 @@ The same, by identifier: `APP-DOC-3`, or `DOC-3` for a workspace page. **Viewer.
 
 ### PUT `/api/pages/{id}`
 
-Changes a page. **Maintainer.** Every field is optional: `title`, `content`, `folder_id` (null moves it to the top level), `sort_order`, `status`, `pinned`, `labels` (replaces the set) and `expected_seq`. A stale `expected_seq` is `409`, as for issues. Returns the `Page`.
+Changes a page. **Maintainer.** Every field is optional: `title`, `content`, `folder_id` (null moves it to the top level), `sort_order`, `status`, `pinned`, `labels` (replaces the set), `conventions_enabled` and `expected_seq`. `conventions_enabled` turns the project's conventions page on or off and keeps its text; on any other page it is `400`. A stale `expected_seq` is `409`, as for issues. Returns the `Page`.
 
 ### DELETE `/api/pages/{id}`
 
@@ -323,7 +346,7 @@ Deletes a step and the steps under it. **Maintainer.** Returns the plan with its
 
 ## Modules, labels and folders
 
-Reading these needs **viewer**. Changing them needs **maintainer** with enforcement on and **lead** with it off.
+Reading these needs **viewer**. Changing them needs **maintainer**.
 
 ### GET `/api/modules`
 
@@ -385,4 +408,4 @@ Deletes the folder and the folders inside it. Their pages are kept and move to t
 
 ### GET `/api/plans/{id}/activity`
 
-One item's history, newest first. A plan's feed includes its steps. **Viewer**, or administrator for a workspace page with enforcement on. Query: `limit` (default 50, at most 200) and `offset`. Returns `items` and `has_more`, in the shape described under [project activity](/docs/rest-api/projects#get-apiprojectsidactivity).
+One item's history, newest first. A plan's feed includes its steps. **Viewer**, or administrator for a workspace page. Query: `limit` (default 50, at most 200) and `offset`. Returns `items` and `has_more`, in the shape described under [project activity](/docs/rest-api/projects#get-apiprojectsidactivity).

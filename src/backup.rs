@@ -966,6 +966,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "BackupTest".into(),
                     identifier: "BKP".into(),
                     description: String::new(),

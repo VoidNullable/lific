@@ -38,6 +38,10 @@ pub struct CreateProject {
     pub description: String,
     pub emoji: Option<String>,
     pub lead_user_id: Option<i64>,
+    /// LIF-524: start the project with a conventions page holding this
+    /// template. `None` creates no page; the transports default to `Empty`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventions: Option<crate::conventions::Template>,
 }
 
 /// LIF-374: `Serialize` is what the HTTP CLI backend sends as the request
@@ -315,6 +319,56 @@ pub struct Issue {
     /// and for issues marked for any human.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignees: Vec<IssueAssignee>,
+    /// LIF-525: who holds the issue right now. Only a claim that has not
+    /// expired is read; an expired one is the same as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<IssueClaim>,
+}
+
+/// LIF-525: a live claim on an issue. The holder is an account plus, when
+/// the claim came from one MCP session or process, that worker's id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueClaim {
+    pub user_id: i64,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// `None`: the claim is tied to the account alone, so any session of
+    /// that account holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    /// UTC, `YYYY-MM-DD HH:MM:SS`. Kept across re-claims by the same holder.
+    pub claimed_at: String,
+    /// UTC, `YYYY-MM-DD HH:MM:SS`. Each re-claim moves it.
+    pub expires_at: String,
+}
+
+/// LIF-525: who is asking, for claims. The account that authenticated (a
+/// bot key is the bot, not its owner) and the worker id of the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimant {
+    pub user_id: i64,
+    pub worker: Option<String>,
+}
+
+impl IssueClaim {
+    /// Whether `claimant` holds this claim: the same account, and the same
+    /// worker unless the claim is tied to the account alone.
+    pub fn held_by(&self, claimant: &Claimant) -> bool {
+        self.user_id == claimant.user_id
+            && (self.worker.is_none() || self.worker == claimant.worker)
+    }
+
+    /// `@user (worker w) until 2026-11-26 15:04 UTC`.
+    pub fn describe(&self) -> String {
+        let mut text = format!("@{}", self.username);
+        if let Some(worker) = &self.worker {
+            text.push_str(&format!(" (worker {worker})"));
+        }
+        let until = self.expires_at.get(..16).unwrap_or(&self.expires_at);
+        text.push_str(&format!(" until {until} UTC"));
+        text
+    }
 }
 
 /// LIF-147: one named assignee. Always a human account.
@@ -529,6 +583,19 @@ pub struct ListIssuesQuery {
     /// Who `assignee=me` means. Internal: set by the transport.
     #[serde(skip)]
     pub caller_user_id: Option<i64>,
+    /// LIF-525: who `workable=true` is asked for. An issue someone else
+    /// holds a live claim on is not workable for them; `None` treats every
+    /// live claim as someone else's. Internal: set by the transport.
+    #[serde(skip)]
+    pub claimant: Option<Claimant>,
+    /// LIF-525: last activity (the later of `updated_at` and the last claim
+    /// or re-claim, now for a live claim) strictly before this. The stale
+    /// checks use it. Internal: not a REST parameter.
+    #[serde(skip)]
+    pub idle_before: Option<String>,
+    /// LIF-525: last activity at or after this. Internal.
+    #[serde(skip)]
+    pub touched_since: Option<String>,
 }
 
 /// Per-status issue counts for a project (LIF-161). `total` is the sum of
@@ -684,6 +751,17 @@ pub struct Page {
     /// workspace-level pages — labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// LIF-524: this is its project's conventions page.
+    #[serde(default)]
+    pub conventions: bool,
+    /// LIF-524: the conventions page's on/off toggle. Off keeps the text but
+    /// leaves it out of the briefing. Always true on other pages.
+    #[serde(default = "default_true")]
+    pub conventions_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -700,6 +778,10 @@ pub struct CreatePage {
     /// project_id), since labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// LIF-524: make this the project's conventions page. Refused when the
+    /// project already has a live one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conventions: bool,
     /// LIF-409: see [`CreateIssue::attachments`].
     #[serde(skip)]
     pub attachments: AttachmentActor,
@@ -716,6 +798,7 @@ impl Default for CreatePage {
             content: String::new(),
             status: default_page_status(),
             labels: Vec::new(),
+            conventions: false,
             attachments: AttachmentActor::default(),
         }
     }
@@ -748,6 +831,9 @@ pub struct UpdatePage {
     /// no-ops for workspace pages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    /// LIF-524: turn the conventions page on or off. Refused on other pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventions_enabled: Option<bool>,
     /// LIF-441: optimistic-concurrency precondition, exactly as on
     /// [`UpdateIssue`]. `None` keeps last-writer-wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1039,20 +1125,24 @@ pub struct Comment {
     /// pages. See [`Issue::seq`].
     #[serde(default)]
     pub seq: i64,
-    /// LIF-486: `verification` for evidence recorded by closing an issue.
+    /// Ordinary discussion, a decision, or evidence recorded by closing an issue.
     #[serde(default)]
     pub kind: CommentKind,
 }
 
 /// What a comment is (migration 056). The string forms match the column's
 /// CHECK constraint exactly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[schemars(crate = "rmcp::schemars")]
 #[serde(rename_all = "lowercase")]
 pub enum CommentKind {
     #[default]
     Comment,
     /// Completion evidence written by `update_issue` alongside a close.
     Verification,
+    Decision,
 }
 
 impl CommentKind {
@@ -1060,6 +1150,7 @@ impl CommentKind {
         match self {
             CommentKind::Comment => "comment",
             CommentKind::Verification => "verification",
+            CommentKind::Decision => "decision",
         }
     }
 }
@@ -1069,6 +1160,7 @@ impl rusqlite::types::FromSql for CommentKind {
         match value.as_str()? {
             "comment" => Ok(CommentKind::Comment),
             "verification" => Ok(CommentKind::Verification),
+            "decision" => Ok(CommentKind::Decision),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         }
     }
@@ -1083,6 +1175,29 @@ impl rusqlite::types::ToSql for CommentKind {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateComment {
     pub content: String,
+    #[serde(default)]
+    pub kind: CommentWriteKind,
+}
+
+/// Kinds callers can write directly. Verification is reserved for closing issues.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
+pub enum CommentWriteKind {
+    #[default]
+    Comment,
+    Decision,
+}
+
+impl From<CommentWriteKind> for CommentKind {
+    fn from(kind: CommentWriteKind) -> Self {
+        match kind {
+            CommentWriteKind::Comment => Self::Comment,
+            CommentWriteKind::Decision => Self::Decision,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1092,9 +1207,8 @@ pub struct UpdateComment {
 
 /// LIF-263: a user who can be `@`-mentioned in a comment. Powers
 /// `GET /api/projects/{id}/mention-candidates` — the autocomplete list the
-/// composer fuzzy-filters client-side. Scoped to project members when
-/// `authz_enforced` is on, all users otherwise (see
-/// `db::queries::comments::mention_candidates`).
+/// composer fuzzy-filters client-side. Scoped to the project's members and
+/// the instance admins (see `db::queries::comments::mention_candidates`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MentionCandidate {
     pub user_id: i64,
@@ -1335,6 +1449,10 @@ pub struct PageChange {
     /// Label names (LIF-105, project-scoped), resolved in one grouped query
     /// per response page.
     pub labels: Vec<String>,
+    /// LIF-524: see [`Page::conventions`].
+    pub conventions: bool,
+    /// LIF-524: see [`Page::conventions_enabled`].
+    pub conventions_enabled: bool,
 }
 
 /// A live comment in the sync stream. The body is omitted on purpose:
@@ -1490,7 +1608,7 @@ pub struct PlanStepNode {
 /// Create a plan, optionally anchored to an issue, with a full nested step
 /// tree authored in one call. Issue references are pre-resolved to ids by the
 /// MCP/REST layer.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePlan {
     pub project_id: i64,
     pub title: String,
@@ -1500,7 +1618,7 @@ pub struct CreatePlan {
 }
 
 /// A step in a create_plan tree. Recursive via `steps`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePlanStep {
     pub title: String,
     #[serde(default)]

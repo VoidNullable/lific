@@ -164,7 +164,7 @@ pub(super) async fn list_structure<R: Structure>(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(q): Query<ProjectQuery>,
 ) -> Result<Json<Vec<R::Model>>, LificError> {
-    authz::require_role(&db, &identity, q.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, q.project_id)?;
     with_read(&db, |conn| R::list(conn, q.project_id)).map(Json)
 }
 
@@ -214,7 +214,7 @@ pub(super) async fn get_module(
     Path(id): Path<i64>,
 ) -> Result<Json<Module>, LificError> {
     let module = with_read(&db, |conn| crate::db::queries::get_module(conn, id))?;
-    authz::require_role(&db, &identity, module.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, module.project_id)?;
     Ok(Json(module))
 }
 

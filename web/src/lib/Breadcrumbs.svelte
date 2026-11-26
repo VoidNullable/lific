@@ -37,7 +37,6 @@
 
   import { ChevronRight } from "lucide-svelte";
   import CopyIdButton from "./CopyIdButton.svelte";
-  import { scopedHref } from "./publicScope"; // LIF-471: crumbs stay inside the public view
 
   let { segments }: { segments: Crumb[] } = $props();
 
@@ -73,7 +72,7 @@
       >
         {#if seg.href && !isLast}
           <a
-            href={scopedHref(seg.href)}
+            href={seg.href}
             title={seg.label}
             class="flex items-center gap-1.5 min-w-0 text-body-sm font-medium
                    text-[var(--text-muted)] hover:text-[var(--text)]

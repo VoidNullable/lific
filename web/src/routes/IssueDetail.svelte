@@ -37,6 +37,7 @@
   } from "../lib/issues/relations";
   import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
   import AssigneeField from "../lib/issues/AssigneeField.svelte"; // LIF-147
+  import ClaimField from "../lib/issues/ClaimField.svelte"; // LIF-525
   import { assignmentKind, assignmentNames, personName, sameNames, type Person } from "../lib/issues/assignees";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
@@ -57,7 +58,7 @@
   import { ArrowUpRight, CalendarDays, ChevronDown, FolderInput, Plus, Tag, X } from "lucide-svelte";
   import { getContext } from "svelte";
   import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
-  import { inPublicScope } from "../lib/publicScope"; // LIF-471
+  import { isSignedOut } from "../lib/signedOut"; // LIF-583
 
   let {
     navigate,
@@ -73,8 +74,7 @@
     editable?: boolean;
   } = $props();
 
-  // LIF-234: content edits require maintainer+ once enforcement is on;
-  // commenting stays available for viewers.
+  // LIF-234: content edits require maintainer+; commenting stays available for viewers.
   const editable = $derived(editableProp ?? projectRole.canEdit);
   const canComment = $derived(projectRole.canComment);
 
@@ -111,12 +111,14 @@
     titleCtx?.set(pageTitle(issue.identifier, issue.title, projectIdentifier));
   });
 
-  void me().then((res) => {
-    if (res.ok) currentUser = res.data;
-  });
+  if (!isSignedOut()) {
+    void me().then((res) => {
+      if (res.ok) currentUser = res.data;
+    });
+  }
 
   const thread = new CommentThread({
-    list: (id, before, size) => listComments(id, before, size),
+    list: listComments,
     create: createComment,
     update: updateComment,
     remove: deleteComment,
@@ -151,7 +153,7 @@
   let exporting = false;
   // LIF-488: "Move to project", from the menu or the palette.
   let moveOpen = $state(false);
-  const canMove = $derived(editable && !inPublicScope());
+  const canMove = $derived(editable && !isSignedOut());
 
   $effect(() => {
     const id = issueIdentifier;
@@ -571,11 +573,11 @@
   });
 
   const readOnlyNote = $derived(
-    projectRole.enforced
-      ? inPublicScope()
-        ? "Read-only. This is the public view of the project; sign in to edit or comment."
-        : "You're a viewer on this project. You can still comment."
-      : null,
+    isSignedOut()
+      ? "Read-only. Sign in to edit or comment."
+      : projectRole.role === null
+        ? "Read-only. You're not a member of this project."
+        : "You're a viewer on this project. You can still comment.",
   );
 </script>
 
@@ -614,7 +616,7 @@
   autofocusWhenEmpty
   {saving}
   {savedAt}
-  onExport={inPublicScope() ? undefined : exportMarkdown}
+  onExport={isSignedOut() ? undefined : exportMarkdown}
   {exportError}
   deleteNoun="issue"
   deleteLabel={issue?.identifier ?? ""}
@@ -622,7 +624,9 @@
   onDelete={handleDelete}
   menuItems={canMove ? [{ label: "Move to project…", icon: FolderInput, run: () => (moveOpen = true) }] : []}
   comments={thread.comments}
-  onNewComment={(c) => thread.create(c)}
+  onNewComment={(c, kind) => thread.create(c, kind)}
+  decisionsOnly={thread.decisionsOnly}
+  onFilterDecisions={(enabled) => thread.filterDecisions(enabled)}
   {currentUser}
   onUpdateComment={(id, c) => thread.update(id, c)}
   onDeleteComment={(id) => thread.remove(id)}
@@ -755,6 +759,9 @@
 
           <!-- LIF-147: who must do it. -->
           <AssigneeField {issue} {editable} onApply={setAssignees} onOpen={() => (openMenu = null)} />
+
+          <!-- LIF-525: which worker holds it right now. -->
+          <ClaimField claim={issue.claim} />
 
           <div class="issue-meta-field">
             <p class="issue-meta-field-label">Labels</p>

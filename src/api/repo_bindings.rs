@@ -126,7 +126,7 @@ fn alias_pairs(aliases: &[AliasInput]) -> Vec<(&str, &str)> {
 
 /// Whether `project_id` is inside the caller's cross-project read filter.
 /// `None` is the unrestricted answer `authz::visible_project_ids` returns for
-/// an admin, or whenever enforcement is off.
+/// an admin or the operator's unbound key.
 fn project_visible(visible: &Option<HashSet<i64>>, project_id: i64) -> bool {
     visible.as_ref().is_none_or(|ids| ids.contains(&project_id))
 }
@@ -501,15 +501,6 @@ mod tests {
 
         let (admin, lead, maintainer, bot, outsider, both, a, b) = {
             let conn = db.write().expect("test writer");
-            queries::settings::update(
-                &conn,
-                queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .expect("enable enforcement");
-
             let admin = seed_user(&conn, base + 1, "rb-admin", true);
             let lead = seed_user(&conn, base + 2, "rb-lead", false);
             let maintainer = seed_user(&conn, base + 3, "rb-maintainer", false);

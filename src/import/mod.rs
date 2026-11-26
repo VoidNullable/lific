@@ -137,8 +137,8 @@ pub struct ImportSummary {
 
 /// Find-or-create the import bot for a source, owned by a human user, mirroring
 /// `lific connect`'s bot-identity convention (`src/cli/connect/mod.rs`): the
-/// bot's `owner_id` points at a human so authz resolves bot → owner under both
-/// legacy and enforced modes. Bot username is `import-{source}-{owner}`.
+/// bot's `owner_id` points at a human so authz resolves bot → owner. Bot
+/// username is `import-{source}-{owner}`.
 ///
 /// Returns the bot user id, used as the comment author for provenance.
 pub fn ensure_import_bot(
@@ -382,6 +382,7 @@ mod tests {
         queries::create_project(
             &conn,
             &crate::db::models::CreateProject {
+                conventions: None,
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
                 description: String::new(),

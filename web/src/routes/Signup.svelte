@@ -138,7 +138,7 @@
     const result = await signup(username, email, password);
 
     if (result.ok) {
-      saveSession(result.data.token);
+      saveSession();
       // Tick the first step done (the app's status-change), then enter.
       accountDone = true;
       setTimeout(() => navigate(next), 750);

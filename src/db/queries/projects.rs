@@ -40,6 +40,23 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Whether `project_id` names a published project. A missing project is not
+/// published, so callers cannot tell the two apart from this answer.
+pub fn is_published(conn: &Connection, project_id: i64) -> Result<bool, LificError> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM projects WHERE id = ?1 AND is_public = 1")?
+        .exists(params![project_id])?)
+}
+
+/// The ids of every published project.
+pub fn published_project_ids(conn: &Connection) -> Result<HashSet<i64>, LificError> {
+    let mut stmt = conn.prepare_cached("SELECT id FROM projects WHERE is_public = 1")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Stored personal ranks precede projects the user has not ordered yet.
 /// This is unfiltered, like `list_projects`; callers must apply visibility.
 pub fn list_projects_for_user(conn: &Connection, user_id: i64) -> Result<Vec<Project>, LificError> {
@@ -239,6 +256,20 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
         if let Some(lead_id) = input.lead_user_id {
             super::members::upsert_member(conn, id, lead_id, Role::Lead)?;
         }
+        // LIF-524: the project and its conventions page are one creation.
+        if let Some(template) = input.conventions {
+            super::create_page(
+                conn,
+                &CreatePage {
+                    project_id: Some(id),
+                    title: crate::conventions::PAGE_TITLE.into(),
+                    content: template.content().into(),
+                    status: "active".into(),
+                    conventions: true,
+                    ..Default::default()
+                },
+            )?;
+        }
         // LIF-409: hydrated inside the savepoint, so a failed final read rolls
         // the project and its membership back together.
         get_project(conn, id)
@@ -381,13 +412,9 @@ pub fn delete_project(conn: &Connection, id: i64) -> Result<(), LificError> {
 pub fn delete_project_with_audience(
     conn: &Connection,
     id: i64,
-) -> Result<(Project, Option<Vec<i64>>), LificError> {
+) -> Result<(Project, Vec<i64>), LificError> {
     let project = get_project(conn, id)?;
-    let audience = if super::settings::get(conn)?.authz_enforced {
-        Some(project_viewer_ids(conn, &project)?)
-    } else {
-        None
-    };
+    let audience = project_viewer_ids(conn, &project)?;
     delete_project(conn, id)?;
     Ok((project, audience))
 }
