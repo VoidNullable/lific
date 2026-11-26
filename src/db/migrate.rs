@@ -346,6 +346,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "enforce project roles",
         include_str!("../../migrations/070_enforce_project_roles.sql"),
     ),
+    (
+        71,
+        "number high water",
+        include_str!("../../migrations/071_number_high_water.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page
@@ -875,6 +880,31 @@ mod tests {
         assert!(!has_column(&conn, "instance_settings", "authz_enforced"));
         assert_eq!(roles(&conn), vec![(10, 9, "viewer".to_string())]);
         assert!(losses(&conn).is_empty());
+    }
+
+    #[test]
+    fn number_high_water_upgrade_seeds_tombstones_aliases_and_each_scope() {
+        let conn = migrated_up_to(71);
+        conn.execute_batch(
+            "INSERT INTO projects(id, name, identifier) VALUES (1, 'One', 'ONE'), (2, 'Empty', 'EMPTY');
+             INSERT INTO issues(id, project_id, sequence, title) VALUES (1, 1, 3, 'Last issue');
+             INSERT INTO issue_aliases(project_id, sequence, issue_id, seq) VALUES (1, 8, 1, 1);
+             INSERT INTO pages(project_id, sequence, title) VALUES (1, 5, 'Last page'), (NULL, 7, 'Workspace');
+             INSERT INTO plans(project_id, sequence, title) VALUES (1, 6, 'Last plan');
+             UPDATE issues SET deleted_at = '2000-01-01';
+             UPDATE pages SET deleted_at = '2000-01-01';",
+        ).unwrap();
+        run(&conn).unwrap();
+        crate::db::queries::trash::purge_tombstones(&conn, 30).unwrap();
+        conn.execute("DELETE FROM plans", []).unwrap();
+        use crate::db::queries::number_sequences::{Entity, next};
+        assert_eq!(next(&conn, Some(1), Entity::Issue).unwrap(), 9);
+        assert_eq!(next(&conn, Some(1), Entity::Page).unwrap(), 6);
+        assert_eq!(next(&conn, Some(1), Entity::Plan).unwrap(), 7);
+        assert_eq!(next(&conn, None, Entity::Page).unwrap(), 8);
+        assert_eq!(next(&conn, Some(2), Entity::Issue).unwrap(), 1);
+        run(&conn).unwrap();
+        assert_eq!(next(&conn, Some(1), Entity::Issue).unwrap(), 10);
     }
 
     #[test]

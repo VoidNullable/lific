@@ -678,11 +678,6 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
         validate_module_project(conn, input.project_id, module_id)?;
     }
 
-    // Deliberately counts tombstones too (LIF-438): sequence numbers are the
-    // user-visible identifier, and reusing one that a soft-deleted issue still
-    // holds would collide the moment that issue is restored.
-    let next_seq = super::issue_move::next_issue_sequence(conn, input.project_id)?;
-
     // LIF-130: wrap the issue INSERT + label inserts in a savepoint so a
     // failed label attach can't leave a half-created issue behind. The id is
     // captured inside the closure because `last_insert_rowid()` after the
@@ -694,6 +689,7 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
     // prevent — the caller would see a failure and the database a success.
     let description = unescape_text(&input.description);
     super::savepoint(conn, "create_issue", || {
+        let next_seq = super::issue_move::next_issue_sequence(conn, input.project_id)?;
         conn.execute(
             "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date, source)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",

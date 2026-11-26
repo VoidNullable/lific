@@ -13,9 +13,12 @@ use crate::db::{self, DbPool};
 use crate::error::LificError;
 use crate::storage::{AttachmentStore, valid_sha256};
 
-/// Format 2 added `comments.kind` (migration 056). Format 1 archives still
-/// import: see [`upgrade_manifest`].
-const VERSION: u32 = 2;
+/// Format 3 preserves number high-water marks even after rows are purged.
+/// Formats 1 and 2 still import: see [`upgrade_manifest`].
+const VERSION: u32 = 3;
+
+/// Imported marks must leave room for future allocations.
+const MAX_NUMBER_HIGH_WATER: i64 = 1_000_000_000;
 
 /// One resource profile for a whole export or import.
 ///
@@ -422,12 +425,60 @@ struct Blob {
 struct Manifest {
     format_version: u32,
     exported_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    number_high_water: Option<NumberHighWater>,
     #[serde(deserialize_with = "parse_tables")]
     tables: Vec<Table>,
     #[serde(deserialize_with = "parse_blobs")]
     blobs: Vec<Blob>,
     #[serde(deserialize_with = "parse_references")]
     external_references: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NumberHighWater {
+    issues: i64,
+    pages: i64,
+    plans: i64,
+}
+
+impl NumberHighWater {
+    fn read(conn: &Connection, project: i64) -> Result<Self> {
+        Ok(conn
+            .query_row(
+                "SELECT issues, pages, plans FROM project_number_sequences WHERE project_id = ?1",
+                [project],
+                |row| {
+                    Ok(Self {
+                        issues: row.get(0)?,
+                        pages: row.get(1)?,
+                        plans: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    fn apply(&self, conn: &Connection, project: i64) -> Result<()> {
+        // Import suspends triggers. Seed from the rows as well as the archive
+        // so legacy archives and restore hooks cannot leave counters behind.
+        conn.execute(
+            "INSERT INTO project_number_sequences (project_id, issues, pages, plans)
+             VALUES (?1,
+                 MAX(?2, (SELECT COALESCE(MAX(sequence), 0) FROM issues WHERE project_id = ?1),
+                         (SELECT COALESCE(MAX(sequence), 0) FROM issue_aliases WHERE project_id = ?1)),
+                 MAX(?3, (SELECT COALESCE(MAX(sequence), 0) FROM pages WHERE project_id = ?1)),
+                 MAX(?4, (SELECT COALESCE(MAX(sequence), 0) FROM plans WHERE project_id = ?1)))
+             ON CONFLICT(project_id) DO UPDATE SET
+                 issues = MAX(issues, excluded.issues),
+                 pages = MAX(pages, excluded.pages),
+                 plans = MAX(plans, excluded.plans)",
+            params![project, self.issues, self.pages, self.plans],
+        )?;
+        Ok(())
+    }
 }
 
 fn parse_tables<'de, D: serde::Deserializer<'de>>(
@@ -728,6 +779,7 @@ fn collect_manifest_by_id(conn: &Connection, id: i64) -> Result<Manifest> {
     let mut m = Manifest {
         format_version: VERSION,
         exported_at: chrono::Utc::now().to_rfc3339(),
+        number_high_water: Some(NumberHighWater::read(conn, id)?),
         tables: Vec::new(),
         blobs: Vec::new(),
         external_references: Vec::new(),
@@ -1093,19 +1145,19 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bring a format 1 manifest up to the current format. Format 1 predates
-/// comment kinds, so each of its comment rows is one column short and every
-/// one of them was an ordinary comment. Anything else is left for
-/// [`validate_manifest`] to judge.
+/// Legacy archives lack stored number marks; import seeds them from their
+/// rows. Format 1 also predates comment kinds.
 fn upgrade_manifest(m: &mut Manifest) {
-    if m.format_version != 1 {
-        return;
-    }
-    m.format_version = VERSION;
-    for table in m.tables.iter_mut().filter(|t| t.name == "comments") {
-        for row in &mut table.rows {
-            row.push("comment".into());
+    if m.format_version == 1 {
+        for table in m.tables.iter_mut().filter(|t| t.name == "comments") {
+            for row in &mut table.rows {
+                row.push("comment".into());
+            }
         }
+    }
+    if matches!(m.format_version, 1 | 2) {
+        m.number_high_water.get_or_insert_with(Default::default);
+        m.format_version = VERSION;
     }
 }
 
@@ -1303,6 +1355,24 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
     }
     if m.format_version != VERSION {
         return Err(invalid("unsupported format version"));
+    }
+    let marks = m
+        .number_high_water
+        .as_ref()
+        .ok_or_else(|| invalid("missing number high-water marks"))?;
+    if marks.issues < 0 || marks.pages < 0 || marks.plans < 0 {
+        return Err(invalid("negative number high-water mark"));
+    }
+    for (entity, value) in [
+        ("issue", marks.issues),
+        ("page", marks.pages),
+        ("plan", marks.plans),
+    ] {
+        if value > MAX_NUMBER_HIGH_WATER {
+            return Err(invalid(format!(
+                "{entity} number high-water mark exceeds {MAX_NUMBER_HIGH_WATER}"
+            )));
+        }
     }
     if m.tables.len() != SPECS.len() {
         return Err(invalid("missing or extra tables"));
@@ -2064,6 +2134,7 @@ pub(crate) fn import_with_hooks(
         }
         let ids = ImportedIds { project, maps: &maps };
         (hooks.restore)(&tx, &ids)?;
+        m.number_high_water.as_ref().expect("validated number marks").apply(&tx, project)?;
         for sql in triggers { tx.execute_batch(&sql)?; }
         // Audit this new local grant, not an imported permission or owner action.
         let prior_actor: (Option<i64>, String) = tx.query_row(
@@ -2125,3 +2196,6 @@ mod waits_tests;
 
 #[cfg(test)]
 mod assignees_tests;
+
+#[cfg(test)]
+mod number_sequence_tests;

@@ -44,18 +44,14 @@ pub struct MovedIssue {
     pub dropped_assignees: Vec<String>,
 }
 
-/// The next free sequence in `project_id`. Counts tombstoned issues (LIF-438)
-/// and aliases, so no identifier is ever handed out twice: a restored issue
-/// and an old identifier both keep meaning what they meant.
+/// Reserve an issue number inside the create or move savepoint. The stored
+/// mark survives permanent deletion of both issues and their aliases.
 pub fn next_issue_sequence(conn: &Connection, project_id: i64) -> Result<i64, LificError> {
-    Ok(conn.query_row(
-        "SELECT MAX(
-             (SELECT COALESCE(MAX(sequence), 0) FROM issues WHERE project_id = ?1),
-             (SELECT COALESCE(MAX(sequence), 0) FROM issue_aliases WHERE project_id = ?1)
-         ) + 1",
-        params![project_id],
-        |row| row.get(0),
-    )?)
+    super::number_sequences::next(
+        conn,
+        Some(project_id),
+        super::number_sequences::Entity::Issue,
+    )
 }
 
 /// The live issue an old identifier (`PROJ`, `sequence`) now points to.

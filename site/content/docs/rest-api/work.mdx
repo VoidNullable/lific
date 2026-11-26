@@ -78,7 +78,7 @@ curl -X PUT "$LIFIC/api/issues/42" \
 
 Moves the issue and its comments to the trash. **Maintainer.** It disappears from lists, boards, search and public projects at once. Returns `{"deleted": true}`.
 
-Trashed issues are removed for good after 30 days, or whatever `trash_days` in the [`[retention]`](/docs/configuration#retention) section says. Its number is not reused while it is in the trash.
+Trashed issues are removed for good after 30 days, or whatever `trash_days` in the [`[retention]`](/docs/configuration#retention) section says. Their numbers are never reused, even after permanent removal.
 
 ### POST `/api/issues/{id}/restore`
 

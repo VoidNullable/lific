@@ -115,6 +115,12 @@ The old `mcp_path_token` was a separate server secret, not an API key. Copying i
 
 Run `lific doctor` to find old URLs in supported clients' global and current-project configuration files, then restart the affected clients. The check reports the file to edit without printing the secret. Inspect any files doctor could not read or parse manually.
 
+#### Project archive number counters
+
+Project archives now use format 3 to preserve issue, page and plan numbers after permanent deletion. Upgrade the destination to Lific 3.0 before importing an archive exported by 3.0. Existing format 1 and 2 archives still import.
+
+The database migration seeds number counters from existing rows, including trashed items and moved-issue aliases. Numbers already purged before the upgrade, or absent from an older archive, cannot be recovered.
+
 ### v2.11
 
 Seven migrations run on first start. One of them rebuilds the attachments table, so a database with many attachments takes a little longer to open the first time. Take a backup first: a 2.10 binary refuses the upgraded database, so going back means restoring it.

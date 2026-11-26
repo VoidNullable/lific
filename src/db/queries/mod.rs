@@ -12,6 +12,7 @@ pub(crate) mod insights;
 pub(crate) mod issue_move;
 mod issues;
 pub(crate) mod members;
+pub(crate) mod number_sequences;
 mod pages;
 pub(crate) mod plans;
 pub(crate) mod project_groups;
