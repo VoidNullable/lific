@@ -211,3 +211,59 @@ fn claim_lengths_and_worker_ids_are_bounded() {
     assert!(a.starts_with("s-") && !a.contains("session"));
     assert!(worker_from_session("  ").is_none());
 }
+
+/// A release ends the claim but keeps when it happened, so the stale checks
+/// still count it as the issue's last claim activity.
+#[test]
+fn a_release_keeps_the_time_as_claim_activity() {
+    let (pool, issue, alice, _) = setup();
+    let conn = pool.write().unwrap();
+    let holder = worker(alice, Some("p-1"));
+    conn.execute(
+        "UPDATE issues SET updated_at = '2001-01-01 00:00:00', seq = seq + 1000000 WHERE id = ?1",
+        [issue],
+    )
+    .unwrap();
+    {
+        let _now = pin_now("2026-11-26 12:00:00");
+        claim(&conn, issue, "CLM-1", &holder, 60).unwrap();
+    }
+    let _now = pin_now("2026-11-26 12:20:00");
+    release(&conn, issue, "CLM-1", &holder).unwrap();
+    assert!(live_claim(&conn, issue).unwrap().is_none());
+    let (renewed, expires): (String, String) = conn
+        .query_row(
+            "SELECT renewed_at, expires_at FROM issue_claims WHERE issue_id = ?1",
+            [issue],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(renewed, "2026-11-26 12:20:00");
+    assert_eq!(expires, "2026-11-26 12:20:00");
+    let activity: String = conn
+        .query_row(
+            &format!(
+                "SELECT {} FROM issues i WHERE i.id = ?1",
+                last_activity_sql("i", "?2")
+            ),
+            params![issue, now_text()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(activity, "2026-11-26 12:20:00");
+}
+
+/// A worker id in `X-Lific-Worker` is the worker as sent, so a client
+/// resumes a claim by sending the id it reported; anything else is hashed.
+#[test]
+fn a_worker_header_is_taken_as_sent_when_it_is_a_worker_id() {
+    assert_eq!(
+        worker_from_header(" r-1a2b3c4d ").as_deref(),
+        Some("r-1a2b3c4d")
+    );
+    let session = worker_from_session("s-1a2b3c4d").unwrap();
+    assert_eq!(worker_from_header(&session), Some(session.clone()));
+    let hashed = worker_from_header("has spaces in it").unwrap();
+    assert!(hashed.starts_with("s-") && hashed != "has spaces in it");
+    assert_eq!(worker_from_header("  "), None);
+}

@@ -21,7 +21,7 @@ pub(super) async fn list_issues(
     }
     // LIF-525: workable leaves out what another worker holds.
     if q.workable == Some(true) && identity.is_some() {
-        q.claimant = Some(rest_claimant(&identity, &headers, None)?);
+        q.claimant = Some(rest_claimant(&identity, &headers)?);
     }
     if let Some(pid) = q.project_id {
         authz::require_role(&db, &identity, pid, Role::Viewer)?;
@@ -200,8 +200,6 @@ pub(super) fn commit_issue_update(
 pub(super) struct ClaimRequest {
     /// Claim length, 1 to 1440 minutes (default 15). Claim only.
     pub minutes: Option<i64>,
-    /// A worker id an earlier claim returned, to act as that worker.
-    pub worker: Option<String>,
 }
 
 impl ClaimRequest {
@@ -216,23 +214,18 @@ impl ClaimRequest {
 }
 
 /// LIF-525: who a REST call claims as: the authenticated account, and the
-/// body's `worker`, else the `X-Lific-Worker` or `Mcp-Session-Id` header's.
-/// Neither means a claim tied to the account alone, which is what the web UI
-/// makes.
+/// worker its `X-Lific-Worker` or `Mcp-Session-Id` header names. The header
+/// is the only source, so the list's `workable` filter, which reads the same
+/// header, always agrees with the claim. Neither header means a claim tied
+/// to the account alone.
 fn rest_claimant(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     headers: &axum::http::HeaderMap,
-    worker: Option<&str>,
 ) -> Result<Claimant, LificError> {
     let user = super::require_user(identity)?;
-    if let Some(worker) = worker {
-        crate::db::queries::claims::validate_worker(worker)?;
-    }
     Ok(Claimant {
         user_id: user.id,
-        worker: worker
-            .map(str::to_string)
-            .or_else(|| crate::mcp::worker_from_headers(headers)),
+        worker: crate::mcp::worker_from_headers(headers),
     })
 }
 
@@ -249,7 +242,7 @@ pub(super) async fn claim_issue(
 ) -> Result<Json<Issue>, LificError> {
     let request = ClaimRequest::parse(&body)?;
     let minutes = crate::db::queries::claims::minutes(request.minutes)?;
-    let claimant = rest_claimant(&identity, &headers, request.worker.as_deref())?;
+    let claimant = rest_claimant(&identity, &headers)?;
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let (issue, moved) = db.transaction(|conn| {
@@ -300,7 +293,7 @@ pub(super) async fn release_issue(
             "minutes applies to claim only".into(),
         ));
     }
-    let claimant = rest_claimant(&identity, &headers, request.worker.as_deref())?;
+    let claimant = rest_claimant(&identity, &headers)?;
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let issue = db.transaction(|conn| {

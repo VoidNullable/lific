@@ -2281,6 +2281,52 @@ mod authless_mcp_tests {
         );
     }
 
+    /// LIF-525: a new HTTP session resumes a claim by sending the worker id
+    /// the claim reported as `X-Lific-Worker`. Its claims and its reads then
+    /// agree; the `worker` argument cannot stand in for the header.
+    #[tokio::test]
+    async fn an_http_client_resumes_a_claim_by_sending_its_worker_id() {
+        let router = router_with_project();
+        call_in_session(
+            &router,
+            None,
+            "create_issue",
+            serde_json::json!({"project": "PRO", "title": "Resumed", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRO-1", "claim": true});
+        let first = Some(("Mcp-Session-Id", "session-one"));
+        call_in_session(&router, first, "update_issue", claim.clone()).await;
+        let worker = crate::db::queries::claims::worker_from_session("session-one").unwrap();
+
+        // A fresh session passing the id as an argument is told to use the
+        // header, and nothing changes.
+        let fresh = Some(("Mcp-Session-Id", "session-two"));
+        let argued = call_in_session(
+            &router,
+            fresh,
+            "update_issue",
+            serde_json::json!({"identifier": "PRO-1", "claim": true, "worker": worker}),
+        )
+        .await;
+        assert!(
+            argued.starts_with("Error:") && argued.contains(&format!("X-Lific-Worker: {worker}")),
+            "{argued}"
+        );
+
+        let resumed = Some(("X-Lific-Worker", worker.as_str()));
+        let renewed = call_in_session(&router, resumed, "update_issue", claim).await;
+        assert!(
+            renewed.contains("Claim renewed until") && renewed.contains(&worker),
+            "{renewed}"
+        );
+        let workable = serde_json::json!({"project": "PRO", "workable": true});
+        let own = call_in_session(&router, resumed, "list_issues", workable.clone()).await;
+        assert!(own.contains("Resumed"), "the resumed holder sees it: {own}");
+        let other = call_in_session(&router, fresh, "list_issues", workable).await;
+        assert_eq!(other, "No issues found.");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_http_mcp_calls_keep_their_own_user() {
         let pool = db::open_memory().unwrap();

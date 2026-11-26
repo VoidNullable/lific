@@ -3409,6 +3409,14 @@ No issues found."
         }
         if let Some(worker) = input.worker.as_deref() {
             queries::claims::validate_worker(worker).map_err(|error| error.to_string())?;
+            // Over HTTP nothing would remember the worker for the next call,
+            // so a claim taken here would be hidden from its own holder's
+            // reads. The header is the one place that names it.
+            if !self.has_own_worker() && self.session_worker().as_deref() != Some(worker) {
+                return Err(format!(
+                    "over HTTP the worker is the X-Lific-Worker header: send 'X-Lific-Worker: {worker}' on every request to resume that claim, and leave worker out"
+                ));
+            }
         }
         let claim_minutes = match input.claim {
             Some(true) => Some(

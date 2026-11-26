@@ -161,8 +161,9 @@ struct HttpForwarder {
     credential: Option<String>,
     /// LIF-525: one id for this proxy process, sent as `X-Lific-Worker` on
     /// every request so the server tells this session's claims apart from
-    /// another session's on the same key, as it does for local stdio.
-    worker: String,
+    /// another session's on the same key, as it does for local stdio. A
+    /// claim that resumes another worker replaces it, as `lific mcp` does.
+    worker: std::sync::Mutex<String>,
 }
 
 impl HttpForwarder {
@@ -171,21 +172,54 @@ impl HttpForwarder {
             client,
             endpoint,
             credential,
-            worker: crate::db::queries::claims::mint_worker("r"),
+            worker: std::sync::Mutex::new(crate::db::queries::claims::mint_worker("r")),
         }
     }
+
+    fn worker(&self) -> String {
+        self.worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// LIF-525: the worker an `update_issue` call resumes with its `worker`
+/// argument. The proxy sends that call as that worker, and keeps it once the
+/// call succeeds, since over HTTP the header is what names the worker.
+fn resumed_worker(body: &str) -> Option<String> {
+    let message = serde_json::from_str::<Value>(body).ok()?;
+    let params = message.get("params")?;
+    if message.get("method")?.as_str()? != "tools/call"
+        || params.get("name")?.as_str()? != "update_issue"
+    {
+        return None;
+    }
+    let worker = params.get("arguments")?.get("worker")?.as_str()?;
+    crate::db::queries::claims::validate_worker(worker)
+        .is_ok()
+        .then(|| worker.to_owned())
+}
+
+fn is_tool_success(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        value.get("result").is_some_and(Value::is_object)
+            && value["result"].get("isError").and_then(Value::as_bool) != Some(true)
+    })
 }
 
 impl Forwarder for HttpForwarder {
     async fn forward(&self, body: String) -> Result<String, ForwardError> {
         let inline_attachment = is_get_attachment_call(&body);
         let routing = routing_headers(&body);
+        let resumed = resumed_worker(&body);
+        let worker = resumed.clone().unwrap_or_else(|| self.worker());
         let mut request = self
             .client
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
-            .header("x-lific-worker", &self.worker)
+            .header("x-lific-worker", worker)
             .body(body);
         for (name, value) in routing {
             request = request.header(name, value);
@@ -235,7 +269,13 @@ impl Forwarder for HttpForwarder {
             )));
         }
 
-        response.text().await.map_err(ForwardError::unreachable)
+        let text = response.text().await.map_err(ForwardError::unreachable)?;
+        if let Some(worker) = resumed
+            && is_tool_success(&text)
+        {
+            *self.worker.lock().unwrap_or_else(|e| e.into_inner()) = worker;
+        }
+        Ok(text)
     }
 }
 
@@ -1031,6 +1071,41 @@ mod tests {
             refused.starts_with("Error:") && refused.contains("is claimed by"),
             "{refused}"
         );
+
+        // A restarted proxy resumes by passing the id back, and from then on
+        // its reads see the claim as its own.
+        let worker = first.worker();
+        assert!(held.contains(&format!("as worker {worker}")), "{held}");
+        let restarted = process();
+        let workable = serde_json::json!({"project": "PRX", "workable": true});
+        assert_eq!(
+            run(&restarted, "list_issues", workable.clone()).await,
+            "No issues found."
+        );
+        let resumed = run(
+            &restarted,
+            "update_issue",
+            serde_json::json!({"identifier": "PRX-1", "claim": true, "worker": worker}),
+        )
+        .await;
+        assert!(resumed.contains("Claim renewed"), "{resumed}");
+        assert_eq!(restarted.worker(), worker);
+        let listed = run(&restarted, "list_issues", workable.clone()).await;
+        assert!(listed.contains("Contested"), "{listed}");
+        assert_eq!(
+            run(&second, "list_issues", workable).await,
+            "No issues found."
+        );
+
+        // A resume the server refuses leaves the proxy's own id alone.
+        let own = second.worker();
+        run(
+            &second,
+            "update_issue",
+            serde_json::json!({"identifier": "PRX-1", "claim": true, "worker": "p-00000000"}),
+        )
+        .await;
+        assert_eq!(second.worker(), own);
     }
 
     /// Noise, so the PNG encoder cannot shrink it below the size under test.

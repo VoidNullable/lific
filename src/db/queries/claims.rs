@@ -74,9 +74,21 @@ pub fn mint_worker(prefix: &str) -> String {
     format!("{prefix}-{:08x}", rand::random::<u32>())
 }
 
-/// A worker id derived from a transport session id (an `Mcp-Session-Id` or
-/// `X-Lific-Worker` header). Hashed, so the raw session id is never stored or
-/// shown, and stable, so every request of the session maps to the same id.
+/// The worker an `X-Lific-Worker` header names. A valid worker id (such as
+/// one a claim reported) is the worker as sent, so a client resumes a claim
+/// by sending its id; anything else is hashed like a session id.
+pub fn worker_from_header(value: &str) -> Option<String> {
+    let value = value.trim();
+    if validate_worker(value).is_ok() {
+        Some(value.to_string())
+    } else {
+        worker_from_session(value)
+    }
+}
+
+/// A worker id derived from a transport session id (`Mcp-Session-Id`).
+/// Hashed, so the raw session id is never stored or shown, and stable, so
+/// every request of the session maps to the same id.
 pub fn worker_from_session(session: &str) -> Option<String> {
     use sha2::{Digest, Sha256};
     let session = session.trim();

@@ -70,12 +70,6 @@ tokio::task_local! {
     static REQUEST_WORKER: Option<String>;
 }
 
-/// LIF-525: the headers that name an HTTP caller's session, most specific
-/// first. `X-Lific-Worker` is what `lific mcp --remote` sends (one id per
-/// process); `Mcp-Session-Id` is the protocol's own, for clients that keep a
-/// session.
-const WORKER_HEADERS: [&str; 2] = ["x-lific-worker", "mcp-session-id"];
-
 /// Run `future` as a call whose HTTP session header named `worker`.
 #[cfg(test)]
 pub(crate) async fn with_request_worker<Fut, R>(worker: Option<String>, future: Fut) -> R
@@ -85,14 +79,17 @@ where
     REQUEST_WORKER.scope(worker, future).await
 }
 
-/// The worker id an HTTP request's headers name, if any.
+/// LIF-525: the worker id an HTTP request's headers name, if any.
+/// `X-Lific-Worker` comes first and is taken as sent when it is a valid
+/// worker id (what `lific mcp --remote` sends, and how a client resumes a
+/// claim); `Mcp-Session-Id`, the protocol's own, is hashed.
 pub(crate) fn worker_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
-    WORKER_HEADERS.iter().find_map(|name| {
-        headers
-            .get(*name)
-            .and_then(|value| value.to_str().ok())
-            .and_then(crate::db::queries::claims::worker_from_session)
-    })
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    header("x-lific-worker")
+        .and_then(crate::db::queries::claims::worker_from_header)
+        .or_else(|| {
+            header("mcp-session-id").and_then(crate::db::queries::claims::worker_from_session)
+        })
 }
 
 /// Whether the current tool call's client understands `resource_link`
@@ -530,10 +527,17 @@ impl LificMcp {
             })
     }
 
+    /// LIF-525: whether this server is a stdio process, which keeps a worker
+    /// id of its own and can take over another. Over HTTP the worker is each
+    /// request's header.
+    pub(crate) fn has_own_worker(&self) -> bool {
+        self.stdio_worker.is_some()
+    }
+
     /// LIF-525: a stdio process takes over the worker id a resumed claim
     /// named, so its later reads and claims see that claim as its own.
-    /// HTTP has no per-session state to keep it in; the caller passes the id
-    /// again instead.
+    /// HTTP has no per-session state to keep it in; the client sends the id
+    /// as `X-Lific-Worker` instead.
     pub(crate) fn adopt_worker(&self, worker: &str) {
         if let Some(current) = &self.stdio_worker {
             *current.lock().unwrap_or_else(|e| e.into_inner()) = worker.to_string();

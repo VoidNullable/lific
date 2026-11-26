@@ -238,7 +238,9 @@ pub struct UpdateIssueInput {
     pub claim: Option<bool>,
     #[schemars(description = "Claim length in minutes, 1 to 1440 (default 15)")]
     pub claim_minutes: Option<i64>,
-    #[schemars(description = "The worker id a claim returned, to resume it from a new session")]
+    #[schemars(
+        description = "The worker id a claim returned, to resume it in a new stdio session. Over HTTP send it as the X-Lific-Worker header instead"
+    )]
     pub worker: Option<String>,
 }
 

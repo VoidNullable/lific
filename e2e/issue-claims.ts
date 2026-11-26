@@ -20,7 +20,6 @@
  * web/dist from disk, so build the web UI first).
  */
 import { strict as assert } from "node:assert";
-import { createHash } from "node:crypto";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
@@ -124,11 +123,6 @@ async function shot(page: Page, name: string) {
   if (SHOTS) await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: true });
 }
 
-/** The worker id the server derives from an `X-Lific-Worker` header. */
-function workerId(header: string): string {
-  return `s-${createHash("sha256").update(header).digest("hex").slice(0, 8)}`;
-}
-
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
     console.error(`no binary at ${BIN}: run \`mkdir -p web/dist && cargo build\` (or set LIFIC_BIN)`);
@@ -195,7 +189,8 @@ async function main(): Promise<number> {
 
     // An agent session of ada's claims the issue.
     const claimed = await api(agent, "POST", `/issues/${held.id}/claim`, { minutes: 30 }, "agent-one");
-    const worker = workerId("agent-one");
+    // A valid worker id in the header is the worker as sent.
+    const worker = "agent-one";
     assert.equal(claimed.claim?.username, "ada");
     assert.equal(claimed.claim?.worker, worker);
     assert.equal(claimed.status, "active", "claiming a todo issue starts it");

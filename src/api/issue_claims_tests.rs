@@ -70,8 +70,9 @@ async fn a_claim_refuses_other_workers_until_released() {
     let body = parse_json(resp).await;
     assert_eq!(body["status"], "active", "a todo claim starts the work");
     assert_eq!(body["claim"]["username"], "maintainer");
-    let worker = crate::db::queries::claims::worker_from_session("one").unwrap();
-    assert_eq!(body["claim"]["worker"], worker.as_str());
+    // A worker id in the header is the worker as sent.
+    let worker = "one";
+    assert_eq!(body["claim"]["worker"], worker);
 
     // Another session of the same account, and another account, are refused.
     let resp = post(&app, &claim, Some("two"), None).await;
@@ -122,37 +123,41 @@ async fn a_claim_refuses_other_workers_until_released() {
 }
 
 #[tokio::test]
-async fn a_body_worker_resumes_a_claim_and_bad_input_is_refused() {
+async fn a_header_worker_resumes_a_claim_and_bad_input_is_refused() {
     let (db, _admin, _lead, maintainer, _viewer, _outsider, project_id) = setup_membership_test();
     let app = app_as_user(db, &maintainer);
     let id = issue(&app, project_id, "Resumable", "active").await;
     let claim = format!("/api/issues/{id}/claim");
-    let resp = post(
-        &app,
-        &claim,
-        None,
-        Some(serde_json::json!({"worker": "w-1"})),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let first = parse_json(resp).await;
-    assert_eq!(first["claim"]["worker"], "w-1");
+    // A session whose id is hashed reports its worker id; a later client
+    // resumes by sending that id, and its workable list agrees.
+    let request = Request::builder()
+        .method("POST")
+        .uri(&claim)
+        .header("mcp-session-id", "an opaque session")
+        .body(Body::empty())
+        .unwrap();
+    let first = parse_json(app.clone().oneshot(request).await.unwrap()).await;
+    let worker = first["claim"]["worker"].as_str().unwrap().to_string();
+    assert!(worker.starts_with("s-"), "{worker}");
 
-    let resp = post(
-        &app,
-        &claim,
-        Some("other"),
-        Some(serde_json::json!({"worker": "w-1"})),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "the body names the holder");
+    let resp = post(&app, &claim, Some(&worker), None).await;
+    assert_eq!(resp.status(), StatusCode::OK, "the header names the holder");
     let renewed = parse_json(resp).await;
     assert_eq!(renewed["claim"]["claimed_at"], first["claim"]["claimed_at"]);
+    let list = format!("/api/issues?project_id={project_id}&workable=true");
+    assert_eq!(
+        get_with(&app, &list, &worker)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     for body in [
         serde_json::json!({"minutes": 0}),
         serde_json::json!({"minutes": 1441}),
-        serde_json::json!({"worker": "has space"}),
+        serde_json::json!({"worker": "w-1"}),
         serde_json::json!({"unknown": true}),
     ] {
         let resp = post(&app, &claim, None, Some(body.clone())).await;
