@@ -291,6 +291,7 @@
     work.progress.reduce((m, s) => Math.max(m, daysSince(s.issue.updated_at)), 0),
   );
   const total = $derived(counts?.total ?? 0);
+  const blank = $derived(total === 0 && modules.length === 0 && plans.length === 0 && pages.length === 0);
   const done = $derived(counts?.done ?? 0);
   const completion = $derived(total > 0 ? done / total : 0);
 
@@ -857,6 +858,9 @@
         </div>
       {/if}
 
+      <!-- A project with nothing in it yet stops at the empty state above,
+           which already offers the first steps. -->
+      {#if !blank}
       <!-- ── STRUCTURE: MODULES, PLANS, PAGES ─────────────────── -->
       <div class="ov-split border-b border-[var(--border)]">
         <section class="py-6 min-w-0" data-testid="overview-modules">
@@ -1076,6 +1080,7 @@
           </section>
         </div>
       </div>
+      {/if}
     {/if}
   </div>
 </div>
