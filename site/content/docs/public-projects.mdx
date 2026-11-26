@@ -57,11 +57,11 @@ Usernames and display names are part of that, because assignees, comment authors
 ## What stays private
 
 - Email addresses, passwords, API keys and session tokens, for every account.
-- The project's member list, @mention suggestions, saved views and repository bindings.
+- The project's member list, @mention suggestions, saved views and repository bindings, including the activity entries that record who joined, left or changed role and which repositories were bound.
 - Project settings, and every instance setting.
 - Exports and project archives, which still need a signed-in account (exports) or the lead role (archives).
 - Deleted items in the trash.
-- Workspace pages, and every project that is not published. A plan step or relation that points into a private project shows no identifier or status for it.
+- Workspace pages, and every project that is not published. A plan step or relation that points into a private project shows no identifier or status for it. Activity leaves out what a private project recorded about the published one (a private plan step linked to a published issue, for example), and a relation or move involving a private issue shows "a private issue" in its place.
 
 ## Reading without an account
 
@@ -87,7 +87,7 @@ Requests with no credential share limits so they cannot crowd out signed-in user
 
 | Limit | Value | When exceeded |
 | --- | --- | --- |
-| Reads per client IP | 240 per minute | `429` with `Retry-After` |
+| Reads per client IP | 600 per minute | `429` with `Retry-After` |
 | Anonymous requests in progress, whole instance | 4 | `503` with `Retry-After` |
 | Anonymous file downloads in progress, whole instance | 4 | `503` with `Retry-After` |
 | Thumbnails or previews being generated for anonymous readers | 1 at a time | `503` with `Retry-After` |

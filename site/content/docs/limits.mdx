@@ -111,7 +111,7 @@ Rate limits count requests per client address, and some also per account. Behind
 | OAuth client registrations | 10 per hour | Client address | `429` |
 | OAuth device authorizations (`lific login`) | 10 per hour | Client address | `429` |
 | Repository binding changes | 30 per hour | User | `400` with the wait |
-| Reads with no credential (published projects) | 240 per minute | Client address | `429` |
+| Reads with no credential (published projects) | 600 per minute | Client address | `429` |
 
 A request from a trusted proxy that carries an invalid `X-Lific-Client-IP` and `X-Lific-Proxy-Secret` pair gets `503` on these routes. See [Configuration](/docs/configuration#server).
 

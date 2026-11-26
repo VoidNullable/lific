@@ -35,13 +35,14 @@ These answer `GET` with no credential. Every other route, and every other method
 curl "$LIFIC/api/issues/resolve/APP-12"
 ```
 
-The realtime socket at `/api/events/ws` also accepts a connection with no session cookie. It carries events for published projects only.
+The realtime socket at `/api/events/ws` also accepts a connection with no session cookie, or with one whose session has expired or been revoked. It carries events for published projects only.
 
 ## What it leaves out
 
 - Email addresses, API keys and session tokens never appear in a response.
 - A plan step or anchor that points to an issue in a project the caller cannot read has no issue identifier or status.
 - A relation to an issue in a project the caller cannot read is left out.
+- Activity feeds leave out rows recorded by a project the caller cannot read, even when they concern a readable issue, and membership and repository-binding rows of a project the caller is not a member of. In what remains, an issue identifier in a project the caller cannot read (a relation target, a moved issue's old identifier, a plan anchor or step link) reads `"a private issue"`, and an `issue_id` or `page_id` in such a project is `null`. The same applies to MCP `get_activity` and to signed-in callers.
 - Member lists, mention candidates, saved views, repository bindings, exports, archives, accounts and instance settings answer `401`.
 
 ## One answer for "no"
@@ -56,7 +57,7 @@ These requests carry no credential, so they are bounded to keep anonymous traffi
 
 | Limit | Value | When exceeded |
 | --- | --- | --- |
-| Requests per client address | 240 per minute | `429`, `Retry-After: 30` |
+| Requests per client address | 600 per minute | `429`, `Retry-After: 30` |
 | Requests in progress, whole instance | 4 | `503`, `Retry-After: 2` |
 | Attachment downloads in progress | 4 | `503`, `Retry-After: 2` |
 | Thumbnail or preview being generated | 1 at a time | `503`, `Retry-After: 2` |
