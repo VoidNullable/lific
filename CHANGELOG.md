@@ -1,8 +1,50 @@
 # Changelog
 
-## Unreleased
+## v3.0.0 (2026-11-27)
 
-Work that came out of studying how agents actually use Lific. The briefing becomes the place to start a session: it remembers where you left off, leads with what only a person can do, and points out stale claims and forgotten plans. Issues can move between projects, plans finish themselves, page history stops dominating the database, and a new page shows what your agents have been doing. Nine migrations run on first start.
+Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Sixteen migrations run on first start.
+
+### Before you upgrade
+
+- Project roles are always enforced. The `authz_enforced` setting and its unenforced mode are gone, with the web UI's Project permissions switch and `lific instance set --authz-enforced`. An instance that already enforced roles upgrades unchanged; that includes every instance created with 2.1 or later. On an instance that still had the setting off, the upgrade gives out roles from evidence: each project's lead becomes `lead`, anyone who wrote in a project becomes `maintainer` (a connected tool's work counts for its owner), and existing memberships stay. Someone who only ever read a project loses access to it.
+- Everyone who lost access that way is logged once at startup, and `lific doctor` lists them in a `project_access` warning until each has a role again. `lific member add --project <PROJECT> --user <name> --role maintainer` gives access back.
+- `PATCH /api/instance/settings` refuses `"authz_enforced": false` with `400` and ignores `true`. The settings response no longer has the field, and `GET /api/projects/{id}/my-role` no longer returns `enforced`. The rules that only applied with enforcement off are gone too: a project's lead can delete or archive it, maintainers manage modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only suggest people who can see the project.
+- The `/mcp/<token>` route is removed and answers `404`, since a credential in a URL ends up in proxy logs and shell history. Point clients at `/mcp` and send `Authorization: Bearer <API_KEY>`, or use the client's OAuth login; `lific connect` sets up either and refuses old URLs. The old `mcp_path_token` was a server secret, not an API key, so it does not work in the header. `mcp_path_token` and `mcp_path_user` in `[server]` still parse, so the server starts, but they do nothing, and startup and `lific doctor` warn until you remove them. `lific doctor` also finds old URLs in supported clients' configuration files without printing the secret.
+- A published project is read at its ordinary links and API routes, by visitors with no account, every signed-in account and every API key or MCP connection. Changing anything still needs a role. Plans and their steps, activity and edit history, insights, assignees, waits with their notes, comment authors' usernames and live updates become readable, so review those in each published project, or unpublish it, before upgrading.
+- Every route under `/public/api` now answers `404`; use the ordinary routes with no credential, such as `GET /api/issues/resolve/APP-12`. Old `/public/APP/...` links answer `301` to `/APP/...`. If a proxy or CDN special-cased `/public/`, apply those rules to requests that carry neither an `Authorization: Bearer` header nor a `lific_token` cookie, and do not cache responses to requests that carry the cookie.
+- The web UI's session lives only in the HttpOnly `lific_token` cookie. Sign-in, sign-up, auto-login, session refresh and password change responses no longer include the token, so a script that signed in with a password and sent the returned token must use an API key instead (Settings, API keys, or `lific key create --user <name>`). MCP clients and `lific login` use OAuth and are not affected.
+- Writes authenticated by the cookie must come from the server's own origin, `public_url` or a `cors_origins` entry, or they get `403`. If people reach the instance over plain HTTP at any address other than localhost, set `public_url = "http://..."` to that address, or nobody can sign in. Behind a reverse proxy, set `public_url` to the address people open, or pass the original `Host` (and `X-Forwarded-Proto` when the proxy terminates TLS).
+- Project archives are written in format 3. Upgrade the destination to 3.0 before importing an archive exported by 3.0; format 1 and 2 archives still import.
+- The server now returns active issues untouched for 14 days to `todo` once a day, starting shortly after the first start. Run `lific instance set --stale-active-reset-days 0` first if you do not want that.
+- 2.11 refuses a database that 3.0 has migrated. Take a backup first; going back means restoring it.
+
+### Claiming issues
+
+- An agent can claim an issue for a limited time with `update_issue` (`claim`, `claim_minutes`, `worker`) or `POST /api/issues/{id}/claim` and `/release`. While a claim lasts, other workers are refused with the holder's name, and the issue is left out of their `workable` lists and the briefing's workable section. Claiming again moves the expiry and keeps the original claim time. An expired claim stops counting; no cleanup job is involved.
+- Two sessions on the same key are separate workers: each stdio process, each `lific mcp --remote` process, and each HTTP client sending `Mcp-Session-Id` or `X-Lific-Worker` gets its own id. A client resumes a claim by sending the worker id the claim returned.
+- Closing, deleting or moving an issue to another project ends its claim, and project archives do not carry live claims. Releasing a claim keeps it on record as activity.
+- Home lists claimed issues with their holder and time left, and the issue view and peek panel show who holds a claim. The web UI judges expiry by the server's clock, which `GET /api/clock` now reports as `now_ms`.
+- A claim counts as activity, so an issue someone keeps claiming is never reported as stale or moved back to `todo`.
+
+### Safe retries
+
+- A create can be retried without writing it twice. `create_issue` (single and batch), `add_comment`, `create_page` and `create_plan` take an optional `op_key`, and the REST create routes for issues, comments, pages and plans read an `Idempotency-Key` header. A retry with the same key returns the first result, marked as a replay (`Idempotent-Replayed: true` over REST). The same key with a different request is refused and writes nothing. A failed write records no key, so a corrected retry goes through. Keys last 24 hours.
+- `lific mcp --remote` adds a key to every create that lacks one and resends it once when the connection drops or times out. The CLI's HTTP backend does the same for `issue create`, `page create` and `comment add`, but only resends to a server that lists `idempotency-key` in the new `capabilities` field of `GET /api/instance`, since an older server would write the create twice.
+- MCP `create_plan` now writes the plan and its steps in one transaction.
+
+### Decisions
+
+- Mark a comment as a decision from the web composer, MCP (`kind: "decision"`), REST or the CLI. Decisions carry a badge, the web UI filters the thread to them, and project archives keep the kind.
+- `get_issue` lists the newest decisions in their own section, within 50 entries and 32 KiB, even when comment bodies are left out or the discussion is trimmed. Each summary is the first line of prose, skipping leading headings and code blocks. Older decisions are counted, with a pointer to `list_comments`, which now filters by `kind`.
+- The remote CLI reports when an older server stored an ordinary comment instead of the requested decision, naming the comment it created.
+
+### Conventions pages
+
+- Each project can have one conventions page: the rules for working with its issues, pages and plans. New projects start with one, from a template you pick: empty (the default), heavily AI managed, human managed or human owned. Because of that, the first page a client creates in a new project through REST, MCP or the CLI is `DOC-2`.
+- `get_briefing` opens with the conventions page, up to 4,000 characters, outside its usual budget, and does not list it again among recently updated pages. Projects created before 3.0 get a one-line reminder in the briefing until they get a conventions page or turn the reminder off.
+- Turning the page off keeps its text. Deleting or emptying it also takes it out of briefings. `get_page` and page listings mark it, and search ranks it higher when it covers the query.
+- `manage_resource`, `create_page`, `POST /api/projects`, `POST /api/pages`, `PUT /api/pages/{id}` and `lific project create` take the new conventions options, and `GET /api/conventions/templates` lists the templates.
+- In the web UI the conventions page leads the Pages list, with an on/off switch, and creating a project offers the template picker.
 
 ### Briefing
 
@@ -17,6 +59,7 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - The server returns active issues untouched for 14 days to `todo` once a day, with a comment saying why. Set the period with `lific instance set --stale-active-reset-days`; 0 turns it off.
 - Cancelling an issue checks off the plan steps that mirror it, and reopening it unchecks them, so a plan with dropped work can reach 100 percent.
 - Active plans complete themselves when their last step is resolved, and reopen when a step is unchecked or its issue reopens.
+- Issue, page and plan numbers are never reused, even after the item is permanently deleted, and a moved issue's old number stays taken. The upgrade seeds the counters from existing rows, trashed items and moved-issue aliases; numbers purged before the upgrade cannot be recovered. Project archives carry the counters.
 
 ### MCP
 
@@ -34,7 +77,18 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - Every tool declares MCP annotations: which ones only read, which writes are destructive, and which are safe to repeat, so clients can auto-approve reads instead of prompting for every call. `lific mcp --instances` marks its `list_instances` tool read-only too.
 - Issues and pages are MCP resources: `lific://APP/issues/APP-42` and `lific://APP/pages/APP-DOC-3` read as the same text `get_issue` and `get_page` return, with the same role checks, so hosts that attach resources by @-mention can pull them into context. `resources/list` stays empty so a picker never lists a whole tracker.
 - `list_issues`, `search`, `list_resources` and `get_briefing` return structured results alongside their text. Each declares an MCP `outputSchema` and returns `structuredContent` with the identifiers, ids, titles, status and links its text shows, plus `next_offset` when more results follow, so clients that call tools from code can read fields instead of parsing lines. The text replies are unchanged.
+- A required parameter that arrives missing is named, with the tool's real parameters listed, the same way an unknown one is. A missing field inside a plan step or batch item is reported as that nested field, instead of blaming the tool's top-level parameters (PR #102 by [@zorro432](https://github.com/zorro432)).
+- Tool descriptions say what fixes a failed call: an edit miss names the read that gets fresh content, `create_page` explains the workspace-page form, and `link_issues` states that the source blocks the target (PR #102 by [@zorro432](https://github.com/zorro432)).
 - 32 tools now cost an agent 7,290 tokens of context.
+<!-- tool surface version bullet: lead adds -->
+
+### Published projects
+
+- Published projects are read at their normal links, by anyone. Signed-out visitors get the same app members use, with a Sign in button wherever a member would see an edit control. A signed-in account without a role sees the project read-only.
+- Opening `/` signed out shows the only published project, a list when there are several, and the sign-in page when there are none.
+- Requests with no credential are limited to 600 reads a minute per address (up from 240, since a signed-out reader now loads the full app), 4 in progress, 4 downloads and 1 thumbnail or preview at a time. Responses to them are never cached. A request with a valid session cookie does not count against these limits.
+- Email addresses, keys, tokens, member lists and settings are never shown to a reader without a role. Activity shows each reader only rows from projects they can read, a relation or move involving a private issue shows "a private issue", and membership and repository-binding history stays with members. Plans hide links to issues the reader cannot see.
+- A live-update connection whose session has expired carries on as a signed-out reader of published projects instead of being refused.
 
 ### OAuth
 
@@ -58,11 +112,51 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - The Attachments panel under an issue or page has an Insert action on each file. It puts the file's Markdown, with the image's alt text, at the editor's caret, or opens the editor and adds it at the end when you are reading, so a file uploaded once can be placed again without copying its link by hand.
 - The image viewer zooms and pans: a click shows the native size, the wheel, a pinch or `+`/`-` zoom further, and a drag moves around, so a 4000 px screenshot of a log or a dense UI is finally readable. The arrow keys step through the other images on the page, and the toolbar downloads the original or opens it in a new tab. The same viewer now serves issue and page bodies, comments, and the Attachments panel.
 - The panel's Details action edits an image's alt text after upload (for whoever may delete the file) and lists every issue, page and comment you can see that uses the file, linked.
+- Pasting an image URL into a body editor, comment box or new issue offers to import the image as an attachment. Declining, or a failed import, keeps the URL as you pasted it. The server fetches only public addresses, follows no redirects, checks that the file is an image within the attachment size limit, and gives up after ten seconds.
 
 ### Agent activity
 
 - A new Agent activity page (`/agents`) shows what connected tools have been doing over the last hour, day or week: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The data comes from `GET /api/agents/activity`.
 - MCP read tools now record which agent read what, so the page can count reads. Records are buffered and written every few seconds, and the server deletes them after 30 days.
+- Each agent in the roster shows its tool's mark, such as Claude, OpenCode or GitHub, instead of one generic bot icon. `GET /api/agents/activity` returns each agent's `tool_id`.
+- The sidebar's Agent activity row shows how many agents acted in the last 10 minutes.
+
+### Sidebar and Home
+
+- The sidebar opens with a Workspace section (Home, Inbox, Assigned to me, Agent activity) that stays in place with live counts while only the project tree scrolls. A search launcher with your platform's keycaps and an account card sit beside it, and each project's views are split into daily and reference groups.
+- Collapsing the sidebar folds it into an icon rail instead of hiding it: workspace links, one button per project that opens a menu of its views, theme and account, all with tooltips. Icons sit on the same line in both states, so folding and unfolding does not move them.
+- Project groups show as folders with a project count, and one New project row replaces the Projects heading's create menu.
+- Assigned to me lists open issues that name you across projects, grouped by status and sorted by priority, then recency.
+- Home is redrawn in the style of the Agent activity page: sections divided by hairlines, the age chart and 90-day trend drawn with real count axes, and a freshness bar per project colored by its last change.
+
+### Inbox
+
+- The Inbox is a triage feed: one row per issue with every reason it is there, and tabs with counts for All, Unread, Assigned, For anyone, Waiting and Later. Read state is kept per device.
+- A reading pane shows the issue's description and latest comments, with a reply box.
+- Later puts an issue off with a date wait noted "Put off from the inbox", and the sidebar's Inbox count leaves put-off issues out.
+- Rows have quick actions (read, later, done, start). Select several for bulk actions, search, filter by project, sort and group, and drive it all from the keyboard with a hint bar showing the keys.
+
+### Issue list
+
+- Each filter (status, priority, assignee, label, module) can hold several values, so Urgent and High show together; separate filters still combine. The board shows a column for every status the filter admits, which also stops the Unresolved filter hiding every column. Saved views from before keep working.
+- The toolbar has two tiers: the page name, count, view switch, an always-visible search field and New issue on top, with slices and view tools below. Active filters are spelled out as removable chips, and F opens the filters.
+- Rows are taller, with hover states on every inline control and pickers that mark the current value. On phones the title gets two lines and the full width.
+- The composer stays open after Enter so you can file the next issue; Ctrl/⌘ Enter creates and opens it. A group header's "+" opens the composer preset to that group. A row that changes, here or from someone else, glows once.
+- A hint bar shows what the keys do, and when filters hide everything, the empty state says how many issues are hidden and by which filter, with one click to remove it.
+- On extra-wide screens a project pulse sidebar shows a completion ring, the status mix, open work by priority, module progress, labels and recently updated issues; every row toggles a filter. The right sidebar collapses to a labeled edge tab and remembers it (PR #106 by [@zorro432](https://github.com/zorro432)).
+
+### Issue and page views
+
+- Issues show start and due dates with overdue marks, and relations show the linked issue's status and title. S, P, M, L and D open the status, priority, module, label and due date pickers, and phones get a strip of the issue's properties.
+- Pages get an outline beside the body that follows your scroll (folded above it on narrower screens), a 760 px reading column, a line with length and reading time, and a pin toggle. Status saves as soon as you change it, and Delete offers Undo instead of a confirmation.
+- Both share one comment thread with a Saved indicator, a comment count that jumps to it, and C to write a comment. Copy link and Export sit in the overflow menu for everyone, and the command palette can copy, export, set a due date or pin.
+- Issue, plan and module views use the full content width, with the metadata docked to the right.
+
+### Web app
+
+- Browser tabs, bookmarks and history name the page you are on, such as `Issues · APP · Lific`, and an issue or page title once it loads (PR #107 by [@zorro432](https://github.com/zorro432)).
+- Opening a link without a session (a bookmark, a link from chat, an expired tab) takes you back to it after you sign in, instead of to Home.
+- On reload, the web app paints the data you last saw from a local cache right away, then brings it up to date. The cache is kept per account and cleared when you sign out.
 
 ### Editing in the browser
 
@@ -86,18 +180,50 @@ Work that came out of studying how agents actually use Lific. The briefing becom
 - A project's overview is rebuilt in the style of Home. Five numbers lead it: open issues and their change this week, what is in progress, what closed in the last four weeks with a weekly chart, what an agent can pick up, and what waits on a person. A bar of every issue by status sits under them; click a status, a number or a label to open the issue list filtered to it.
 - A Work list ranks open issues with tabs for Needs attention, In progress, Ready for agents, For a person and Blocked. Blocked issues name their blocker.
 - The overview also shows the open count over 90 days, opened against closed for the last four weeks, each module's progress, active plans, pinned and recent pages, who has been working, and open issues per label. It refreshes as changes arrive, and says what agents and people opened and closed since your last visit.
-- Recent activity reads as sentences: "closed LIF-12", "moved LIF-4 to Active", "checked off a step in LIF-PLAN-2", with the issue's title and a comment's first words. A burst of edits by one person to one thing is folded into one line.
+- Recent activity reads as sentences: "closed APP-12", "moved APP-4 to Active", "checked off a step in APP-PLAN-2", with the issue's title and a comment's first words. A burst of edits by one person to one thing is folded into one line.
 - Settings move to their own tab at `/{PROJECT}/settings`, with a section index that follows the scroll: General (icon, name, description, identifier, lead, sidebar group), Labels, Members, Public view, Import and export, and an always-open Danger zone. The project lead is no longer under the danger zone. Projects' sidebar menus gain a Project settings item, and `?section=labels` opens the page at a section.
 - `GET /api/home/overview` accepts `project_id` to narrow every aggregate to one project.
+- A project with no issues, modules, plans or pages shows only its first steps, without empty sections under them.
 
 ### Storage
 
 - Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.
 - Module, label and folder names and issue and page titles that older clients saved with HTML entities (for example `Window &amp; Panel`) are decoded on upgrade, so looking them up by their real name works again.
 
+### Installing
+
+- Install with Homebrew on macOS or Linux: `brew install voidnullable/tap/lific`. The formula installs the release binary, checked against the release's SHA-256, plus shell completions, and is updated with every release (requested in [#93](https://github.com/VoidNullable/lific/issues/93) by [@pasteley](https://github.com/pasteley)).
+- Install with winget on Windows: `winget install VoidNullable.lific`. Each release is submitted to winget's community repository, so `winget upgrade` sees it a day or two after the GitHub release.
+- `cargo install --git https://github.com/VoidNullable/lific --locked --features build-web` builds the web UI as part of the install, which needs Bun. Without the feature, a build from Git stops with an error instead of producing a binary with no web UI (PR #94 by [@mjc](https://github.com/mjc)).
+
+### CLI and doctor
+
+- `lific doctor` diagnoses the instance that actually runs. Without `--config`, it reads the running server's own `--config`, then the one the installed service names, before the usual search. It names where the configuration came from, warns when that differs from the one the search would find, and fails when a service points at a file that no longer exists (PR #104 by [@zorro432](https://github.com/zorro432)).
+- `lific doctor` no longer warns that no per-user service is installed on an instance that something else supervises, such as a system-level systemd unit or a container.
+- When no service manager is found, the message now says what each platform needs, so Windows users are no longer told Lific only supports systemd and launchd. `lific init`, `lific service install` and `lific service` tell you how to remove the service with `lific service uninstall` (PR #103 by [@zorro432](https://github.com/zorro432)).
+- New `lific doctor` checks report anyone the roles upgrade left without access, obsolete MCP settings, and old `/mcp/<token>` URLs in client configurations (see Before you upgrade).
+
+### Security
+
+- No script on the page can read the web session, which lives only in the HttpOnly cookie. A token an older version left in local storage is deleted on first load, and the browser carries on with the cookie set at its last sign-in.
+- A request with an `Authorization: Bearer` header (the scheme in any case) is judged by that header alone, so a missing or wrong credential after `Bearer` gets `401` even when a session cookie is present. A header with any other scheme, such as the `Basic` credentials an HTTP basic-auth proxy sends, is ignored and the cookie applies, so instances behind such a proxy keep working.
+- The session cookie omits `Secure` when `public_url` is an explicit `http://` URL, as before, and now also for plain-HTTP requests to a loopback address, so a default local install can sign in from any browser.
+- Signing out ends the session from the cookie. If the server does not confirm it, the web UI keeps you signed in and shows the error so you can retry.
+- The CLI sends a stored credential only to the origin it was issued for or to a loopback address. Before, `lific doctor` could present it to another host when `public_url` named a different server. A bracketed IPv6 loopback such as `[::1]` now counts as loopback (PR #103 by [@zorro432](https://github.com/zorro432)).
+
+### Fixes
+
+- A project created by a connected tool through `manage_resource` makes the tool's owner its lead. Before, nobody was a member, so only administrators could see it ([#108](https://github.com/VoidNullable/lific/issues/108), reported by [@lardissone](https://github.com/lardissone)).
+- Backups and `lific dump` work when the data directory is reached through a symlink, which on macOS includes every temporary directory.
+- Icons in the collapsed sidebar rail keep their full size when the project list overflows.
+
 ### Upgrading
 
-- Ten migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database. The space it frees is only returned to the file system after a `VACUUM`.
+The full notes, with every command, are at [lific.dev/docs/upgrading](https://lific.dev/docs/upgrading). In short:
+
+- Take a backup with `lific dump` and stop every process that opens the database first. Sixteen migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database; the space it frees only returns to the file system after a `VACUUM`. The roles migration seeds memberships only on an instance that still had enforcement off.
+- Work through Before you upgrade: replace `/mcp/<token>` clients, review published projects, move password-login scripts to API keys, and set `public_url` if people use plain HTTP beyond localhost.
+- Afterwards, run `lific doctor` and resolve any `project_access` warning with `lific member add`, remove `mcp_path_token` and `mcp_path_user` from `lific.toml`, and refresh MCP tool discovery in your clients.
 - `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
 
 ## v2.11.1 (2026-10-13)
