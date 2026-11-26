@@ -47,7 +47,8 @@ function row(value: unknown, kind: "issue" | "page"): boolean {
 
 /** Disk is an optional cache, never a trusted wire response. */
 export function validSnapshot(value: unknown): value is StoredSnapshot {
-  if (!record(value) || value.version !== VERSION || !integer(value.cursor)) return false;
+  if (!record(value) || value.version !== VERSION || !integer(value.cursor) ||
+      typeof value.database_id !== "string" || !value.database_id) return false;
   return (["issues", "pages"] as const).every((key) => {
     const rows = value[key];
     return Array.isArray(rows) && rows.every(item => row(item, key === "issues" ? "issue" : "page")) &&
@@ -90,6 +91,28 @@ export interface CacheRead {
   epoch: string | null;
 }
 
+function generation(): string {
+  return [...crypto.getRandomValues(new Uint32Array(4))].join("-");
+}
+
+function privateAccountKey(key: string): boolean {
+  return /^private:\d+:/.test(key);
+}
+
+function guard(tx: IDBTransaction, key: string) {
+  const meta = tx.objectStore(META);
+  const global = meta.get("epoch");
+  const privateEpoch = meta.get("private-epoch");
+  const local = meta.get(`epoch:${key}`);
+  const scope = key.slice(0, key.lastIndexOf(":") + 1);
+  const projects = meta.get(`projects:${scope}`);
+  return {
+    ready: projects,
+    epoch: () => JSON.stringify([global.result ?? "", privateAccountKey(key) ? privateEpoch.result ?? "" : "", local.result ?? ""]),
+    allowed: () => !Array.isArray(projects.result) || projects.result.includes(Number(key.slice(scope.length))),
+  };
+}
+
 export async function loadSnapshot(key: string): Promise<CacheRead> {
   const empty = { snapshot: null, epoch: null };
   const db = await open();
@@ -98,12 +121,12 @@ export async function loadSnapshot(key: string): Promise<CacheRead> {
     try {
       const tx = db.transaction([SNAPSHOTS, META], "readonly");
       const snapshot = tx.objectStore(SNAPSHOTS).get(key);
-      const epoch = tx.objectStore(META).get("epoch");
+      const fence = guard(tx, key);
       tx.oncomplete = () => {
         db.close();
         resolve({
-          snapshot: validSnapshot(snapshot.result) ? snapshot.result : null,
-          epoch: typeof epoch.result === "string" ? epoch.result : "",
+          snapshot: fence.allowed() && validSnapshot(snapshot.result) ? snapshot.result : null,
+          epoch: fence.allowed() ? fence.epoch() : null,
         });
       };
       tx.onabort = tx.onerror = () => { db.close(); resolve(empty); };
@@ -121,15 +144,16 @@ export async function storeSnapshot(key: string, snapshot: IndexSnapshot, epoch:
       const tx = db.transaction([SNAPSHOTS, META], "readwrite");
       const store = tx.objectStore(SNAPSHOTS);
       let written = false;
-      const currentEpoch = tx.objectStore(META).get("epoch");
-      currentEpoch.onsuccess = () => {
+      const fence = guard(tx, key);
+      fence.ready.onsuccess = () => {
         try {
-          if ((currentEpoch.result ?? "") !== epoch) return;
+          if (fence.epoch() !== epoch || !fence.allowed()) return;
           const previous = store.get(key);
           previous.onsuccess = () => {
             try {
               // A slower tab cannot rewind the durable cursor.
-              if (validSnapshot(previous.result) && previous.result.cursor > snapshot.cursor) return;
+              if (validSnapshot(previous.result) && previous.result.database_id === snapshot.database_id &&
+                  previous.result.cursor > snapshot.cursor) return;
               store.put({ ...snapshot, version: VERSION }, key);
               written = true;
             } catch { tx.abort(); }
@@ -151,7 +175,7 @@ export async function clearSnapshots(): Promise<void> {
       tx.oncomplete = tx.onabort = tx.onerror = () => { db.close(); resolve(); };
       try {
         tx.objectStore(SNAPSHOTS).clear();
-        tx.objectStore(META).put([...crypto.getRandomValues(new Uint32Array(4))].join("-"), "epoch");
+        tx.objectStore(META).put(generation(), "epoch");
       } catch { tx.abort(); }
     } catch { db.close(); resolve(); }
   });
@@ -162,14 +186,57 @@ export async function removeSnapshot(key: string): Promise<void> {
   if (!db) return;
   return new Promise(resolve => {
     try {
-      const tx = db.transaction(SNAPSHOTS, "readwrite");
-      tx.objectStore(SNAPSHOTS).delete(key);
+      const tx = db.transaction([SNAPSHOTS, META], "readwrite");
       tx.oncomplete = tx.onabort = tx.onerror = () => { db.close(); resolve(); };
+      try {
+        tx.objectStore(SNAPSHOTS).delete(key);
+        tx.objectStore(META).put(generation(), `epoch:${key}`);
+      } catch { tx.abort(); }
     } catch { db.close(); resolve(); }
   });
 }
 
+async function prune(
+  remove: (key: string) => boolean,
+  fenceKey: string,
+  fenceValue: unknown,
+): Promise<void> {
+  const db = await open();
+  if (!db) return;
+  return new Promise(resolve => {
+    try {
+      const tx = db.transaction([SNAPSHOTS, META], "readwrite");
+      tx.oncomplete = tx.onabort = tx.onerror = () => { db.close(); resolve(); };
+      try {
+        tx.objectStore(META).put(fenceValue, fenceKey);
+        const cursor = tx.objectStore(SNAPSHOTS).openCursor();
+        cursor.onsuccess = () => {
+          try {
+            const entry = cursor.result;
+            if (!entry) return;
+            if (typeof entry.key === "string" && remove(entry.key)) entry.delete();
+            entry.continue();
+          } catch { tx.abort(); }
+        };
+      } catch { tx.abort(); }
+    } catch { db.close(); resolve(); }
+  });
+}
+
+/** Anonymous readers retain public caches, never another person's private rows. */
+export function clearPrivateSnapshots(): Promise<void> {
+  if (typeof indexedDB === "undefined") return Promise.resolve();
+  return prune(privateAccountKey, "private-epoch", generation());
+}
+
+/** The allowlist also rejects queued writes for projects already removed. */
+export function pruneProjectSnapshots(scope: string, projects: number[]): Promise<void> {
+  const allowed = new Set(projects);
+  return prune(key => key.startsWith(scope) && !allowed.has(Number(key.slice(scope.length))),
+    `projects:${scope}`, projects);
+}
+
 /** Copy the arrays while the in-memory cursor still describes exactly these rows. */
-export function snapshotOf(cursor: number, issues: Map<number, IssueRow>, pages: Map<number, PageRow>): IndexSnapshot {
-  return { cursor, issues: [...issues.values()], pages: [...pages.values()] };
+export function snapshotOf(database_id: string, cursor: number, issues: Map<number, IssueRow>, pages: Map<number, PageRow>): IndexSnapshot {
+  return { database_id, cursor, issues: [...issues.values()], pages: [...pages.values()] };
 }

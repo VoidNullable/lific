@@ -1404,9 +1404,12 @@ impl Change {
 /// `GET /api/projects/{id}/changes` response.
 #[derive(Debug, Serialize)]
 pub struct ChangesPage {
+    pub database_id: String,
+    /// Discard the replica and fetch /index when the cursor is ahead of this database.
+    pub reset: bool,
     pub changes: Vec<Change>,
-    /// The highest seq in `changes`, or the `since` the caller supplied when
-    /// the page is empty — a cursor never moves backwards.
+    /// The highest seq in `changes`, or `since` on an empty page. A reset uses
+    /// zero and requires replacing the replica rather than advancing it.
     pub cursor: i64,
     pub has_more: bool,
 }
@@ -1414,6 +1417,7 @@ pub struct ChangesPage {
 /// `GET /api/projects/{id}/index` response: the cold-start snapshot.
 #[derive(Debug, Serialize)]
 pub struct IndexSnapshot {
+    pub database_id: String,
     /// Resume `/changes` from here. Read *before* the lists below, so a write
     /// racing the bootstrap is re-delivered rather than skipped — see
     /// `db::queries::changes::get_index`.

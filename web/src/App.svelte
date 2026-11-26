@@ -28,7 +28,7 @@
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
-  import { hasSession, getInstance, autoLogin, saveSession, clearSession, me } from "./lib/api";
+  import { hasSession, getInstance, autoLogin, saveSession, me } from "./lib/api";
   import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
   import {
     handleRealtimeEvent,
@@ -233,10 +233,7 @@
     // the user stuck with a dead session. Clear it so the flow below can self-
     // heal in single-user mode (or fall through to /login otherwise).
     if (hasSession()) {
-      const probe = await me();
-      if (!probe.ok && probe.status === 401) {
-        clearSession();
-      }
+      await me();
     }
 
     // Single-user mode: no valid session → silently mint a fresh admin session
@@ -418,13 +415,13 @@
     // A stale probe must not clear a session established after this socket
     // attempt ended. Network failures have no HTTP status and must keep
     // reconnecting so a temporarily unavailable server can recover.
-    if (realtimeDisposed || localStorage.getItem("lific_token") !== sessionToken) return;
+    if (realtimeDisposed) return;
 
-    if (!session.ok && session.status === 401) {
-      clearSession();
+    if (!session.ok && session.status === 401 && readModelAccount() === null && !hasSession()) {
       navigate(loginRouteFor(routeToResume()));
       return;
     }
+    if (localStorage.getItem("lific_token") !== sessionToken) return;
 
     scheduleRealtimeReconnect();
   }

@@ -25,7 +25,7 @@
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
 import { getPublicProject } from "../publicScope";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
-import { onReadModelAccountChange, readModelAccount } from "./account";
+import { onReadModelAccountChange, onReadModelProjects, readModelAccount, readModelScope } from "./account";
 import { loadSnapshot, removeSnapshot, snapshotOf, storeSnapshot } from "./persistence";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
@@ -78,6 +78,8 @@ export class ProjectReadModel {
   private pullAfterBootstrap = false;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private epoch: string | null = null;
+  private databaseId = "";
+  private skipCache = false;
   private disposed = false;
 
   constructor(projectId: number, key: string = modelKey(projectId)) {
@@ -108,7 +110,7 @@ export class ProjectReadModel {
     this.writeTimer = setTimeout(() => {
       this.writeTimer = null;
       if (!this.inScope() || this.epoch === null) return;
-      void storeSnapshot(this.key, snapshotOf(this.cursor, this.issues, this.pages), this.epoch);
+      void storeSnapshot(this.key, snapshotOf(this.databaseId, this.cursor, this.issues, this.pages), this.epoch);
     }, WRITE_BEHIND_MS);
   }
 
@@ -129,19 +131,22 @@ export class ProjectReadModel {
         const cached = await loadSnapshot(this.key);
         if (!this.inScope()) return;
         this.epoch = cached.epoch;
-        if (cached.snapshot) {
+        if (cached.snapshot && !this.skipCache) {
           this.issues = new Map(cached.snapshot.issues.map(row => [row.id, row]));
           this.pages = new Map(cached.snapshot.pages.map(row => [row.id, row]));
           this.cursor = cached.snapshot.cursor;
+          this.databaseId = cached.snapshot.database_id;
           this.error = "";
           this.status = "ready";
           this.pullAfterBootstrap = true;
           return;
         }
       }
+      this.skipCache = false;
       const res = await getProjectIndex(this.projectId);
       if (!this.inScope()) return;
       if (res.ok) {
+        this.databaseId = res.data.database_id;
         const issues = new Map<number, IssueRow>();
         for (const row of res.data.issues) issues.set(row.id, row);
         const pages = new Map<number, PageRow>();
@@ -238,6 +243,20 @@ export class ProjectReadModel {
             }
             return;
           }
+          if (res.data.reset || res.data.database_id !== this.databaseId) {
+            this.skipCache = true;
+            if (this.writeTimer) clearTimeout(this.writeTimer);
+            this.writeTimer = null;
+            this.issues = new Map();
+            this.pages = new Map();
+            this.cursor = 0;
+            this.databaseId = "";
+            this.epoch = null;
+            this.status = "loading";
+            await removeSnapshot(this.key);
+            if (this.inScope()) await this.bootstrap();
+            return;
+          }
           this.applyChanges(res.data);
           if (!res.data.has_more) break;
         }
@@ -324,10 +343,7 @@ export class ProjectReadModel {
 const models = new Map<string, ProjectReadModel>();
 
 function modelKey(projectId: number): string {
-  const audience = getPublicProject();
-  return audience === null
-    ? `private:${readModelAccount() ?? (readModelAccount() === null ? "signed-out" : "unverified")}:${projectId}`
-    : `public:signed-out:${audience}:${projectId}`;
+  return `${readModelScope()}${projectId}`;
 }
 
 /** The project whose websocket resume frame we send on reconnect. Set by
@@ -488,4 +504,14 @@ onReadModelAccountChange(() => {
   models.clear();
   projectsByIdentifier.clear();
   activeProjectId = null;
+});
+
+onReadModelProjects((scope, projects) => {
+  const allowed = new Set(projects);
+  for (const model of models.values()) {
+    if (model.key.startsWith(scope) && !allowed.has(model.projectId)) model.dispose();
+  }
+  for (const [key, project] of projectsByIdentifier) {
+    if (key.startsWith(scope) && !allowed.has(project.id)) projectsByIdentifier.delete(key);
+  }
 });

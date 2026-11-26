@@ -15,17 +15,18 @@ const page = {
   title: "Saved page", status: "draft", folder_id: null, pinned: false,
   created_at: "today", updated_at: "today", preview: "", labels: [],
 };
-const snapshot = { version: 1, cursor: 10, issues: [issue], pages: [page] };
+const snapshot = { version: 1, database_id: "database-a", cursor: 10, issues: [issue], pages: [page] };
 
 describe("read-model disk validation", () => {
   test("accepts live summaries, including rows ahead of the snapshot cursor", () => {
     expect(validSnapshot(snapshot)).toBe(true);
-    expect(validSnapshot({ version: 1, cursor: 0, issues: [], pages: [] })).toBe(true);
+    expect(validSnapshot({ ...snapshot, cursor: 0, issues: [], pages: [] })).toBe(true);
   });
 
   test("rejects incompatible versions, corrupt rows, and duplicate identities", () => {
     for (const invalid of [
       null, {}, { ...snapshot, version: 2 }, { ...snapshot, cursor: -1 },
+      { ...snapshot, database_id: undefined }, { ...snapshot, database_id: "" },
       { ...snapshot, cursor: Infinity }, { ...snapshot, pages: null },
       { ...snapshot, issues: [issue, issue] },
       { ...snapshot, issues: [{ ...issue, deleted: true }] },
@@ -39,6 +40,6 @@ describe("read-model disk validation", () => {
 
   test("unavailable IndexedDB is a cache miss, not a bootstrap failure", async () => {
     expect(await loadSnapshot("private:1:1")).toEqual({ snapshot: null, epoch: null });
-    expect(await storeSnapshot("private:1:1", { cursor: 0, issues: [], pages: [] }, "")).toBe(false);
+    expect(await storeSnapshot("private:1:1", { database_id: "database-a", cursor: 0, issues: [], pages: [] }, "")).toBe(false);
   });
 });

@@ -13,7 +13,7 @@ const fixture = `<script>
   import {ensureProjectModel} from './lib/sync/readModel.svelte';
   import * as cache from './lib/sync/persistence';
   import {setPublicProject} from './lib/publicScope';
-  import {me, logout, login, saveSession} from './lib/api';
+  import {me, logout, login, saveSession, listProjects} from './lib/api';
   let model = $state(null);
   const isPublic = new URLSearchParams(location.search).has('public');
   setPublicProject(isPublic ? 'APP' : null);
@@ -21,7 +21,7 @@ const fixture = `<script>
     if (!isPublic) await me();
     model = ensureProjectModel(1);
     window.fixture = {
-      cache, model: () => model, logout,
+      cache, model: () => model, logout, listProjects,
       login: async (persistToken = true) => {
         const result = await login('other', 'password');
         if (result.ok && persistToken) saveSession(result.data.token);
@@ -67,6 +67,8 @@ const pageRow = (id = 1, seq = 9) => ({
 });
 let userId: number | null = 1;
 let title = "Private saved issue";
+let databaseId = "database-a";
+let snapshotCursor = 10;
 let indexCount = 0;
 let changesCount = 0;
 let delta = false;
@@ -104,18 +106,20 @@ try {
       user: { id: userId }, token: `token-${userId}`, expires_at: "2099-01-01",
     } });
     if (url.pathname === "/api/auth/logout") return route.fulfill({ json: {} });
+    if (url.pathname === "/api/projects") return route.fulfill({ json: [{ id: 1, identifier: "APP" }] });
     if (url.pathname.endsWith("/index")) {
       indexCount++;
       if (holdIndex) { heldIndex = route; return; }
-      return route.fulfill({ json: { cursor: 10, issues: [issue(title)], pages: [pageRow()] } });
+      return route.fulfill({ json: { database_id: databaseId, cursor: snapshotCursor,
+        issues: [issue(title, snapshotCursor)], pages: [pageRow()] } });
     }
     if (url.pathname.endsWith("/changes")) {
       changesCount++;
       if (holdChanges) { heldChanges = route; return; }
       const since = Number(url.searchParams.get("since"));
       return route.fulfill({ json: delta && since === 12
-        ? { cursor: 13, changes: [pageRow(2, 13)], has_more: false }
-        : { cursor: since, changes: [], has_more: false } });
+        ? { database_id: databaseId, cursor: 13, changes: [pageRow(2, 13)], has_more: false }
+        : { database_id: databaseId, cursor: since, changes: [], has_more: false } });
     }
     throw new Error(`Unexpected request: ${url}`);
   });
@@ -161,6 +165,7 @@ try {
   holdChanges = false;
   delta = true;
   await heldChanges!.fulfill({ json: {
+    database_id: databaseId,
     cursor: 12, has_more: true,
     changes: [issue("Updated issue", 11), { kind: "page", id: 1, seq: 12, deleted: true }],
   } });
@@ -185,7 +190,7 @@ try {
         return result;
       };
       try {
-        const saved = await cache.storeSnapshot(key, { cursor: 99, issues: [], pages: [] }, before.epoch);
+        const saved = await cache.storeSnapshot(key, { database_id: before.snapshot.database_id, cursor: 99, issues: [], pages: [] }, before.epoch);
         return { saved, after: await cache.loadSnapshot(key) };
       } finally { IDBObjectStore.prototype.put = original; }
     }, { key, failure });
@@ -196,8 +201,8 @@ try {
 
   assert.equal(await page.evaluate(async key => {
     const cache = (window as any).fixture.cache;
-    const { epoch } = await cache.loadSnapshot(key);
-    return cache.storeSnapshot(key, { cursor: 1, issues: [], pages: [] }, epoch);
+    const { epoch, snapshot } = await cache.loadSnapshot(key);
+    return cache.storeSnapshot(key, { database_id: snapshot.database_id, cursor: 1, issues: [], pages: [] }, epoch);
   }, key), false);
   assert.deepEqual(await read(), committed);
   pass("a slower tab cannot replace a newer durable replica");
@@ -210,7 +215,10 @@ try {
       if (this.name === "snapshots") f.writes++;
       return f.originalPut.apply(this, args);
     };
-    f.model().applyChanges({ cursor: 14, changes: [], has_more: true });
+    f.model().applyChanges({ cursor: 14, changes: [{
+      ...f.model().issues.get(1), id: 99, identifier: "APP-99", seq: 14,
+      title: "Ghost from the lost backup window",
+    }], has_more: true });
     f.model().applyChanges({ cursor: 15, changes: [
       { kind: "page", id: 2, seq: 15, deleted: true },
     ], has_more: false });
@@ -224,6 +232,51 @@ try {
   }), 1);
   assert.deepEqual((await read()).snapshot.pages, []);
   pass("a burst updates memory immediately and coalesces into one write-behind commit");
+
+  holdChanges = true;
+  await page.reload();
+  await ready();
+  await waitHeld("changes");
+  const preRestore = await read();
+  assert.equal(preRestore.snapshot.issues.length, 2);
+  const beforeRestore = indexCount;
+  snapshotCursor = 3;
+  title = "Restored issue";
+  holdChanges = false;
+  await heldChanges!.fulfill({ json: {
+    database_id: databaseId, reset: true, cursor: 0, changes: [], has_more: false,
+  } });
+  heldChanges = null;
+  await durable(3);
+  assert.equal(indexCount, beforeRestore + 1);
+  assert.equal(await page.locator("#issues").textContent(), title);
+  assert.equal((await read()).snapshot.issues[0].seq, 3);
+  assert.equal(await page.evaluate(async ({ key, stale }) =>
+    (window as any).fixture.cache.storeSnapshot(key, stale.snapshot, stale.epoch),
+  { key, stale: preRestore }), false);
+  pass("restore reset discards high-sequence rows and cursor, bootstraps /index and fences old writers");
+
+  holdChanges = true;
+  await page.reload();
+  await ready();
+  await waitHeld("changes");
+  const beforeReplacement = indexCount;
+  databaseId = "database-b";
+  snapshotCursor = 20;
+  title = "Replacement database";
+  holdChanges = false;
+  await heldChanges!.fulfill({ json: {
+    database_id: databaseId, reset: false, cursor: 30,
+    changes: [issue("Must not merge foreign delta", 30)], has_more: false,
+  } });
+  heldChanges = null;
+  await durable(20);
+  assert.equal(indexCount, beforeReplacement + 1);
+  assert.equal(await page.locator("#issues").textContent(), title);
+  assert.equal((await read()).snapshot.database_id, databaseId);
+  pass("a different database with a higher counter is a cache miss, not a delta merge");
+  snapshotCursor = 10;
+  title = "Private saved issue";
 
   // Invalid data is rejected as a unit, including a version mismatch.
   for (const corrupt of [{ version: 999 }, { issues: [{ id: 1 }] }]) {
@@ -263,12 +316,48 @@ try {
   assert.equal(await page.locator("#issues").textContent(), "");
   assert.equal((await read()).snapshot.issues[0].title, "Private saved issue");
   holdIndex = false;
-  await heldIndex!.fulfill({ json: { cursor: 10, issues: [issue("Other account")], pages: [] } });
+  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Other account")], pages: [] } });
   heldIndex = null;
   await switching;
   await durable(10, "private:2:1");
   assert.equal(await page.locator("#issues").textContent(), "Other account");
   pass("same project under another account cannot hydrate the first account's rows");
+
+  const pruneSeed = await page.evaluate(async () => {
+    const cache = (window as any).fixture.cache;
+    const source = await cache.loadSnapshot("private:2:1");
+    const result: Record<string, any> = {};
+    for (const key of ["private:2:99", "private:2:88", "private:1:99", "public:signed-out:APP:99"]) {
+      const { epoch } = await cache.loadSnapshot(key);
+      result[key] = { snapshot: source.snapshot, epoch };
+      if (key !== "private:2:88") await cache.storeSnapshot(key, source.snapshot, epoch);
+    }
+    return result;
+  });
+  await page.evaluate(() => (window as any).fixture.listProjects());
+  const storedKeys = await page.evaluate(() => new Promise<IDBValidKey[]>((resolve, reject) => {
+    const request = indexedDB.open("lific-read-model", 1);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("snapshots", "readonly");
+      const keys = tx.objectStore("snapshots").getAllKeys();
+      tx.oncomplete = () => { db.close(); resolve(keys.result); };
+      tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+    request.onerror = () => reject(request.error);
+  }));
+  assert(!storedKeys.includes("private:2:99"));
+  assert(storedKeys.includes("private:1:99"));
+  assert.equal((await read("private:2:99")).snapshot, null);
+  assert((await read("private:2:1")).snapshot);
+  assert((await read("private:1:99")).snapshot);
+  assert((await read("public:signed-out:APP:99")).snapshot);
+  for (const removed of ["private:2:99", "private:2:88"]) {
+    assert.equal(await page.evaluate(async ({ key, stale }) =>
+      (window as any).fixture.cache.storeSnapshot(key, stale.snapshot, stale.epoch),
+    { key: removed, stale: pruneSeed[removed] }), false);
+  }
+  pass("project-list reconciliation prunes only the current scope and rejects queued writes for removed projects");
 
   const sibling = await context.newPage();
   sibling.on("pageerror", error => errors.push(error.message));
@@ -290,7 +379,7 @@ try {
   await waitHeld("index");
   await page.evaluate(() => (window as any).fixture.logout());
   holdIndex = false;
-  await heldIndex!.fulfill({ json: { cursor: 100, issues: [issue("Late private response", 100)], pages: [] } });
+  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 100, issues: [issue("Late private response", 100)], pages: [] } });
   heldIndex = null;
   await page.waitForTimeout(400);
   assert.equal(await page.locator("#issues").textContent(), "");
@@ -308,21 +397,38 @@ try {
   assert.equal(await page.locator("#issues").textContent(), "");
   assert.equal(calls.filter(call => call.startsWith("/api/")).length, privateCalls);
   holdIndex = false;
-  await heldIndex!.fulfill({ json: { cursor: 10, issues: [issue("Public summary")], pages: [] } });
+  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Public summary")], pages: [] } });
   heldIndex = null;
   await ready();
   await durable(10, "public:signed-out:APP:1");
   assert.equal(await page.locator("#issues").textContent(), "Public summary");
   pass("signed-out public scope never hydrates private data or calls private APIs");
 
+  const anonymousSeed = await page.evaluate(async () => {
+    const cache = (window as any).fixture.cache;
+    const source = await cache.loadSnapshot("private:1:1");
+    for (const key of ["private:9:1", "private:signed-out:99"]) {
+      const { epoch } = await cache.loadSnapshot(key);
+      await cache.storeSnapshot(key, source.snapshot, epoch);
+    }
+    return source;
+  });
   // The normal-URL public-reader branch confirms signed-out through /auth/me.
   userId = null;
   holdIndex = true;
   await page.goto(origin);
   await waitHeld("index");
   assert.equal(await page.locator("#issues").textContent(), "");
+  assert.equal((await read("private:1:1")).snapshot, null);
+  assert.equal((await read("private:9:1")).snapshot, null);
+  assert((await read("private:signed-out:99")).snapshot);
+  assert((await read("public:signed-out:APP:1")).snapshot);
+  assert.equal(await page.evaluate(async stale =>
+    (window as any).fixture.cache.storeSnapshot("private:1:1", stale.snapshot, stale.epoch),
+  anonymousSeed), false);
+  pass("anonymous /auth/me purges every private account, keeps signed-out scopes and fences private writers");
   holdIndex = false;
-  await heldIndex!.fulfill({ json: { cursor: 10, issues: [issue("Signed-out summary")], pages: [] } });
+  await heldIndex!.fulfill({ json: { database_id: databaseId, cursor: 10, issues: [issue("Signed-out summary")], pages: [] } });
   heldIndex = null;
   await ready();
   await durable(10, "private:signed-out:1");

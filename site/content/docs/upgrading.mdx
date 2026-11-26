@@ -64,6 +64,14 @@ Migrations run on this first start.
 
 ## Release notes
 
+### 3.0
+
+- **Custom sync clients:** save the `database_id` returned by `/index` and
+  `/changes`. If it changes, discard the replica and fetch `/index`. Do the same
+  when `/changes` returns `reset: true`: the requested cursor is ahead of the
+  database, typically after restoring a backup. A reset response uses cursor 0;
+  do not merge it into a replica whose cursor only advances.
+
 Newest first. Each section lists what changed for someone upgrading past that version.
 
 ### v2.11

@@ -93,6 +93,11 @@ fn project_archive_roundtrip_preserves_graph_without_neighbor_secrets_or_account
     assert!(!json.contains("PRIVATE PASSWORD HASH"));
     assert!(!json.contains("secret@example.test"));
     let (dest, _destdir, deststore) = fixture();
+    let destination_identity = queries::changes::database_id(&dest.read().unwrap()).unwrap();
+    assert_ne!(
+        destination_identity,
+        queries::changes::database_id(&source.read().unwrap()).unwrap()
+    );
     {
         let c = dest.write().unwrap();
         c.execute_batch("INSERT INTO projects(id,name,identifier) VALUES(100,'Existing','EX'); INSERT INTO issues(id,project_id,sequence,title) VALUES(100,100,1,'Existing issue');").unwrap();
@@ -105,6 +110,10 @@ fn project_archive_roundtrip_preserves_graph_without_neighbor_secrets_or_account
     assert_eq!(result.project, "LIF");
     assert!(!result.external_references.is_empty());
     let c = dest.read().unwrap();
+    assert_eq!(
+        destination_identity,
+        queries::changes::database_id(&c).unwrap()
+    );
     let actual = collect_manifest(&c, "LIF").unwrap();
     for table in &before.tables {
         let s = spec(&table.name).unwrap();

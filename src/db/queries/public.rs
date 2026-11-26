@@ -166,6 +166,7 @@ pub fn public_index(conn: &Connection, project: &Project) -> Result<IndexSnapsho
         issue.assignees.clear();
     }
     Ok(IndexSnapshot {
+        database_id: super::changes::database_id(conn)?,
         cursor,
         issues,
         pages,

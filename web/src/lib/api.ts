@@ -1,6 +1,7 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
 import { inPublicScope, publicMirror, publicSynthetic } from "./publicScope";
-import { clearReadModelAccount, readModelAccount, readModelAccountRevision, setReadModelAccount } from "./sync/account";
+import { clearReadModelAccount, readModelAccountRevision, readModelScope, reconcileReadModelProjects, setReadModelAccount } from "./sync/account";
+import { clearPrivateSnapshots, pruneProjectSnapshots } from "./sync/persistence";
 
 const BASE = "/api";
 
@@ -378,13 +379,14 @@ export async function logout() {
 export async function me() {
   const before = readModelAccountRevision();
   const publicScope = inPublicScope();
-  const wasSignedIn = typeof readModelAccount() === "number" || hasSession();
   const result = await request<AuthUser>("/auth/me");
   if (!publicScope && before === readModelAccountRevision()) {
     if (result.ok) setReadModelAccount(result.data.id);
     else if (result.status === 401) {
-      if (wasSignedIn) await clearSession();
-      else setReadModelAccount(null);
+      localStorage.removeItem("lific_token");
+      setReadModelAccount(null);
+      for (const listener of sessionListeners) listener();
+      await clearPrivateSnapshots();
     }
   }
   return result;
@@ -707,7 +709,15 @@ export interface Project {
 }
 
 export async function listProjects() {
-  return request<Project[]>("/projects");
+  const scope = readModelScope();
+  const revision = readModelAccountRevision();
+  const result = await request<Project[]>("/projects");
+  if (result.ok && scope === readModelScope() && revision === readModelAccountRevision()) {
+    const ids = result.data.map(project => project.id);
+    reconcileReadModelProjects(scope, ids);
+    await pruneProjectSnapshots(scope, ids);
+  }
+  return result;
 }
 
 // LIF-233: persist sidebar order. Send the full id list top-to-bottom; the

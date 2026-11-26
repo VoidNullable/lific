@@ -76,6 +76,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_responses_identify_the_database_and_reset_impossible_cursors() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        seed_issue(&app, project_id, "before backup").await;
+        let snapshot =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/index")).await).await;
+        assert_eq!(snapshot["database_id"].as_str().unwrap().len(), 32);
+        let cursor = snapshot["cursor"].as_i64().unwrap();
+        let response = json_get(
+            &app,
+            &format!("/api/projects/{project_id}/changes?since={}", cursor + 1),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reset = parse_json(response).await;
+        assert_eq!(reset["database_id"], snapshot["database_id"]);
+        assert_eq!(reset["reset"], true);
+        assert_eq!(reset["cursor"], 0);
+        assert_eq!(reset["changes"], serde_json::json!([]));
+        let delta = parse_json(
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/changes?since={cursor}"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(delta["database_id"], snapshot["database_id"]);
+        assert_eq!(delta["reset"], false);
+    }
+
+    #[tokio::test]
     async fn index_returns_live_rows_and_a_cursor() {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;

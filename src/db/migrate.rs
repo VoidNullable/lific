@@ -341,6 +341,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "upload tickets",
         include_str!("../../migrations/069_upload_tickets.sql"),
     ),
+    (
+        77,
+        "database identity",
+        include_str!("../../migrations/077_database_identity.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page

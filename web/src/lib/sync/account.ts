@@ -1,10 +1,12 @@
 import { clearSnapshots } from "./persistence";
+import { getPublicProject } from "../publicScope";
 
 // undefined means the session has not been verified. Never hydrate private
 // rows until the server identifies the account, including with cookie auth.
 let account: number | null | undefined;
 let revision = 0;
 const listeners = new Set<() => void>();
+const projectListeners = new Set<(scope: string, projects: number[]) => void>();
 let channel: BroadcastChannel | null = null;
 let listening = false;
 
@@ -14,6 +16,21 @@ export function readModelAccount(): number | null | undefined {
 
 export function readModelAccountRevision(): number {
   return revision;
+}
+
+export function readModelScope(): string {
+  const publicProject = getPublicProject();
+  return publicProject === null
+    ? `private:${account ?? (account === null ? "signed-out" : "unverified")}:`
+    : `public:signed-out:${publicProject}:`;
+}
+
+export function onReadModelProjects(listener: (scope: string, projects: number[]) => void): void {
+  projectListeners.add(listener);
+}
+
+export function reconcileReadModelProjects(scope: string, projects: number[]): void {
+  for (const listener of projectListeners) listener(scope, projects);
 }
 
 export function setReadModelAccount(id: number | null | undefined): void {

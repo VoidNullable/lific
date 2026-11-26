@@ -53,11 +53,16 @@ cache records, and browsers without usable IndexedDB, fall back to `/index`.
 This is a warm-start cache, not offline editing: authentication, project
 resolution, detail views and writes still use the server.
 
+A confirmed anonymous `/api/auth/me` response removes every account's private
+snapshot while retaining signed-out caches. A successful project-list refresh
+also removes snapshots for projects no longer in the current audience's list.
+Queued writes cannot recreate those removed snapshots.
+
 ### GET `/api/projects/{id}/index`
 
 Every live issue and page in the project, and the cursor to continue from. **Viewer.**
 
-Returns `cursor`, `issues` and `pages`. Each row has the same fields as the matching `/changes` row below, `waits` included. Rows in the trash are left out, and comments are not included.
+Returns `database_id`, `cursor`, `issues` and `pages`. Each row has the same fields as the matching `/changes` row below, `waits` included. Rows in the trash are left out, and comments are not included.
 
 The cursor is read before the rows, so a write that lands during the request can appear both in the snapshot and in the next `/changes`. Apply changes as updates keyed by `id` and a duplicate does no harm.
 
@@ -67,7 +72,23 @@ What changed in the project above a cursor, oldest first. **Viewer.**
 
 Query: `since` (default 0) and `limit` (default 5,000, at most 50,000). `since=0` returns the whole history, which works, but `/index` is cheaper for a first load.
 
-Returns `changes`, `cursor` and `has_more`. `cursor` is the highest `seq` in `changes`, or your `since` when nothing changed, so it never moves backwards. When `has_more` is true, call again with `since` set to the returned cursor.
+Returns `database_id`, `reset`, `changes`, `cursor` and `has_more`. Normally `reset`
+is false and `cursor` is the highest `seq` in `changes`, or your `since` when
+nothing changed. When `has_more` is true, call again with `since` set to the
+returned cursor.
+
+If `since` exceeds the database's current sync counter, the server returns HTTP
+200 with `reset: true`, `changes: []`, `cursor: 0` and `has_more: false`. Discard
+the cached rows and cursor and fetch `/index`; do not merge the replacement
+snapshot into the old rows. This handles a backup restored behind a cached
+cursor.
+
+Both endpoints, including their public mirrors, return the same opaque
+`database_id`. Save it with the rows and cursor. A different ID means this origin
+now serves another database: discard the replica and fetch `/index`, even if the
+new database has already advanced past your cursor. The ID is generated once by
+migration 077 and lives in the database file. Backups retain it; project archive
+imports and `lific doctor --repair` do not replace it.
 
 Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id`. A change with `deleted: true` carries nothing else: remove your copy. Otherwise it also has:
 
@@ -79,6 +100,8 @@ A comment belongs to the project of the issue or page it is on.
 
 ```json
 {
+  "database_id": "984e3b28e3fe438b979834ae4792cd36",
+  "reset": false,
   "changes": [
     {
       "kind": "issue",
