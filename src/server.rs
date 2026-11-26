@@ -2020,16 +2020,17 @@ mod cookie_session_tests {
         assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Headers that are present but are not a usable `Bearer <credential>`.
-    const UNUSABLE_AUTHORIZATION: [&str; 4] =
-        ["Basic eDp5", "bearer {session}", "Bearer", "Token abc"];
-
-    async fn me_status(app: &Router, authorization: Option<&str>, session: &str) -> StatusCode {
-        let mut builder = Request::builder()
-            .uri("/api/auth/me")
-            .header("cookie", format!("lific_token={session}"));
+    async fn me_status(
+        app: &Router,
+        authorization: Option<&str>,
+        cookie: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().uri("/api/auth/me");
         if let Some(authorization) = authorization {
             builder = builder.header("authorization", authorization);
+        }
+        if let Some(session) = cookie {
+            builder = builder.header("cookie", format!("lific_token={session}"));
         }
         app.clone()
             .oneshot(builder.body(Body::empty()).unwrap())
@@ -2038,56 +2039,109 @@ mod cookie_session_tests {
             .status()
     }
 
-    /// Any Authorization header decides the request on its own: an unusable
-    /// one is a 401, never a reason to read the cookie instead.
+    async fn logout(app: &Router, authorization: &str, session: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("authorization", authorization)
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A header with another scheme (a basic-auth proxy in front of Lific) is
+    /// not a Lific credential: the cookie still signs the web app in.
     #[tokio::test]
-    async fn an_unusable_authorization_header_is_refused_even_with_a_valid_cookie() {
+    async fn a_non_bearer_authorization_header_leaves_the_cookie_in_charge() {
         let d = deploy();
-        for header in UNUSABLE_AUTHORIZATION {
-            let header = header.replace("{session}", &d.session);
+        for header in ["Basic eDp5", "Token abc"] {
             assert_eq!(
-                me_status(&d.app, Some(&header), &d.session).await,
+                me_status(&d.app, Some(header), Some(&d.session)).await,
+                StatusCode::OK,
+                "{header}"
+            );
+            assert_eq!(
+                me_status(&d.app, Some(header), None).await,
+                StatusCode::UNAUTHORIZED,
+                "{header} alone is no credential"
+            );
+        }
+    }
+
+    /// And logout behind such a proxy ends the cookie's session.
+    #[tokio::test]
+    async fn logout_with_a_basic_auth_header_ends_the_cookie_session() {
+        let d = deploy();
+        let response = logout(&d.app, "Basic eDp5", &d.session).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::UNAUTHORIZED,
+            "the session was deleted on the server"
+        );
+    }
+
+    /// A Bearer header, in any case, decides the request on its own: a good
+    /// one works without the cookie, and an unusable one is a 401 that never
+    /// falls back to the cookie.
+    #[tokio::test]
+    async fn a_bearer_header_in_any_case_decides_alone() {
+        let d = deploy();
+        let lowercase = format!("bearer {}", d.session);
+        assert_eq!(
+            me_status(&d.app, Some(&lowercase), None).await,
+            StatusCode::OK
+        );
+        for header in [
+            "Bearer",
+            "bearer",
+            "bearer lific_sess_wrong",
+            "Bearer lific_sk-live-wrong",
+        ] {
+            assert_eq!(
+                me_status(&d.app, Some(header), Some(&d.session)).await,
                 StatusCode::UNAUTHORIZED,
                 "{header}"
             );
         }
-        assert_eq!(me_status(&d.app, None, &d.session).await, StatusCode::OK);
     }
 
-    /// Logout with such a header is refused too, rather than answering 200
-    /// while the cookie's session lives on.
+    /// Logout with an unusable Bearer header is refused rather than answering
+    /// 200 while the cookie's session lives on.
     #[tokio::test]
-    async fn logout_with_an_unusable_authorization_header_is_refused_and_changes_nothing() {
+    async fn logout_with_an_unusable_bearer_header_is_refused_and_changes_nothing() {
         let d = deploy();
-        for header in UNUSABLE_AUTHORIZATION {
-            let header = header.replace("{session}", &d.session);
-            let response = d
-                .app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/auth/logout")
-                        .header("host", "lific.example")
-                        .header("x-forwarded-proto", "https")
-                        .header("origin", PUBLIC)
-                        .header("authorization", header.as_str())
-                        .header("cookie", format!("lific_token={}", d.session))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let response = logout(&d.app, header, &d.session).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{header}");
             assert!(response.headers().get("set-cookie").is_none(), "{header}");
         }
-        assert_eq!(me_status(&d.app, None, &d.session).await, StatusCode::OK);
+        assert_eq!(
+            me_status(&d.app, None, Some(&d.session)).await,
+            StatusCode::OK
+        );
     }
 
     /// `[auth] required = false` treats a missing credential as the operator,
-    /// but an unusable header is still a broken client, not "no credential".
+    /// and a non-Bearer header as missing; an unusable Bearer header is still a
+    /// broken client, not "no credential".
     #[tokio::test]
-    async fn an_unusable_authorization_header_is_refused_when_auth_is_optional() {
+    async fn an_unusable_bearer_header_is_refused_when_auth_is_optional() {
         let pool = db::open_memory().expect("test db");
         let mut cfg = Config::default();
         cfg.auth.required = false;
@@ -2102,14 +2156,14 @@ mod cookie_session_tests {
             }
             builder.body(Body::empty()).unwrap()
         };
-        let refused = app
-            .clone()
-            .oneshot(request(Some("Basic eDp5")))
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-        let anonymous = app.oneshot(request(None)).await.unwrap();
-        assert_eq!(anonymous.status(), StatusCode::OK);
+        for header in ["Bearer", "bearer lific_sess_wrong"] {
+            let refused = app.clone().oneshot(request(Some(header))).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{header}");
+        }
+        for header in [None, Some("Basic eDp5")] {
+            let anonymous = app.clone().oneshot(request(header)).await.unwrap();
+            assert_eq!(anonymous.status(), StatusCode::OK, "{header:?}");
+        }
     }
 }
 

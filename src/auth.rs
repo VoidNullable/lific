@@ -243,6 +243,31 @@ fn recent_auth_required() -> crate::error::LificError {
     crate::error::LificError::Forbidden("recent authentication required".into())
 }
 
+/// The credential in an `Authorization: Bearer` header.
+///
+/// The scheme is matched case-insensitively (RFC 9110 section 11.1).
+/// `Some("")` is a Bearer header with nothing usable after it, which callers
+/// refuse like any wrong token. A header with any other scheme, such as the
+/// `Basic` credentials a browser attaches for an HTTP basic-auth proxy in
+/// front of Lific, is not a Lific credential: it yields `None`, the same as no
+/// header, so the session cookie (or anonymous access) applies.
+pub(crate) fn bearer_credential(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(axum::http::header::AUTHORIZATION)?.as_bytes();
+    let split = value
+        .iter()
+        .position(|byte| *byte == b' ' || *byte == b'\t')
+        .unwrap_or(value.len());
+    let (scheme, rest) = value.split_at(split);
+    if !scheme.eq_ignore_ascii_case(b"bearer") {
+        return None;
+    }
+    Some(
+        std::str::from_utf8(rest)
+            .map(|credential| credential.trim().to_string())
+            .unwrap_or_default(),
+    )
+}
+
 /// Pull the browser session token out of the request for a route that mints
 /// durable credentials.
 ///
@@ -261,8 +286,8 @@ pub fn recent_session_token(headers: &HeaderMap) -> Result<String, crate::error:
 /// The browser session token the request authenticated with, or a `Forbidden`
 /// naming what is missing.
 ///
-/// Same precedence as [`require_api_key`]: an `Authorization` header wins, and
-/// only a request without one is read from the `lific_token` cookie. A header
+/// Same precedence as [`require_api_key`]: a `Bearer` header wins, and only a
+/// request without one is read from the `lific_token` cookie. A Bearer header
 /// carrying an API key is refused rather than falling back to the cookie, so
 /// this always names the credential the middleware actually accepted.
 ///
@@ -276,13 +301,8 @@ pub fn session_bearer_token(headers: &HeaderMap) -> Result<String, crate::error:
             "this action requires a signed-in browser session".into(),
         )
     };
-    let token = match headers.get("authorization") {
-        Some(value) => value
-            .to_str()
-            .ok()
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(|value| value.trim().to_string())
-            .ok_or_else(refused)?,
+    let token = match bearer_credential(headers) {
+        Some(token) => token,
         None => session_cookie_token(headers).ok_or_else(refused)?,
     };
 
@@ -776,17 +796,9 @@ pub async fn require_api_key(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Extract Bearer token from Authorization header. Whether the header is
-    // there at all is kept apart: a request that sends one is judged by it
-    // alone, so an unusable header is refused rather than read past to the
-    // session cookie.
-    let has_authorization = request.headers().contains_key("authorization");
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
+    // A Bearer header decides the request on its own, usable or not; any
+    // other scheme is not a Lific credential (see [`bearer_credential`]).
+    let token = bearer_credential(request.headers());
 
     // Targeted diagnostics for the MCP endpoint only (keeps REST traffic quiet).
     // Lets us see, post-OAuth, whether Claude actually presents the bearer token
@@ -800,7 +812,6 @@ pub async fn require_api_key(
             Some(t) if t.starts_with("lific_at_") => "oauth",
             Some(t) if t.starts_with("lific_sk") => "api_key",
             Some(_) => "unknown",
-            None if has_authorization => "malformed",
             None => "none",
         };
         info!(method = %request.method(), token_kind, "/mcp request received");
@@ -816,17 +827,9 @@ pub async fn require_api_key(
     );
 
     let Some(token) = token else {
-        if has_authorization {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", www_auth.as_str())],
-                "Malformed Authorization header: expected `Bearer <key>`",
-            )
-                .into_response();
-        }
         // The web app's credential is the HttpOnly `lific_token` cookie set at
         // sign-in, so no script on the page can read the session. A request
-        // with no Authorization header presents it here and is resolved
+        // with no Bearer header presents it here and is resolved
         // exactly like a header-borne session token. `/mcp` is left out: MCP
         // clients authenticate with a bearer token, and the cookie has no
         // business reaching that surface.
@@ -3751,6 +3754,40 @@ mod tests {
             session_bearer_token(&headers).is_err(),
             "an API key in the header must not borrow the cookie's session"
         );
+
+        headers.insert("authorization", "Bearer".parse().unwrap());
+        assert!(
+            session_bearer_token(&headers).is_err(),
+            "a bare Bearer header must not borrow the cookie's session"
+        );
+
+        headers.insert("authorization", "Basic eDp5".parse().unwrap());
+        assert_eq!(
+            session_bearer_token(&headers).unwrap(),
+            "lific_sess_cookie",
+            "a proxy's basic-auth header is not a Lific credential"
+        );
+    }
+
+    #[test]
+    fn bearer_credential_matches_the_scheme_case_insensitively_and_ignores_others() {
+        let read = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", value.parse().unwrap());
+            bearer_credential(&headers)
+        };
+        assert_eq!(
+            read("Bearer lific_sk-live-x").as_deref(),
+            Some("lific_sk-live-x")
+        );
+        assert_eq!(read("bearer lific_sess_x").as_deref(), Some("lific_sess_x"));
+        assert_eq!(read("BEARER  lific_at_x ").as_deref(), Some("lific_at_x"));
+        assert_eq!(read("Bearer").as_deref(), Some(""));
+        assert_eq!(read("Bearer ").as_deref(), Some(""));
+        assert_eq!(read("Basic eDp5"), None);
+        assert_eq!(read("Token abc"), None);
+        assert_eq!(read("Bearerx abc"), None);
+        assert_eq!(bearer_credential(&HeaderMap::new()), None);
     }
 
     #[test]
