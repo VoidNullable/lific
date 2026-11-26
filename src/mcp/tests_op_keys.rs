@@ -172,6 +172,28 @@ fn add_comment_replays_on_retry() {
 }
 
 #[test]
+fn add_comment_key_reused_with_another_kind_is_refused() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "TST");
+    seed_issue(&m, "TST", "Talk");
+    let comment = |kind| {
+        m.add_comment(Parameters(AddCommentInput {
+            kind,
+            identifier: "TST-1".into(),
+            content: "Use SQLite".into(),
+            op_key: Some("c1".into()),
+        }))
+    };
+    let first = comment(models::CommentWriteKind::Comment);
+    assert!(first.starts_with("Comment #"), "got: {first}");
+
+    let refused = comment(models::CommentWriteKind::Decision);
+
+    assert!(refused.contains("different request"), "got: {refused}");
+    assert_eq!(count(&m, "comments"), 1);
+}
+
+#[test]
 fn create_page_replays_on_retry() {
     let (m, _guard) = mcp();
     seed_project(&m, "Test", "TST");

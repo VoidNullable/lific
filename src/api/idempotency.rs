@@ -277,6 +277,42 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_comment_key_reused_with_another_kind_is_a_conflict() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let issue = body_of(
+            json_post(
+                &app,
+                "/api/issues",
+                json!({"project_id": project_id, "title": "Host"}),
+            )
+            .await,
+        )
+        .await;
+        let uri = format!("/api/issues/{}/comments", issue["id"].as_i64().unwrap());
+        let (status, _, _) = post_keyed(
+            &app,
+            &uri,
+            "k1",
+            json!({"content": "Use SQLite", "kind": "comment"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, replayed, error) = post_keyed(
+            &app,
+            &uri,
+            "k1",
+            json!({"content": "Use SQLite", "kind": "decision"}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "got: {error}");
+        assert!(!replayed);
+        assert_eq!(listed(&app, &uri).await, 1);
+    }
+
     /// A retry sent while the original still writes waits for it and gets
     /// the replay, not a conflict. The test holds the writer so both requests
     /// are inside their handlers before either can write.
