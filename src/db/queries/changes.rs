@@ -806,8 +806,10 @@ mod tests {
         let identity = database_id(&conn).unwrap();
         assert_eq!(identity.len(), 32);
         assert_ne!(identity, database_id(&other.read().unwrap()).unwrap());
-        conn.execute_batch(include_str!("../../../migrations/077_database_identity.sql"))
-            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../../migrations/077_database_identity.sql"
+        ))
+        .unwrap();
         crate::db::migrate::run(&conn).unwrap();
         assert_eq!(identity, database_id(&conn).unwrap());
         assert_eq!(identity, get_index(&conn, project).unwrap().database_id);
