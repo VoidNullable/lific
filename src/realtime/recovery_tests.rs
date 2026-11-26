@@ -128,6 +128,15 @@ fn fixture() -> Recovery {
             },
         )
         .expect("project");
+        for member in [human.id, bystander.id] {
+            crate::db::queries::members::upsert_member(
+                &conn,
+                project.id,
+                member,
+                crate::db::models::Role::Viewer,
+            )
+            .expect("membership");
+        }
         (
             project.id,
             human.id,

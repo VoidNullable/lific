@@ -381,13 +381,9 @@ pub fn delete_project(conn: &Connection, id: i64) -> Result<(), LificError> {
 pub fn delete_project_with_audience(
     conn: &Connection,
     id: i64,
-) -> Result<(Project, Option<Vec<i64>>), LificError> {
+) -> Result<(Project, Vec<i64>), LificError> {
     let project = get_project(conn, id)?;
-    let audience = if super::settings::get(conn)?.authz_enforced {
-        Some(project_viewer_ids(conn, &project)?)
-    } else {
-        None
-    };
+    let audience = project_viewer_ids(conn, &project)?;
     delete_project(conn, id)?;
     Ok((project, audience))
 }

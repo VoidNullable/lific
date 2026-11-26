@@ -803,7 +803,6 @@ fn comment(
             // author's: `--user` says who wrote it, not whose permissions the
             // body's references borrow.
             let project_id = parent.project_id(&conn)?;
-            let member_scoped = crate::authz::authz_enforced_conn(&conn)?;
             let comment = queries::comments::create_comment_with_mentions(
                 &conn,
                 parent,
@@ -811,7 +810,6 @@ fn comment(
                 author,
                 AttachmentActor::TrustedLocal,
                 content,
-                member_scoped,
             )?;
             drop(conn);
 

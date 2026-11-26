@@ -571,9 +571,9 @@ fn project_archive_preserves_destination_settings_and_keeps_published_source_pri
     let settings_before = {
         let c = dest.write().unwrap();
         queries::settings::ensure(&c, false).unwrap();
-        c.execute("UPDATE instance_settings SET authz_enforced=1", [])
+        c.execute("UPDATE instance_settings SET stale_active_days=9", [])
             .unwrap();
-        c.query_row("SELECT authz_enforced FROM instance_settings", [], |r| {
+        c.query_row("SELECT stale_active_days FROM instance_settings", [], |r| {
             r.get::<_, i64>(0)
         })
         .unwrap()
@@ -581,7 +581,7 @@ fn project_archive_preserves_destination_settings_and_keeps_published_source_pri
     import(&dest, &deststore, &path, "owner").unwrap();
     let c = dest.read().unwrap();
     assert_eq!(
-        c.query_row("SELECT authz_enforced FROM instance_settings", [], |r| r
+        c.query_row("SELECT stale_active_days FROM instance_settings", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         settings_before

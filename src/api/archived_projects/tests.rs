@@ -75,18 +75,6 @@ impl Instance {
             .token
     }
 
-    fn enforce_authz(&self, on: bool) {
-        let conn = self.db.write().unwrap();
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(on),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
-
     fn project(&self, members: &[(i64, &str)]) -> i64 {
         let conn = self.db.write().unwrap();
         conn.execute_batch(
@@ -132,7 +120,6 @@ impl Instance {
 #[tokio::test]
 async fn a_lead_archives_and_only_an_admin_lists_and_unarchives() {
     let instance = Instance::new();
-    instance.enforce_authz(true);
     let admin = instance.user("admin", true);
     let lead = instance.user("lead", false);
     let project = instance.project(&[(lead.id, "lead")]);
@@ -209,7 +196,6 @@ async fn a_lead_archives_and_only_an_admin_lists_and_unarchives() {
 #[tokio::test]
 async fn a_viewer_cannot_archive() {
     let instance = Instance::new();
-    instance.enforce_authz(true);
     let viewer = instance.user("viewer", false);
     let project = instance.project(&[(viewer.id, "viewer")]);
     let token = instance.session(viewer.id);
@@ -223,9 +209,8 @@ async fn a_viewer_cannot_archive() {
 }
 
 #[tokio::test]
-async fn without_enforcement_only_an_admin_archives() {
+async fn a_non_member_cannot_archive_and_an_admin_can() {
     let instance = Instance::new();
-    instance.enforce_authz(false);
     let admin = instance.user("admin", true);
     let user = instance.user("someone", false);
     let project = instance.project(&[]);

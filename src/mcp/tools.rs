@@ -1734,11 +1734,10 @@ impl Display for ActivityLine<'_> {
 //
 // LIFIC-11: MCP gates now call the exact same `crate::authz` primitives REST
 // does — one seam, one behavior, no transport-specific divergence. The old
-// `mcp_gate` short-circuit that kept MCP wide-open in legacy mode is gone:
-// `authz::*` carry their own legacy-mode branches, so MCP inherits identical
-// semantics to REST. The `LificError` denials translate to the `String` error
-// type `self.read`/`self.write` use, rendering as the same
-// `Error: Forbidden: <msg>` shape every other MCP error uses.
+// `mcp_gate` short-circuit that kept MCP wide-open in legacy mode is gone, and
+// since 3.0 so is legacy mode itself. The `LificError` denials translate to
+// the `String` error type `self.read`/`self.write` use, rendering as the
+// same `Error: Forbidden: <msg>` shape every other MCP error uses.
 
 /// Require the caller hold at least `min` role on `project_id`.
 fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Result<(), String> {
@@ -1746,22 +1745,22 @@ fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Res
         .map_err(|e| e.to_string())
 }
 
-/// Gate for module/label/folder ("structure") mutations — Maintainer once
-/// enforcement is on, Lead in legacy mode (matches REST).
+/// Gate for module/label/folder ("structure") mutations: Maintainer (matches
+/// REST).
 fn require_structure_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
     crate::authz::require_structure_role(db, &super::current_identity(db), project_id)
         .map_err(|e| e.to_string())
 }
 
-/// Gate for `delete(resource_type="project")` — Lead once enforcement is on
-/// (design decision #6), admin-only in legacy mode (matches REST).
+/// Gate for `delete(resource_type="project")`: Lead (design decision #6,
+/// matches REST).
 fn require_project_delete_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
     crate::authz::require_project_delete_role(db, &super::current_identity(db), project_id)
         .map_err(|e| e.to_string())
 }
 
-/// Gate for workspace-level (project-less) pages/comments — admin-only once
-/// enforcement is on, a no-op in legacy mode (matches REST).
+/// Gate for workspace-level (project-less) pages/comments: admin-only
+/// (matches REST).
 fn require_workspace_admin_mcp(db: &Arc<DbPool>) -> Result<(), String> {
     crate::authz::require_workspace_admin(db, &super::current_identity(db))
         .map_err(|e| e.to_string())
@@ -3456,7 +3455,6 @@ No issues found."
                         author,
                         models::AttachmentActor::Authenticated(author),
                         evidence,
-                        crate::authz::authz_enforced_conn(conn)?,
                     )?;
                     // The comment bumped the issue's seq; report the current one.
                     (queries::get_issue(conn, id)?, Some(comment.id))
@@ -4485,10 +4483,7 @@ No issues found."
                 let event = crate::realtime::RealtimeEvent::ProjectDeleted {
                     project_id: project.id,
                 };
-                match audience {
-                    Some(user_ids) => self.realtime.send_to_users(event, user_ids),
-                    None => self.emit(event),
-                }
+                self.realtime.send_to_users(event, audience);
                 Ok(format!("Deleted project {}", project.identifier))
             }
             "module" | "label" | "folder" => {
@@ -4796,7 +4791,7 @@ No issues found."
                 // Project-scoped: Viewer gate. Cross-project (no `project`
                 // filter): filter by visibility instead of denying (LIF-198
                 // scope item 2) — a workspace page (project_id None) is
-                // excluded for any non-admin once enforcement is on.
+                // excluded for any non-admin.
                 let visible = if let Some(pid) = project_id {
                     require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                     None
@@ -5263,7 +5258,6 @@ No issues found."
                 project_id,
                 models::Role::Viewer,
             )?;
-            let member_scoped = crate::authz::authz_enforced_conn(conn)?;
             let author = models::CommentActor::from(&actor.user);
             let comment = queries::comments::create_comment_with_mentions(
                 conn,
@@ -5272,7 +5266,6 @@ No issues found."
                 author,
                 models::AttachmentActor::Authenticated(author),
                 &input.content,
-                member_scoped,
             )?;
             let event = comment_updated_event(parent, project_id);
             Ok((comment, parent, parent_identifier, event))
@@ -5515,7 +5508,6 @@ No issues found."
                     "you can only edit your own comments".into(),
                 ));
             }
-            let member_scoped = crate::authz::authz_enforced_conn(conn)?;
             let body = edit.apply(&existing.content)?;
             // LIF-375: shared with the REST edit path; re-derives mentions
             // and attachment links from the new body (LIF-369).
@@ -5526,7 +5518,6 @@ No issues found."
                 // The editor's reach, not the original author's.
                 models::AttachmentActor::Authenticated(models::CommentActor::from(&actor.user)),
                 &body,
-                member_scoped,
             )?;
             Ok((comment, context))
         })?;
@@ -7106,7 +7097,7 @@ mod tests {
     /// LIFIC-11: a fresh install has a first admin (LIFIC-9), and MCP gates now
     /// resolve the caller via `resolve_caller` — a credential-less request falls
     /// back to that admin. Seed one so the structure/project mutations these
-    /// tests perform (Lead/admin-gated in legacy mode, like REST) resolve to an
+    /// tests perform (role-gated, like REST) resolve to an
     /// admin identity instead of default-denying.
     fn seed_first_admin(db: &crate::db::DbPool) {
         let conn = db.write().unwrap();
@@ -7211,11 +7202,10 @@ mod tests {
             .expect("issue id")
     }
 
-    /// LIF-198: MCP-side mirror of `api::test_helpers::setup_membership_test`
-    /// — reuses the exact same fixture (DB with `authz_enforced` ON, an
-    /// admin, and a project with a lead/maintainer/viewer member plus a
-    /// non-member) so the flag-ON test matrix stays byte-identical to
-    /// REST's (LIF-197), just wrapped as an `LificMcp` + `AuthUser`s ready
+    /// LIF-198: MCP-side mirror of `api::test_helpers::setup_membership_test`.
+    /// It reuses the exact same fixture (an admin, and a project with a
+    /// lead/maintainer/viewer member plus a non-member) so the test matrix
+    /// stays byte-identical to REST's (LIF-197), just wrapped as an `LificMcp` + `AuthUser`s ready
     /// for `with_request_user` instead of an axum `Router` + `Extension`.
     pub(super) fn setup_membership_mcp() -> (
         LificMcp,
@@ -9944,8 +9934,7 @@ mod tests {
     }
 
     // LIF-263: the MCP add_comment path records @mentions too, using the
-    // same visible-member rules as REST (enforcement is off in this test
-    // fixture, so all non-bot users are candidates).
+    // same visible-member rules as REST (ada is a member, ghost doesn't exist).
     #[test]
     fn add_comment_records_mentions() {
         let (m, _guard) = mcp();
@@ -9970,6 +9959,11 @@ mod tests {
             .unwrap()
             .id
         };
+        let project_id = project_id_for(&m, "PRJ");
+        m.write(|conn| {
+            queries::members::upsert_member(conn, project_id, ada_id, models::Role::Viewer)
+        })
+        .unwrap();
 
         let result = m.add_comment(Parameters(AddCommentInput {
             identifier: "PRJ-1".into(),
@@ -12512,6 +12506,8 @@ mod tests {
         guard
     }
 
+    /// A user who is a maintainer of every project seeded so far, so tests
+    /// about comment ownership aren't decided by project roles.
     fn make_user(m: &LificMcp, username: &str, is_admin: bool) -> models::User {
         let conn = m.db.write().unwrap();
         let u = queries::users::create_user(
@@ -12526,6 +12522,10 @@ mod tests {
             },
         )
         .unwrap();
+        for project in queries::list_projects(&conn).unwrap() {
+            queries::members::upsert_member(&conn, project.id, u.id, models::Role::Maintainer)
+                .unwrap();
+        }
         drop(conn);
         u
     }
@@ -13470,7 +13470,15 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.last_insert_rowid()
+            let bot_id = conn.last_insert_rowid();
+            // Ownerless, so it acts on its own role.
+            conn.execute(
+                "INSERT INTO project_members (project_id, user_id, role)
+                 SELECT id, ?1, 'maintainer' FROM projects WHERE identifier = 'TST'",
+                [bot_id],
+            )
+            .unwrap();
+            bot_id
         };
         let user = crate::db::models::AuthUser {
             id: bot_id,
@@ -15622,12 +15630,9 @@ mod tests {
 }
 
 /// LIF-198: project-scoped authorization enforcement across every MCP tool.
-/// Flag-ON cases mirror `api::mod.rs`'s `authz_gating_tests` matrix
+/// The cases mirror `api::mod.rs`'s `authz_gating_tests` matrix
 /// byte-for-byte (same fixture — `setup_membership_mcp`, wrapping
-/// `api::test_helpers::setup_membership_test`); the flag-OFF smoke test is
-/// the regression proof that MCP's historical (fully open) behavior hasn't
-/// moved — the 93 pre-existing `mcp::tools::tests` above all run flag-OFF
-/// by default and already prove that in full.
+/// `api::test_helpers::setup_membership_test`).
 #[cfg(test)]
 mod authz_gating_tests {
     use super::tests::{attachment_store_tempdir, comment_id_from, setup_membership_mcp};
@@ -15676,7 +15681,7 @@ mod authz_gating_tests {
         });
         assert!(created.starts_with("Created"), "got: {created}");
 
-        // Non-member is refused with enforcement on (mirrors update_issue).
+        // Non-member is refused (mirrors update_issue).
         let denied = as_user(&non_member, || {
             m.bulk_update(Parameters(BulkUpdateInput {
                 project: "MEM".into(),
@@ -17058,7 +17063,7 @@ mod authz_gating_tests {
     // This drives an actual MCP tool call through the SAME
     // `require_api_key` middleware production wires in front of `/mcp`
     // (`main.rs`), proving a token bound to a project member (maintainer)
-    // succeeds on read + write once `authz_enforced` is on, and a token
+    // succeeds on read + write, and a token
     // bound to a non-member is still denied on both — the specific
     // "default-deny bricks token-backed agents" failure mode LIF-DOC-7
     // decision #9 exists to prevent.
@@ -17243,12 +17248,13 @@ mod authz_gating_tests {
         );
     }
 
-    // ── Flag OFF smoke: non-member agent can still mutate ────────
+    // ── LIF-518: the legacy open door is closed over MCP too ─────
 
     #[test]
-    fn flag_off_non_member_agent_can_still_mutate() {
-        // setup_lead_test-equivalent: a plain project with authz_enforced
-        // left at its default (off), an unrelated authenticated user.
+    fn non_member_agent_on_a_default_instance_cannot_mutate() {
+        // setup_lead_test-equivalent: a plain project on an instance nobody
+        // configured, and an unrelated authenticated user. Legacy mode let
+        // this caller write; nothing does now.
         let db = crate::db::open_memory().expect("test db");
         let (project_lead, outsider) = {
             let conn = db.write().unwrap();
@@ -17312,8 +17318,8 @@ mod authz_gating_tests {
             }))
         });
         assert!(
-            !is_forbidden(&result),
-            "flag off: a non-member agent must still be able to mutate (MCP's historical behavior): {result}"
+            is_forbidden(&result),
+            "a non-member agent must be refused: {result}"
         );
     }
 

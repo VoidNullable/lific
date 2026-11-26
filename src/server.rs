@@ -1571,7 +1571,6 @@ mod public_surface_tests {
                 },
                 AttachmentActor::TrustedLocal,
                 "A public comment",
-                false,
             )
             .unwrap();
 

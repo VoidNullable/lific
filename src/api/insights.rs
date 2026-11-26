@@ -116,7 +116,7 @@ mod tests {
 }
 
 /// LIF-197/LIF-201: Viewer-gated like every sibling read handler in
-/// `api::activity`; a non-member with the flag on must get 403, a viewer
+/// `api::activity`; a non-member must get 403, a viewer
 /// must get 200.
 #[cfg(test)]
 mod authz_gating_tests {

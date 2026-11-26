@@ -13,8 +13,7 @@ use super::{filter_visible, with_read, with_write};
 /// Gate a page mutation/read by its `project_id`: project-scoped pages check
 /// `min` role on the project; workspace-level pages (`project_id = None`,
 /// the only entity besides itself that can be project-less — plans always
-/// require a project) fall back to admin-only once enforcement is on
-/// (design decision #10).
+/// require a project) are admin-only (design decision #10).
 fn require_page_role(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -82,8 +81,8 @@ pub(super) async fn list_pages_handler(
         .map(Json);
     }
     // Cross-project list (LIF-197 scope item 2): filter, don't deny. A
-    // workspace page (project_id None) is excluded for any non-admin once
-    // enforcement is on — see `filter_visible`'s doc comment.
+    // workspace page (project_id None) is excluded for any non-admin; see
+    // `filter_visible`'s doc comment.
     let visible = authz::visible_project_ids(&db, &identity)?;
     let pages = with_read(&db, |conn| {
         crate::db::queries::list_pages(

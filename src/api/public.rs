@@ -930,7 +930,6 @@ mod tests {
                 },
                 AttachmentActor::TrustedLocal,
                 content,
-                false,
             )
             .unwrap()
             .id
@@ -2206,14 +2205,11 @@ mod publication_setting_tests {
         assert_eq!(project["is_public"], false);
     }
 
-    /// Legacy mode (`authz_enforced` off) is the default on every existing
-    /// instance, and its `require_role` treats Viewer and Maintainer as
-    /// unconditional allows. Only the Lead branch denies anybody, so this is
-    /// the mode where a wrong gate would be invisible.
+    /// Publishing is a Lead action: a non-member is refused, the lead and an
+    /// admin are not.
     #[tokio::test]
-    async fn only_the_lead_or_an_admin_may_publish_in_legacy_mode() {
+    async fn only_the_lead_or_an_admin_may_publish() {
         let (db, admin, lead, regular, project_id) = setup_lead_test();
-        assert!(!crate::authz::authz_enforced(&db).unwrap());
 
         let publish = serde_json::json!({ "is_public": true });
 
@@ -2250,7 +2246,7 @@ mod publication_setting_tests {
         assert!(!is_public(&db, project_id));
     }
 
-    /// Enforced mode: the roles below Lead exist and are denied by name.
+    /// The roles below Lead exist and are denied by name.
     #[tokio::test]
     async fn maintainers_and_viewers_may_not_publish_in_enforced_mode() {
         let (db, _admin, lead, maintainer, viewer, non_member, project_id) =

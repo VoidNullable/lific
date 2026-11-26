@@ -335,7 +335,7 @@ fn router_impl(
         // without reading the full roster or the admin-only instance settings.
         .route("/api/projects/{id}/my-role", get(members::my_project_role))
         // @mention autocomplete candidates (LIF-263) — Viewer-gated,
-        // member-scoped when authz enforcement is on.
+        // member-scoped.
         .route(
             "/api/projects/{id}/mention-candidates",
             get(comments::mention_candidates),
@@ -690,9 +690,8 @@ where
 /// LIF-196: thin wrapper over `authz::require_role(.., Role::Lead)`, the
 /// single enforcement primitive shared with MCP. Kept as its own function so
 /// existing call sites (`api/resources.rs`, `api/projects.rs`) don't churn.
-/// The behavior above is unchanged while the `authz_enforced` instance
-/// setting is off (today's default); see `src/authz.rs` for the full mode
-/// split.
+/// Since 3.0 a lead without a membership row is not enough: the role comes
+/// from `project_members` (see `src/authz.rs`).
 fn require_project_lead(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -1230,23 +1229,13 @@ pub(crate) mod test_helpers {
         (db, admin, lead, regular, project.id)
     }
 
-    /// LIF-197: set up a DB with `authz_enforced` ON, an admin, and a
-    /// project with a lead/maintainer/viewer member plus a non-member —
-    /// the fixture the LIF-197 flag-ON test matrix (and its LIF-198 MCP
-    /// sibling) both need. Returns
+    /// LIF-197: set up a DB with an admin and a project with a
+    /// lead/maintainer/viewer member plus a non-member: the fixture the
+    /// LIF-197 test matrix (and its LIF-198 MCP sibling) both need. Returns
     /// `(db, admin, lead, maintainer, viewer, non_member, project_id)`.
     pub fn setup_membership_test() -> (DbPool, User, User, User, User, User, i64) {
         let db = crate::db::open_memory().expect("test db");
         let conn = db.write().unwrap();
-
-        crate::db::queries::settings::update(
-            &conn,
-            crate::db::queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
 
         let mk_user = |username: &str, is_admin: bool| {
             crate::db::queries::users::create_user(
@@ -1589,9 +1578,7 @@ mod tests {
 }
 
 /// LIF-197: project-scoped authorization enforcement across every REST
-/// handler. Flag-ON cases exercise the full viewer/maintainer/lead matrix;
-/// the flag-OFF smoke test is the regression proof that today's behavior
-/// (all 530 pre-existing tests, run flag-OFF by default) hasn't moved.
+/// handler: the full viewer/maintainer/lead matrix.
 #[cfg(test)]
 mod authz_gating_tests {
     use super::test_helpers::*;
@@ -2282,7 +2269,7 @@ mod authz_gating_tests {
     // This test closes that gap at the layer closest to production: the
     // actual `api::router` wrapped in the actual `require_api_key`
     // middleware (mirroring `main.rs`'s `authed_routes`), fed a real OAuth
-    // bearer token. Flag ON: a token bound to a project member (maintainer)
+    // bearer token. A token bound to a project member (maintainer)
     // must succeed on read AND write — the specific "member gets bricked by
     // default-deny" failure mode the design doc calls the lockout landmine.
     // A token bound to a non-member must still be denied on both.
@@ -2439,45 +2426,34 @@ mod authz_gating_tests {
         );
     }
 
-    // ── Flag OFF: byte-for-byte regression proof ──────────────────
+    // ── LIF-518: what legacy mode allowed is gone ─────────────────
 
     #[tokio::test]
-    async fn flag_off_preserves_legacy_behavior() {
-        // setup_lead_test seeds a DB with authz_enforced left at its default
-        // (off) — a random authenticated non-member.
+    async fn legacy_open_access_is_gone() {
+        // setup_lead_test: a lead, an admin, and an authenticated non-member,
+        // the caller legacy mode let read and write everything.
         let (db, admin, lead, regular, project_id) = setup_lead_test();
         let random_app = app_as_user(db.clone(), &regular);
 
-        // Reads + content mutation stay open to any authenticated user.
         assert_eq!(
             json_get(&random_app, &format!("/api/projects/{project_id}"))
                 .await
                 .status(),
-            StatusCode::OK
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             json_post(
                 &random_app,
                 "/api/issues",
-                serde_json::json!({ "project_id": project_id, "title": "Legacy open" })
-            )
-            .await
-            .status(),
-            StatusCode::OK,
-            "content mutation must stay open when the flag is off"
-        );
-
-        // Structure endpoints stay lead-gated (not loosened to Maintainer).
-        assert_eq!(
-            json_post(
-                &random_app,
-                "/api/modules",
-                serde_json::json!({"project_id": project_id, "name": "Nope"})
+                serde_json::json!({ "project_id": project_id, "title": "No longer open" })
             )
             .await
             .status(),
             StatusCode::FORBIDDEN
         );
+
+        // The lead manages structure and may delete the project, which the
+        // legacy delete gate kept for admins alone.
         let lead_app = app_as_user(db.clone(), &lead);
         assert_eq!(
             json_post(
@@ -2489,55 +2465,18 @@ mod authz_gating_tests {
             .status(),
             StatusCode::OK
         );
-
-        // Project delete stays admin-only (lead denied, matching pre-LIF-194).
+        let admin_app = app_as_user(db, &admin);
+        assert_eq!(
+            json_get(&admin_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
         assert_eq!(
             json_delete(&lead_app, &format!("/api/projects/{project_id}"))
                 .await
                 .status(),
-            StatusCode::FORBIDDEN
-        );
-        let admin_app = app_as_user(db, &admin);
-        assert_eq!(
-            json_delete(&admin_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
             StatusCode::OK
-        );
-    }
-
-    // ── Runtime toggle via PATCH /api/instance/settings ───────────
-
-    #[tokio::test]
-    async fn toggling_authz_enforced_via_patch_changes_behavior_on_next_request() {
-        let (db, admin, _lead, regular, project_id) = setup_lead_test();
-        let admin_app = app_as_user(db.clone(), &admin);
-        let regular_app = app_as_user(db.clone(), &regular);
-
-        // Flag off (default): a non-member can read the project freely.
-        assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
-            StatusCode::OK
-        );
-
-        let resp = json_patch(
-            &admin_app,
-            "/api/instance/settings",
-            serde_json::json!({"authz_enforced": true}),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(parse_json(resp).await["authz_enforced"], true);
-
-        // Same connection, next request: the non-member is now denied — no
-        // restart required (authz::authz_enforced reads the row live).
-        assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}"))
-                .await
-                .status(),
-            StatusCode::FORBIDDEN
         );
     }
 
@@ -2736,24 +2675,14 @@ mod authz_gating_tests {
     async fn websocket_refreshes_activity_baseline_after_cache_expiry() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
+        let project_id = websocket_project(&db, "EXP");
         let (url, server) = websocket_test_server(db.clone(), realtime).await;
         let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
             .await
             .unwrap();
 
         let initial = request_activity_baseline(&mut socket).await;
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::create_project(
-                &conn,
-                &crate::db::models::CreateProject {
-                    name: "After baseline expiry".into(),
-                    identifier: "EXP".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        websocket_module(&db, project_id, "After baseline expiry");
 
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         assert_eq!(request_activity_baseline(&mut socket).await, initial + 1);
@@ -2920,24 +2849,14 @@ mod authz_gating_tests {
         // A one-slot channel lags the socket's receiver as soon as the test
         // queues more than one event without yielding to the socket task.
         let realtime = crate::realtime::RealtimeHub::with_capacity(1);
+        let project_id = websocket_project(&db, "RSNC");
         let (url, server) = websocket_test_server(db.clone(), realtime.clone()).await;
         let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
             .await
             .unwrap();
 
         let initial = request_activity_baseline(&mut socket).await;
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::create_project(
-                &conn,
-                &crate::db::models::CreateProject {
-                    name: "After resync".into(),
-                    identifier: "RSNC".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        websocket_module(&db, project_id, "After resync");
 
         // Queued synchronously: the socket task cannot drain between sends, so
         // its receiver overflows and the next recv reports a lag.
@@ -2959,7 +2878,18 @@ mod authz_gating_tests {
     // ── LIF-440: WebSocket event replay ──────────────────────────
 
     /// Seed a project the websocket user can see, and return its id.
+    /// A project the `websocket_session` user can see.
     fn websocket_project(db: &crate::db::DbPool, identifier: &str) -> i64 {
+        let project_id = websocket_hidden_project(db, identifier);
+        let conn = db.write().unwrap();
+        let user = crate::db::queries::users::get_user_by_username(&conn, "ws-user").unwrap();
+        crate::db::queries::members::upsert_member(&conn, project_id, user.id, Role::Viewer)
+            .unwrap();
+        project_id
+    }
+
+    /// A project the `websocket_session` user holds no role in.
+    fn websocket_hidden_project(db: &crate::db::DbPool, identifier: &str) -> i64 {
         let conn = db.write().unwrap();
         crate::db::queries::create_project(
             &conn,
@@ -2971,6 +2901,22 @@ mod authz_gating_tests {
         )
         .unwrap()
         .id
+    }
+
+    /// One new audit row in `project_id`.
+    fn websocket_module(db: &crate::db::DbPool, project_id: i64, name: &str) {
+        let conn = db.write().unwrap();
+        crate::db::queries::create_module(
+            &conn,
+            &crate::db::models::CreateModule {
+                project_id,
+                name: name.into(),
+                description: String::new(),
+                status: "active".into(),
+                emoji: None,
+            },
+        )
+        .unwrap();
     }
 
     /// Ask for the activity baseline and require it to be the very next
@@ -3090,18 +3036,7 @@ mod authz_gating_tests {
     async fn websocket_resume_on_an_invisible_project_replays_nothing() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
-        let project_id = websocket_project(&db, "HIDE");
-        {
-            let conn = db.write().unwrap();
-            crate::db::queries::settings::update(
-                &conn,
-                crate::db::queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        }
+        let project_id = websocket_hidden_project(&db, "HIDE");
         realtime.send_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,

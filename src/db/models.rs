@@ -1092,9 +1092,8 @@ pub struct UpdateComment {
 
 /// LIF-263: a user who can be `@`-mentioned in a comment. Powers
 /// `GET /api/projects/{id}/mention-candidates` — the autocomplete list the
-/// composer fuzzy-filters client-side. Scoped to project members when
-/// `authz_enforced` is on, all users otherwise (see
-/// `db::queries::comments::mention_candidates`).
+/// composer fuzzy-filters client-side. Scoped to the project's members and
+/// the instance admins (see `db::queries::comments::mention_candidates`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MentionCandidate {
     pub user_id: i64,

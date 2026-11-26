@@ -518,10 +518,9 @@ pub enum Command {
 
     /// Manage project membership (who can see and edit which project).
     ///
-    /// With authorization enforcement on (`lific instance set
-    /// --authz-enforced true`, the default on fresh installs), users only see
-    /// projects they are members of — a freshly created user sees nothing
-    /// until granted access here (or via the web UI's project members page).
+    /// Users only see projects they are members of: a freshly created user
+    /// sees nothing until granted access here (or via the web UI's project
+    /// members page).
     Member {
         #[command(subcommand)]
         action: MemberAction,
@@ -1309,15 +1308,6 @@ pub enum InstanceAction {
         /// instance is publicly reachable.
         #[arg(long = "auto-login")]
         auto_login: Option<bool>,
-
-        /// Enable project-scoped default-deny authorization (LIF-194). When
-        /// true, viewer/maintainer/lead project membership is enforced on every
-        /// REST/MCP call, including reads. Fresh installs (created 2.1+) seed
-        /// this ON; upgrades keep it OFF until you set it. Unbound API keys
-        /// (from `lific start`/`lific key create`/`connect`) are operator-
-        /// trusted and bypass this by design — audit them with `lific key list`.
-        #[arg(long = "authz-enforced")]
-        authz_enforced: Option<bool>,
 
         /// Days an active issue may go untouched before the briefing and
         /// `list_issues(stale=true)` report it as stale (1-365, default 3)
@@ -2235,8 +2225,6 @@ mod tests {
             "Ask #it for access",
             "--auto-login",
             "true",
-            "--authz-enforced",
-            "true",
             "--stale-active-days",
             "5",
             "--stale-active-reset-days",
@@ -2253,7 +2241,6 @@ mod tests {
                         session_days,
                         login_message,
                         auto_login,
-                        authz_enforced,
                         stale_active_days,
                         stale_active_reset_days,
                     },
@@ -2264,7 +2251,6 @@ mod tests {
                 assert_eq!(session_days, Some(14));
                 assert_eq!(login_message, Some("Ask #it for access".into()));
                 assert_eq!(auto_login, Some(true));
-                assert_eq!(authz_enforced, Some(true));
                 assert_eq!(stale_active_days, Some(5));
                 assert_eq!(stale_active_reset_days, Some(0));
             }

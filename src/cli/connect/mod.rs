@@ -13,21 +13,15 @@
 //!
 //! ## Key-minting & authz semantics (investigated, LIF-249)
 //!
-//! An API key with `user_id = NULL` (an "unassigned" key) behaves very
-//! differently under the two authz modes (see `src/authz.rs`):
-//! - **Legacy mode (default, `authz_enforced = false`):** an unassigned key
-//!   resolves to `AuthUser = None`, which `require_role` passes unconditionally
-//!   at Viewer/Maintainer. It can read and write everything — exactly like
-//!   `lific start`'s first-run "default" key. Fine for a local single-user box.
-//! - **Enforced mode (`authz_enforced = true`):** `None` is default-denied at
-//!   every level and `visible_project_ids` returns the empty set — an
-//!   unassigned key would **see nothing**. Shipping one there is a setup bug.
+//! An API key with `user_id = NULL` (an "unassigned" key) acts as the
+//! instance's first admin (operator trust, see `src/authz.rs`), exactly like
+//! `lific start`'s first-run "default" key. Fine for a local single-user box,
+//! but it hands an agent admin rights on a shared one.
 //!
 //! Therefore `connect` prefers a **bot identity owned by a human** (parity with
-//! the web UI's Connected Tools): the bot inherits its owner's role, so it works
-//! under both modes. It only falls back to a plain unassigned key on a truly
-//! fresh install (zero human users) — where enforcement can't be on yet (it
-//! takes an admin to enable). If humans exist but none can be chosen
+//! the web UI's Connected Tools): the bot inherits its owner's role and never
+//! exceeds it. It only falls back to a plain unassigned key on a truly
+//! fresh install (zero human users). If humans exist but none can be chosen
 //! unambiguously and no `--user` was given, we surface guidance rather than mint
 //! a key that might see nothing.
 //!

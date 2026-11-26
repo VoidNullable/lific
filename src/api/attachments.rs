@@ -13,10 +13,9 @@
 //!   into an entity in the same request, are gated separately by
 //!   [`authorize_link`] — that part *is* a mutation of someone else's issue,
 //!   page or comment.
-//! - **Download** requires `Viewer` on the owning project when
-//!   `authz_enforced` is on. An unlinked attachment (not yet referenced
-//!   anywhere) is readable only by its uploader / an admin — there's no
-//!   project to gate on yet.
+//! - **Download** requires `Viewer` on the owning project. An unlinked
+//!   attachment (not yet referenced anywhere) is readable only by its
+//!   uploader or an admin, since there's no project to gate on yet.
 //! - **Delete** requires the uploader, or `Maintainer` on any owning project,
 //!   or an admin.
 
@@ -1310,9 +1309,7 @@ pub(crate) fn authorize_link_conn(
 }
 
 /// Read gate: Viewer on any owning project, or uploader/admin for an unlinked
-/// attachment. When enforcement is off, `require_role(.., Viewer)` is an
-/// unconditional allow (legacy mode), so this reduces to today's open read
-/// behavior — matching every other GET while the flag is off.
+/// attachment.
 pub(crate) fn authorize_read(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -1321,9 +1318,7 @@ pub(crate) fn authorize_read(
     let project_ids = with_read(db, |conn| owning_project_ids(conn, attachment.id))?;
 
     if project_ids.is_empty() {
-        // Unlinked: only the uploader or an admin can read it. (When
-        // enforcement is off we still restrict unlinked reads to the uploader
-        // to avoid an enumeration hole on freshly-uploaded blobs.)
+        // Unlinked: only the uploader or an admin can read it.
         match identity.as_ref().map(|i| &i.user) {
             Some(u) if u.is_admin => Ok(()),
             Some(u) if Some(u.id) == attachment.uploader_id => Ok(()),

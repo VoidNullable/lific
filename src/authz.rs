@@ -2,55 +2,46 @@
 //! (LIF-197) and MCP (LIF-198), so the two transports can't drift. Design:
 //! LIF-DOC-7. Part of epic LIF-194.
 //!
-//! ## Two modes, one runtime flag
+//! ## One rule
 //!
-//! Enforcement is gated by the instance setting `authz_enforced` (migration
-//! 027 — see [`db::queries::settings`]). This mirrors how `web_auto_login`
-//! (LIF-215) and `allow_signup` (LIF-211) are read: a plain column on the
-//! single `instance_settings` row, read fresh on every check so flipping it
-//! takes effect without a restart.
+//! Every project check resolves the caller's role from `project_members` and
+//! requires `role >= min`. A `None` caller or a non-member is `Forbidden`,
+//! even for `min = Viewer`. Reads need `Viewer`, content writes `Maintainer`,
+//! and managing the project itself `Lead`.
 //!
-//! LIF-261: the *seed* default is install-dependent. `settings::ensure` turns
-//! it ON for a fresh install (zero users at row-creation time) and OFF for an
-//! upgrade (users already exist), then the row is authoritative forever. The
-//! zero-user agent-first flow survives the default-on because unbound API keys
-//! are operator-trusted (see below).
+//! Until 3.0 this was an instance setting (`authz_enforced`) with a legacy
+//! mode in which any authenticated request could read and write every
+//! project. LIF-518 retired that mode: migration 070 seeded memberships from
+//! what people had actually done and recorded who lost access (see
+//! [`crate::db::queries::access_losses`]), and the switch is gone.
 //!
-//! - **Flag off (legacy mode)** — reproduces today's behavior exactly:
-//!   `min = Lead` runs the pre-LIF-194 `require_project_lead` check
-//!   (`projects.lead_user_id`, plus the LIF-102 unowned-project carve-out);
-//!   `min = Maintainer` / `min = Viewer` allow any request, authenticated or
-//!   not. No new denials are introduced in this mode.
-//! - **Flag on (default-deny mode)** — resolves the effective role from
-//!   `project_members` and requires `role >= min`. A `None` auth user or a
-//!   non-member is always `Forbidden`, even for `min = Viewer`.
+//! [`project_role`] is the one place a role is decided. [`require_role_conn`],
+//! [`can_view_project`] and [`visible_project_ids`] all answer from it, so a
+//! rule that grants access without a membership row (published projects, for
+//! instance) is added there and nowhere else.
 //!
-//! `is_admin` bypasses both modes unconditionally. Bots resolve to their
-//! owner (`007_bot_owners.sql`) before either check runs, in both modes — an
-//! agent can never exceed the human that owns it.
+//! `is_admin` passes every check. Bots resolve to their owner
+//! (`007_bot_owners.sql`) before any check runs: an agent can never exceed
+//! the human that owns it.
 //!
 //! ## Operator-key trust (LIF-261 → LIFIC-7/8/10/11/14)
 //!
-//! Enforced mode is default-deny for a `None` effective user. That alone would
-//! brick the zero-user agent-first flow (`lific init` → `start` → `connect`),
-//! which runs on **user-unbound API keys** that resolve to `AuthUser = None`.
-//! Those keys can only be minted with shell access to the server (`lific
-//! start`'s first-run auto-key, `lific key create`, `connect`'s fresh-install
-//! path), so they're operator-trusted by construction — the threat the default
-//! guards against is a web-signup stranger with a session/OAuth token, not the
-//! operator's own shell-minted key.
+//! Default-deny for a `None` effective user would brick the zero-user
+//! agent-first flow (`lific init` → `start` → `connect`), which runs on
+//! **user-unbound API keys**. Those keys can only be minted with shell access
+//! to the server (`lific start`'s first-run auto-key, `lific key create`,
+//! `connect`'s fresh-install path), so they're operator-trusted by
+//! construction: the threat the default guards against is a web-signup
+//! stranger with a session/OAuth token, not the operator's own shell-minted
+//! key.
 //!
 //! LIFIC-7 unified this on [`resolve_caller`]: any credential that
 //! authenticates but resolves no specific user (an unbound API key, a legacy
 //! unbound OAuth token, a credential-less "auth off" request, or a stdio MCP
 //! session) falls back to the **first admin**. The gates then read
-//! `identity.user.is_admin`, which short-circuits to allow — so the operator
+//! `identity.user.is_admin`, which short-circuits to allow, so the operator
 //! bypass is just "the first admin is trusted," applied identically across
-//! REST, MCP, and CLI. LIFIC-14 deleted the last credential-type-specific
-//! operator carriers (`operator_context`, `operator_scope`, the `OPERATOR`
-//! task-local, `OperatorCredential`, MCP's operator flag); the signal now
-//! lives entirely in the resolved identity. **Audit unbound keys with `lific
-//! key list`.**
+//! REST, MCP, and CLI. **Audit unbound keys with `lific key list`.**
 
 use std::collections::HashSet;
 
@@ -111,22 +102,26 @@ fn user_of(identity: &Option<ResolvedIdentity>) -> Option<AuthUser> {
     identity.as_ref().map(|i| i.user.clone())
 }
 
-// ── Instance setting read ───────────────────────────────────────
+// ── The role decision ────────────────────────────────────────────
 
-pub(crate) fn authz_enforced_conn(conn: &Connection) -> Result<bool, LificError> {
-    Ok(queries::settings::get(conn)?.authz_enforced)
+/// The role `effective` (already resolved through [`effective_user`]) holds
+/// on `project_id`, or `None` for no access at all. An admin holds every role.
+///
+/// Every project gate, read or write, is answered from here; see the module
+/// docs.
+fn project_role(
+    conn: &Connection,
+    effective: &Option<AuthUser>,
+    project_id: i64,
+) -> Result<Option<Role>, LificError> {
+    let Some(user) = effective else {
+        return Ok(None);
+    };
+    if user.is_admin {
+        return Ok(Some(Role::Lead));
+    }
+    queries::members::get_member_role(conn, project_id, user.id)
 }
-
-/// Whether project-scoped default-deny authorization is currently on.
-/// Reads the live `instance_settings` row, so a runtime toggle takes effect
-/// on the very next call — no restart required. Exposed for LIF-197/LIF-198
-/// call sites that need to branch on the mode directly.
-pub fn authz_enforced(db: &DbPool) -> Result<bool, LificError> {
-    let conn = db.read()?;
-    authz_enforced_conn(&conn)
-}
-
-// ── require_role ─────────────────────────────────────────────────
 
 fn insufficient_role(min: Role) -> LificError {
     LificError::Forbidden(format!(
@@ -135,15 +130,13 @@ fn insufficient_role(min: Role) -> LificError {
     ))
 }
 
+// ── require_role ─────────────────────────────────────────────────
+
 /// Require the effective caller to hold at least `min` role on `project_id`.
-/// `Ok(())` = allowed. See the module docs for the legacy-vs-enforced
-/// semantics; `is_admin` always short-circuits to allow in both modes.
+/// `Ok(())` = allowed.
 ///
-/// LIFIC-10/14: consumes [`ResolvedIdentity`] instead of `Option<AuthUser>`. The
-/// LIF-261 operator bypass is gone as a separate signal — an operator-trusted
-/// unbound API key now resolves (via [`resolve_caller`]) to the first admin, so
-/// `identity.user.is_admin` catches it in the same `is_admin` short-circuit
-/// below.
+/// LIFIC-10/14: an operator-trusted unbound API key resolves (via
+/// [`resolve_caller`]) to the first admin, so it passes here as an admin.
 pub fn require_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -154,22 +147,15 @@ pub fn require_role(
     require_role_conn(&conn, identity, project_id, min)
 }
 
+/// Whether the caller can read `project_id` at all (any role).
 pub(crate) fn can_view_project(
     db: &DbPool,
     identity: &ResolvedIdentity,
     project_id: i64,
 ) -> Result<bool, LificError> {
-    if identity.user.is_admin {
-        return Ok(true);
-    }
     let conn = db.read()?;
-    if !authz_enforced_conn(&conn)? {
-        return Ok(true);
-    }
-    Ok(matches!(
-        queries::members::get_member_role(&conn, project_id, identity.user.id)?,
-        Some(role) if role >= Role::Viewer
-    ))
+    let effective = effective_user(&conn, &Some(identity.user.clone()));
+    Ok(project_role(&conn, &effective, project_id)?.is_some())
 }
 
 pub(crate) fn require_role_conn(
@@ -178,132 +164,25 @@ pub(crate) fn require_role_conn(
     project_id: i64,
     min: Role,
 ) -> Result<(), LificError> {
-    let auth_user = user_of(identity);
-    let effective = effective_user(conn, &auth_user);
-
-    // Admin — resolved *after* bot→owner inheritance — always wins, in
-    // both modes. LIFIC-10: this is also where the operator bypass now
-    // lands — an unbound API key resolves to the first admin (see
-    // [`resolve_caller`]), so it's caught here rather than by a separate
-    // `is_operator` signal.
-    if matches!(&effective, Some(u) if u.is_admin) {
-        return Ok(());
-    }
-
-    if authz_enforced_conn(conn)? {
-        require_role_enforced(conn, &effective, project_id, min)
-    } else {
-        require_role_legacy(conn, &effective, project_id, min)
-    }
-}
-
-/// Default-deny mode: resolve the membership row and compare against `min`.
-fn require_role_enforced(
-    conn: &Connection,
-    effective: &Option<AuthUser>,
-    project_id: i64,
-    min: Role,
-) -> Result<(), LificError> {
-    let Some(user) = effective else {
-        return Err(insufficient_role(min));
-    };
-    match queries::members::get_member_role(conn, project_id, user.id)? {
+    let effective = effective_user(conn, &user_of(identity));
+    match project_role(conn, &effective, project_id)? {
         Some(role) if role >= min => Ok(()),
         _ => Err(insufficient_role(min)),
     }
 }
 
-/// Legacy mode: reproduces today's exact behavior. Only `min = Lead` can
-/// ever deny; `Maintainer`/`Viewer` allow any request, matching every
-/// existing (non-lead-gated) REST route today.
-fn require_role_legacy(
-    conn: &Connection,
-    effective: &Option<AuthUser>,
-    project_id: i64,
-    min: Role,
-) -> Result<(), LificError> {
-    match min {
-        Role::Lead => require_lead_legacy(conn, effective, project_id),
-        Role::Maintainer | Role::Viewer => Ok(()),
-    }
-}
-
-/// The pre-LIF-194 `require_project_lead` check, preserved bit-for-bit
-/// (see `api/mod.rs`'s original implementation and its LIF-102 doc comment),
-/// with one additive extension: a `lead` `project_members` row also passes,
-/// so a co-lead added purely via membership (not `projects.lead_user_id`)
-/// isn't locked out even while enforcement is off. This never changes the
-/// outcome for any project that only has the classic `lead_user_id` pointer,
-/// which is every project in the existing test suite.
-fn require_lead_legacy(
-    conn: &Connection,
-    effective: &Option<AuthUser>,
-    project_id: i64,
-) -> Result<(), LificError> {
-    const DENIED: &str = "only the project lead or an admin can do this";
-    const NO_LEAD: &str = "this project has no lead — only an admin can edit it";
-
-    let Some(user) = effective else {
-        return Err(LificError::Forbidden(DENIED.into()));
-    };
-
-    let project = queries::get_project(conn, project_id)?;
-    if project.lead_user_id == Some(user.id) {
-        return Ok(());
-    }
-    if queries::members::get_member_role(conn, project_id, user.id)? == Some(Role::Lead) {
-        return Ok(());
-    }
-
-    if project.lead_user_id.is_some() {
-        Err(LificError::Forbidden(DENIED.into()))
-    } else {
-        Err(LificError::Forbidden(NO_LEAD.into()))
-    }
-}
-
-/// LIF-197: gate for the module/label/folder ("structure") REST endpoints.
-/// These were lead-gated pre-LIF-194 via `require_project_lead`
-/// (`api::require_project_lead`, itself `require_role(.., Lead)`). The
-/// design loosens them to `Maintainer` once enforcement is on, but flag-OFF
-/// must keep reproducing the exact pre-existing Lead gate — if this just
-/// called `require_role(.., Maintainer)` unconditionally, the legacy branch
-/// of `require_role` treats `Maintainer` as an unconditional allow (see
-/// `require_role_legacy`), which would *regress* today's lead-only structure
-/// endpoints the moment this function is wired in, flag or no flag. So the
-/// two modes call `require_role` with two different `min` values instead of
-/// letting `require_role` infer it:
-/// - enforced: `require_role(.., Maintainer)` — the new, looser bar.
-/// - legacy: `require_role(.., Lead)` — literally what `require_project_lead`
-///   already does, unchanged.
+/// LIF-197: gate for the module/label/folder ("structure") endpoints:
+/// `Maintainer`, the same bar as any other content write.
 pub fn require_structure_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    if authz_enforced(db)? {
-        require_role(db, identity, project_id, Role::Maintainer)
-    } else {
-        require_role(db, identity, project_id, Role::Lead)
-    }
+    require_role(db, identity, project_id, Role::Maintainer)
 }
 
-/// LIF-197: gate for `DELETE /api/projects/{id}`. Pre-LIF-194 this was
-/// `require_admin` — a strict `auth_user.is_admin` check with **no** project
-/// involvement at all (notably stricter than `require_lead_legacy`, which
-/// also lets a project's lead through). Design decision #6 loosens deletion
-/// to `Lead` once enforcement is on, but flag-OFF must keep the exact
-/// admin-only behavior — routing it through `require_role(.., Lead)`
-/// unconditionally would let a project lead delete their own project even
-/// with the flag off, which never worked before. So legacy mode reproduces
-/// `require_admin` verbatim here (deliberately not `effective_user`-aware:
-/// the pre-existing check never resolved bot ownership either).
-///
-/// LIFIC-10: consumes [`ResolvedIdentity`]. In legacy mode the check is now
-/// `identity.user.is_admin` — so an unbound API key (which resolves to the
-/// first admin) is admitted, where before it was `None` and denied. That is
-/// the intended operator-works-everywhere fix (AC: "unbound keys resolve via
-/// first_admin"), not a regression: real non-admin users are still denied.
+/// LIF-197: gate for `DELETE /api/projects/{id}`: the project's lead (design
+/// decision #6) or an admin.
 pub fn require_project_delete_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -325,26 +204,13 @@ pub(crate) fn require_project_delete_role_conn(
     identity: &Option<ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    if authz_enforced_conn(conn)? {
-        require_role_conn(conn, identity, project_id, Role::Lead)
-    } else {
-        match identity {
-            Some(i) if i.user.is_admin => Ok(()),
-            _ => Err(LificError::Forbidden("only an admin can do this".into())),
-        }
-    }
+    require_role_conn(conn, identity, project_id, Role::Lead)
 }
 
 /// LIF-197: gate for mutations/reads on workspace-level (project-less)
-/// pages — the only entity that can have `project_id = NULL` (plans always
+/// pages, the only entity that can have `project_id = NULL` (plans always
 /// require a project; see `CreatePlan.project_id: i64`). Design decision
-/// #10: admin-only once enforcement is on. Legacy mode has never gated these
-/// at all (no `require_*` call existed on the pre-LIF-194 page handlers), so
-/// flag-off stays a no-op here to avoid a behavior change.
-///
-/// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
-/// `identity.user.is_admin` (an unbound key resolves to the first admin),
-/// not a separate carrier signal.
+/// #10: admin-only.
 pub fn require_workspace_admin(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -357,9 +223,6 @@ pub(crate) fn require_workspace_admin_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
 ) -> Result<(), LificError> {
-    if !authz_enforced_conn(conn)? {
-        return Ok(());
-    }
     let effective = effective_user(conn, &user_of(identity));
     match &effective {
         Some(u) if u.is_admin => Ok(()),
@@ -384,17 +247,16 @@ pub(crate) fn require_project_or_workspace_role_conn(
 // ── visible_project_ids ──────────────────────────────────────────
 
 /// The cross-project read filter for search / project listing / any
-/// workspace-spanning read (LIF-197/LIF-198 call sites).
+/// workspace-spanning read (LIF-197/LIF-198 call sites): the set form of
+/// [`project_role`], so the two must grant the same projects.
 ///
-/// `None` = unrestricted — caller should apply no filter at all. Returned
-/// for admins and whenever enforcement is off (legacy mode has no concept of
-/// hidden projects). `Some(ids)` = only these project ids are visible: the
-/// effective caller's memberships (any role), or the empty set for a `None`
-/// auth user / a member of nothing.
+/// `None` = unrestricted (admins): the caller should apply no filter at all.
+/// `Some(ids)` = only these project ids are visible: the effective caller's
+/// memberships (any role), or the empty set for a `None` auth user / a member
+/// of nothing.
 ///
-/// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
-/// `identity.user.is_admin` (an unbound key resolves to the first admin and
-/// short-circuits below).
+/// LIFIC-10/14: an unbound key resolves to the first admin and
+/// short-circuits below.
 pub fn visible_project_ids(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -402,26 +264,23 @@ pub fn visible_project_ids(
     let conn = db.read()?;
 
     let effective = effective_user(&conn, &user_of(identity));
-    if matches!(&effective, Some(u) if u.is_admin) {
-        return Ok(None);
-    }
-    if !authz_enforced_conn(&conn)? {
-        return Ok(None);
-    }
     let Some(user) = effective else {
         return Ok(Some(HashSet::new()));
     };
+    if user.is_admin {
+        return Ok(None);
+    }
 
     let ids = queries::members::list_project_ids_for_user(&conn, user.id)?;
     Ok(Some(ids.into_iter().collect()))
 }
 
 /// LIF-197: apply the [`visible_project_ids`] cross-project read filter to a
-/// list of items. `None` (unrestricted — admin, or enforcement off) keeps
-/// everything. `Some(ids)` keeps only items whose `project_id_of` result is
-/// `Some(pid)` with `pid` in `ids` — a workspace-level item (`None`
-/// project_id) is therefore excluded for any non-admin once enforcement is
-/// on, matching design decision #10 (workspace pages are admin-only).
+/// list of items. `None` (unrestricted: admin) keeps everything. `Some(ids)`
+/// keeps only items whose `project_id_of` result is `Some(pid)` with `pid` in
+/// `ids`; a workspace-level item (`None` project_id) is therefore excluded
+/// for any non-admin, matching design decision #10 (workspace pages are
+/// admin-only).
 ///
 /// LIF-377: one implementation for both read surfaces. REST and MCP each had
 /// a byte-identical copy, so "silently absent, never an error" could drift on
@@ -448,7 +307,6 @@ mod tests {
     use crate::actor::Transport;
     use crate::db::models::{CreateProject, CreateUser};
     use crate::db::queries::members::upsert_member;
-    use crate::db::queries::settings::{InstanceSettingsPatch, update as update_settings};
     use crate::db::{self, queries};
 
     /// Wrap an `AuthUser` into a `ResolvedIdentity` (transport is irrelevant to
@@ -549,24 +407,12 @@ mod tests {
         .id
     }
 
-    fn enable_enforcement(conn: &Connection) {
-        update_settings(
-            conn,
-            InstanceSettingsPatch {
-                authz_enforced: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
-
-    // ── Enforced mode (flag ON) ──────────────────────────────────
+    // ── Role matrix ──────────────────────────────────────────────
 
     #[test]
     fn enforced_non_member_denied_at_every_level() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "ENF");
         let outsider = seed_user(&conn, "outsider", false);
 
@@ -583,7 +429,6 @@ mod tests {
     fn enforced_viewer_allowed_viewer_denied_maintainer_and_lead() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "VWR");
         let viewer = seed_user(&conn, "viewer", false);
         upsert_member(&conn, project, viewer.id, Role::Viewer).unwrap();
@@ -597,7 +442,6 @@ mod tests {
     fn enforced_maintainer_allowed_viewer_and_maintainer_denied_lead() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "MNT");
         let maintainer = seed_user(&conn, "maintainer", false);
         upsert_member(&conn, project, maintainer.id, Role::Maintainer).unwrap();
@@ -613,7 +457,6 @@ mod tests {
     fn enforced_lead_allowed_all_levels() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "LED");
         let lead = seed_user(&conn, "lead", false);
         upsert_member(&conn, project, lead.id, Role::Lead).unwrap();
@@ -627,7 +470,6 @@ mod tests {
     fn enforced_admin_non_member_allowed_all_levels() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "ADM");
         let admin = seed_user(&conn, "admin", true);
 
@@ -640,7 +482,6 @@ mod tests {
     fn enforced_none_user_denied_all_levels() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "ANO");
 
         for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
@@ -657,13 +498,13 @@ mod tests {
     // the resolved identity the middleware would actually produce.
 
     // An unbound API key's resolved identity is the first admin → passes every
-    // level in enforced mode, exactly as the LIF-261 carrier-signal path did
-    // before. Replaces the deleted `require_role_conn_op(.., true)` test.
+    // level, exactly as the LIF-261 carrier-signal path did before. Replaces
+    // the deleted `require_role_conn_op(.., true)` test. LIF-518: this holds on
+    // a project with no lead and no members, which legacy mode used to cover.
     #[test]
-    fn enforced_resolved_first_admin_passes_all_levels_like_operator_key_did() {
+    fn resolved_first_admin_passes_all_levels_like_operator_key_did() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let _admin = seed_user(&conn, "admin", true); // becomes first_admin
         let project = seed_project(&conn, "OPR"); // no membership rows at all
 
@@ -671,18 +512,19 @@ mod tests {
         for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
             assert!(
                 require_role_conn(&conn, &Some(identity.clone()), project, min).is_ok(),
-                "resolved-first-admin (unbound key) must pass {min} in enforced mode"
+                "resolved-first-admin (unbound key) must pass {min}"
             );
         }
+        assert!(require_project_delete_role_conn(&conn, &Some(identity), project).is_ok());
+        assert!(require_workspace_admin_conn(&conn, &first_admin_identity(&conn)).is_ok());
     }
 
     // A non-member resolved to a non-admin stays forbidden at every level —
     // the bypass is `is_admin`, not merely "an identity exists."
     #[test]
-    fn enforced_resolved_non_admin_non_member_stays_forbidden_all_levels() {
+    fn resolved_non_admin_non_member_stays_forbidden_all_levels() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         seed_user(&conn, "someone", true); // first_admin, but irrelevant here
         let project = seed_project(&conn, "ONA");
         let regular = seed_user(&conn, "regular", false);
@@ -693,108 +535,20 @@ mod tests {
                 "a resolved non-admin non-member must stay Forbidden at {min}"
             );
         }
+        assert!(require_project_delete_role_conn(&conn, &id(regular), project).is_err());
     }
 
-    // The bypass is enforced-mode-relevant only because legacy mode already
-    // admits None/outsiders at Viewer/Maintainer; but the Lead gate stays
-    // admin/lead-only. A resolved first-admin still passes Lead (the point of
-    // the unbound-key escape hatch); a None identity (pre-LIFIC-9 bootstrap)
-    // does not.
+    // A `None` identity (no admin exists to resolve an unbound key to) is
+    // denied everywhere, including the lead gate of an unowned project.
     #[test]
-    fn legacy_mode_lead_gate_admits_resolved_admin_denies_none() {
+    fn none_identity_is_denied_even_on_an_unowned_project() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        seed_user(&conn, "admin", true);
-        let project = seed_project(&conn, "LGO"); // unowned
+        let project = seed_project(&conn, "NOP");
 
-        let identity = first_admin_identity(&conn).expect("first admin resolves");
-        assert!(require_role_conn(&conn, &Some(identity), project, Role::Lead).is_ok());
-        assert!(require_role_conn(&conn, &None, project, Role::Lead).is_err());
-    }
-
-    // ── Legacy mode (flag OFF, default) ─────────────────────────
-
-    #[test]
-    fn legacy_none_user_and_non_member_allowed_at_viewer_and_maintainer() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let project = seed_project(&conn, "LGC");
-        let outsider = seed_user(&conn, "outsider", false);
-
-        for min in [Role::Viewer, Role::Maintainer] {
-            assert!(
-                require_role_conn(&conn, &None, project, min).is_ok(),
-                "None user at {min}"
-            );
-            assert!(
-                require_role_conn(&conn, &id(outsider.clone()), project, min).is_ok(),
-                "non-member at {min}"
-            );
+        for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
+            assert!(require_role_conn(&conn, &None, project, min).is_err());
         }
-    }
-
-    #[test]
-    fn legacy_lead_level_matches_require_project_lead_semantics() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let admin = seed_user(&conn, "admin", true);
-        let lead = seed_user(&conn, "lead", false);
-        let regular = seed_user(&conn, "regular", false);
-
-        let project = queries::create_project(
-            &conn,
-            &CreateProject {
-                name: "Legacy Lead".into(),
-                identifier: "LLD".into(),
-                lead_user_id: Some(lead.id),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .id;
-
-        assert!(require_role_conn(&conn, &id(lead), project, Role::Lead).is_ok());
-        assert!(require_role_conn(&conn, &id(admin), project, Role::Lead).is_ok());
-        assert!(require_role_conn(&conn, &id(regular), project, Role::Lead).is_err());
-        assert!(require_role_conn(&conn, &None, project, Role::Lead).is_err());
-
-        // Additive: a co-lead granted purely via project_members (no
-        // lead_user_id change) also passes at Lead in legacy mode.
-        let co_lead = seed_user(&conn, "co_lead", false);
-        upsert_member(&conn, project, co_lead.id, Role::Lead).unwrap();
-        assert!(require_role_conn(&conn, &id(co_lead), project, Role::Lead).is_ok());
-
-        // A plain viewer/maintainer membership does NOT grant Lead in legacy mode.
-        let viewer_only = seed_user(&conn, "viewer_only", false);
-        upsert_member(&conn, project, viewer_only.id, Role::Viewer).unwrap();
-        assert!(require_role_conn(&conn, &id(viewer_only), project, Role::Lead).is_err());
-    }
-
-    #[test]
-    fn legacy_unowned_project_denies_non_admin_with_no_lead_message() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let regular = seed_user(&conn, "regular", false);
-        let project = seed_project(&conn, "UNO"); // lead_user_id = None
-
-        let err = require_role_conn(&conn, &id(regular), project, Role::Lead).unwrap_err();
-        match err {
-            LificError::Forbidden(msg) => assert!(
-                msg.contains("no lead"),
-                "expected 'no lead' carve-out message, got: {msg}"
-            ),
-            other => panic!("expected Forbidden, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn legacy_admin_can_lead_unowned_project() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let admin = seed_user(&conn, "admin", true);
-        let project = seed_project(&conn, "UN2");
-
-        assert!(require_role_conn(&conn, &id(admin), project, Role::Lead).is_ok());
     }
 
     // ── Bot → owner inheritance ──────────────────────────────────
@@ -803,7 +557,6 @@ mod tests {
     fn bot_inherits_owner_maintainer_role_passes_maintainer_fails_lead() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "BOT");
         let owner = seed_user(&conn, "owner", false);
         upsert_member(&conn, project, owner.id, Role::Maintainer).unwrap();
@@ -821,7 +574,6 @@ mod tests {
     fn bot_with_admin_owner_passes_everything() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "BAD"); // non-member project on purpose
         let owner = seed_user(&conn, "admin_owner", true);
         let bot = seed_bot(&conn, "bot2", Some(owner.id));
@@ -835,7 +587,6 @@ mod tests {
     fn ownerless_bot_is_evaluated_as_itself() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "OWL");
         let bot = seed_bot(&conn, "lonebot", None);
 
@@ -854,29 +605,16 @@ mod tests {
         let pool = test_db();
         let admin = {
             let conn = pool.write().unwrap();
-            enable_enforcement(&conn);
             seed_user(&conn, "admin", true)
         };
         assert_eq!(visible_project_ids(&pool, &id(admin)).unwrap(), None);
     }
 
     #[test]
-    fn visible_project_ids_flag_off_returns_none() {
-        let pool = test_db();
-        let user = {
-            let conn = pool.write().unwrap();
-            seed_user(&conn, "someone", false)
-        };
-        assert_eq!(visible_project_ids(&pool, &id(user)).unwrap(), None);
-        assert_eq!(visible_project_ids(&pool, &None).unwrap(), None);
-    }
-
-    #[test]
-    fn visible_project_ids_flag_on_member_of_two_of_three_returns_those_two() {
+    fn visible_project_ids_member_of_two_of_three_returns_those_two() {
         let pool = test_db();
         let (user, p1, p2, _p3) = {
             let conn = pool.write().unwrap();
-            enable_enforcement(&conn);
             let user = seed_user(&conn, "member", false);
             let p1 = seed_project(&conn, "PA1");
             let p2 = seed_project(&conn, "PA2");
@@ -891,12 +629,8 @@ mod tests {
     }
 
     #[test]
-    fn visible_project_ids_flag_on_none_user_returns_empty_set() {
+    fn visible_project_ids_none_user_returns_empty_set() {
         let pool = test_db();
-        {
-            let conn = pool.write().unwrap();
-            enable_enforcement(&conn);
-        }
         assert_eq!(
             visible_project_ids(&pool, &None).unwrap(),
             Some(HashSet::new())
@@ -912,7 +646,6 @@ mod tests {
         let pool = test_db();
         let identity = {
             let conn = pool.write().unwrap();
-            enable_enforcement(&conn);
             seed_user(&conn, "admin", true);
             seed_project(&conn, "V1");
             seed_project(&conn, "V2");
@@ -939,7 +672,6 @@ mod tests {
         let pool = test_db();
         let (project, identity, regular) = {
             let conn = pool.write().unwrap();
-            enable_enforcement(&conn);
             seed_user(&conn, "admin", true);
             let project = seed_project(&conn, "AMB");
             let identity = first_admin_identity(&conn).expect("first admin resolves");
@@ -947,7 +679,7 @@ mod tests {
             (project, identity, regular)
         };
 
-        // None identity: denied at Viewer in enforced mode.
+        // None identity: denied at Viewer.
         assert!(require_role(&pool, &None, project, Role::Viewer).is_err());
 
         // Resolved first-admin: allowed at every level (the unbound-key bypass).
@@ -968,40 +700,9 @@ mod tests {
     // ── require_structure_role (LIF-197) ────────────────────────
 
     #[test]
-    fn structure_role_legacy_mode_keeps_lead_gate() {
+    fn structure_role_needs_maintainer() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        let lead = seed_user(&conn, "lead", false);
-        let maintainer = seed_user(&conn, "maintainer", false);
-        let project = queries::create_project(
-            &conn,
-            &CreateProject {
-                name: "Structure Legacy".into(),
-                identifier: "SL1".into(),
-                lead_user_id: Some(lead.id),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .id;
-        // A plain membership (non-lead_user_id) at Maintainer must NOT be
-        // enough in legacy mode — this is the exact regression the branching
-        // helper exists to prevent.
-        upsert_member(&conn, project, maintainer.id, Role::Maintainer).unwrap();
-        drop(conn);
-
-        assert!(require_structure_role(&pool, &id(lead), project).is_ok());
-        assert!(
-            require_structure_role(&pool, &id(maintainer), project).is_err(),
-            "maintainer-only membership must not pass the legacy structure gate"
-        );
-    }
-
-    #[test]
-    fn structure_role_enforced_mode_loosens_to_maintainer() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "SE1");
         let maintainer = seed_user(&conn, "maintainer", false);
         let viewer = seed_user(&conn, "viewer", false);
@@ -1016,36 +717,9 @@ mod tests {
     // ── require_project_delete_role (LIF-197) ───────────────────
 
     #[test]
-    fn delete_role_legacy_mode_is_admin_only_even_for_the_lead() {
+    fn delete_role_allows_lead_and_refuses_maintainer() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        let admin = seed_user(&conn, "admin", true);
-        let lead = seed_user(&conn, "lead", false);
-        let project = queries::create_project(
-            &conn,
-            &CreateProject {
-                name: "Delete Legacy".into(),
-                identifier: "DL1".into(),
-                lead_user_id: Some(lead.id),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .id;
-        drop(conn);
-
-        assert!(require_project_delete_role(&pool, &id(admin), project).is_ok());
-        assert!(
-            require_project_delete_role(&pool, &id(lead), project).is_err(),
-            "legacy mode's delete gate is admin-only — a lead must still be refused, matching pre-LIF-194 require_admin"
-        );
-    }
-
-    #[test]
-    fn delete_role_enforced_mode_allows_lead() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let project = seed_project(&conn, "DE1");
         let lead = seed_user(&conn, "lead", false);
         let maintainer = seed_user(&conn, "maintainer", false);
@@ -1060,21 +734,9 @@ mod tests {
     // ── require_workspace_admin (LIF-197) ───────────────────────
 
     #[test]
-    fn workspace_admin_legacy_mode_is_a_no_op() {
+    fn workspace_admin_requires_admin() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        let regular = seed_user(&conn, "regular", false);
-        drop(conn);
-
-        assert!(require_workspace_admin(&pool, &id(regular)).is_ok());
-        assert!(require_workspace_admin(&pool, &None).is_ok());
-    }
-
-    #[test]
-    fn workspace_admin_enforced_mode_requires_admin() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        enable_enforcement(&conn);
         let admin = seed_user(&conn, "admin", true);
         let regular = seed_user(&conn, "regular", false);
         drop(conn);
@@ -1091,22 +753,16 @@ mod tests {
     // gets exactly one `lead` membership row. This test proves the other
     // half end-to-end through `require_role` itself — that the row seeded
     // at *creation* time (not via a manual `upsert_member` like the other
-    // tests in this file use) is what `authz_enforced` actually reads once
-    // the flag flips on later, mirroring the real rollout sequence from
-    // LIF-DOC-7 ("ship schema + backfill first ... then turn on
-    // enforcement"). A second, non-member user must have no implicit
-    // access at any level — including read.
+    // tests in this file use) is what the gate reads. A second, non-member
+    // user must have no implicit access at any level, including read.
 
     #[test]
-    fn enforced_mode_creation_seeded_lead_retains_access_second_user_has_none() {
+    fn creation_seeded_lead_retains_access_second_user_has_none() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let lead = seed_user(&conn, "creator_lead", false);
         let second = seed_user(&conn, "second_user", false);
 
-        // Flag starts off (default) at project-creation time — exactly the
-        // pre-rollout state. create_project's LIF-195 seeding still runs
-        // unconditionally.
         let project = queries::create_project(
             &conn,
             &CreateProject {
@@ -1119,13 +775,10 @@ mod tests {
         .unwrap()
         .id;
 
-        // Flip enforcement on *after* creation — the rollout sequence.
-        enable_enforcement(&conn);
-
         for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
             assert!(
                 require_role_conn(&conn, &id(lead.clone()), project, min).is_ok(),
-                "creation-time-seeded lead must retain {min} access once enforcement is on"
+                "creation-time-seeded lead must retain {min} access"
             );
             assert!(
                 require_role_conn(&conn, &id(second.clone()), project, min).is_err(),
@@ -1134,36 +787,33 @@ mod tests {
         }
     }
 
-    // ── Runtime toggle ────────────────────────────────────────────
-
+    // `can_view_project` answers from the same role decision as the gates, so
+    // a bot sees what its owner sees.
     #[test]
-    fn toggling_authz_enforced_at_runtime_changes_behavior_without_restart() {
+    fn can_view_project_follows_the_bot_owner() {
         let pool = test_db();
-        let conn = pool.write().unwrap();
-        let project = seed_project(&conn, "TGL"); // unowned, no memberships
-        let outsider = seed_user(&conn, "outsider", false);
-
-        // Flag off (default): legacy mode, Viewer is unconditionally allowed.
-        assert!(!authz_enforced_conn(&conn).unwrap());
-        assert!(require_role_conn(&conn, &id(outsider.clone()), project, Role::Viewer).is_ok());
-
-        // Flip it on mid-test, same connection/pool, no restart.
-        enable_enforcement(&conn);
-        assert!(authz_enforced_conn(&conn).unwrap());
-        assert!(
-            require_role_conn(&conn, &id(outsider.clone()), project, Role::Viewer).is_err(),
-            "outsider must now be denied — no membership row"
-        );
-
-        // Flip it back off: legacy behavior returns immediately.
-        update_settings(
-            &conn,
-            InstanceSettingsPatch {
-                authz_enforced: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(require_role_conn(&conn, &id(outsider), project, Role::Viewer).is_ok());
+        let (project, bot, stranger_bot) = {
+            let conn = pool.write().unwrap();
+            let project = seed_project(&conn, "CVP");
+            let owner = seed_user(&conn, "owner", false);
+            upsert_member(&conn, project, owner.id, Role::Viewer).unwrap();
+            let bot = seed_bot(&conn, "cvbot", Some(owner.id));
+            let stranger = seed_user(&conn, "stranger", false);
+            let stranger_bot = seed_bot(&conn, "strangerbot", Some(stranger.id));
+            (project, bot, stranger_bot)
+        };
+        let view = |u: AuthUser| {
+            can_view_project(
+                &pool,
+                &ResolvedIdentity {
+                    user: u,
+                    transport: Transport::Api,
+                },
+                project,
+            )
+            .unwrap()
+        };
+        assert!(view(bot));
+        assert!(!view(stranger_bot));
     }
 }

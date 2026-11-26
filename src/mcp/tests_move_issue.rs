@@ -24,7 +24,7 @@ struct Setup {
     _guard: McpTestGuard,
 }
 
-/// The shared membership fixture (project MEM, enforcement on) plus project
+/// The shared membership fixture (project MEM) plus project
 /// DST where the maintainer starts as a Viewer, and one labelled issue MEM-1
 /// in module "Core".
 fn setup() -> Setup {

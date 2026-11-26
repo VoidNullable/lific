@@ -441,9 +441,7 @@ fn assignees_who_cannot_see_the_target_are_unassigned_and_reported() {
     let conn = f.db.write().unwrap();
     conn.execute_batch(
         "INSERT INTO users (username, email, password_hash) VALUES
-             ('ann', 'a@t.local', 'x'), ('bo', 'b@t.local', 'x');
-         INSERT OR REPLACE INTO instance_settings (id, allow_signup, authz_enforced)
-         VALUES (1, 0, 1);",
+             ('ann', 'a@t.local', 'x'), ('bo', 'b@t.local', 'x');",
     )
     .unwrap();
     let id_of = |name: &str| -> i64 {

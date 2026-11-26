@@ -1398,8 +1398,7 @@ async fn cmd_init(
     let mut cfg = load_config_for_init(&config_path, db_flag)?;
 
     // Create + migrate the database and seed instance settings now, while the
-    // instance has zero users — this is the moment the authz-enforced default
-    // is decided. The data dir may not exist yet under the OS-dirs layout
+    // instance has zero users. The data dir may not exist yet under the OS-dirs layout
     // (LIF-295: db lives in ~/.local/share/lific/, not beside the config).
     if let Some(parent) = cfg.database.path.parent()
         && !parent.as_os_str().is_empty()
