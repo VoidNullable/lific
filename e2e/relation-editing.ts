@@ -1,13 +1,12 @@
 import type { BrowserContext, Page, Route } from "playwright";
 
-/** Calls the REST API from inside the page, with the session's token. */
+/** Calls the REST API from inside the page, on the session cookie. */
 async function api(page: Page, path: string, body?: unknown): Promise<any> {
   return page.evaluate(
     async ([path, body]) => {
       const res = await fetch(`/api${path}`, {
         method: body === undefined ? "GET" : "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
           "Content-Type": "application/json",
         },
         body: body === undefined ? undefined : JSON.stringify(body),

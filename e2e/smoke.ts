@@ -159,9 +159,9 @@ async function main(): Promise<number> {
     browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
     const context = await browser.newContext();
 
-    // Sign in the way a person does. The login flow stores the bearer token
-    // in localStorage AND receives the `lific_token` session cookie, which is
-    // the only credential the realtime WebSocket accepts.
+    // Sign in the way a person does. The login flow sets the HttpOnly
+    // `lific_token` session cookie, the web app's only credential, which the
+    // realtime WebSocket accepts too.
     {
       const page = await context.newPage();
       const loginErrors: string[] = [];

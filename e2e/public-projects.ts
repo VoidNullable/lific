@@ -342,8 +342,8 @@ async function main(): Promise<number> {
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
         }
-        const token = await w.page.evaluate(() => localStorage.getItem("lific_token"));
-        if (token) {
+        const cookies = await w.page.context().cookies();
+        if (cookies.some((cookie) => cookie.name === "lific_token")) {
           fail(scenario, "a session token was minted for an anonymous visitor");
         }
         for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
@@ -968,14 +968,22 @@ async function main(): Promise<number> {
         // is not attached and the private API is not consulted at all.
         //
         // A page of its own, in the same (signed-in) context: it carries the
-        // session cookie and the token in localStorage, and the public route
-        // is the first thing it ever loads, so nothing the private app was
-        // doing can be mistaken for something the public view did.
+        // session cookie, and the public route is the first thing it ever
+        // loads, so nothing the private app was doing can be mistaken for
+        // something the public view did.
         const publicPage = await context.newPage();
         let watching = true;
-        const seen: { url: string; auth: string | undefined }[] = [];
+        const seen: Promise<{ url: string; auth: string | undefined }>[] = [];
         publicPage.on("request", (req) => {
-          if (watching) seen.push({ url: req.url(), auth: req.headers()["authorization"] });
+          if (!watching) return;
+          seen.push(
+            req.allHeaders().then((headers) => ({
+              url: req.url(),
+              auth:
+                headers["authorization"] ??
+                (headers["cookie"]?.includes("lific_token=") ? headers["cookie"] : undefined),
+            })),
+          );
         });
         await publicPage.goto(`${base}/#/public/DEMO/issues`, {
           waitUntil: "load",
@@ -989,10 +997,10 @@ async function main(): Promise<number> {
         await publicPage.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
         watching = false;
 
-        if ((await publicPage.evaluate(() => localStorage.getItem("lific_token"))) === null) {
+        if (!(await context.cookies(base)).some((cookie) => cookie.name === "lific_token")) {
           fail(scenario, "the context under test was not actually signed in");
         }
-        for (const req of seen) {
+        for (const req of await Promise.all(seen)) {
           if (req.url.startsWith(`${base}/public/api`) && req.auth !== undefined) {
             fail(scenario, `a public request carried a credential: ${req.url}`);
           }

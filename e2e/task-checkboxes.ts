@@ -78,14 +78,13 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`server did not answer at ${url} within ${timeoutMs}ms`);
 }
 
-/** Calls the REST API from inside the page with the session's token. */
+/** Calls the REST API from inside the page on the session cookie. */
 async function api(page: Page, method: string, path: string, body?: unknown): Promise<any> {
   return page.evaluate(
     async ([method, path, body]) => {
       const res = await fetch(`/api${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
           "Content-Type": "application/json",
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -103,10 +102,8 @@ async function signIn(context: BrowserContext, base: string, identity: string, p
   await page.fill("#login-identity", identity);
   await page.fill("#login-password", password);
   await page.click("button[type=submit]");
+  // The app leaves the login route once the session cookie is set.
   await page.waitForURL((url) => !url.href.includes("login"), { timeout: 15_000 });
-  // The route changes before the session token is stored; navigating away
-  // in that gap loads the next page signed out.
-  await page.waitForFunction(() => localStorage.getItem("lific_token"), null, { timeout: 15_000 });
   return page;
 }
 
@@ -232,7 +229,15 @@ async function exerciseEditor(page: Page, entity: Entity) {
   // socket: it stays stale, the way a view does when an event is late or
   // the socket is down. The save is refused, the edits touch different
   // lines, so they merge and the merged text saves.
-  const stale = await page.context().newPage();
+  //
+  // A context of its own, signed in with the same cookie: a tab in the
+  // view's context would join the shared connection as a follower and get
+  // every event over the BroadcastChannel, blocked socket or not.
+  const staleContext = await page.context().browser()!.newContext({
+    storageState: await page.context().storageState(),
+    reducedMotion: "reduce",
+  });
+  const stale = await staleContext.newPage();
   stale.setDefaultTimeout(10_000);
   await stale.routeWebSocket(/\/api\/events/, () => {});
   await stale.goto(entity.url);
@@ -271,7 +276,7 @@ async function exerciseEditor(page: Page, entity: Entity) {
   assert.equal((await entity.read()).body, mine, `${label}: "Keep mine" saves this tab's text`);
   console.log(`ok   ${label}: an edit to the same spot asks first, then "Keep mine" saves`);
 
-  await stale.close();
+  await staleContext.close();
   await entity.write(BODY);
 }
 

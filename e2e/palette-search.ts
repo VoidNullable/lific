@@ -37,12 +37,11 @@ type Seeded = { projectId: number };
 async function seed(page: Page, base: string): Promise<Seeded> {
   return page.evaluate(
     async ({ warmupCount, token, mixed }) => {
-      const auth = localStorage.getItem("lific_token");
-      if (!auth) throw new Error("no lific_token in localStorage — not signed in");
+      if (!(await fetch("/api/auth/me")).ok) throw new Error("not signed in");
       const post = async (path: string, body: unknown) => {
         const res = await fetch(`/api${path}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth}` },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
         const json = await res.json();
