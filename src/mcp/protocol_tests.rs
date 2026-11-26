@@ -132,6 +132,15 @@ async fn a_2025_03_26_client_initializes_lists_and_calls() {
         .await;
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26", "{init}");
     assert_eq!(init["result"]["serverInfo"]["name"], "lific");
+    // LIF-521: the tool surface rides in capabilities, not the instructions.
+    assert_eq!(
+        init["result"]["capabilities"]["experimental"]["dev.lific/toolSurface"],
+        json!({
+            "version": crate::mcp::tool_surface::TOOL_SURFACE_VERSION,
+            "fingerprint": crate::mcp::tool_surface::TOOL_SURFACE_FINGERPRINT,
+        }),
+        "{init}"
+    );
     session
         .send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         .await;

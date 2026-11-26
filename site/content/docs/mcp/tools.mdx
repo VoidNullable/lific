@@ -55,6 +55,25 @@ The key is recorded in the same transaction as the write, so it exists exactly w
 
 `list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`conventions`, `human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
 
+## Tool surface version
+
+The `initialize` result says which version of this tool list the server has, so a wrapper or script written against these tools can check it instead of comparing `tools/list` field by field:
+
+```json
+"capabilities": {
+  "experimental": {
+    "dev.lific/toolSurface": {
+      "version": 1,
+      "fingerprint": "sha256:<64 hex digits>"
+    }
+  }
+}
+```
+
+`version` goes up by one whenever anything in `tools/list` changes: a tool added or removed, a name, description, parameter, schema or annotation. Releases that leave the tools alone keep the number. `fingerprint` is the SHA-256 of `tools/list` with the tools sorted by name and every object's keys sorted, serialized without whitespace. It is the same for every session, bound or not. Servers older than 3.0 send neither. The field is in capabilities rather than the instructions, so agents do not pay context for it.
+
+The [multi-instance proxy](/docs/mcp/multi-instance) compares these versions before it compares definitions, and relays the shared version and fingerprint in its own `initialize`. Those describe the servers' tools before the proxy adds the `instance` argument and `list_instances`.
+
 ## Which tools use a repository binding
 
 In a session [bound to a repository](/docs/repository-bindings), an omitted `project` resolves to the bound project on these tools only:

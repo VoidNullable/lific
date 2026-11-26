@@ -145,6 +145,10 @@ The browser session now lives only in the HttpOnly `lific_token` cookie, which n
 - **A `Bearer` header always decides the request.** When a request carries `Authorization: Bearer ...` (the scheme in any case), the cookie is ignored, and a missing or wrong credential after it is answered `401`. A header with any other scheme, such as the `Basic` credentials a browser sends to an HTTP basic-auth proxy in front of Lific, is not a Lific credential: Lific ignores it and the cookie applies, so such a proxy keeps working.
 - **Behind a reverse proxy, keep the browser's address recognizable.** Either set `public_url` to the address people open, or have the proxy pass the original `Host` header (and `X-Forwarded-Proto` when it terminates TLS), so the origin check can tell the browser's own writes from someone else's.
 
+#### Tool surface version
+
+`initialize` now reports a [tool surface version](/docs/mcp/tools#tool-surface-version) in `capabilities.experimental["dev.lific/toolSurface"]`; 3.0's tools are version 1. A wrapper that pins against Lific's tools can check that number instead of diffing `tools/list`. The [multi-instance proxy](/docs/mcp/multi-instance) refuses to start when its servers report different versions, and names a 2.x server as older than 3.0, so upgrade every server it points at together.
+
 ### v2.11
 
 Seven migrations run on first start. One of them rebuilds the attachments table, so a database with many attachments takes a little longer to open the first time. Take a backup first: a 2.10 binary refuses the upgraded database, so going back means restoring it.

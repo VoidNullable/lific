@@ -79,8 +79,8 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - `list_issues`, `search`, `list_resources` and `get_briefing` return structured results alongside their text. Each declares an MCP `outputSchema` and returns `structuredContent` with the identifiers, ids, titles, status and links its text shows, plus `next_offset` when more results follow, so clients that call tools from code can read fields instead of parsing lines. The text replies are unchanged.
 - A required parameter that arrives missing is named, with the tool's real parameters listed, the same way an unknown one is. A missing field inside a plan step or batch item is reported as that nested field, instead of blaming the tool's top-level parameters (PR #102 by [@zorro432](https://github.com/zorro432)).
 - Tool descriptions say what fixes a failed call: an edit miss names the read that gets fresh content, `create_page` explains the workspace-page form, and `link_issues` states that the source blocks the target (PR #102 by [@zorro432](https://github.com/zorro432)).
-- 32 tools now cost an agent 7,290 tokens of context.
-<!-- tool surface version bullet: lead adds -->
+- 32 tools now cost an agent 7,862 tokens of context.
+- `initialize` reports a tool surface version and a SHA-256 fingerprint of the tool list in `capabilities.experimental["dev.lific/toolSurface"]`, so a wrapper that pins against Lific's tools can tell when they changed without diffing `tools/list`. 3.0's tools are version 1. The multi-instance proxy compares versions first and names the instance that runs an older one, instead of failing on a definition diff.
 
 ### Published projects
 

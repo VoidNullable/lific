@@ -6,7 +6,10 @@
 //!   only reach servers the operator configured and no alias's token can be
 //!   sent to another's server.
 //! - Backends must advertise matching normalized contracts. Never unioned,
-//!   never version-guessed: a mismatch fails the launch.
+//!   never version-guessed: a mismatch fails the launch. Advertised tool
+//!   surface versions are compared first, so the usual mismatch (one server
+//!   upgraded, one not) is reported by version; identical definitions are
+//!   still required when the versions agree.
 //! - Routing errors are raised before anything is forwarded, and nothing ever
 //!   falls back to another instance. There is no mutable active instance.
 //! - Provenance is stamped by this process, so a backend cannot claim to be a
@@ -33,6 +36,7 @@ use super::mcp_proxy::{
     write_line,
 };
 use crate::mcp::INLINE_ATTACHMENT_HEADER;
+use crate::mcp::tool_surface::TOOL_SURFACE_CAPABILITY;
 
 // Limits. Each bounds something attacker- or accident-controlled.
 
@@ -670,6 +674,98 @@ pub(crate) fn validate_envelope(response: &Value, expected_id: &Value) -> Result
     }
 }
 
+// tool surface versions
+
+/// What a backend's `initialize` says about its tool surface, under
+/// `capabilities.experimental["dev.lific/toolSurface"]`. Servers older than
+/// Lific 3.0 send nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolSurface {
+    pub(crate) version: u64,
+    pub(crate) fingerprint: String,
+}
+
+/// Everything discovery learned from one backend.
+#[derive(Debug)]
+pub(crate) struct Discovered {
+    pub(crate) tools: Vec<Value>,
+    pub(crate) surface: Option<ToolSurface>,
+}
+
+/// Read the tool surface out of an `initialize` response. Absent is fine (an
+/// older server); present but malformed fails the launch, since a backend that
+/// says something it cannot say properly is not one to guess about.
+pub(crate) fn tool_surface_of(
+    alias: &str,
+    response: &Value,
+) -> Result<Option<ToolSurface>, String> {
+    let Some(advertised) = response
+        .get("result")
+        .and_then(|result| result.get("capabilities"))
+        .and_then(|capabilities| capabilities.get("experimental"))
+        .and_then(|experimental| experimental.get(TOOL_SURFACE_CAPABILITY))
+    else {
+        return Ok(None);
+    };
+    let version = advertised
+        .get("version")
+        .and_then(Value::as_u64)
+        .filter(|version| *version > 0);
+    let fingerprint = advertised
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .filter(|fingerprint| {
+            fingerprint.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        });
+    match (version, fingerprint) {
+        (Some(version), Some(fingerprint)) => Ok(Some(ToolSurface {
+            version,
+            fingerprint: fingerprint.to_owned(),
+        })),
+        _ => Err(format!(
+            "instance '{alias}' advertised a malformed tool surface version in initialize"
+        )),
+    }
+}
+
+/// Compare advertised tool surface versions before comparing definitions, so
+/// the common failure names the instances and their versions instead of the
+/// first tool that differs. Returns the shared surface, or `None` when no
+/// backend advertises one; [`unify_surfaces`] still decides either way.
+pub(crate) fn check_surface_versions(
+    surfaces: &[(String, Option<ToolSurface>)],
+) -> Result<Option<ToolSurface>, String> {
+    let Some((_, first)) = surfaces.first() else {
+        return Err("no instances to unify".to_owned());
+    };
+    let version = |surface: &Option<ToolSurface>| surface.as_ref().map(|s| s.version);
+    if surfaces
+        .iter()
+        .all(|(_, surface)| version(surface) == version(first))
+    {
+        return Ok(first.clone());
+    }
+    let described: Vec<String> = surfaces
+        .iter()
+        .map(|(alias, surface)| match surface {
+            Some(surface) => format!("instance '{alias}' has tool surface {}", surface.version),
+            None => {
+                format!("instance '{alias}' is older than Lific 3.0 and advertises no tool surface")
+            }
+        })
+        .collect();
+    Err(format!(
+        "tool surface versions differ: {}. Upgrade the older one, or run them as separate MCP \
+         entries.",
+        described.join(", ")
+    ))
+}
+
 // contract normalization
 
 /// Metadata instructs the model too. A backend cannot replace another's tool
@@ -898,6 +994,8 @@ pub(crate) struct Router {
     default: Option<String>,
     tools: Vec<Value>,
     redactor: Redactor,
+    /// The backends' shared tool surface, relayed in `initialize`.
+    tool_surface: Option<ToolSurface>,
 }
 
 /// What a `tools/call` resolved to, before anything leaves the process.
@@ -921,7 +1019,17 @@ impl Router {
             default,
             tools,
             redactor,
+            tool_surface: None,
         }
+    }
+
+    /// Relay the backends' tool surface. It describes the Lific tools behind
+    /// this proxy, before `instance` and `list_instances` are added: those
+    /// depend on the instances file, so no committed fingerprint could cover
+    /// them, and they change only with this binary.
+    pub(crate) fn with_tool_surface(mut self, surface: Option<ToolSurface>) -> Self {
+        self.tool_surface = surface;
+        self
     }
 
     fn aliases(&self) -> Vec<String> {
@@ -1077,12 +1185,21 @@ impl Router {
             .and_then(Value::as_str)
             .filter(|version| KNOWN_PROTOCOL_VERSIONS.contains(version))
             .unwrap_or(PROTOCOL_VERSION);
+        let mut capabilities = serde_json::json!({ "tools": { "listChanged": false } });
+        if let Some(surface) = &self.tool_surface {
+            capabilities["experimental"] = serde_json::json!({
+                TOOL_SURFACE_CAPABILITY: {
+                    "version": surface.version,
+                    "fingerprint": surface.fingerprint,
+                },
+            });
+        }
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": id.clone(),
             "result": {
                 "protocolVersion": requested,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": capabilities,
                 "serverInfo": {
                     "name": "lific-multi-instance-proxy",
                     "version": env!("CARGO_PKG_VERSION"),
@@ -1553,7 +1670,7 @@ async fn discover<T: InstanceTransport>(
     transport: &T,
     alias: &str,
     redactor: &Redactor,
-) -> Result<Vec<Value>, String> {
+) -> Result<Discovered, String> {
     /// Send one request and return its validated, scrubbed response. Startup
     /// gets the same envelope discipline as a routed call.
     async fn ask<T: InstanceTransport>(
@@ -1593,7 +1710,8 @@ async fn discover<T: InstanceTransport>(
             "clientInfo": { "name": "lific-multi-instance-proxy", "version": env!("CARGO_PKG_VERSION") },
         },
     });
-    ask(transport, alias, redactor, &init, "initialize").await?;
+    let initialized = ask(transport, alias, redactor, &init, "initialize").await?;
+    let surface = tool_surface_of(alias, &initialized)?;
 
     let mut tools: Vec<Value> = Vec::new();
     let mut surface_bytes = 0usize;
@@ -1648,7 +1766,7 @@ async fn discover<T: InstanceTransport>(
                 ));
             }
             Some(next) => cursor = Some(next),
-            None => return Ok(tools),
+            None => return Ok(Discovered { tools, surface }),
         }
     }
     Err(format!(
@@ -1849,14 +1967,18 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn Error>> {
     };
 
     let mut surfaces: Vec<(String, Vec<Value>)> = Vec::with_capacity(config.instances.len());
+    let mut versions: Vec<(String, Option<ToolSurface>)> =
+        Vec::with_capacity(config.instances.len());
     let mut routed: Vec<RoutedInstance> = Vec::with_capacity(config.instances.len());
     let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
     for (spec, credential) in config.instances.iter().zip(&credentials) {
-        let tools = tokio::time::timeout_at(deadline, discover(&discovery, &spec.alias, &redactor))
-            .await
-            .map_err(|_| format!("instance '{}': startup deadline exceeded", spec.alias))?
-            .map_err(|error| redactor.scrub(&error))?;
-        surfaces.push((spec.alias.clone(), tools));
+        let discovered =
+            tokio::time::timeout_at(deadline, discover(&discovery, &spec.alias, &redactor))
+                .await
+                .map_err(|_| format!("instance '{}': startup deadline exceeded", spec.alias))?
+                .map_err(|error| redactor.scrub(&error))?;
+        surfaces.push((spec.alias.clone(), discovered.tools));
+        versions.push((spec.alias.clone(), discovered.surface));
 
         // Each backend resolves this directory itself, against its own
         // database, with its own credential. Two instances may legitimately
@@ -1885,6 +2007,7 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn Error>> {
         });
     }
 
+    let tool_surface = check_surface_versions(&versions).map_err(|error| redactor.scrub(&error))?;
     let unified = unify_surfaces(&surfaces).map_err(|error| redactor.scrub(&error))?;
     let aliases: Vec<String> = routed
         .iter()
@@ -1899,7 +2022,8 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn Error>> {
         "lific multi-instance MCP proxy started (stdio)"
     );
 
-    let router = Router::new(routed, config.default, tools, redactor);
+    let router =
+        Router::new(routed, config.default, tools, redactor).with_tool_surface(tool_surface);
     let transport = HttpBackends { backends };
     pump(
         BufReader::new(tokio::io::stdin()),

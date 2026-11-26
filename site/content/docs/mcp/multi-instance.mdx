@@ -308,6 +308,11 @@ relayed as successful results.
 
 ## Troubleshooting
 
+If startup reports that tool surface versions differ, it names each alias with
+the [tool surface version](/docs/mcp/tools#tool-surface-version) it advertised,
+or says it is older than Lific 3.0 when it advertised none. Upgrade the older
+server and restart the proxy.
+
 If startup reports different tool definitions, upgrade every backend to the
 same tool contract and restart the proxy. Matching version numbers alone are
 not enough. Check the named alias and tool; even a description change matters.

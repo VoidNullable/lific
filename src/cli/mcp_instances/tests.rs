@@ -43,7 +43,16 @@ enum Behaviour {
     SurfaceAtLimit,
     /// Each page fits, but the ninth tool exceeds the cumulative budget.
     SurfaceOverLimit,
+    /// Advertise tool surface 1 in `initialize`.
+    SurfaceV1,
+    /// Advertise tool surface 2 in `initialize`.
+    SurfaceV2,
+    /// Advertise a tool surface with no usable version.
+    SurfaceMalformed,
 }
+
+const MOCK_FINGERPRINT: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// `"secret"` as `"\u0073\u0065..."`: decodes to the same string, matches no
 /// substring search over the wire bytes.
@@ -173,12 +182,31 @@ impl MockServer {
             }
 
             let result = match method {
-                "initialize" => serde_json::json!({
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "mock-lific", "version": "0" },
-                    "instructions": "Mock.",
-                }),
+                "initialize" => {
+                    let surface = match ctx.behaviour {
+                        Behaviour::SurfaceV1 => Some(
+                            serde_json::json!({ "version": 1, "fingerprint": MOCK_FINGERPRINT }),
+                        ),
+                        Behaviour::SurfaceV2 => Some(
+                            serde_json::json!({ "version": 2, "fingerprint": MOCK_FINGERPRINT }),
+                        ),
+                        Behaviour::SurfaceMalformed => Some(
+                            serde_json::json!({ "version": "one", "fingerprint": MOCK_FINGERPRINT }),
+                        ),
+                        _ => None,
+                    };
+                    let mut capabilities = serde_json::json!({ "tools": {} });
+                    if let Some(surface) = surface {
+                        capabilities["experimental"] =
+                            serde_json::json!({ TOOL_SURFACE_CAPABILITY: surface });
+                    }
+                    serde_json::json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": capabilities,
+                        "serverInfo": { "name": "mock-lific", "version": "0" },
+                        "instructions": "Mock.",
+                    })
+                }
                 "tools/list" => {
                     let cursor = parsed
                         .get("params")
@@ -2146,10 +2174,12 @@ async fn discovery_follows_pagination_and_unifies_the_whole_surface() {
 
     let private = discover(&transport, "private", &Redactor::default())
         .await
-        .unwrap();
+        .unwrap()
+        .tools;
     let community = discover(&transport, "community", &Redactor::default())
         .await
-        .unwrap();
+        .unwrap()
+        .tools;
 
     assert_eq!(
         private
@@ -2200,7 +2230,8 @@ async fn the_exact_cumulative_surface_budget_is_allowed_independently_per_backen
     for alias in ["private", "community"] {
         let tools = discover(&transport, alias, &Redactor::default())
             .await
-            .unwrap();
+            .unwrap()
+            .tools;
         assert_eq!(tools.len(), 8);
         assert_eq!(
             tools
@@ -2228,19 +2259,159 @@ async fn discovery_against_mismatched_servers_names_the_alias_and_the_tool() {
             "private".to_owned(),
             discover(&transport, "private", &Redactor::default())
                 .await
-                .unwrap(),
+                .unwrap()
+                .tools,
         ),
         (
             "community".to_owned(),
             discover(&transport, "community", &Redactor::default())
                 .await
-                .unwrap(),
+                .unwrap()
+                .tools,
         ),
     ];
 
     let error = unify_surfaces(&surfaces).expect_err("mismatched schemas fail the launch");
     assert!(error.contains("get_issue"), "got: {error}");
     assert!(error.contains("community"), "got: {error}");
+}
+
+#[tokio::test]
+async fn discovery_reads_each_backends_tool_surface_version_from_initialize() {
+    let upgraded = MockServer::start(Behaviour::SurfaceV2).await;
+    let older = MockServer::start(Behaviour::SurfaceV1).await;
+    let pre_three = MockServer::start(Behaviour::Normal).await;
+    let transport = http_backends(&[
+        ("magi", &upgraded.base_url, None),
+        ("community", &older.base_url, None),
+        ("legacy", &pre_three.base_url, None),
+    ]);
+
+    let mut versions = Vec::new();
+    for alias in ["magi", "community", "legacy"] {
+        let discovered = discover(&transport, alias, &Redactor::default())
+            .await
+            .unwrap();
+        versions.push((alias.to_owned(), discovered.surface));
+    }
+    assert_eq!(
+        versions[0].1,
+        Some(ToolSurface {
+            version: 2,
+            fingerprint: MOCK_FINGERPRINT.to_owned()
+        })
+    );
+    assert_eq!(versions[2].1, None, "a pre-3.0 server advertises nothing");
+
+    // The mock surfaces are identical, so only the version check can fail
+    // this launch, and it names every instance rather than a tool.
+    assert_eq!(
+        check_surface_versions(&versions[..2]).unwrap_err(),
+        "tool surface versions differ: instance 'magi' has tool surface 2, instance \
+         'community' has tool surface 1. Upgrade the older one, or run them as separate MCP \
+         entries."
+    );
+    assert_eq!(
+        check_surface_versions(&versions[1..]).unwrap_err(),
+        "tool surface versions differ: instance 'community' has tool surface 1, instance \
+         'legacy' is older than Lific 3.0 and advertises no tool surface. Upgrade the older \
+         one, or run them as separate MCP entries."
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_tool_surface_fails_discovery_by_name() {
+    let server = MockServer::start(Behaviour::SurfaceMalformed).await;
+    let transport = http_backends(&[("community", &server.base_url, None)]);
+    let error = discover(&transport, "community", &Redactor::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "instance 'community' advertised a malformed tool surface version in initialize"
+    );
+}
+
+#[test]
+fn matching_versions_fall_back_to_the_exact_definition_check() {
+    let surface = Some(ToolSurface {
+        version: 1,
+        fingerprint: MOCK_FINGERPRINT.to_owned(),
+    });
+    let versions = vec![
+        ("private".to_owned(), surface.clone()),
+        ("community".to_owned(), surface.clone()),
+    ];
+    assert_eq!(check_surface_versions(&versions).unwrap(), surface);
+    // Same advertised version, different definitions (a dev build, say):
+    // the definition check still refuses, naming the tool.
+    let error = unify_surfaces(&[
+        (
+            "private".to_owned(),
+            vec![tool_value(
+                "get_issue",
+                serde_json::json!({ "type": "object" }),
+            )],
+        ),
+        (
+            "community".to_owned(),
+            vec![tool_value(
+                "get_issue",
+                serde_json::json!({ "type": "object", "required": ["x"] }),
+            )],
+        ),
+    ])
+    .unwrap_err();
+    assert!(
+        error.starts_with("tool contracts differ for 'get_issue'"),
+        "{error}"
+    );
+
+    let unversioned = vec![("a".to_owned(), None), ("b".to_owned(), None)];
+    assert_eq!(check_surface_versions(&unversioned).unwrap(), None);
+}
+
+#[test]
+fn the_proxy_relays_the_backends_tool_surface_in_initialize() {
+    let request = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+    let plain = router(&["private"], None).initialize_result(&serde_json::json!(1), &request);
+    assert!(
+        plain["result"]["capabilities"]
+            .get("experimental")
+            .is_none(),
+        "pre-3.0 backends: nothing to relay"
+    );
+
+    let relayed = router(&["private"], None)
+        .with_tool_surface(Some(ToolSurface {
+            version: 1,
+            fingerprint: MOCK_FINGERPRINT.to_owned(),
+        }))
+        .initialize_result(&serde_json::json!(1), &request);
+    assert_eq!(
+        relayed["result"]["capabilities"]["experimental"][TOOL_SURFACE_CAPABILITY],
+        serde_json::json!({ "version": 1, "fingerprint": MOCK_FINGERPRINT })
+    );
+    assert_eq!(
+        relayed["result"]["capabilities"]["tools"],
+        serde_json::json!({ "listChanged": false })
+    );
+}
+
+/// The real server's advertisement parses, so a 3.0 pair is compared by
+/// version rather than falling through as "older than 3.0".
+#[test]
+fn the_real_servers_tool_surface_is_read_back_by_the_proxy() {
+    use rmcp::ServerHandler;
+    let mcp = crate::mcp::LificMcp::new(crate::db::open_memory().unwrap());
+    let response = serde_json::json!({ "result": mcp.get_info() });
+    assert_eq!(
+        tool_surface_of("private", &response).unwrap(),
+        Some(ToolSurface {
+            version: crate::mcp::tool_surface::TOOL_SURFACE_VERSION,
+            fingerprint: crate::mcp::tool_surface::TOOL_SURFACE_FINGERPRINT.to_owned(),
+        })
+    );
 }
 
 #[tokio::test]

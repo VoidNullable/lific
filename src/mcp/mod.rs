@@ -7,6 +7,7 @@ pub(crate) mod protocol_tests;
 mod read_log;
 mod resources;
 pub(crate) mod schemas;
+pub(crate) mod tool_surface;
 pub(crate) mod tools;
 mod waits;
 
@@ -865,6 +866,7 @@ impl ServerHandler for LificMcp {
         // `server/discover` and per-request `_meta`.
         let info = ServerConfig::new(
             ServerCapabilities::builder()
+                .enable_experimental_with(tool_surface::experimental_capabilities())
                 .enable_tools()
                 .enable_resources()
                 .build(),
