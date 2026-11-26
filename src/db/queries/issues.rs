@@ -45,6 +45,7 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 waits: Vec::new(),
                 needs_human: false,
                 assignees: Vec::new(),
+                claim: None,
             })
         })
         .map_err(|e| match e {
@@ -146,6 +147,7 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
     let assignment = super::assignees::assignment(conn, id)?;
     issue.needs_human = assignment.needs_human;
     issue.assignees = assignment.assignees;
+    issue.claim = super::claims::live_claim(conn, id)?;
 
     Ok(issue)
 }
@@ -410,6 +412,33 @@ pub fn list_issues_page(
         );
         conditions.push(format!("NOT {holding_wait}"));
         conditions.push("i.status NOT IN ('done', 'cancelled')".to_string());
+        // LIF-525: an issue someone else holds is not theirs to pick up.
+        param_values.push(Box::new(super::claims::now_text()));
+        let now = format!("?{}", param_values.len());
+        let held = match &q.claimant {
+            Some(claimant) => {
+                param_values.push(Box::new(claimant.user_id));
+                let user = format!("?{}", param_values.len());
+                param_values.push(Box::new(claimant.worker.clone()));
+                let worker = format!("?{}", param_values.len());
+                super::claims::held_by_other_sql("i", &now, Some((&user, &worker)))
+            }
+            None => super::claims::held_by_other_sql("i", &now, None),
+        };
+        conditions.push(format!("NOT {held}"));
+    }
+    // LIF-525: idle and recent activity count a claim as activity.
+    if q.idle_before.is_some() || q.touched_since.is_some() {
+        param_values.push(Box::new(super::claims::now_text()));
+        let activity = super::claims::last_activity_sql("i", &format!("?{}", param_values.len()));
+        if let Some(before) = &q.idle_before {
+            param_values.push(Box::new(before.replace('T', " ")));
+            conditions.push(format!("{activity} < ?{}", param_values.len()));
+        }
+        if let Some(since) = &q.touched_since {
+            param_values.push(Box::new(since.replace('T', " ")));
+            conditions.push(format!("{activity} >= ?{}", param_values.len()));
+        }
     }
     if q.blocked == Some(true) {
         conditions.push(format!(
@@ -510,6 +539,7 @@ pub fn list_issues_page(
             waits: Vec::new(),
             needs_human: false,
             assignees: Vec::new(),
+            claim: None,
         })
     })?;
 
@@ -589,8 +619,10 @@ pub fn list_issues_page(
         // them, in one grouped query.
         let mut waits = super::waits::waits_by_issue(conn, &ids)?;
         let mut assignments = super::assignees::assignments_by_issue(conn, &ids)?;
+        let mut claims = super::claims::claims_by_issue(conn, &ids)?;
         for issue in &mut issues {
             issue.waits = waits.remove(&issue.id).unwrap_or_default();
+            issue.claim = claims.remove(&issue.id);
             if let Some(assignment) = assignments.remove(&issue.id) {
                 issue.needs_human = assignment.needs_human;
                 issue.assignees = assignment.assignees;

@@ -342,9 +342,47 @@ impl Display for IssueLine<'_> {
             )
         })?;
         Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)?;
-        queries::assignees::describe(issue.needs_human, &issue.assignees).map_or(Ok(()), |who| {
-            write!(formatter, " for:{}", who.replace(", ", ","))
+        queries::assignees::describe(issue.needs_human, &issue.assignees)
+            .map_or(Ok(()), |who| {
+                write!(formatter, " for:{}", who.replace(", ", ","))
+            })?;
+        // LIF-525: a live claim, so an agent scanning rows sees who is on it.
+        issue.claim.as_ref().map_or(Ok(()), |claim| {
+            write!(formatter, " | claimed by {}", claim.describe())
         })
+    }
+}
+
+/// LIF-525: what `update_issue` did with `claim`.
+enum ClaimNote {
+    Held {
+        claim: models::IssueClaim,
+        renewed: bool,
+    },
+    /// Whether a live claim ended; releasing nothing is not an error.
+    Released(bool),
+}
+
+impl Display for ClaimNote {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Held { claim, renewed } => {
+                let until = claim.expires_at.get(..16).unwrap_or(&claim.expires_at);
+                let verb = if *renewed { "renewed" } else { "held" };
+                match &claim.worker {
+                    Some(worker) => write!(
+                        formatter,
+                        "Claim {verb} until {until} UTC as worker {worker}. Claim again before then to keep it; from a new session pass worker='{worker}' to resume it."
+                    ),
+                    None => write!(
+                        formatter,
+                        "Claim {verb} until {until} UTC for your whole account: this call named no session or worker, so any session of this account holds it. Claim again before then to keep it."
+                    ),
+                }
+            }
+            Self::Released(true) => formatter.write_str("Claim released."),
+            Self::Released(false) => formatter.write_str("No live claim to release."),
+        }
     }
 }
 
@@ -2302,7 +2340,7 @@ impl LificMcp {
             return Err("statuses must name at least one status, or all".into());
         }
         // LIF-492: stale means active and idle past the instance threshold,
-        // which is the `updated_until` filter at a computed cutoff.
+        // which is the `idle_before` filter at a computed cutoff.
         let stale_cutoff = if input.stale == Some(true) {
             if input.statuses.is_some()
                 || input
@@ -2385,6 +2423,7 @@ impl LificMcp {
         // the shared clamp needs no override; it runs here as well to give the
         // paging hint below the numbers the query paged by.
         let (limit, offset) = queries::page(input.limit, input.offset);
+        let claimant = self.claimant(None);
         let issues = self.read(|conn| {
             queries::list_issues_page(
                 conn,
@@ -2411,19 +2450,17 @@ impl LificMcp {
                     created_since: input.created_since.clone(),
                     created_until: input.created_until.clone(),
                     updated_since: input.updated_since.clone(),
-                    // The tighter of the caller's bound and the stale cutoff.
-                    updated_until: match (input.updated_until.as_deref(), &stale_cutoff) {
-                        (Some(given), Some(cutoff)) => {
-                            Some(given.replace('T', " ").min(cutoff.clone()))
-                        }
-                        (given, cutoff) => given.map(str::to_string).or_else(|| cutoff.clone()),
-                    },
+                    updated_until: input.updated_until.clone(),
+                    // LIF-525: stale counts a claim as activity.
+                    idle_before: stale_cutoff.clone(),
+                    claimant: claimant.clone(),
                     order_by: input.order_by.clone(),
                     order: input.order.clone(),
                     limit: Some(limit),
                     offset: Some(offset),
                     assignee: input.assignee.clone(),
                     caller_user_id: crate::authz::effective_user(conn, &identity).map(|u| u.id),
+                    touched_since: None,
                 },
             )
         })?;
@@ -2718,6 +2755,7 @@ No issues found."
             Ok((issue, module_name, rels, aliases))
         })?;
         require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
+        let claimant = issue.claim.as_ref().and_then(|_| self.claimant(None));
         let context = current_issue_link_context();
         // Load exactly the rows the chosen mode renders, never the whole
         // thread. `none` reads no comment rows at all, `recent` reads three,
@@ -2775,6 +2813,14 @@ No issues found."
                 Some(who) => writeln!(output, "Assigned: {who} (a person must do this)"),
                 None => Ok(()),
             }?;
+            issue.claim.as_ref().map_or(Ok(()), |claim| {
+                let yours = if claimant.as_ref().is_some_and(|me| claim.held_by(me)) {
+                    " (you)"
+                } else {
+                    ""
+                };
+                writeln!(output, "Claimed by {}{yours}", claim.describe())
+            })?;
             [
                 ("Blocks: ", rels.blocks.as_slice()),
                 ("Blocked by: ", rels.blocked_by.as_slice()),
@@ -3354,6 +3400,29 @@ No issues found."
             }
             other => other,
         };
+        // LIF-525: the claim, checked before anything is read or written.
+        if input.claim_minutes.is_some() && input.claim != Some(true) {
+            return Err("claim_minutes needs claim=true".into());
+        }
+        if input.worker.is_some() && input.claim.is_none() {
+            return Err("worker needs claim=true or claim=false".into());
+        }
+        if let Some(worker) = input.worker.as_deref() {
+            queries::claims::validate_worker(worker).map_err(|error| error.to_string())?;
+        }
+        let claim_minutes = match input.claim {
+            Some(true) => Some(
+                queries::claims::minutes(input.claim_minutes).map_err(|error| error.to_string())?,
+            ),
+            _ => None,
+        };
+        let claimant = match input.claim {
+            Some(_) => Some(
+                self.claimant(input.worker.as_deref())
+                    .ok_or("claiming needs an authenticated caller")?,
+            ),
+            None => None,
+        };
         let (id, project_id) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let project_id = queries::get_issue(conn, id)?.project_id;
@@ -3361,6 +3430,8 @@ No issues found."
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let caller = self.caller_username(input.assignees.as_deref())?;
+        let mut claim_note = None;
+        let mut previous_seq = None;
         let (issue, cascade_action, cascaded_steps, cascaded_plans, verification) = self
             .transaction(|conn| {
             // The plan cascades (migrations 020, 061, 062) key on an issue
@@ -3368,6 +3439,7 @@ No issues found."
             // before the direct issue update so the response can name only
             // the steps and plans the triggers actually changed.
             let previous_issue = queries::get_issue(conn, id)?;
+            previous_seq = Some(previous_issue.seq);
             let audit_checkpoint = input
                 .status
                 .as_ref()
@@ -3401,14 +3473,44 @@ No issues found."
                 Some(previous_issue.project_id),
                 models::Role::Maintainer,
             )?;
+            let mut status = models::Status::parse_opt(input.status.as_deref())
+                .map_err(crate::error::LificError::BadRequest)?;
+            // LIF-525: claim or release first, so a refused claim refuses the
+            // whole call before any field changes.
+            if let (Some(claimant), Some(claiming)) = (&claimant, input.claim) {
+                let identifier = &previous_issue.identifier;
+                if claiming {
+                    let resulting = status.unwrap_or(previous_issue.status);
+                    if matches!(resulting, models::Status::Done | models::Status::Cancelled) {
+                        return Err(crate::error::LificError::BadRequest(format!(
+                            "{identifier} is {resulting}; only open issues can be claimed"
+                        )));
+                    }
+                    let renewed = previous_issue
+                        .claim
+                        .as_ref()
+                        .is_some_and(|held| held.held_by(claimant));
+                    let held = queries::claims::claim(
+                        conn,
+                        id,
+                        identifier,
+                        claimant,
+                        claim_minutes.unwrap_or(queries::claims::DEFAULT_MINUTES),
+                    )?;
+                    status = status.or_else(|| queries::claims::status_on_claim(previous_issue.status));
+                    claim_note = Some(ClaimNote::Held { claim: held, renewed });
+                } else {
+                    let released = queries::claims::release(conn, id, identifier, claimant)?;
+                    claim_note = Some(ClaimNote::Released(released.is_some()));
+                }
+            }
             let issue = queries::update_issue(
                 conn,
                 id,
                 &models::UpdateIssue {
                     title: input.title.clone(),
                     description: input.description.clone(),
-                    status: models::Status::parse_opt(input.status.as_deref())
-                        .map_err(crate::error::LificError::BadRequest)?,
+                    status,
                     priority: models::Priority::parse_opt(input.priority.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
@@ -3471,13 +3573,24 @@ No issues found."
                 verification,
             ))
         })?;
-        self.emit_with_seq(
-            crate::realtime::RealtimeEvent::IssueUpdated {
-                project_id: issue.project_id,
-                issue_id: issue.id,
-            },
-            issue.seq,
-        );
+        let event = crate::realtime::RealtimeEvent::IssueUpdated {
+            project_id: issue.project_id,
+            issue_id: issue.id,
+        };
+        // LIF-525: a claim alone writes no row, so the seq has not moved and
+        // a replaying client would drop the event as a duplicate. Send it
+        // seq-less, as advice to refresh.
+        if previous_seq == Some(issue.seq) {
+            self.emit(event);
+        } else {
+            self.emit_with_seq(event, issue.seq);
+        }
+        // LIF-525: a stdio session resuming an earlier worker's claim keeps
+        // that id from now on.
+        if let (Some(worker), Some(ClaimNote::Held { .. })) = (input.worker.as_deref(), &claim_note)
+        {
+            self.adopt_worker(worker);
+        }
         let mut issue = issue;
         self.retain_visible_relations(std::slice::from_mut(&mut issue))?;
         let context = current_issue_link_context();
@@ -3522,6 +3635,9 @@ No issues found."
             verification.map_or(Ok(()), |comment_id| {
                 write!(output, "\nVerification recorded as comment #{comment_id}.")
             })?;
+            claim_note
+                .as_ref()
+                .map_or(Ok(()), |note| write!(output, "\n{note}"))?;
             // LIF-487: closing over unchecked acceptance items is allowed,
             // but not silently.
             match (
@@ -7047,6 +7163,10 @@ mod tests_waits;
 mod tests_assignees;
 
 #[cfg(test)]
+#[path = "tests_claims.rs"]
+mod tests_claims;
+
+#[cfg(test)]
 #[path = "tests_move_issue.rs"]
 mod tests_move_issue;
 
@@ -9824,6 +9944,7 @@ mod tests {
             waits: vec![],
             needs_human: false,
             assignees: vec![],
+            claim: None,
         };
         crate::mcp::reset_issue_link_context_reads();
         let context = current_issue_link_context();

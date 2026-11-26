@@ -186,6 +186,9 @@ fn router_impl(
         )
         // Move to another project (LIF-487): Maintainer on both ends.
         .route("/api/issues/{id}/move", post(issues::move_issue_handler))
+        // Claims (LIF-525): Maintainer, like any other issue write.
+        .route("/api/issues/{id}/claim", post(issues::claim_issue))
+        .route("/api/issues/{id}/release", post(issues::release_issue))
         // Activity (audit log read surface — LIF-156)
         .route("/api/issues/{id}/activity", get(activity::issue_activity))
         .route("/api/pages/{id}/activity", get(activity::page_activity))

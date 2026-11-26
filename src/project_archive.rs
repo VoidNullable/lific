@@ -2125,3 +2125,6 @@ mod waits_tests;
 
 #[cfg(test)]
 mod assignees_tests;
+
+#[cfg(test)]
+mod claims_tests;
