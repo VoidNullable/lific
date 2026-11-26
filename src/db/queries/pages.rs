@@ -326,23 +326,6 @@ fn validate_page_folder(
 
 pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificError> {
     validate_page_folder(conn, input.project_id, input.folder_id)?;
-    // Counts tombstones on purpose (LIF-438): a soft-deleted page still owns
-    // its `PROJ-DOC-n` identifier and would collide on restore if reissued.
-    let next_seq: i64 = if let Some(pid) = input.project_id {
-        conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM pages WHERE project_id = ?1",
-            params![pid],
-            |row| row.get(0),
-        )
-        .unwrap_or(1)
-    } else {
-        conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM pages WHERE project_id IS NULL",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(1)
-    };
     // The page id is captured inside the savepoint closure —
     // `conn.last_insert_rowid()` after the savepoint releases would reflect
     // the most recent INSERT, which may be a page_labels row, not the page
@@ -350,6 +333,11 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
     // LIF-409's hydrating read inside the savepoint.
     let content = unescape_text(&input.content);
     super::savepoint(conn, "create_page", || {
+        let next_seq = super::number_sequences::next(
+            conn,
+            input.project_id,
+            super::number_sequences::Entity::Page,
+        )?;
         conn.execute(
             "INSERT INTO pages (project_id, folder_id, title, content, sequence, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![input.project_id, input.folder_id, input.title, content, next_seq, input.status],
