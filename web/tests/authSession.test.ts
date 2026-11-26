@@ -60,6 +60,17 @@ describe("read-model account identity", () => {
     expect(sessionKey()).toBe(before);
   });
 
+  test("a different confirmed account invalidates the old session's views", async () => {
+    const { me, saveSession, sessionKey } = await api();
+    setReadModelAccount(7);
+    saveSession();
+    const before = sessionKey();
+    reply = { status: 200, body: { id: 8 } };
+    await me();
+    expect(readModelAccount()).toBe(8);
+    expect(sessionKey()).not.toBe(before);
+  });
+
   test("signed-out state and the disk scope share the confirmed account", async () => {
     const { probeSession, saveSession } = await api();
     setSignedOut(true);

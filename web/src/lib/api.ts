@@ -482,10 +482,12 @@ async function readSession(
       if (started !== sessionGeneration || clearingRevision !== readModelAccountRevision()) return result;
     }
     setReadModelAccount(result.data.id);
-    if (publishSession && (!signedIn || !sessionKnown || account !== result.data.id)) setSession(true, false);
+    if ((publishSession || (account !== undefined && account !== result.data.id)) &&
+        (!signedIn || !sessionKnown || account !== result.data.id)) setSession(true, false);
   } else if (result.status === 401) {
     setReadModelAccount(null);
-    if (publishSession && (signedIn || !sessionKnown || account !== null)) setSession(false, false);
+    if ((publishSession || (account !== undefined && account !== null)) &&
+        (signedIn || !sessionKnown || account !== null)) setSession(false, false);
     await clearPrivateSnapshots();
   } else if (publishSession && !sessionKnown) {
     setSession(signedIn, false);
