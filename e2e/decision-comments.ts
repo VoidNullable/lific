@@ -8,7 +8,6 @@ export async function checkDecisionComments(context: BrowserContext, base: strin
     await page.goto(`${base}/DEMO/issues/DEMO-1`);
     const issue = await page.evaluate(async () => {
       const headers = {
-        Authorization: `Bearer ${localStorage.getItem("lific_token")}`,
         "Content-Type": "application/json",
       };
       async function request(path: string, body?: unknown) {
