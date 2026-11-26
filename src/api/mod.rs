@@ -1,6 +1,7 @@
 mod activity;
 mod agents;
 mod archived_projects;
+mod attachment_import;
 /// LIF-418: the MCP attachment tools reuse this module's authorization gates
 /// and filename hygiene verbatim rather than growing a second copy, so the
 /// module is crate-visible even though its handlers stay `pub(super)`.
@@ -428,6 +429,10 @@ fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<D
             get(attachments::list_entity_attachments)
                 .post(attachments::upload_attachment)
                 .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
+        .route(
+            "/api/attachments/import",
+            post(attachment_import::import_attachment),
         )
         .route(
             "/api/attachments/{id}",

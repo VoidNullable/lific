@@ -270,9 +270,14 @@
           label,
           services: { imageSrc, openImage, renderBlock },
           hooks: {
-            onChange: (changes, update) =>
-              onChange?.(changes, update.transactions.some((tr) => tr.isUserEvent("input.task"))),
-            onSelection: updateFloating,
+            onChange: (changes, update) => {
+              attach.handleEdit();
+              onChange?.(changes, update.transactions.some((tr) => tr.isUserEvent("input.task")));
+            },
+            onSelection: (view) => {
+              attach.handleSelection();
+              updateFloating(view);
+            },
             onFocus: (f) => {
               focused = f;
               if (!f) {

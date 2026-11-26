@@ -54,6 +54,24 @@ curl -X POST "$LIFIC/api/attachments" \
 
 To show it in an issue, put `![crash](/api/attachments/17)` in the description.
 
+## POST `/api/attachments/import`
+
+Imports an image from a public HTTP or HTTPS URL. Requires a signed-in caller and shares the upload rate limit. JSON body:
+
+```json
+{
+  "url": "https://example.com/screenshot.png",
+  "entity_type": "issue",
+  "entity_id": 42
+}
+```
+
+`url` is required, at most 8192 bytes, and must not contain credentials. `entity_type` and `entity_id` are optional together and use the same linking permissions as uploads. Returns the upload response shown above.
+
+The server checks every resolved address and connects only to a checked address. Private, loopback, link-local and other non-public addresses are refused. Unresolved and non-public hosts both return `image host is unavailable`. Proxies and redirects are disabled. The ten-second deadline includes DNS lookup and reading the response. The normal attachment size cap applies both to the declared length and to bytes received.
+
+The response must be HTTP 200 and contain PNG, JPEG, GIF, WebP or SVG data under the attachment MIME rules. Raster images must have readable image headers; SVG must start with an SVG root, optionally after an XML declaration or comments. Non-images, oversized files, redirects, blocked destinations and failed fetches return `400`. No attachment is stored on failure.
+
 ## GET `/api/attachments`
 
 The files linked to one item. Query: `entity_type` (`issue`, `page` or `comment`) and `entity_id`, both required. **Viewer** on the item's project. Returns an attachment array.
