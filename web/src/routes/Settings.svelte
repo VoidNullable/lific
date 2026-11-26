@@ -10,6 +10,7 @@
     revokeAllSessions,
     logout,
     clearSession,
+    sessionKey,
     getInstance,
     TOOL_TEMPLATES,
     type Bot,
@@ -236,7 +237,7 @@
   async function saveProfile() {
     if (!user || !hasProfileChanges || profileSaving) return;
     const revision = getUserRevision();
-    const session = localStorage.getItem("lific_token");
+    const session = sessionKey();
     profileSaving = true;
     profileError = "";
     const input: { display_name?: string; email?: string } = {};
@@ -244,7 +245,7 @@
     if (profileEmail.trim().toLowerCase() !== user.email) input.email = profileEmail.trim();
     const res = await updateProfile(input);
     profileSaving = false;
-    if (session !== localStorage.getItem("lific_token")) return;
+    if (session !== sessionKey()) return;
     if (res.ok) {
       if (!publishUser(res.data, revision)) return;
       profileName = res.data.display_name;
@@ -314,7 +315,7 @@
       navigate("/login");
       return;
     }
-    // The local token is still valid (the helper only clears it on success),
+    // The session is still valid (the helper only clears it on success),
     // so stay put, keep the confirm open, and let them try again.
     signOutAllError = res.error;
   }
@@ -328,13 +329,13 @@
 
   async function loadUser() {
     const revision = getUserRevision();
-    const session = localStorage.getItem("lific_token");
+    const session = sessionKey();
     // Whether this instance signs in without a password decides how a stale
     // session is recovered below, so it is read once with the profile.
     const instance = await getInstance();
     if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     const result = await me();
-    if (session !== localStorage.getItem("lific_token")) return;
+    if (session !== sessionKey()) return;
     if (result.ok) {
       publishUser(result.data, revision);
       profileName = user?.display_name ?? "";

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getContext, onMount } from "svelte";
   import { ArrowLeft } from "lucide-svelte";
-  import { getArchiveCapabilities, me, onSessionChange, type ArchiveCapabilities } from "../lib/api";
+  import { getArchiveCapabilities, me, onSessionChange, sessionKey, type ArchiveCapabilities } from "../lib/api";
   import { archiveImport, restoreArchiveImport, startArchiveImport, resetArchiveImport } from "../lib/archiveImport.svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -22,12 +22,12 @@
     let generation = 0;
     async function initialize() {
       const current = ++generation;
-      const token = localStorage.getItem("lific_token");
+      const token = sessionKey();
       loading = true; capabilities = null; accessError = "";
       file = null; confirmed = false; validation = "";
       if (!token) { accessError = "Sign in to import a project archive."; loading = false; return; }
       const [res, user] = await Promise.all([getArchiveCapabilities(), me()]);
-      if (current !== generation || token !== localStorage.getItem("lific_token")) return;
+      if (current !== generation || token !== sessionKey()) return;
       if (res.ok && user.ok && token) {
         restoreArchiveImport(user.data.id, token);
         capabilities = res.data;

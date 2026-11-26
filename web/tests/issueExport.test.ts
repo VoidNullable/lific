@@ -8,12 +8,14 @@ afterEach(() => {
   globalThis.localStorage = originalStorage;
 });
 
-test("exports only requested issues, in order, using authentication", async () => {
-  globalThis.localStorage = { getItem: () => "test-token" } as Storage;
+test("exports only requested issues, in order, on the session cookie alone", async () => {
+  globalThis.localStorage = { getItem: () => "test-token" } as unknown as Storage;
   const calls: string[] = [];
   globalThis.fetch = (async (url, init) => {
     calls.push(String(url));
-    expect(init?.headers).toEqual({ Authorization: "Bearer test-token" });
+    // The browser attaches the HttpOnly session cookie; no script-held
+    // credential travels, even if an old one is lying in storage.
+    expect(new Headers(init?.headers).get("Authorization")).toBeNull();
     return new Response(`# ${String(url).split("/").pop()}`);
   }) as typeof fetch;
   const blob = await selectedIssueExport(["DEMO-1", "DEMO-3"]);

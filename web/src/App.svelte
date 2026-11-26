@@ -28,7 +28,7 @@
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
-  import { hasSession, getInstance, autoLogin, saveSession, clearSession, me } from "./lib/api";
+  import { hasSession, getInstance, autoLogin, saveSession, clearSession, me, probeSession, sessionKey } from "./lib/api";
   import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
   import {
     handleRealtimeEvent,
@@ -51,7 +51,7 @@
   import { motionReduced } from "./lib/theme";
   import { scopedRoute, setPublicProject } from "./lib/publicScope"; // LIF-471
   import { fade } from "svelte/transition";
-  import { onDestroy, onMount, setContext } from "svelte";
+  import { onDestroy, setContext } from "svelte";
   import { routePageTitle, PAGE_TITLE_CONTEXT } from "./lib/pageTitle";
   import { loginRouteFor, nextRouteFrom } from "./lib/loginRedirect";
 
@@ -151,13 +151,12 @@
     }
   }
 
-  // LIF-215: single-user mode. On a cold load with no session, ask the
-  // instance whether web auto-login is enabled; if so, silently mint an admin
-  // session before the redirect logic can bounce us to /login. We start
-  // "bootstrapping" only when there's no session, so the logged-in common case
-  // never shows a spinner.
+  // The session is an HttpOnly cookie the page cannot read, so a cold load
+  // asks the server (`/api/auth/me`) whether it is signed in before the
+  // redirect logic runs. LIF-215: when it is not and the instance has web
+  // auto-login on, silently mint an admin session first.
   // LIF-465: a public page has nothing to bootstrap, so no spinner either.
-  let bootstrapping = $state(publicProjectOf(initialRoute) === null && !hasSession());
+  let bootstrapping = $state(publicProjectOf(initialRoute) === null);
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —
@@ -206,39 +205,33 @@
     realtimeActivityRevision += 1;
   }
 
-  onMount(async () => {
-    // LIF-465: none of the requests below may run for a public page.
-    // `autoLogin()` would mint an admin session for whoever opened the link
-    // on a single-user instance.
-    if (isPublicRoute) {
-      bootstrapping = false;
-      return;
-    }
-    // Probe the instance once; its auto-login flag decides single-user mode.
-    const inst = await getInstance();
+  // LIF-465: none of the requests below may run for a public page.
+  // `autoLogin()` would mint an admin session for whoever opened the link on a
+  // single-user instance. So the session is learned the first time the tab is
+  // on a private route, at load or on leaving the public view.
+  let sessionBootstrapped = false;
+  $effect(() => {
+    if (isPublicRoute || sessionBootstrapped) return;
+    sessionBootstrapped = true;
+    void bootstrapSession();
+  });
 
-    // LIF-215 follow-up: trust a stored session only if it still validates.
-    // `hasSession()` only checks localStorage — an expired token (server
-    // rejects with 401) would otherwise look valid, skip auto-login, and leave
-    // the user stuck with a dead session. Clear it so the flow below can self-
-    // heal in single-user mode (or fall through to /login otherwise).
-    if (hasSession()) {
-      const probe = await me();
-      if (!probe.ok && probe.status === 401) {
-        clearSession();
-      }
-    }
+  async function bootstrapSession() {
+    bootstrapping = true;
+    // Probe the instance once; its auto-login flag decides single-user mode.
+    // The session probe runs alongside it.
+    const [inst] = await Promise.all([getInstance(), probeSession()]);
 
     // Single-user mode: no valid session → silently mint a fresh admin session
-    // (covers both a cold load with no token and a just-expired one).
+    // (covers both a cold load with no cookie and a just-expired one).
     if (!hasSession() && inst.ok && inst.data.web_auto_login) {
       const res = await autoLogin();
-      if (res.ok) saveSession(res.data.token);
+      if (res.ok) saveSession();
     }
 
     bootstrapping = false;
     if (!realtimeDisposed) syncRealtimeSocket();
-  });
+  }
 
   onDestroy(() => {
     realtimeDisposed = true;
@@ -402,13 +395,13 @@
     }, REALTIME_HEARTBEAT_MS);
   }
 
-  async function reconnectAfterFailedRealtimeAttempt(sessionToken: string | null) {
+  async function reconnectAfterFailedRealtimeAttempt(attemptSession: string | null) {
     const session = await me();
 
     // A stale probe must not clear a session established after this socket
     // attempt ended. Network failures have no HTTP status and must keep
     // reconnecting so a temporarily unavailable server can recover.
-    if (realtimeDisposed || localStorage.getItem("lific_token") !== sessionToken) return;
+    if (realtimeDisposed || sessionKey() !== attemptSession) return;
 
     if (!session.ok && session.status === 401) {
       clearSession();
@@ -466,7 +459,7 @@
     if (opened) {
       scheduleRealtimeReconnect();
     } else {
-      void reconnectAfterFailedRealtimeAttempt(localStorage.getItem("lific_token"));
+      void reconnectAfterFailedRealtimeAttempt(sessionKey());
     }
   }
 

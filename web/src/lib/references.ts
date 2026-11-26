@@ -14,6 +14,7 @@ import {
   listProjects,
   listIssues,
   search as searchApi,
+  sessionKey,
   type Issue,
   type Module,
   type Project,
@@ -103,9 +104,8 @@ type IssueInFlight = {
 
 const issueInFlight = new Map<string, IssueInFlight>();
 
-// API credentials live in localStorage, and the app can log out/in without
-// reloading this module. A cache entry therefore belongs to the current token,
-// not the browser tab. The generation also prevents an older request from
+// The app can log out/in without reloading this module. A cache entry
+// therefore belongs to the current session, not the browser tab. The generation also prevents an older request from
 // repopulating a cache which has just been invalidated by realtime.
 let cacheSession: string | null | undefined;
 let cacheGeneration = 0;
@@ -136,13 +136,10 @@ function refreshSubscribedIssueStatuses() {
 }
 
 function ensureCacheSession(): boolean {
-  const token = typeof localStorage === "undefined"
-    ? null
-    : localStorage.getItem("lific_token");
   // LIF-471: the public view is a different audience with a different data
-  // source, so a scope change invalidates exactly like a token change would.
+  // source, so a scope change invalidates exactly like a session change would.
   const audience = getPublicProject();
-  const session = audience === null ? token : `public:${audience}`;
+  const session = audience === null ? sessionKey() : `public:${audience}`;
   if (cacheSession === session) return false;
   cacheSession = session;
   clearReferenceCaches(true);

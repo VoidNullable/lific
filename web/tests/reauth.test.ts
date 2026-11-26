@@ -26,7 +26,22 @@ function reply(path: string, ...queued: Reply[]) {
   replies.set(path, queued);
 }
 
-beforeEach(() => {
+let saveSession: typeof import("../src/lib/api").saveSession;
+let sessionKey: typeof import("../src/lib/api").sessionKey;
+/** The session the tab held before re-authenticating. */
+let stale: string | null = null;
+
+function markSignedIn() {
+  saveSession();
+  stale = sessionKey();
+}
+
+function expectFreshSession() {
+  expect(sessionKey()).not.toBeNull();
+  expect(sessionKey()).not.toBe(stale);
+}
+
+beforeEach(async () => {
   storage = new MemoryStorage();
   (globalThis as { localStorage: unknown }).localStorage = storage;
   (globalThis as { window?: unknown }).window ??= {
@@ -47,6 +62,7 @@ beforeEach(() => {
       json: async () => chosen.body,
     };
   }) as unknown as typeof fetch;
+  ({ saveSession, sessionKey } = await import("../src/lib/api"));
 });
 
 afterEach(() => {
@@ -58,9 +74,11 @@ async function mod() {
 }
 
 const STALE = { status: 403, body: { error: "recent authentication required" } };
-const session = (id: number, token: string) => ({
+// The refreshed session arrives as the HttpOnly cookie; the body names only
+// the account. The label just tells the reader which session a reply mints.
+const session = (id: number, _label: string) => ({
   status: 200,
-  body: { user: { id, username: "blake" }, token, expires_at: "2099-01-01T00:00:00Z" },
+  body: { user: { id, username: "blake" }, expires_at: "2099-01-01T00:00:00Z" },
 });
 
 describe("needsReauth", () => {
@@ -84,18 +102,18 @@ describe("needsReauth", () => {
 describe("password re-authentication", () => {
   test("saves the fresh session so the retry carries it", async () => {
     const { reauthenticateWithPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", session(7, "lific_sess_fresh"));
 
     const outcome = await reauthenticateWithPassword("hunter2", 7);
 
     expect(outcome.ok).toBe(true);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_fresh");
+    expectFreshSession();
   });
 
   test("a wrong password leaves the existing session in place", async () => {
     const { reauthenticateWithPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", { status: 401, body: { error: "invalid credentials" } });
 
     const outcome = await reauthenticateWithPassword("wrong", 7);
@@ -107,12 +125,12 @@ describe("password re-authentication", () => {
       // no error shown would be a loop.
       recoverable: false,
     });
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
   });
 
   test("a network failure leaves the existing session in place", async () => {
     const { reauthenticateWithPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     globalThis.fetch = (async () => {
       throw new TypeError("network down");
     }) as unknown as typeof fetch;
@@ -120,20 +138,20 @@ describe("password re-authentication", () => {
     const outcome = await reauthenticateWithPassword("hunter2", 7);
 
     expect(outcome.ok).toBe(false);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
   });
 });
 
 describe("passwordless re-authentication", () => {
   test("saves the fresh session on a passwordless instance", async () => {
     const { reauthenticateWithoutPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", session(7, "lific_sess_fresh"));
 
     const outcome = await reauthenticateWithoutPassword(7);
 
     expect(outcome.ok).toBe(true);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_fresh");
+    expectFreshSession();
   });
 
   /** Auto-login mints a session for *the instance's* admin, which on a
@@ -142,25 +160,25 @@ describe("passwordless re-authentication", () => {
    *  performed by someone else. */
   test("refuses a session belonging to a different admin", async () => {
     const { reauthenticateWithoutPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", session(99, "lific_sess_other_admin"));
 
     const outcome = await reauthenticateWithoutPassword(7);
 
     expect(outcome.ok).toBe(false);
-    // The other admin's token must never be adopted.
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    // The other admin's session must never be adopted.
+    expect(sessionKey()).toBe(stale);
   });
 
   test("the same identity check applies to the password path", async () => {
     const { reauthenticateWithPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", session(99, "lific_sess_other"));
 
     const outcome = await reauthenticateWithPassword("hunter2", 7);
 
     expect(outcome.ok).toBe(false);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
   });
 });
 
@@ -268,7 +286,7 @@ describe("retryOnceAfterReauth", () => {
 describe("passwordless failure falls back to the password prompt", () => {
   test("a refused passwordless refresh is recoverable so callers can prompt", async () => {
     const { reauthenticateWithoutPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", { status: 400, body: { error: "your password is required to confirm this" } });
 
     const outcome = await reauthenticateWithoutPassword(7);
@@ -278,19 +296,19 @@ describe("passwordless failure falls back to the password prompt", () => {
       error: "your password is required to confirm this",
       recoverable: true,
     });
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
   });
 
-  test("a refresh naming another account is recoverable, and the token is untouched", async () => {
+  test("a refresh naming another account is recoverable, and the session is untouched", async () => {
     const { reauthenticateWithoutPassword } = await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     reply("/auth/me/refresh", session(99, "lific_sess_other_admin"));
 
     const outcome = await reauthenticateWithoutPassword(7);
 
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.recoverable).toBe(true);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
   });
 
   /** The decision callers make: a recoverable failure comes back out of
@@ -330,7 +348,7 @@ describe("passwordless failure falls back to the password prompt", () => {
   test("a refused passwordless refresh then a successful password path retries once", async () => {
     const { reauthenticateWithoutPassword, reauthenticateWithPassword, retryOnceAfterReauth } =
       await mod();
-    storage.setItem("lific_token", "lific_sess_stale");
+    markSignedIn();
     // First call to the refresh endpoint is refused, the second succeeds.
     reply(
       "/auth/me/refresh",
@@ -341,21 +359,21 @@ describe("passwordless failure falls back to the password prompt", () => {
     let attempts = 0;
     const pending = async () => {
       attempts += 1;
-      return storage.getItem("lific_token") === "lific_sess_mine"
+      return sessionKey() !== stale
         ? { ok: true as const, data: "granted" }
         : { ok: false as const, error: "recent authentication required", status: 403 };
     };
 
-    // Passwordless route first: refused, token untouched, caller must prompt.
+    // Passwordless route first: refused, session untouched, caller must prompt.
     const auto = await retryOnceAfterReauth(pending, () => reauthenticateWithoutPassword(7));
     expect(auto.ok).toBe(false);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
+    expect(sessionKey()).toBe(stale);
     expect(attempts).toBe(1);
 
     // Password route: adopted, and the pending operation runs once more.
     const verified = await reauthenticateWithPassword("hunter2", 7);
     expect(verified.ok).toBe(true);
-    expect(storage.getItem("lific_token")).toBe("lific_sess_mine");
+    expectFreshSession();
 
     const retried = await pending();
     expect(retried).toEqual({ ok: true, data: "granted" });

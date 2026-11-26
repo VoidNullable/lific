@@ -71,7 +71,7 @@
     const result = await login(identity, password);
 
     if (result.ok) {
-      saveSession(result.data.token);
+      saveSession();
       navigate(next);
     } else {
       error = result.error;

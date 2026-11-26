@@ -2,6 +2,7 @@
   import {
     me,
     clearSession,
+    sessionKey,
     listProjects,
     reorderProjects,
     reorderProjectGroups,
@@ -659,9 +660,9 @@
 
   async function loadUser() {
     const revision = getUserRevision();
-    const session = localStorage.getItem("lific_token");
+    const session = sessionKey();
     const res = await me();
-    if (session !== localStorage.getItem("lific_token")) return;
+    if (session !== sessionKey()) return;
     if (res.ok) {
       publishUser(res.data, revision);
     } else {

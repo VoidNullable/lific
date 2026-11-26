@@ -17,15 +17,14 @@ beforeEach(() => {
 });
 afterEach(() => restore());
 
-test("archive fetch returns bytes without saving and forwards cancellation and session", async () => {
+test("archive fetch returns bytes without saving and forwards cancellation on the session cookie", async () => {
   const { downloadProjectArchive } = await import("../src/lib/api");
-  localStorage.setItem("lific_token", "lific_sess_test");
   const controller = new AbortController();
   globalThis.fetch = (async (url: string, options: RequestInit) => {
     expect(url).toBe("/api/project-archives/ARC");
     expect(options.signal).toBe(controller.signal);
     expect(options.cache).toBe("no-store");
-    expect(new Headers(options.headers).get("Authorization")).toBe("Bearer lific_sess_test");
+    expect(new Headers(options.headers).get("Authorization")).toBeNull();
     return new Response("archive bytes", { headers: { "Content-Type": "application/gzip" } });
   }) as typeof fetch;
   const result = await downloadProjectArchive("ARC", controller.signal);
@@ -37,15 +36,20 @@ test("archive fetch returns bytes without saving and forwards cancellation and s
 });
 
 test("session observers see same-tab refresh and logout and unsubscribe cleanly", async () => {
-  const { onSessionChange, saveSession, clearSession } = await import("../src/lib/api");
+  const { onSessionChange, saveSession, clearSession, sessionKey } = await import("../src/lib/api");
   const seen: (string | null)[] = [];
-  const unsubscribe = onSessionChange(() => seen.push(localStorage.getItem("lific_token")));
+  const unsubscribe = onSessionChange(() => seen.push(sessionKey()));
   try {
-    saveSession("first");
-    saveSession("refreshed");
+    saveSession();
+    saveSession();
     clearSession();
-    expect(seen).toEqual(["first", "refreshed", null]);
+    expect(seen).toHaveLength(3);
+    const [first, refreshed, signedOut] = seen;
+    expect(first).not.toBeNull();
+    expect(refreshed).not.toBeNull();
+    expect(refreshed).not.toBe(first);
+    expect(signedOut).toBeNull();
   } finally { unsubscribe(); }
-  saveSession("later");
+  saveSession();
   expect(seen).toHaveLength(3);
 });
