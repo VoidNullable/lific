@@ -11,6 +11,7 @@ struct Source {
     mime: Option<String>,
     fetched: Mutex<Vec<SocketAddr>>,
     stall: bool,
+    resolve_error: bool,
 }
 
 impl Default for Source {
@@ -21,6 +22,7 @@ impl Default for Source {
             mime: Some("text/html".into()),
             fetched: Mutex::new(Vec::new()),
             stall: false,
+            resolve_error: false,
         }
     }
 }
@@ -30,6 +32,9 @@ impl ImageSource for Source {
         Box::pin(async move {
             if self.stall {
                 std::future::pending::<()>().await;
+            }
+            if self.resolve_error {
+                return Err("internal resolver diagnostic".into());
             }
             Ok(self.addresses.clone())
         })
@@ -50,6 +55,33 @@ impl ImageSource for Source {
 }
 
 const URL: &str = "https://images.example/screen.png?size=large";
+
+#[tokio::test]
+async fn unresolved_and_non_public_hosts_have_the_same_error() {
+    let mut source = Source {
+        resolve_error: true,
+        ..Source::default()
+    };
+    assert_eq!(
+        load(&source, URL, 1024).await.unwrap_err(),
+        IMAGE_HOST_UNAVAILABLE
+    );
+    source.resolve_error = false;
+    for addresses in [vec![], vec!["10.0.0.1".parse().unwrap()]] {
+        source.addresses = addresses;
+        assert_eq!(
+            load(&source, URL, 1024).await.unwrap_err(),
+            IMAGE_HOST_UNAVAILABLE
+        );
+    }
+    assert_eq!(
+        load(&source, "http://127.0.0.1/a.png", 1024)
+            .await
+            .unwrap_err(),
+        IMAGE_HOST_UNAVAILABLE
+    );
+    assert!(source.fetched.lock().unwrap().is_empty());
+}
 
 #[tokio::test]
 async fn public_image_uses_checked_address_and_byte_detected_mime() {

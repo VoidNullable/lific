@@ -19,6 +19,7 @@ use crate::resolve_caller::ResolvedIdentity;
 use crate::storage::{self, AttachmentStore};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const IMAGE_HOST_UNAVAILABLE: &str = "image host is unavailable";
 
 #[derive(serde::Deserialize)]
 pub(super) struct ImportBody {
@@ -120,7 +121,7 @@ impl ImageSource for HttpSource {
             tokio::net::lookup_host((host.as_str(), port))
                 .await
                 .map(|addresses| addresses.map(|address| address.ip()).collect())
-                .map_err(|_| "image host could not be resolved".into())
+                .map_err(|_| IMAGE_HOST_UNAVAILABLE.into())
         })
     }
 
@@ -217,10 +218,13 @@ async fn load_inner(
     let port = url.port_or_known_default().unwrap_or(443);
     let addresses = match host.trim_matches(['[', ']']).parse::<IpAddr>() {
         Ok(ip) => vec![ip],
-        Err(_) => source.resolve(host.to_owned(), port).await?,
+        Err(_) => source
+            .resolve(host.to_owned(), port)
+            .await
+            .map_err(|_| IMAGE_HOST_UNAVAILABLE.to_owned())?,
     };
     if addresses.is_empty() || addresses.iter().any(|ip| !public_address(*ip)) {
-        return Err("image host must resolve only to public addresses".into());
+        return Err(IMAGE_HOST_UNAVAILABLE.into());
     }
     let filename = sanitize_filename(
         &urlencoding::decode(

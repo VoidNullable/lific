@@ -68,7 +68,7 @@ Imports an image from a public HTTP or HTTPS URL. Requires a signed-in caller an
 
 `url` is required, at most 8192 bytes, and must not contain credentials. `entity_type` and `entity_id` are optional together and use the same linking permissions as uploads. Returns the upload response shown above.
 
-The server checks every resolved address and connects only to a checked address. Private, loopback, link-local and other non-public addresses are refused. Proxies and redirects are disabled. The ten-second deadline includes DNS lookup and reading the response. The normal attachment size cap applies both to the declared length and to bytes received.
+The server checks every resolved address and connects only to a checked address. Private, loopback, link-local and other non-public addresses are refused. Unresolved and non-public hosts both return `image host is unavailable`. Proxies and redirects are disabled. The ten-second deadline includes DNS lookup and reading the response. The normal attachment size cap applies both to the declared length and to bytes received.
 
 The response must be HTTP 200 and contain PNG, JPEG, GIF, WebP or SVG data under the attachment MIME rules. Raster images must have readable image headers; SVG must start with an SVG root, optionally after an XML declaration or comments. Non-images, oversized files, redirects, blocked destinations and failed fetches return `400`. No attachment is stored on failure.
 
