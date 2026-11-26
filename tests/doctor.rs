@@ -1,6 +1,44 @@
 use std::process::Command;
 
 #[test]
+fn doctor_flags_an_existing_path_token_client_config_offline() {
+    let scratch = tempfile::tempdir().unwrap();
+    let config = scratch.path().join("lific.toml");
+    std::fs::write(&config, "[server]\nhost = '127.0.0.1'\nport = 0\n").unwrap();
+    let client_config = scratch.path().join("opencode.json");
+    let original = r#"{"mcp":{"lific":{"type":"remote","url":"https://example.test/mcp/DO_NOT_PRINT_THIS_SECRET"}}}"#;
+    std::fs::write(&client_config, original).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lific"))
+        .current_dir(scratch.path())
+        .env("LIFIC_CONNECT_HOME", scratch.path().join("home"))
+        .env_remove("LIFIC_URL")
+        .env_remove("LIFIC_TOKEN")
+        .env_remove("LIFIC_API_KEY")
+        .arg("--config")
+        .arg(config)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let check = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "client_config")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(check["detail"].as_str().unwrap().contains("opencode.json"));
+    assert!(check["detail"].as_str().unwrap().contains("Authorization"));
+    for bytes in [&output.stdout, &output.stderr] {
+        assert!(!String::from_utf8_lossy(bytes).contains("DO_NOT_PRINT_THIS_SECRET"));
+    }
+    assert_eq!(std::fs::read_to_string(client_config).unwrap(), original);
+}
+
+#[test]
 fn invalid_config_repair_leaves_the_default_database_untouched() {
     for malformed in [false, true] {
         let scratch = tempfile::tempdir().unwrap();

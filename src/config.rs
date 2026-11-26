@@ -302,17 +302,6 @@ pub struct ServerConfig {
     /// isolated reverse-proxy addresses that cannot be reached directly.
     /// Example: ["10.0.0.0/8"]
     pub trusted_proxies: Vec<String>,
-    /// If set, exposes an authless MCP endpoint at `/mcp/<token>` that skips the
-    /// OAuth flow entirely — the path secret itself is the credential. This is an
-    /// escape hatch for clients whose OAuth connector flow is broken (notably
-    /// claude.ai web, which completes OAuth, obtains a token, then never sends the
-    /// authenticated MCP request). Treat the token like a bearer secret: anyone
-    /// with the URL gets full MCP access, so use a long random value and only
-    /// expose it over HTTPS.
-    pub mcp_path_token: Option<String>,
-    /// Username the authless `/mcp/<token>` endpoint acts as, for attribution.
-    /// Defaults to the first admin user when unset.
-    pub mcp_path_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,8 +367,6 @@ impl Default for ServerConfig {
             public_url: None,
             cors_origins: Vec::new(),
             trusted_proxies: Vec::new(),
-            mcp_path_token: None,
-            mcp_path_user: None,
         }
     }
 }
@@ -998,6 +985,17 @@ enabled = false
         let err = Config::load(Some(&path)).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert!(err.to_string().contains("allow_signupp"));
+    }
+
+    #[test]
+    fn removed_mcp_path_settings_are_rejected() {
+        for key in ["mcp_path_token", "mcp_path_user"] {
+            let error =
+                toml::from_str::<Config>(&format!("[server]\n{key} = 'old-value'\n")).unwrap_err();
+            assert!(error.message().contains(key), "{error}");
+        }
+        let defaults = Config::default_toml();
+        assert!(!defaults.contains("mcp_path_"));
     }
 
     /// The whole point of the change: the permissive defaults an operator
