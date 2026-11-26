@@ -9,7 +9,7 @@ Every view has its own link, so you can paste or bookmark any of them: `/APP/iss
 
 ## Find your way around
 
-**Home** (`/`) covers every project you can see. It shows open work by how long it has been open, the open count over the last 90 days, and how recently each project changed. Below that, the **Agent queue** ranks unassigned, unblocked issues by priority, age and idle time, and **Only you** lists issues assigned to you, marked for a person, or waiting on you. Recent activity, your finished work over the last twelve weeks and your pinned pages close the page. Recently viewed items are in the command palette.
+**Home** (`/`) covers every project you can see. It shows open work by how long it has been open, the open count over the last 90 days, and how recently each project changed. Below that, the **Agent queue** ranks unassigned, unblocked issues by priority, age and idle time, with the issues an agent has [claimed](/docs/concepts/issues#claims) listed under it by holder and time left, and **Only you** lists issues assigned to you, marked for a person, or waiting on you. Recent activity, your finished work over the last twelve weeks and your pinned pages close the page. Recently viewed items are in the command palette.
 
 The sidebar lists your projects. Expand one to reach its sections: **Overview**, **Issues**, **Board**, **Graph**, **Modules**, **Pages**, **Files**, **Plans**, **Activity** and **Insights**. Under the active section it also lists the items you opened recently in that section.
 
@@ -55,6 +55,8 @@ The issue view puts the description on the left and the fields on the right: Sta
 To add a relation, click **Add relation** under the relations, choose its kind, then pick the other issue. The picker searches the current project; type a full identifier such as `OPS-12` to link an issue in another project. Click the × on a chip to remove it. That removes every relation between the two issues, so a pair that both blocks and relates loses both. Viewers see the chips without these controls.
 
 The **Waiting on** field holds blockers that are not issues: a person, or a window of days with an optional note. Choose **Add blocker**, then **Person** or **Dates**. Each one shows whether it is still waiting, due to check or overdue, and its clear button removes it. List rows and board cards show a small marker naming who or when the issue waits on, in red once overdue. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
+
+While an agent holds a [claim](/docs/concepts/issues#claims) on the issue, a **Claimed by** field names the holder, its worker and the time left, and the peek panel shows the same as a chip. Both disappear when the claim is released or runs out.
 
 The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
 

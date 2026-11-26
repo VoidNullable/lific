@@ -20,7 +20,7 @@ Every query parameter is optional:
 | `module_id` | Only this module. |
 | `label` | Only issues carrying this label name. |
 | `assignee` | `none` (free for agents), `human` (a person must do it), `me`, or a username. |
-| `workable` | `true`: open issues whose blockers are all `done` and that have no wait still holding. |
+| `workable` | `true`: open issues whose blockers are all `done`, that have no wait still holding, and that no other worker has [claimed](#post-apiissuesidclaim). Send `X-Lific-Worker` to keep the issues your own session holds. |
 | `blocked` | `true`: issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. |
 | `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
 | `created_until`, `updated_until` | Exclusive upper bound. |
@@ -28,7 +28,7 @@ Every query parameter is optional:
 | `order` | `asc` (default) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 
-The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads. Every issue carries `needs_human`, and an issue that names people carries them in `assignees` as `{user_id, username, display_name}`; see [Assignment](/docs/concepts/issues#assignment).
+The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads. Every issue carries `needs_human`, and an issue that names people carries them in `assignees` as `{user_id, username, display_name}`; see [Assignment](/docs/concepts/issues#assignment). An issue under a live claim carries it in `claim` as `{user_id, username, display_name, worker, claimed_at, expires_at}`; an expired claim is left out.
 
 ### POST `/api/issues`
 
@@ -100,6 +100,24 @@ curl -X POST "$LIFIC/api/issues/42/move" \
   -H "Content-Type: application/json" \
   -d '{"project":"OPS"}'
 ```
+
+### POST `/api/issues/{id}/claim`
+
+Holds the issue for your worker for a limited time, or extends the claim you hold. **Maintainer.** The body is optional: `minutes` (1 to 1440, default 15) and `worker`, a worker id an earlier claim returned, to take that claim over from a new session. Without `worker`, the worker is derived from the `X-Lific-Worker` or `Mcp-Session-Id` header; with neither, the claim belongs to your whole account. See [Claims](/docs/concepts/issues#claims).
+
+A `todo` or `backlog` issue becomes `active`. A live claim held by anyone else is `409`, naming the holder and when the claim ends. A `done` or `cancelled` issue, or a bad `minutes` or `worker`, is `400`. Returns the `Issue` with its `claim`; a re-claim keeps `claimed_at` and moves `expires_at`.
+
+```bash
+curl -X POST "$LIFIC/api/issues/42/claim" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Lific-Worker: build-runner-7" \
+  -H "Content-Type: application/json" \
+  -d '{"minutes":30}'
+```
+
+### POST `/api/issues/{id}/release`
+
+Ends your claim on the issue. **Maintainer.** The body is optional and takes only `worker`. The worker is found as for a claim. Releasing when no claim is live succeeds; a live claim held by anyone else is `409`. Returns the `Issue`.
 
 ## Relations
 

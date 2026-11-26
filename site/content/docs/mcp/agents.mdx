@@ -36,10 +36,12 @@ When you do not know the project yet, start with `list_resources(resource_type='
 
 Then triage with `list_issues`:
 
-- `workable=true` returns issues that are open (not `done` or `cancelled`), whose blockers are all `done`, and that have no wait still holding. This answers "what can I start now".
+- `workable=true` returns issues that are open (not `done` or `cancelled`), whose blockers are all `done`, that have no wait still holding, and that no other worker has claimed. This answers "what can I start now".
 - `blocked=true` returns issues with at least one blocker that is not `done`, or a wait still holding, and annotates each row with `blocked_by:APP-3,APP-7` and any wait tokens. It ignores the issue's own status, so a closed issue with an open blocker still appears.
 
 These are independent filters, not opposites. A cancelled blocker still blocks, deliberately: cancelling a prerequisite does not make the dependent work possible. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
+
+When other agents may pick from the same list, claim the issue before you start: `update_issue(identifier='APP-12', claim=true)`. If another worker holds it, the call fails and names them, so pick something else. The claim lasts 15 minutes by default (`claim_minutes` up to 1440); call again before it ends to keep it, and pass `claim=false` when you stop without closing the issue. Closing it ends the claim. See [Claims](/docs/concepts/issues#claims).
 
 Rows show checklist progress when the description has a Markdown task list (`checklist: 2/5`), so you can see how far an issue got without opening it. Rows also show the due date when one is set (`due:2026-11-20`), so a deadline check needs no `get_issue` per issue.
 
