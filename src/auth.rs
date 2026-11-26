@@ -776,7 +776,11 @@ pub async fn require_api_key(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Extract Bearer token from Authorization header
+    // Extract Bearer token from Authorization header. Whether the header is
+    // there at all is kept apart: a request that sends one is judged by it
+    // alone, so an unusable header is refused rather than read past to the
+    // session cookie.
+    let has_authorization = request.headers().contains_key("authorization");
     let token = request
         .headers()
         .get("authorization")
@@ -796,6 +800,7 @@ pub async fn require_api_key(
             Some(t) if t.starts_with("lific_at_") => "oauth",
             Some(t) if t.starts_with("lific_sk") => "api_key",
             Some(_) => "unknown",
+            None if has_authorization => "malformed",
             None => "none",
         };
         info!(method = %request.method(), token_kind, "/mcp request received");
@@ -811,6 +816,14 @@ pub async fn require_api_key(
     );
 
     let Some(token) = token else {
+        if has_authorization {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Malformed Authorization header: expected `Bearer <key>`",
+            )
+                .into_response();
+        }
         // The web app's credential is the HttpOnly `lific_token` cookie set at
         // sign-in, so no script on the page can read the session. A request
         // with no Authorization header presents it here and is resolved
