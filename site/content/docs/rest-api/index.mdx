@@ -38,7 +38,7 @@ Every credential goes in the same header: `Authorization: Bearer <token>`.
 
 A session is for a person in a browser; use an API key for a script. An agent should normally connect through [MCP](/docs/mcp) rather than calling REST directly.
 
-The session lives in an HttpOnly, `SameSite=Lax` cookie named `lific_token`, which no script on a page can read. The web UI authenticates with that cookie and nothing else. A request with no `Authorization` header is authenticated by the cookie on every route except `/mcp`; a request that has the header is judged by the header alone. The realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws) accepts only the cookie.
+The session lives in an HttpOnly, `SameSite=Lax` cookie named `lific_token`, which no script on a page can read. The web UI authenticates with that cookie and nothing else. A request with no `Authorization` header is authenticated by the cookie on every route except `/mcp`; a request that has the header is judged by the header alone, and a header that is not `Bearer <credential>` is `401` even when a valid cookie is present. The realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws) accepts only the cookie.
 
 A request the cookie authenticates that can change something (any method but `GET`, `HEAD` and `OPTIONS`) must also carry an `Origin` header naming this server: the address the request was sent to, the origin of `public_url`, or an entry in `cors_origins`. A missing Origin, `null`, or any other origin gets `403 cross-origin request refused`, and nothing is written. An empty `cors_origins` does not widen this. Requests with an `Authorization` header skip the check, since a browser never attaches one on its own.
 
