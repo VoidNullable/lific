@@ -9,6 +9,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency::{self, Bound, Created};
 use super::{filter_visible, with_read, with_write};
 
 /// LIF-407: a step's (or plan's) linked issue can live in a *different*
@@ -92,15 +93,24 @@ pub(super) async fn create_plan(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreatePlan>,
-) -> Result<Json<Plan>, LificError> {
+) -> Result<Created<Plan>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     require_create_plan_issue_roles(&db, &identity, &input)?;
-    let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
+    let op_key = match idempotency::bind(&db, &identity, &headers, "rest.create_plan", &input)? {
+        Bound::Replay(body) => return Ok(Created::Replayed(body)),
+        Bound::Write(op_key) => op_key,
+    };
+    let plan = db.transaction(|conn| {
+        let plan = plans::create_plan(conn, &input)?;
+        idempotency::record(conn, op_key.as_ref(), &plan)?;
+        Ok(plan)
+    })?;
     realtime.send(RealtimeEvent::ProjectUpdated {
         project_id: plan.project_id,
     });
-    Ok(Json(plan))
+    Ok(Created::Fresh(plan))
 }
 
 pub(super) async fn update_plan(

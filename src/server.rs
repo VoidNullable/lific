@@ -743,6 +743,8 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             // with `x-mcp-header`, so no `Mcp-Param-*` header is ever sent.
             HeaderName::from_static("mcp-method"),
             HeaderName::from_static("mcp-name"),
+            // LIF-526: idempotent creates.
+            HeaderName::from_static(crate::api::idempotency::KEY_HEADER),
         ])
         .expose_headers([
             header::WWW_AUTHENTICATE,
@@ -753,6 +755,7 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             HeaderName::from_static(crate::api::comments::RETURNED_HEADER),
             HeaderName::from_static(crate::api::comments::NEXT_CURSOR_AT_HEADER),
             HeaderName::from_static(crate::api::comments::NEXT_CURSOR_ID_HEADER),
+            HeaderName::from_static(crate::api::idempotency::REPLAYED_HEADER),
         ])
         .max_age(std::time::Duration::from_secs(86400));
 

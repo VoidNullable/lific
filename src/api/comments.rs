@@ -9,6 +9,7 @@ use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency::{self, Bound, Created};
 use super::{require_user, with_read};
 
 /// Comments are gated at `Viewer` — anyone who can see a project
@@ -179,10 +180,19 @@ fn create_for_parent(
     db: &DbPool,
     realtime: &RealtimeHub,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    headers: &axum::http::HeaderMap,
     parent: CommentParent,
     content: &str,
-) -> Result<Json<Comment>, LificError> {
+) -> Result<Created<Comment>, LificError> {
     let user = require_user(identity)?;
+    let request = match parent {
+        CommentParent::Issue(id) => ("issue", id, content),
+        CommentParent::Page(id) => ("page", id, content),
+    };
+    let op_key = match idempotency::bind(db, identity, headers, "rest.create_comment", &request)? {
+        Bound::Replay(body) => return Ok(Created::Replayed(body)),
+        Bound::Write(op_key) => op_key,
+    };
     let (comment, project_id) = db.transaction(|conn| {
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
@@ -197,6 +207,7 @@ fn create_for_parent(
             content,
             member_scoped,
         )?;
+        idempotency::record(conn, op_key.as_ref(), &comment)?;
         Ok((comment, project_id))
     })?;
     if let Some(project_id) = project_id {
@@ -208,7 +219,7 @@ fn create_for_parent(
             comment.seq,
         );
     }
-    Ok(Json(comment))
+    Ok(Created::Fresh(comment))
 }
 
 pub(super) async fn list_comments(
@@ -225,12 +236,14 @@ pub(super) async fn create_comment(
     Extension(realtime): Extension<RealtimeHub>,
     Path(issue_id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Json<Comment>, LificError> {
+) -> Result<Created<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
+        &headers,
         CommentParent::Issue(issue_id),
         &input.content,
     )
@@ -250,12 +263,14 @@ pub(super) async fn create_page_comment(
     Extension(realtime): Extension<RealtimeHub>,
     Path(page_id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Json<Comment>, LificError> {
+) -> Result<Created<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
+        &headers,
         CommentParent::Page(page_id),
         &input.content,
     )

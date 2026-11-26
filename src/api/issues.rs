@@ -8,6 +8,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency::{self, Bound, Created};
 use super::{filter_visible, retain_visible_relations, with_read, with_write};
 
 pub(super) async fn list_issues(
@@ -115,10 +116,15 @@ pub(super) async fn create_issue(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(mut input): Json<CreateIssue>,
-) -> Result<Json<Issue>, LificError> {
+) -> Result<Created<Issue>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    let op_key = match idempotency::bind(&db, &identity, &headers, "rest.create_issue", &input)? {
+        Bound::Replay(body) => return Ok(Created::Replayed(body)),
+        Bound::Write(op_key) => op_key,
+    };
     // LIF-262/LIF-409: the description's attachment references are linked by
     // `create_issue` itself, inside its savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
@@ -129,7 +135,9 @@ pub(super) async fn create_issue(
         // inside one immediate transaction: no revocation can slip between.
         authz::require_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
         resolve_me(conn, &identity, input.assignees.as_mut())?;
-        crate::db::queries::create_issue(conn, &input)
+        let issue = crate::db::queries::create_issue(conn, &input)?;
+        idempotency::record(conn, op_key.as_ref(), &issue)?;
+        Ok(issue)
     })?;
     realtime.send_with_seq(
         RealtimeEvent::IssueCreated {
@@ -138,7 +146,7 @@ pub(super) async fn create_issue(
         },
         issue.seq,
     );
-    Ok(Json(issue))
+    Ok(Created::Fresh(issue))
 }
 
 pub(super) async fn update_issue(

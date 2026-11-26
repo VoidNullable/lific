@@ -8,6 +8,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency::{self, Bound, Created};
 use super::{filter_visible, with_read, with_write};
 
 /// Gate a page mutation/read by its `project_id`: project-scoped pages check
@@ -128,10 +129,15 @@ pub(super) async fn create_page(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(mut input): Json<CreatePage>,
-) -> Result<Json<Page>, LificError> {
+) -> Result<Created<Page>, LificError> {
     require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    let op_key = match idempotency::bind(&db, &identity, &headers, "rest.create_page", &input)? {
+        Bound::Replay(body) => return Ok(Created::Replayed(body)),
+        Bound::Write(op_key) => op_key,
+    };
     // LIF-262/LIF-409: `create_page` links the content's attachment references
     // inside its own savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
@@ -141,12 +147,14 @@ pub(super) async fn create_page(
         // transaction, so the authorization deciding which references may be
         // linked cannot go stale between the check and the insert.
         require_page_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
-        crate::db::queries::create_page(conn, &input)
+        let page = crate::db::queries::create_page(conn, &input)?;
+        idempotency::record(conn, op_key.as_ref(), &page)?;
+        Ok(page)
     })?;
     if let Some(project_id) = page.project_id {
         realtime.send_with_seq(RealtimeEvent::ProjectUpdated { project_id }, page.seq);
     }
-    Ok(Json(page))
+    Ok(Created::Fresh(page))
 }
 
 pub(super) async fn update_page(

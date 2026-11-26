@@ -171,6 +171,7 @@ fn search_hits_carry_type_id_identifier_title_and_link() {
     let comment = m.add_comment(Parameters(AddCommentInput {
         identifier: "STR-1".into(),
         content: "A searchable remark".into(),
+        op_key: None,
     }));
     assert!(!comment.starts_with("Error"), "{comment}");
 

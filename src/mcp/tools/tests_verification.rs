@@ -80,6 +80,7 @@ fn ordinary_comments_stay_unmarked() {
     m.add_comment(Parameters(AddCommentInput {
         identifier: "VER-1".into(),
         content: "a plain note".into(),
+        op_key: None,
     }));
     let detail = get(&m, "VER-1");
     assert!(detail.contains("a plain note"), "got: {detail}");
