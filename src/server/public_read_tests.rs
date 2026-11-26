@@ -562,14 +562,14 @@ async fn the_owner_is_unaffected() {
 async fn anonymous_reads_are_rate_limited_and_signed_in_reads_are_not() {
     let d = deploy();
     let mut refused = None;
-    for _ in 0..300 {
+    for _ in 0..(crate::api::anonymous::READS_PER_MINUTE + 50) {
         let response = anonymous(&d.app, "GET", "/api/projects").await;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             refused = Some(response);
             break;
         }
     }
-    let refused = refused.expect("300 anonymous reads in a row were all served");
+    let refused = refused.expect("every anonymous read in a row past the limit was served");
     assert!(refused.headers().get(header::RETRY_AFTER).is_some());
     assert_eq!(
         refused

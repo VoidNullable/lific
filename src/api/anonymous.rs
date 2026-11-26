@@ -43,9 +43,11 @@ use crate::storage::{self, AttachmentStore};
 /// The single answer for "nothing readable here".
 const NOT_FOUND: &str = "not found";
 
-/// Anonymous reads allowed per client IP per minute. A person opening the
-/// list, an issue, its comments and a body of images stays well under it.
-pub(crate) const READS_PER_MINUTE: usize = 240;
+/// Anonymous reads allowed per client IP per minute. Opening one page of the
+/// app costs a signed-out reader about 6 to 19 reads, so this is roughly 30
+/// to 100 page views a minute: room for a person browsing quickly, or a few
+/// people behind one address, while still bounding a scraper.
+pub(crate) const READS_PER_MINUTE: usize = 600;
 
 /// Anonymous requests that may be in flight at once, across every visitor.
 ///

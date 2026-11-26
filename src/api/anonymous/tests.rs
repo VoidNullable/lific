@@ -124,7 +124,7 @@ async fn a_full_instance_answers_503_with_retry_after() {
 #[test]
 fn production_budgets_match_the_documented_limits() {
     let reads = reads();
-    assert_eq!(READS_PER_MINUTE, 240);
+    assert_eq!(READS_PER_MINUTE, 600);
     assert_eq!(reads.concurrency().available_permits(), 4);
     assert_eq!(reads.downloads().available_permits(), 4);
     assert_eq!(reads.derivations().available_permits(), 1);

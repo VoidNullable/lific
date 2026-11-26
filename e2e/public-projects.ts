@@ -302,7 +302,7 @@ async function main(): Promise<number> {
       "--auth-mode", "passwords",
       "--password", PASSWORD,
     ]);
-    // Anonymous reads are budgeted per client address (240 a minute), and
+    // Anonymous reads are budgeted per client address (600 a minute), and
     // this suite reads far more than one person would in a minute. Trust the
     // loopback proxy so each scenario can arrive from its own address (see
     // `run`), the way separate visitors would.
