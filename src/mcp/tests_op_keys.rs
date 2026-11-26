@@ -216,6 +216,37 @@ fn create_page_replays_on_retry() {
 }
 
 #[test]
+fn a_retried_conventions_page_replays_before_the_duplicate_check() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "TST");
+    let page = |conventions| {
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("TST".into()),
+            title: "Conventions".into(),
+            conventions,
+            op_key: Some("conv".into()),
+            ..Default::default()
+        }))
+    };
+    let first = page(Some(true));
+    assert!(first.contains("conventions page"), "got: {first}");
+
+    // The page now exists, so a fresh create would be refused as a second
+    // conventions page; the retry gets the first result instead.
+    let retried = page(Some(true));
+    assert!(retried.contains(REPLAYED), "got: {retried}");
+    assert!(
+        retried.ends_with(&first),
+        "first: {first}\nretried: {retried}"
+    );
+
+    // The flag is part of the request, so the key cannot be reused without it.
+    let refused = page(None);
+    assert!(refused.contains("different request"), "got: {refused}");
+    assert_eq!(count(&m, "pages"), 1);
+}
+
+#[test]
 fn create_plan_replays_on_retry() {
     let (m, _guard) = mcp();
     seed_project(&m, "Test", "TST");

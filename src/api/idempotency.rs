@@ -267,14 +267,55 @@ mod tests {
             ),
         ];
         for (uri, body, list) in creates {
+            // A new project already holds its conventions page.
+            let before = listed(&app, &list).await;
             let (status, _, first) = post_keyed(&app, &uri, &uri, body.clone()).await;
             assert_eq!(status, StatusCode::OK, "{uri}: {first}");
             let (status, replayed, again) = post_keyed(&app, &uri, &uri, body).await;
             assert_eq!(status, StatusCode::OK, "{uri}");
             assert!(replayed, "{uri}");
             assert_eq!(again, first, "{uri}");
-            assert_eq!(listed(&app, &list).await, 1, "{uri}");
+            assert_eq!(listed(&app, &list).await, before + 1, "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_retried_conventions_page_replays_before_the_duplicate_check() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let list = format!("/api/pages?project_id={project_id}");
+        let seeded = body_of(json_get(&app, &list).await).await;
+        for page in seeded.as_array().unwrap() {
+            let id = page["id"].as_i64().unwrap();
+            let response = json_delete(&app, &format!("/api/pages/{id}")).await;
+            assert!(response.status().is_success());
+        }
+        let body = json!({"project_id": project_id, "title": "Conventions", "conventions": true});
+
+        let (status, _, first) = post_keyed(&app, "/api/pages", "conv", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["conventions"], true, "{first}");
+        // A fresh create would now be refused as a second conventions page.
+        let (status, replayed, again) = post_keyed(&app, "/api/pages", "conv", body).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert!(replayed);
+        assert_eq!(again, first);
+
+        let (status, _, error) = post_keyed(
+            &app,
+            "/api/pages",
+            "conv",
+            json!({"project_id": project_id, "title": "Conventions"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("Idempotency-Key")),
+            "got: {error}"
+        );
+        assert_eq!(listed(&app, &list).await, 1);
     }
 
     #[tokio::test]
