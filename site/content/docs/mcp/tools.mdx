@@ -323,13 +323,13 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | `order` | `string` | No | Pages only: `asc` (default) or `desc`. |
 | `limit` | `integer` | No | Issues and pages default to 100, plans to 50; all cap at 500. Ignored for projects, modules, labels and folders. |
 | `offset` | `integer` | No | Zero-based, for issues, pages and plans. |
-
-A project's [conventions page](/docs/concepts/pages#conventions-page) is marked in page listings: its line ends with `(this project's conventions page)`, or `(this project's conventions page, turned off)`, and its structured row has `conventions: true`.
 | `members` | `string[]` | No | Projects only: keep projects where any of these users has a role. `"me"` is you; name others by username, with or without `@`. `"all"` is rejected. |
 | `roles` | `string[]` | No | Projects only: the roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
 | `statuses` | `string[]` | No | Projects only: which per-status issue counts each row prints: `backlog`, `todo`, `active`, `done`, `cancelled` or `all` (default). `[]` prints none. |
 | `show_members` | `string[]` | No | Projects only: roles whose members are all named, uncapped: `lead`, `maintainer`, `viewer` or `all`. `[]` prints only counts per role. |
 | `verbose` | `boolean` | No | Projects only: print each description in full. By default a row shows the description's first line, up to 100 characters, with `…` when anything was left out. |
+
+A project's [conventions page](/docs/concepts/pages#conventions-page) is marked in page listings: its line ends with `(this project's conventions page)`, or `(this project's conventions page, turned off)`, and its structured row has `conventions: true`.
 
 Projects are sorted by recent activity, and each row carries a one-line description, its workable-issue count, active-plan count and how long ago anything happened. It then shows the project's members by role, your own role, and its issue count per status:
 
@@ -614,7 +614,7 @@ Sections follow in this order, and a section with nothing to report is left out:
 | Due to check | Open issues with a date wait whose window has arrived, most overdue first, each with its wait line. These no longer block, so this is where the follow-up surfaces; clear the wait with `unlink_issues` when it is done. |
 | Blocked | Open issues with an unresolved blocker or a wait still holding, each naming its blocking issues and their status, and its holding waits (`waiting on @ada-lovelace (note)`, `waiting until 2026-09-28..29`). A blocker in a project you cannot view is counted, not named. |
 | Workable, not yet active | Issues ready to start, highest priority first. Active issues have their own section. |
-| Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. |
+| Key pages, or recently updated pages | Identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`. The recently updated list leaves out the conventions page; name it in `pages` to have it listed. |
 | Active | Active issues touched within the stale threshold, highest priority first, each with how long it has been idle (`idle 2d`, `idle 5h`, `idle <1h`). |
 | Stale active | Active issues nobody has touched for the instance's stale threshold (default 3 days), each with its idle age. An active issue claims work in progress; these are claims whose sessions likely ended. Resume one, or move it back to `todo`. `list_issues(stale=true)` lists them all. The server moves any left alone for 14 days (`stale_active_reset_days`) back to `todo` itself, with a comment. |
 | Needs triage | Active plans with no activity for 30 days or more (the plan itself, or any step created or edited), longest idle first, with progress and the date of the last activity; then active modules with no open issue, by name, each with how many closed issues it holds. Nothing here is changed for you: finish, archive or close each, or plan its next work. |
