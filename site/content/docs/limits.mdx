@@ -113,7 +113,7 @@ Rate limits count requests per client address, and some also per account. Behind
 | OAuth client registrations | 10 per hour | Client address | `429` |
 | OAuth device authorizations (`lific login`) | 10 per hour | Client address | `429` |
 | Repository binding changes | 30 per hour | User | `400` with the wait |
-| Public project reads | 240 per minute | Client address | `429` |
+| Reads with no credential (published projects) | 600 per minute | Client address | `429` |
 
 A request from a trusted proxy that carries an invalid `X-Lific-Client-IP` and `X-Lific-Proxy-Secret` pair gets `503` on these routes. See [Configuration](/docs/configuration#server).
 
@@ -126,10 +126,10 @@ These limit how many expensive operations run at once on the whole instance. A r
 | Markdown exports in progress over REST and MCP | 2 | `429` (MCP: `Error:` text) |
 | Browser project archive exports and imports in progress | 1 | `429` |
 | GitHub imports from the web UI | 1 per project, 4 per instance | `409` |
-| Public project requests in progress | 4 | `503` |
-| Public attachment downloads in progress | 4 | `503` |
-| Public thumbnail and preview generation | 1 at a time, from files up to 32 MiB | `503` when busy. A larger file gets `404` for a thumbnail that has not been made yet, and for a preview. |
-| Realtime connections | 16 per user, 1,024 per instance | `429`, without `Retry-After` |
+| Requests with no credential in progress | 4 | `503` |
+| Attachment downloads with no credential in progress | 4 | `503` |
+| Thumbnail and preview generation for requests with no credential | 1 at a time, from files up to 32 MiB | `503` when busy. A larger file gets `404` for a thumbnail that has not been made yet, and for a preview. |
+| Realtime connections | 16 per user, 64 shared by every reader with no account, 1,024 per instance | `429`, without `Retry-After` |
 
 A realtime connection is also closed if its client sends messages over 16 KiB, or more than 64 messages in 10 seconds. The web UI never does either.
 

@@ -11,6 +11,7 @@
   // per-user, so there's no sensible anonymous fallback).
   import { Bookmark, Star, Pencil, Trash2, Check, Plus, ChevronDown } from "lucide-svelte";
   import { me, listProjects } from "../api";
+  import { isSignedOut } from "../signedOut";
   import type { IssueListState } from "./state.svelte";
   import {
     buildConfig,
@@ -63,6 +64,11 @@
 
   // ── Auth check (once) — hides the whole control on failure ──────────
   $effect(() => {
+    // LIF-583: saved views belong to an account.
+    if (isSignedOut()) {
+      authOk = false;
+      return;
+    }
     let cancelled = false;
     (async () => {
       const resp = await me();

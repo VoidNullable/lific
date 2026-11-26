@@ -165,7 +165,7 @@ A `Wait` has `id`, `issue_id`, `kind` (`user` or `date`), `note` (a string, empt
 }
 ```
 
-Issue responses, `/index` rows and `/changes` rows carry an issue's waits as a `waits` array, left out when there are none. The [public read API](/docs/rest-api/public) never shows them. Adding or clearing a wait moves the issue's `seq`, records the change in the issue's activity, and publishes `issue.updated`.
+Issue responses, `/index` rows and `/changes` rows carry an issue's waits as a `waits` array, left out when there are none. Adding or clearing a wait moves the issue's `seq`, records the change in the issue's activity, and publishes `issue.updated`.
 
 ### GET `/api/issues/{id}/waits`
 

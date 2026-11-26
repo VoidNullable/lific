@@ -24,7 +24,13 @@ pub(super) fn sidebar_visibility(
 ) -> Result<Option<HashSet<i64>>, LificError> {
     let fresh = crate::auth::fresh_caller(conn, user_id)?;
     let effective = authz::effective_user(conn, &Some(crate::auth::fresh_auth_user(&fresh)));
-    authz::visible_project_ids_conn(conn, &effective)
+    let Some(mut visible) = authz::visible_project_ids_conn(conn, &effective)? else {
+        return Ok(None);
+    };
+    // Published projects are readable by every account (LIF-583), so they
+    // belong in everyone's sidebar alongside the caller's memberships.
+    visible.extend(crate::db::queries::published_project_ids(conn)?);
+    Ok(Some(visible))
 }
 
 /// REST ranks describe positions in the visible response, not storage ranks.
@@ -41,10 +47,11 @@ pub(super) async fn list_projects(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    // A valid unbound key can precede the first user. There is no preference
-    // owner in that case; preserve the existing visibility-filtered listing.
+    // No caller: an anonymous reader, or a valid unbound key that precedes the
+    // first user. There is no preference owner, so list what may be read:
+    // the published projects.
     if identity.is_none() {
-        let visible = authz::visible_project_ids(&db, &identity)?;
+        let visible = authz::readable_project_ids(&db, &identity)?;
         let projects = with_read(&db, crate::db::queries::list_projects)?;
         return Ok(Json(filter_visible(projects, &visible, |p| Some(p.id))));
     }
@@ -66,7 +73,7 @@ pub(super) async fn get_project(
     Path(id): Path<i64>,
 ) -> Result<Json<Project>, LificError> {
     let project = with_read(&db, |conn| crate::db::queries::get_project(conn, id))?;
-    authz::require_role(&db, &identity, project.id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project.id)?;
     Ok(Json(project))
 }
 
@@ -255,7 +262,7 @@ pub(super) async fn issue_counts(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<IssueStatusCounts>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     with_read(&db, |conn| {
         crate::db::queries::count_issues_by_status(conn, project_id)
     })
@@ -278,7 +285,7 @@ pub(super) async fn get_board(
     Path(project_id): Path<i64>,
     Query(q): Query<BoardQuery>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     let mut issues = with_read(&db, |conn| {
         crate::db::queries::list_issues(
             conn,

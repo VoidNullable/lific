@@ -35,7 +35,7 @@
   import { navLink } from "./navLink";
   import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
-  import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot, Settings2 } from "lucide-svelte";
+  import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot, Settings2, LogIn } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
@@ -49,6 +49,8 @@
   import { startAutoRefresh } from "./autoRefresh.svelte";
   import { loadActiveAgentCount } from "./agents/activeCount"; // LIF-544
   import { loginRouteFor } from "./loginRedirect";
+  import { isSignedOut } from "./signedOut"; // LIF-583
+  import SignInButton from "./SignInButton.svelte";
   import { buildEntries } from "./inbox/inbox";
   import { ensureServerClock, serverDay } from "./serverClock.svelte";
   import {
@@ -61,6 +63,12 @@
     saveSidebarCollapsed,
     SIDEBAR_DEFAULT_WIDTH,
   } from "./sidebarWidth";
+
+  // LIF-583: a signed-out reader gets this same shell around a published
+  // project, minus everything that belongs to an account: the workspace
+  // views, groups, creation, reordering, the palette and the user footer.
+  // Read once: App remounts Layout when the answer changes.
+  const signedOut = isSignedOut();
 
   // Ref to the command palette so the sidebar's "Jump to…" affordance can
   // summon it (LIF-192).
@@ -230,6 +238,7 @@
   let countsAt = 0;
   let countsRequest = 0;
   async function refreshCounts(force = false) {
+    if (signedOut) return;
     if (!force && Date.now() - countsAt < 15_000) return;
     countsAt = Date.now();
     const request = ++countsRequest;
@@ -658,6 +667,11 @@
   );
 
   async function loadUser() {
+    if (signedOut) {
+      await refreshProjects();
+      loading = false;
+      return;
+    }
     const revision = getUserRevision();
     const session = localStorage.getItem("lific_token");
     const res = await me();
@@ -683,9 +697,12 @@
     if (dragActive || orderSaving) return;
     const request = ++refreshRequest;
     groupsLoaded = false;
+    // Groups are an account's own filing; a signed-out reader has none.
     const [projectsRes, groupsRes] = await Promise.all([
       listProjects(),
-      listProjectGroups(),
+      signedOut
+        ? Promise.resolve({ ok: true as const, data: [] as ProjectGroup[] })
+        : listProjectGroups(),
     ]);
     if (request !== refreshRequest || dragActive || orderSaving) return;
     if (projectsRes.ok) {
@@ -958,7 +975,7 @@
              border-t-[var(--accent)] animate-spin"
     ></div>
   </div>
-{:else if user}
+{:else if user || signedOut}
   <!-- L-shaped chrome (sidebar + topbar share --chrome, no internal seams).
        The chrome floats above the recessed content panel; --chrome is its
        own token, distinct from --surface (which is reserved for cards
@@ -1010,6 +1027,7 @@
       </div>
 
       <!-- Jump-to / command palette trigger -->
+      {#if !signedOut}
       <div class="sidebar-launcher-wrap px-2">
         <button
           class="sidebar-launcher w-full h-10 flex items-center gap-3 pl-[0.6875rem] pr-2 rounded-lg transition-colors"
@@ -1022,6 +1040,7 @@
           </span>
         </button>
       </div>
+      {/if}
 
       <!-- Navigation. The workspace views stay put; only the project tree
            below the rule scrolls. -->
@@ -1041,6 +1060,11 @@
             {/if}
           </a>
         {/snippet}
+        {#if signedOut}
+          <span class="sidebar-section-label block px-4 pt-2 pb-1 text-micro font-semibold uppercase text-[var(--text-faint)]">
+            Projects
+          </span>
+        {:else}
         <div class="sidebar-workspace shrink-0 px-2 pt-1">
           <span class="sidebar-section-label block px-2 pb-1 text-micro font-semibold uppercase text-[var(--text-faint)]">
             Workspace
@@ -1063,6 +1087,7 @@
             <span class="flex-1 min-w-0 truncate">New project</span>
           </a>
         </div>
+        {/if}
 
         <div class="sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-1">
 
@@ -1082,7 +1107,7 @@
                 data-sidebar-project={project.id}
                 aria-current={route === `/${project.identifier}/overview` ? "page" : undefined}
                 title={project.name} class="sidebar-project-link min-w-0 flex-1 flex items-center gap-2.5 pl-2"
-                oncontextmenu={(e) => openProjectMenu(e, project)}>
+                oncontextmenu={signedOut ? undefined : (e) => openProjectMenu(e, project)}>
               {#if project.emoji}
                 <span class="sidebar-project-icon">
                   <ProjectIcon value={project.emoji} size={18} />
@@ -1096,9 +1121,11 @@
               {/if}
               <span class="truncate flex-1">{project.name}</span>
               </a>
+              {#if !signedOut}
               <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
                 aria-label={`Actions for ${project.name}`} aria-haspopup="menu"
                 onclick={(e) => openProjectMenu(e, project)}><Ellipsis size={16} /></button>
+              {/if}
               <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--sidebar-hover)]"
                 aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
                 aria-expanded={open} aria-controls={`project-nav-${project.id}`}
@@ -1270,7 +1297,7 @@
               flipDurationMs: flipMs(),
               type: "lific-projects",
               dropTargetStyle: {},
-              dragDisabled: orderSaving || ungroupedItems.length < 2,
+              dragDisabled: signedOut || orderSaving || ungroupedItems.length < 2,
             }}
             onconsider={handleProjectConsider}
             onfinalize={handleProjectFinalize}
@@ -1284,6 +1311,8 @@
             </div>
           {/each}
           </div>
+        {:else if signedOut}
+          <p class="px-3 py-6 text-body-sm text-[var(--text-faint)]">No published projects.</p>
         {:else if editingGroupId !== NEW_GROUP}
           <div class="px-3 py-6">
             <p class="text-body-sm text-[var(--text-faint)] mb-2">No projects yet.</p>
@@ -1308,6 +1337,13 @@
       <!-- Footer: the user identity IS the Settings entry (logout now lives
            inside Settings → Security). A compact theme toggle sits beside it. -->
       <div class="sidebar-footer p-1.5">
+        {#if signedOut || !user}
+        <!-- LIF-583: no account to show, so the way in takes its place. -->
+        <div class="sidebar-account-card flex items-center gap-0.5 p-1 rounded-lg">
+          <SignInButton class="flex-1 min-w-0 justify-center" />
+          {@render themeButton()}
+        </div>
+        {:else}
         <div class="sidebar-account-card flex items-center gap-0.5 p-1 rounded-lg">
         <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
           class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-3 pl-px pr-1.5 py-1 rounded-md text-left transition-colors"
@@ -1329,21 +1365,7 @@
             </div>
           </div>
         </a>
-        <button
-          class="size-7 shrink-0 grid place-items-center rounded-md
-                 text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
-          onclick={themeMenu}
-          title="Theme: {themePref}"
-          aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
-        >
-          {#if themePref === "system"}
-            <Monitor size={15} />
-          {:else if themeResolved === "dark"}
-            <Moon size={15} />
-          {:else}
-            <Sun size={15} />
-          {/if}
-        </button>
+        {@render themeButton()}
         <!-- LIF-245: small, unobtrusive entry point to the Shortcut Help
              overlay — mirrors the theme toggle beside it. The "?" key does
              the same thing from anywhere; this is for anyone who doesn't
@@ -1358,6 +1380,7 @@
           <HelpCircle size={15} />
         </button>
         </div>
+        {/if}
       </div>
       <!-- LIF-309: an 8px hit area keeps the 3px resize indicator easy to grab. -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1395,6 +1418,23 @@
           {#if count}<span class="rail-dot" aria-hidden="true"></span>{/if}
         </a>
       {/snippet}
+      {#snippet themeButton()}
+        <button
+          class="size-7 shrink-0 grid place-items-center rounded-md
+                 text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
+          onclick={themeMenu}
+          title="Theme: {themePref}"
+          aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
+        >
+          {#if themePref === "system"}
+            <Monitor size={15} />
+          {:else if themeResolved === "dark"}
+            <Moon size={15} />
+          {:else}
+            <Sun size={15} />
+          {/if}
+        </button>
+      {/snippet}
       {#snippet rail()}
         <div class="flex flex-col items-center gap-1 pt-3 pb-2 px-1.5">
           <img src="/logo.webp" alt="Lific" width="26" height="26" class="rounded-md mb-1" />
@@ -1407,6 +1447,7 @@
           >
             <PanelLeftOpen size={18} />
           </button>
+          {#if !signedOut}
           <button
             class="sidebar-launcher rail-item size-10 grid place-items-center rounded-lg transition-colors"
             onclick={() => palette?.openPalette()}
@@ -1415,13 +1456,16 @@
           >
             <Search size={17} />
           </button>
+          {/if}
         </div>
         <nav class="rail-nav flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col items-center gap-1 px-1.5 pb-2" aria-label="Navigation">
+          {#if !signedOut}
           {@render railLink("/", "Home", Home, route === "/")}
           {@render railLink("/inbox", "Inbox", Inbox, route === "/inbox", inboxCount)}
           {@render railLink("/assigned", "Assigned to me", UserCheck, route === "/assigned")}
           {@render railLink("/agents", "Agent activity", Bot, route === "/agents", activeAgents)}
           <hr class="rail-rule" />
+          {/if}
           {#each [...groups.flatMap((g) => projectsIn(g)), ...ungrouped] as project (project.id)}
             {@const current = activeProject?.toLowerCase() === project.identifier.toLowerCase()}
             <button
@@ -1432,7 +1476,7 @@
               aria-label={`${project.name} views`}
               use:tip={project.name}
               onclick={(e) => openRailProjectMenu(e, project)}
-              oncontextmenu={(e) => openProjectMenu(e, project)}
+              oncontextmenu={signedOut ? undefined : (e) => openProjectMenu(e, project)}
             >
               {#if project.emoji}
                 <ProjectIcon value={project.emoji} size={18} />
@@ -1443,6 +1487,7 @@
               {/if}
             </button>
           {/each}
+          {#if !signedOut}
           <button
             class="rail-item size-10 grid place-items-center rounded-md text-[var(--text-faint)]
                    hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
@@ -1452,6 +1497,7 @@
           >
             <Plus size={17} />
           </button>
+          {/if}
         </nav>
         <div class="flex flex-col items-center gap-1 px-1.5 pt-2 pb-2.5 border-t border-[var(--sidebar-guide)]">
           <button
@@ -1469,6 +1515,14 @@
               <Sun size={17} />
             {/if}
           </button>
+          {#if signedOut}
+          <a href={`#${loginRouteFor(route)}`} use:navLink={navigate} use:tip={"Sign in"}
+            aria-label="Sign in" data-sign-in
+            class="sidebar-destination rail-item size-10 grid place-items-center rounded-md transition-colors"
+          >
+            <LogIn size={17} />
+          </a>
+          {:else}
           <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
             use:tip={user ? `${user.display_name || user.username} · Settings` : "Settings"}
             aria-label="Account settings"
@@ -1478,6 +1532,7 @@
               {initials(user?.display_name || user?.username || "")}
             </span>
           </a>
+          {/if}
         </div>
       {/snippet}
     </aside>
@@ -1615,6 +1670,7 @@
     {route}
     {navigate}
     {user}
+    {signedOut}
     {projects}
     {groups}
     {projectsIn}
@@ -1642,7 +1698,11 @@
        the authoritative current path to know which project's read model to
        search, and to invalidate in-flight results when that project
        changes underneath it (LIF-445). -->
-  <CommandPalette bind:this={palette} {navigate} {route} actions={paletteActions} />
+  <!-- LIF-583: not for a signed-out reader; it carries create and update
+       commands as well as search. -->
+  {#if !signedOut}
+    <CommandPalette bind:this={palette} {navigate} {route} actions={paletteActions} />
+  {/if}
   <!-- LIF-245: shortcut help overlay, mounted once so "?" works from any
        route. -->
   <ShortcutHelp />

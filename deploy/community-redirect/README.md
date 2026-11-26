@@ -23,10 +23,11 @@ continue to use the ordinary trusted-proxy forwarding chain. Then install the
 same secret on the Worker and deploy it with `bunx wrangler deploy` from this
 directory. A missing Worker secret makes all proxied requests return 503. A
 missing or mismatched server secret makes requests that resolve proxy identity
-return 503, including login and public API reads.
+return 503, including login and signed-out reads of published projects.
 
-After deployment, check public API reads, password login, and the authenticated
-events WebSocket through the public hostname. Caller-supplied dedicated headers
+After deployment, check a signed-out read of a published project (for example
+`GET /api/issues/resolve/LIF-1` with no credential), password login, and the
+events WebSocket, signed in and signed out, through the public hostname. Caller-supplied dedicated headers
 must be replaced by the Worker. A direct origin request with an invalid dedicated
 header pair must fail with 503 on an IP-limited endpoint. Requests without the
 pair still use the ordinary forwarding chain; the secret does not require all

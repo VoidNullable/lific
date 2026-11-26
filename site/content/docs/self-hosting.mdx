@@ -133,7 +133,7 @@ The proxy must pass `/api/events/ws` through as a WebSocket, including the `Upgr
 
 ### Client addresses behind a proxy
 
-Lific rate-limits sign-in, signup, session refresh, password changes, OAuth client registration, device authorization and public project reads by client address. Behind a proxy, every request arrives from the proxy's address, so Lific has to be told which peers may speak for someone else. `server.trusted_proxies` lists those IP addresses or CIDR ranges. The default is empty, which means every client of an undeclared proxy shares one rate-limit bucket. An invalid entry stops the server at startup.
+Lific rate-limits sign-in, signup, session refresh, password changes, OAuth client registration, device authorization and reads of published projects that carry no credential, by client address. Behind a proxy, every request arrives from the proxy's address, so Lific has to be told which peers may speak for someone else. `server.trusted_proxies` lists those IP addresses or CIDR ranges. The default is empty, which means every client of an undeclared proxy shares one rate-limit bucket. An invalid entry stops the server at startup.
 
 Forwarding headers from any other peer are ignored. For a trusted peer, Lific reads all `X-Forwarded-For` values as one chain, walks it right to left, skips the addresses in `trusted_proxies`, and uses the first address that is not a trusted proxy. `X-Real-IP` is read only when there is no `X-Forwarded-For` at all, and a malformed or entirely trusted chain falls back to the proxy's own address. List every proxy layer you run, and nothing else. If your proxy sets `X-Real-IP` rather than appending to `X-Forwarded-For`, make sure it overwrites any value the client sent.
 

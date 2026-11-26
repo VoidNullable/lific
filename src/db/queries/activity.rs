@@ -107,6 +107,10 @@ pub fn normalize_since(input: &str) -> Result<String, LificError> {
 
 /// List activity newest-first. `limit` is clamped to 1..=200 (default 50).
 /// Fetches limit+1 rows internally to compute `has_more` without a COUNT.
+///
+/// Unfiltered, so test-only: every served feed goes through
+/// [`list_activity_for`] with the reader's [`ActivityAccess`] (LIF-583).
+#[cfg(test)]
 pub fn list_activity(
     conn: &Connection,
     scope: ActivityScope,
@@ -119,7 +123,9 @@ pub fn list_activity(
 /// [`list_activity`] with an optional cursor. With `since` (already passed
 /// through [`normalize_since`]) only entries strictly after it are returned,
 /// oldest-first, so a caller can page forward from where it left off. Without
-/// it the feed is newest-first, as it always was.
+/// it the feed is newest-first, as it always was. Unfiltered and test-only,
+/// like [`list_activity`].
+#[cfg(test)]
 pub fn list_activity_since(
     conn: &Connection,
     scope: ActivityScope,
@@ -127,6 +133,164 @@ pub fn list_activity_since(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<ActivityFeed, LificError> {
+    list_activity_for(
+        conn,
+        scope,
+        &ActivityAccess::default(),
+        since,
+        limit,
+        offset,
+    )
+}
+
+/// LIF-583: what one reader of the audit log may see.
+///
+/// A feed's scope (an issue, a page, a plan, a project) says nothing about
+/// where each of its rows came from: a plan in one project writes rows onto
+/// an issue it links in another, and a relation row names its target by
+/// identifier. Gating the scope is therefore not enough once a published
+/// project lets strangers read feeds; every row is checked against this.
+#[derive(Debug, Clone, Default)]
+pub struct ActivityAccess {
+    /// Projects whose rows the reader may see. `None` is every project.
+    pub readable: Option<HashSet<i64>>,
+    /// Projects whose roster rows (membership and repository bindings) the
+    /// reader may see: only the projects they belong to, published or not.
+    /// `None` is every project.
+    pub members_of: Option<HashSet<i64>>,
+}
+
+/// Audit rows that describe who belongs to a project or which checkouts are
+/// bound to it. Members only, like the member list and the bindings list.
+const ROSTER_ENTITIES: &str = "'member', 'repo_binding', 'repo_identity'";
+
+/// What a reader sees in place of an issue identifier in a project they
+/// cannot read.
+pub const HIDDEN_ISSUE: &str = "a private issue";
+
+fn id_list(ids: &HashSet<i64>) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl ActivityAccess {
+    /// The extra `WHERE` terms, or `None` when nothing can be visible.
+    /// Project ids are integers from the database, so they are written into
+    /// the SQL directly rather than bound.
+    fn sql_filter(&self) -> Option<String> {
+        let mut filter = String::new();
+        if let Some(readable) = &self.readable {
+            if readable.is_empty() {
+                return None;
+            }
+            filter.push_str(&format!(" AND a.project_id IN ({})", id_list(readable)));
+        }
+        if let Some(members_of) = &self.members_of {
+            filter.push_str(&format!(" AND (a.entity_type NOT IN ({ROSTER_ENTITIES})"));
+            if !members_of.is_empty() {
+                filter.push_str(&format!(" OR a.project_id IN ({})", id_list(members_of)));
+            }
+            filter.push(')');
+        }
+        Some(filter)
+    }
+
+    /// Remove what a row says about projects the reader cannot read: issue
+    /// identifiers in relation, move, anchor and step-link values, and the
+    /// numeric issue or page a row is filed under.
+    fn redact(&self, conn: &Connection, activity: &mut Activity) -> Result<(), LificError> {
+        let Some(readable) = &self.readable else {
+            return Ok(());
+        };
+        let names_an_issue = matches!(activity.action.as_str(), "link" | "unlink")
+            || (activity.action == "update"
+                && matches!(
+                    (activity.entity_type.as_str(), activity.field.as_deref()),
+                    ("issue", Some("project"))
+                        | ("plan", Some("anchor_issue"))
+                        | ("plan_step", Some("issue"))
+                ));
+        if names_an_issue {
+            for value in [&mut activity.old_value, &mut activity.new_value] {
+                if let Some(identifier) = value.as_deref()
+                    && !issue_identifier_readable(conn, identifier, readable)?
+                {
+                    *value = Some(HIDDEN_ISSUE.to_string());
+                }
+            }
+        }
+        if let Some(issue_id) = activity.issue_id {
+            let project: Option<i64> = rusqlite::OptionalExtension::optional(conn.query_row(
+                "SELECT project_id FROM issues WHERE id = ?1",
+                [issue_id],
+                |row| row.get(0),
+            ))?;
+            if !project.is_some_and(|project| readable.contains(&project)) {
+                activity.issue_id = None;
+            }
+        }
+        if let Some(page_id) = activity.page_id {
+            let project: Option<Option<i64>> =
+                rusqlite::OptionalExtension::optional(conn.query_row(
+                    "SELECT project_id FROM pages WHERE id = ?1",
+                    [page_id],
+                    |row| row.get(0),
+                ))?;
+            if !project
+                .flatten()
+                .is_some_and(|project| readable.contains(&project))
+            {
+                activity.page_id = None;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether an issue identifier recorded in the audit log names a project the
+/// reader can read. Decided by the project the identifier names, not by the
+/// issue it resolves to now: a moved issue's old identifier still names its
+/// old project. A prefix that names no current project (it was renamed or
+/// deleted) is treated as unreadable.
+fn issue_identifier_readable(
+    conn: &Connection,
+    identifier: &str,
+    readable: &HashSet<i64>,
+) -> Result<bool, LificError> {
+    let Some((prefix, number)) = identifier.rsplit_once('-') else {
+        return Ok(false);
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(false);
+    }
+    let project: Option<i64> = rusqlite::OptionalExtension::optional(conn.query_row(
+        "SELECT id FROM projects WHERE identifier = ?1",
+        [prefix],
+        |row| row.get(0),
+    ))?;
+    Ok(project.is_some_and(|project| readable.contains(&project)))
+}
+
+/// The activity feed for one reader: rows from projects they cannot
+/// read are left out, roster rows are left to members, and references into
+/// unreadable projects are redacted. Paging counts only the rows the reader
+/// sees.
+pub fn list_activity_for(
+    conn: &Connection,
+    scope: ActivityScope,
+    access: &ActivityAccess,
+    since: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<ActivityFeed, LificError> {
+    let Some(access_filter) = access.sql_filter() else {
+        return Ok(ActivityFeed {
+            items: Vec::new(),
+            has_more: false,
+        });
+    };
     let (limit, offset) = super::page_with(limit, offset, DEFAULT_LIMIT, MAX_LIMIT);
 
     // Scope params come first (?1, optionally ?2 for plans); limit/offset are
@@ -175,8 +339,9 @@ pub fn list_activity_since(
                 "a.ts ASC, a.id ASC",
             )
         }
-        None => (where_clause, "a.id DESC"),
+        None => (format!("({where_clause})"), "a.id DESC"),
     };
+    let where_clause = format!("{where_clause}{access_filter}");
 
     let n = sp.len();
     sp.push(Box::new(super::over_fetch(limit)));
@@ -200,7 +365,10 @@ pub fn list_activity_since(
     let refs: Vec<&dyn rusqlite::types::ToSql> = sp.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), row_to_activity)?;
-    let items: Vec<Activity> = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut items: Vec<Activity> = rows.collect::<Result<Vec<_>, _>>()?;
+    for activity in &mut items {
+        access.redact(conn, activity)?;
+    }
 
     // ActivityFeed is the serialized shape the REST feed and the web UI read;
     // the split itself is the shared one (LIF-388).

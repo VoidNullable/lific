@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // `![alt|N](url)` image widths, rendered by the real Markdown component in
-// signed-in and public scope: the width is a ceiling, a small image is not
+// for signed-in and signed-out readers: the width is a ceiling, a small image is not
 // stretched, a width past the thumbnail edge loads the original, and a lone
 // titled image becomes a figure whose caption wraps at the image edge.
 // Several images alone in a paragraph tile side by side and wrap on a phone.
@@ -29,8 +29,8 @@ const content = [
 ].join("\\n");
 const fixture = `<script>
   import Markdown from './lib/Markdown.svelte';
-  import { setPublicProject } from './lib/publicScope';
-  if (location.search.includes('public')) setPublicProject('TST');
+  import { setSignedOut } from './lib/signedOut';
+  if (location.search.includes('signed-out')) setSignedOut(true);
 </script>
 <main style="max-width: 700px"><Markdown content={"${content}"} /></main>`;
 const originalHtml = await Bun.file(root + "/index.html").text();
@@ -92,8 +92,8 @@ try {
     return route.fulfill({ contentType: "image/png", body });
   });
 
-  for (const scope of ["signed-in", "public"]) {
-    await page.goto(server.resolvedUrls!.local[0] + (scope === "public" ? "?public" : ""));
+  for (const scope of ["signed-in", "signed-out"]) {
+    await page.goto(server.resolvedUrls!.local[0] + (scope === "signed-out" ? "?signed-out" : ""));
     await page.locator(".prose img").nth(7).waitFor();
     await page.waitForFunction(() =>
       Array.from(document.querySelectorAll<HTMLImageElement>(".prose img")).every(

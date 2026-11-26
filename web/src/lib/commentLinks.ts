@@ -7,16 +7,7 @@ export function splitResourcePath(
   pathname: string,
 ): { basePath: string; route: string } | null {
   const match = pathname.match(RESOURCE_PATH);
-  if (!match) return null;
-  let [, basePath, route] = match;
-  // LIF-471: `/public/LIF/issues/LIF-42` is a public route, not the private
-  // issue route served from a `/public` subdirectory. The prefix belongs to
-  // the route so the app opens the public view rather than the login wall.
-  if (/\/public$/i.test(basePath)) {
-    basePath = basePath.slice(0, -"/public".length);
-    route = `/public${route}`;
-  }
-  return { basePath, route };
+  return match ? { basePath: match[1], route: match[2] } : null;
 }
 
 export function commentTargetFromHash(hash: string): string | null {

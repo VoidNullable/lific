@@ -66,7 +66,7 @@ pub(super) async fn list_pages_handler(
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<Page>>, LificError> {
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &identity, pid, Role::Viewer)?;
+        authz::require_read(&db, &identity, pid)?;
         return with_read(&db, |conn| {
             crate::db::queries::list_pages(
                 conn,
@@ -85,7 +85,7 @@ pub(super) async fn list_pages_handler(
     // Cross-project list (LIF-197 scope item 2): filter, don't deny. A
     // workspace page (project_id None) is excluded for any non-admin; see
     // `filter_visible`'s doc comment.
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let pages = with_read(&db, |conn| {
         crate::db::queries::list_pages(
             conn,
@@ -108,7 +108,7 @@ pub(super) async fn get_page(
     Path(id): Path<i64>,
 ) -> Result<Json<Page>, LificError> {
     let page = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?;
-    require_page_role(&db, &identity, page.project_id, Role::Viewer)?;
+    authz::require_read_or_workspace(&db, &identity, page.project_id)?;
     Ok(Json(page))
 }
 
@@ -121,7 +121,7 @@ pub(super) async fn resolve_page(
         let id = crate::db::queries::resolve_page_identifier(conn, &identifier)?;
         crate::db::queries::get_page(conn, id)
     })?;
-    require_page_role(&db, &identity, page.project_id, Role::Viewer)?;
+    authz::require_read_or_workspace(&db, &identity, page.project_id)?;
     Ok(Json(page))
 }
 

@@ -58,13 +58,21 @@ pub(super) async fn list_plans(
     Query(q): Query<ListPlansQuery>,
 ) -> Result<Json<Vec<Plan>>, LificError> {
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &identity, pid, Role::Viewer)?;
-        return with_read(&db, |conn| plans::list_plans(conn, &q)).map(Json);
+        authz::require_read(&db, &identity, pid)?;
+        let mut list = with_read(&db, |conn| plans::list_plans(conn, &q))?;
+        for plan in &mut list {
+            authz::hide_unreadable_plan_issue_refs(&db, &identity, plan)?;
+        }
+        return Ok(Json(list));
     }
     // Cross-project list (LIF-197 scope item 2): filter, don't deny.
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let list = with_read(&db, |conn| plans::list_plans(conn, &q))?;
-    Ok(Json(filter_visible(list, &visible, |p| Some(p.project_id))))
+    let mut list = filter_visible(list, &visible, |p| Some(p.project_id));
+    for plan in &mut list {
+        authz::hide_unreadable_plan_issue_refs(&db, &identity, plan)?;
+    }
+    Ok(Json(list))
 }
 
 pub(super) async fn get_plan(
@@ -72,8 +80,9 @@ pub(super) async fn get_plan(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Plan>, LificError> {
-    let plan = with_read(&db, |conn| plans::get_plan(conn, id))?;
-    authz::require_role(&db, &identity, plan.project_id, Role::Viewer)?;
+    let mut plan = with_read(&db, |conn| plans::get_plan(conn, id))?;
+    authz::require_read(&db, &identity, plan.project_id)?;
+    authz::hide_unreadable_plan_issue_refs(&db, &identity, &mut plan)?;
     Ok(Json(plan))
 }
 
@@ -86,7 +95,9 @@ pub(super) async fn resolve_plan(
         let id = plans::resolve_plan_identifier(conn, &identifier)?;
         plans::get_plan(conn, id)
     })?;
-    authz::require_role(&db, &identity, plan.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, plan.project_id)?;
+    let mut plan = plan;
+    authz::hide_unreadable_plan_issue_refs(&db, &identity, &mut plan)?;
     Ok(Json(plan))
 }
 

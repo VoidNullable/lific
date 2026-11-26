@@ -64,7 +64,7 @@ pub(super) async fn my_project_role(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
 
     let (role, is_admin) = with_read(&db, |conn| {
         let auth_user = identity.as_ref().map(|i| i.user.clone());

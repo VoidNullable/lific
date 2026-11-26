@@ -24,10 +24,10 @@ use super::with_read;
 /// epoch milliseconds, which decides whether a claim has ended. The web client computes
 /// "today" at this offset rather than in the browser's timezone. Signed-in
 /// callers only: the offset hints at where the server lives.
-pub(super) async fn server_clock(
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-) -> Result<Json<serde_json::Value>, LificError> {
-    super::require_user(&identity)?;
+/// LIF-583: no identity check. The server's calendar day carries no project
+/// data, and an anonymous reader of a published project needs it to render
+/// waits the same way a member sees them.
+pub(super) async fn server_clock() -> Result<Json<serde_json::Value>, LificError> {
     Ok(Json(serde_json::json!({
         "today": waits::today_text(),
         "utc_offset_minutes": waits::utc_offset_minutes(),
@@ -43,7 +43,7 @@ pub(super) async fn list_waits(
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<IssueWait>>, LificError> {
     let project_id = with_read(&db, |conn| queries::issue_project_id(conn, id))?;
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     with_read(&db, |conn| waits::list_waits(conn, id)).map(Json)
 }
 

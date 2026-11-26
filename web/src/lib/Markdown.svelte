@@ -23,15 +23,16 @@
   import { PanelRight, ExternalLink } from "lucide-svelte";
   import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
   import { attachmentThumbnailUrl, attachmentUrl } from "./api"; // LIF-418
-  import { inPublicScope } from "./publicScope"; // LIF-471
+  import { isSignedOut } from "./signedOut"; // LIF-583
   import { THUMBNAIL_EDGE, withImageParagraphs, withImageWidths } from "./imageSize";
 
-  // LIF-471: in public scope an <img> may only point at this instance's own
-  // attachments. Registered once (hooks are global to DOMPurify) and inert
-  // outside public scope. An image with no `src` renders as its alt text.
+  // LIF-471: for a signed-out reader an <img> may only point at this
+  // instance's own attachments. Registered once (hooks are global to
+  // DOMPurify) and inert for a signed-in reader. An image with no `src`
+  // renders as its alt text.
   const PUBLIC_IMG_SRC_RE = /^\/api\/attachments\/\d+\/?$/;
   DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
-    if (!inPublicScope()) return;
+    if (!isSignedOut()) return;
     if (data.attrName !== "src") return;
     // `<input type="image" src>` fetches too; task-list checkboxes need the
     // element, so only the attribute goes.
@@ -250,10 +251,10 @@
   // their class + data-* attributes, GFM tables, task-list checkboxes, and the
   // LIF-262 attachment img/chip markup).
   //
-  // LIF-471: on a public page the reader has no relationship with whoever
-  // wrote the body, so a body must not be able to make their browser fetch
-  // from a host the author chose (a tracking pixel: IP, user agent, reading
-  // time). Everything that can fetch on its own is dropped in public scope:
+  // LIF-471: a signed-out reader has no relationship with whoever wrote the
+  // body, so a body must not be able to make their browser fetch from a host
+  // the author chose (a tracking pixel: IP, user agent, reading time).
+  // Everything that can fetch on its own is dropped while signed out:
   // media elements, embeds, stylesheets, inline styles, `srcset`/`poster`,
   // and any `<img>` whose source is not one of this instance's attachments.
   // Links the reader chooses to click survive. The signed-in renderer keeps
@@ -281,7 +282,7 @@
         "data-attachment",
         "download",
       ],
-      ...(inPublicScope()
+      ...(isSignedOut()
         ? { FORBID_TAGS: PUBLIC_FORBID_TAGS, FORBID_ATTR: PUBLIC_FORBID_ATTR }
         : {}),
     })
@@ -509,8 +510,8 @@
             // LIF-471: a diagram can carry `<image href>` nodes, which are
             // a fetch the author chose. The body sanitizer never sees this
             // SVG (it is produced after sanitization), so it gets the same
-            // public-scope rule here: no external fetches from a body.
-            if (!inPublicScope()) return out;
+            // signed-out rule here: no external fetches from a body.
+            if (!isSignedOut()) return out;
             return {
               svg: DOMPurify.sanitize(out.svg, {
                 USE_PROFILES: { svg: true, svgFilters: true },
@@ -615,13 +616,13 @@
       const authored = img.getAttribute("src") ?? "";
       const match = authored.match(ATTACHMENT_SRC_RE);
       if (!match) {
-        // LIF-471: an image hosted elsewhere loads for a public reader too,
-        // but must not tell its host which page they came from.
-        if (inPublicScope()) img.referrerPolicy = "no-referrer";
+        // LIF-471: an image hosted elsewhere loads for a signed-out reader
+        // too, but must not tell its host which page they came from.
+        if (isSignedOut()) img.referrerPolicy = "no-referrer";
         continue;
       }
-      // The body says `/api/attachments/N`; the URL that actually loads it
-      // depends on which surface this page is reading from (LIF-471).
+      // The body says `/api/attachments/N`; load it through the shared URL
+      // builder so every viewer agrees on the address.
       const src = attachmentUrl(Number(match[1]));
       img.dataset.attachmentDecorated = "true";
       img.classList.add("attachment-image");

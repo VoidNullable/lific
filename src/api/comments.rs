@@ -13,17 +13,17 @@ use super::idempotency;
 use super::{require_user, with_read};
 use crate::db::queries::op_keys::Written;
 
-/// Comments are gated at `Viewer` — anyone who can see a project
-/// can read and post comments on its issues/pages (the actual auth-required
-/// check for *who* the comment is attributed to is separate, below).
-/// Workspace-level pages (`project_id = None`) fall back to admin-only.
-fn require_comment_viewer(
+/// Reading comments follows the read gate: anyone may read the comments of a
+/// published project, a member any project they belong to. Posting stays at
+/// `Viewer` membership (see `create_for_parent`), so publishing a project does
+/// not open it to comments from strangers. Workspace-level pages
+/// (`project_id = None`) fall back to admin-only.
+fn require_comment_reader(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
-    let conn = db.read()?;
-    authz::require_project_or_workspace_role_conn(&conn, identity, project_id, Role::Viewer)
+    authz::require_read_or_workspace(db, identity, project_id)
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -162,7 +162,7 @@ fn list_for_parent(
     let cursor = q.cursor()?;
     let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
-    require_comment_viewer(db, identity, project_id)?;
+    require_comment_reader(db, identity, project_id)?;
     let page = with_read(db, |conn| {
         comments::list_comments_by_kind(
             conn,

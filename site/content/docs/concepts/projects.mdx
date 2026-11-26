@@ -16,7 +16,7 @@ Any signed-in user can create a project and becomes its lead. Naming somebody el
 | `description` | Markdown describing the project. |
 | `emoji` | The icon shown in the sidebar and project switcher: a literal emoji, or a Lucide icon written `lucide:Rocket`. |
 | `lead_user_id` | The primary lead. See [The primary lead](#the-primary-lead). |
-| `is_public` | Whether the anonymous public view serves this project. Off until a lead turns it on. See [Public projects](/docs/public-projects). |
+| `is_public` | Whether everyone may read this project at its normal links, with or without an account. Off until a lead turns it on. See [Public projects](/docs/public-projects). |
 | `created_at`, `updated_at` | Set by Lific. |
 
 The order of projects in the sidebar belongs to each person. Reordering your list never moves anyone else's.
@@ -85,4 +85,4 @@ A [project archive](/docs/project-archives) copies a project, with its content, 
 
 [Archiving a project](/docs/archiving-projects) takes it out of the instance and keeps it as one compressed file on the server, until an administrator unarchives it with its members and history.
 
-[Publishing a project](/docs/public-projects) serves its current issues, pages, comments and attachments on a separate read-only surface that needs no sign-in, including everything written before you published. Plans, edit history and account records stay private. Publishing changes nothing about how the rest of the API authenticates, and it does not make an otherwise open instance safe to put on the Internet.
+[Publishing a project](/docs/public-projects) makes it readable by everyone at its normal links: visitors with no account, every other account and every API key, who all read what a Viewer reads, including everything written before you published. Changing anything still needs a role. Email addresses, keys, the member list and settings stay private. Publishing changes nothing about how the rest of the API authenticates, and it does not make an otherwise open instance safe to put on the Internet.

@@ -443,35 +443,6 @@ fn waits_follow_their_issue_through_trash_and_purge() {
 }
 
 #[test]
-fn the_public_view_carries_no_waits() {
-    let f = fixture();
-    {
-        let conn = f.db.write().unwrap();
-        conn.execute(
-            "UPDATE projects SET is_public = 1 WHERE id = ?1",
-            [f.project],
-        )
-        .unwrap();
-        add_wait(&conn, f.issue, &user_wait("blake", "private note"), None).unwrap();
-    }
-    let conn = f.db.read().unwrap();
-    let tx = conn.unchecked_transaction().unwrap();
-    let project = queries::public::public_project(&tx, "WAIT")
-        .unwrap()
-        .unwrap();
-    let issue = queries::public::public_issue(&tx, &project, f.issue)
-        .unwrap()
-        .unwrap();
-    assert!(issue.waits.is_empty());
-    let index = queries::public::public_index(&tx, &project).unwrap();
-    assert!(index.issues.iter().all(|row| row.waits.is_empty()));
-    let changes = queries::public::public_changes(&tx, &project, 0, 100).unwrap();
-    let json = serde_json::to_string(&(issue, index, changes)).unwrap();
-    assert!(!json.contains("blake"), "{json}");
-    assert!(!json.contains("private note"), "{json}");
-}
-
-#[test]
 fn windows_render_in_their_shortest_unambiguous_form() {
     assert_eq!(format_window("2026-09-28", "2026-09-28"), "2026-09-28");
     assert_eq!(format_window("2026-09-28", "2026-09-29"), "2026-09-28..29");

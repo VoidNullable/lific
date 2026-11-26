@@ -7,18 +7,14 @@ import {
 } from "../src/lib/commentLinks";
 
 describe("comment links", () => {
-  test("keeps a public prefix inside the route rather than the base path", () => {
-    expect(splitResourcePath("/public/LIF/issues/LIF-42")).toEqual({
-      basePath: "",
-      route: "/public/LIF/issues/LIF-42",
-    });
-    expect(splitResourcePath("/app/public/LIF/pages/7")).toEqual({
-      basePath: "/app",
-      route: "/public/LIF/pages/7",
-    });
+  test("reads a published project's link like any other", () => {
     expect(splitResourcePath("/LIF/issues/LIF-42")).toEqual({
       basePath: "",
       route: "/LIF/issues/LIF-42",
+    });
+    expect(splitResourcePath("/LIF/plans/3")).toEqual({
+      basePath: "",
+      route: "/LIF/plans/3",
     });
   });
 

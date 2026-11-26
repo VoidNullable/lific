@@ -26,7 +26,7 @@
     type AttachmentLinks,
     type LinkedEntity,
   } from "./api";
-  import { inPublicScope } from "./publicScope"; // LIF-471
+  import { isSignedOut } from "./signedOut"; // LIF-583
   import {
     canDeleteAttachment,
     deleteConfirmMessage,
@@ -92,7 +92,7 @@
   });
 
   $effect(() => {
-    if (viewerId === null) {
+    if (viewerId === null && !isSignedOut()) {
       void me().then((res) => {
         if (res.ok) viewerId = res.data.id;
       });
@@ -110,8 +110,8 @@
   function mayDelete(a: Attachment): boolean {
     // LIF-471: `canDeleteAttachment` fails open while the viewer is unknown,
     // which is right for a signed-in page still loading `me()` and wrong for
-    // a public page, where the viewer is unknown by design.
-    if (inPublicScope()) return false;
+    // a signed-out reader, who has no account to be (LIF-583).
+    if (isSignedOut()) return false;
     return canDeleteAttachment({
       uploaderId: a.uploader_id,
       viewerId,
@@ -244,19 +244,17 @@
               />
               <span class="att__thumb-name">{a.filename}</span>
             </button>
-            {#if !inPublicScope()}
-              <button
-                type="button"
-                class="att__info"
-                title="Details for {a.filename}"
-                aria-label="Details for {a.filename}"
-                aria-expanded={detailId === a.id}
-                onclick={() => void toggleDetail(a)}
-              >
-                <Info size={13} />
-              </button>
-            {/if}
-            {#if onInsert && !inPublicScope()}
+            <button
+              type="button"
+              class="att__info"
+              title="Details for {a.filename}"
+              aria-label="Details for {a.filename}"
+              aria-expanded={detailId === a.id}
+              onclick={() => void toggleDetail(a)}
+            >
+              <Info size={13} />
+            </button>
+            {#if onInsert && !isSignedOut()}
               <button
                 type="button"
                 class="att__insert"
@@ -296,19 +294,17 @@
               altText={a.alt_text ?? null}
               hasThumbnail={a.has_thumbnail ?? false}
             />
-            {#if !inPublicScope()}
-              <button
-                type="button"
-                class="att__info"
-                title="Details for {a.filename}"
-                aria-label="Details for {a.filename}"
-                aria-expanded={detailId === a.id}
-                onclick={() => void toggleDetail(a)}
-              >
-                <Info size={13} />
-              </button>
-            {/if}
-            {#if onInsert && !inPublicScope()}
+            <button
+              type="button"
+              class="att__info"
+              title="Details for {a.filename}"
+              aria-label="Details for {a.filename}"
+              aria-expanded={detailId === a.id}
+              onclick={() => void toggleDetail(a)}
+            >
+              <Info size={13} />
+            </button>
+            {#if onInsert && !isSignedOut()}
               <button
                 type="button"
                 class="att__insert"

@@ -26,13 +26,13 @@ pub(super) async fn list_issues(
         q.claimant = Some(rest_claimant(&identity, &headers)?);
     }
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &identity, pid, Role::Viewer)?;
+        authz::require_read(&db, &identity, pid)?;
         let mut issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
         retain_visible_relations(&db, &identity, &mut issues)?;
         return Ok(Json(issues));
     }
     // Cross-project list: filter instead of denying (LIF-197 scope item 2).
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let mut issues = with_read(&db, |conn| {
         let mut issues = crate::db::queries::list_issues(conn, &q)?;
         crate::db::queries::retain_visible_relations(conn, &mut issues, visible.as_ref());
@@ -98,7 +98,7 @@ pub(super) async fn get_issue(
     Path(id): Path<i64>,
 ) -> Result<Json<Issue>, LificError> {
     let mut issue = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?;
-    authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, issue.project_id)?;
     retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
 }
@@ -112,7 +112,7 @@ pub(super) async fn resolve_issue(
         let id = crate::db::queries::resolve_identifier(conn, &identifier)?;
         crate::db::queries::get_issue(conn, id)
     })?;
-    authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, issue.project_id)?;
     let mut issue = issue;
     retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
@@ -472,7 +472,7 @@ pub(super) async fn project_relations(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<ProjectRelation>>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     with_read(&db, |conn| {
         crate::db::queries::list_project_relations(conn, id)
     })

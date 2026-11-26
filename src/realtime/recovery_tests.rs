@@ -72,7 +72,11 @@ async fn upgrade(
         .expect("session lookup")
         .expect("the test connects with a live session");
     let permit = hub.try_acquire_socket(user.id).expect("socket slot");
-    ws.on_upgrade(move |socket| serve_socket(socket, hub, db, query.token, user, permit))
+    let viewer = SocketViewer::Session {
+        token: query.token,
+        user,
+    };
+    ws.on_upgrade(move |socket| serve_socket(socket, hub, db, viewer, permit))
 }
 
 struct Recovery {

@@ -426,7 +426,7 @@
       { id: "general", label: "General", show: true },
       { id: "labels", label: "Labels", show: true },
       { id: "members", label: "Members", show: canManage },
-      { id: "sharing", label: "Public view", show: canPublish },
+      { id: "sharing", label: "Public access", show: canPublish },
       { id: "data", label: "Import and export", show: true },
       { id: "danger", label: "Danger zone", show: canManage },
     ].filter((s) => s.show),

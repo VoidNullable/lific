@@ -12,7 +12,8 @@ test("the Worker replaces spoofable identity headers with an authenticated clien
   };
 
   try {
-    const request = new Request("https://community.lific.dev/public/api/projects/LIF", {
+    // An anonymous read of a published project: no credential, ordinary route.
+    const request = new Request("https://community.lific.dev/api/issues/resolve/LIF-1", {
       headers: {
         "cf-connecting-ip": "203.0.113.7",
         "x-forwarded-for": "192.0.2.1",

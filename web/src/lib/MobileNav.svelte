@@ -57,7 +57,9 @@
     Inbox,
     UserCheck,
     Bot,
+    LogIn,
   } from "lucide-svelte";
+  import { signInRoute } from "./signedOut";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
   import type { ThemePreference } from "./theme";
@@ -67,6 +69,7 @@
     route,
     navigate,
     user,
+    signedOut = false,
     projects,
     groups,
     projectsIn,
@@ -94,7 +97,9 @@
     open?: boolean;
     route: string;
     navigate: (path: string) => void;
-    user: AuthUser;
+    user: AuthUser | null;
+    /** LIF-583: no account features, a Sign in row in the footer. */
+    signedOut?: boolean;
     projects: Project[];
     groups: ProjectGroup[];
     projectsIn: (group: ProjectGroup) => Project[];
@@ -636,6 +641,7 @@
         </button>
       </div>
 
+      {#if !signedOut}
       <div class="shrink-0 px-3 pb-3">
         <button
           class="sidebar-launcher w-full h-11 flex items-center gap-2.5 px-3 rounded-lg transition-colors"
@@ -647,8 +653,10 @@
           <span class="flex-1 text-left text-body-lg">Search issues, pages, projects…</span>
         </button>
       </div>
+      {/if}
 
       <nav class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-2 pb-3">
+        {#if !signedOut}
         <a
           class="sidebar-destination mobile-main-row w-full min-h-12 flex items-center gap-3 px-3 rounded-lg text-left text-body-lg transition-colors"
           href="#/"
@@ -675,11 +683,13 @@
         {@render workspaceRow("/inbox", "Inbox", Inbox, inboxCount, "accent")}
         {@render workspaceRow("/assigned", "Assigned to me", UserCheck, assignedCount, "plain")}
         {@render workspaceRow("/agents", "Agent activity", Bot, null, "plain")}
+        {/if}
 
         <div class="flex items-center justify-between pl-3 pr-1 pt-2 pb-1">
           <span class="sidebar-section-label text-micro font-semibold uppercase text-[var(--text-faint)]">
             Projects
           </span>
+          {#if !signedOut}
           <button
             class="size-11 -mr-1 grid place-items-center rounded-lg
                    text-[var(--text-faint)] active:bg-[var(--bg-subtle)] transition-colors"
@@ -688,6 +698,7 @@
           >
             <Plus size={18} />
           </button>
+          {/if}
         </div>
 
         {#if orderError}
@@ -705,7 +716,7 @@
             onclick={() => push(project)}
             data-mobile-project-trigger={project.identifier}
             aria-label="Open {project.name} navigation"
-            oncontextmenu={(e) => projectMenu(e, project)}
+            oncontextmenu={signedOut ? undefined : (e) => projectMenu(e, project)}
           >
             {#if project.emoji}
               <span class="mobile-project-icon grid place-items-center shrink-0">
@@ -727,7 +738,9 @@
             </span>
             <ChevronRight size={17} class="mobile-project-chevron shrink-0 text-[var(--text-faint)]" />
           </button>
+          {#if !signedOut}
           <button class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {project.name}" aria-haspopup="menu" onclick={(e) => projectMenu(e, project)}><Ellipsis size={18} /></button>
+          {/if}
           </div>
         {/snippet}
 
@@ -802,7 +815,9 @@
           {/each}
         </div>
 
-        {#if projects.length === 0 && groups.length === 0 && editingGroupId !== NEW_GROUP}
+        {#if signedOut && projects.length === 0}
+          <p class="px-3 py-8 text-body text-[var(--text-faint)]">No published projects.</p>
+        {:else if projects.length === 0 && groups.length === 0 && editingGroupId !== NEW_GROUP}
           <div class="px-3 py-8">
             <p class="text-body text-[var(--text-faint)] mb-3">No projects yet.</p>
             <a
@@ -819,6 +834,19 @@
       <div
         class="sidebar-footer shrink-0 flex items-center gap-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
       >
+        {#if signedOut || !user}
+        <!-- LIF-583: the way in, where the account row would be. -->
+        <a
+          class="mobile-main-row flex-1 min-w-0 min-h-12 flex items-center justify-center gap-2 px-3 rounded-lg
+                 text-body-lg font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]"
+          href="#/login"
+          data-sign-in
+          onclick={(e) => go(e, signInRoute())}
+        >
+          <LogIn size={18} class="shrink-0" />
+          Sign in
+        </a>
+        {:else}
         <a
           class="sidebar-destination mobile-main-row flex-1 min-w-0 min-h-12 flex items-center gap-3 px-2 rounded-lg text-left transition-colors"
           href="#/settings"
@@ -841,6 +869,7 @@
             </div>
           </div>
         </a>
+        {/if}
         <button
           class="size-11 shrink-0 grid place-items-center rounded-lg
                  text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"

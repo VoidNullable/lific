@@ -504,10 +504,7 @@ pub(super) async fn list_entity_attachments(
     // The entity's owning project gates the read (Viewer). Workspace-level
     // pages (no project) fall back to workspace-admin.
     let project_id = resolve_entity_project(&db, entity, query.entity_id)?;
-    match project_id {
-        Some(pid) => authz::require_role(&db, &identity, pid, Role::Viewer)?,
-        None => authz::require_workspace_admin(&db, &identity)?,
-    }
+    authz::require_read_or_workspace(&db, &identity, project_id)?;
 
     let items = with_read(&db, |conn| {
         q::list_for_entity(conn, entity, query.entity_id)
@@ -568,7 +565,7 @@ pub(super) async fn list_project_attachments(
     Path(project_id): Path<i64>,
     Query(query): Query<ProjectAttachmentQuery>,
 ) -> Result<axum::Json<ProjectAttachmentPage>, LificError> {
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, project_id)?;
     with_read(&db, |conn| {
         q::list_project_attachments(conn, project_id, &query)
     })
@@ -619,15 +616,24 @@ pub(super) async fn download_attachment(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Response, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
 
-    // Authorize: the caller must be able to view SOME project this attachment
-    // is linked into (Viewer), or be the uploader / an admin for a still-
-    // unlinked attachment.
+    // Authorize: the caller must be able to read SOME project this attachment
+    // is linked into, or be the uploader / an admin for a still-unlinked
+    // attachment.
     authorize_read(&db, &identity, &attachment)?;
+
+    // LIF-583: an anonymous reader gets a bounded stream rather than the whole
+    // file in memory, under the anonymous download budget.
+    if identity.is_none()
+        && let Some(Extension(reads)) = anonymous
+    {
+        return super::anonymous::download(&reads, &store, &attachment);
+    }
 
     let bytes = store.read(&attachment.sha256)?;
     let total = bytes.len() as u64;
@@ -797,6 +803,7 @@ pub(super) async fn attachment_thumbnail(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     Path(id): Path<i64>,
 ) -> Result<Response, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
@@ -808,9 +815,35 @@ pub(super) async fn attachment_thumbnail(
         ));
     }
 
-    let thumb = match store.read_thumb(&attachment.sha256)? {
-        Some(bytes) => bytes,
-        None => {
+    let anonymous = anonymous
+        .filter(|_| identity.is_none())
+        .map(|Extension(reads)| reads);
+    let thumb = match (store.read_thumb(&attachment.sha256)?, anonymous) {
+        (Some(bytes), _) => bytes,
+        // LIF-583: an anonymous reader may have one generated only within the
+        // anonymous size ceiling and derivation budget, off the runtime.
+        (None, Some(reads)) => {
+            let permit = super::anonymous::derivation_permit(&reads, &attachment)?;
+            let store = store.clone();
+            let sha256 = attachment.sha256.clone();
+            super::anonymous::run_derivation(permit, move || {
+                let source = store.read(&sha256)?;
+                let bytes = match storage::generate_thumbnail(&source) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) | Err(_) => {
+                        return Err(LificError::NotFound(
+                            "no thumbnail for this attachment".into(),
+                        ));
+                    }
+                };
+                if let Err(e) = store.write_thumb(&sha256, &bytes) {
+                    tracing::warn!(error = %e, "failed to cache attachment thumbnail");
+                }
+                Ok(bytes)
+            })
+            .await?
+        }
+        (None, None) => {
             let source = store.read(&attachment.sha256)?;
             match storage::generate_thumbnail(&source) {
                 Ok(Some(bytes)) => {
@@ -1045,10 +1078,7 @@ fn visible_links(
         let Ok(project_id) = resolve_entity_project(db, entity, entity_id) else {
             continue;
         };
-        let visible = match project_id {
-            Some(pid) => authz::require_role(db, identity, pid, Role::Viewer).is_ok(),
-            None => authz::require_workspace_admin(db, identity).is_ok(),
-        };
+        let visible = authz::require_read_or_workspace(db, identity, project_id).is_ok();
         if !visible {
             continue;
         }
@@ -1135,10 +1165,24 @@ pub(super) async fn attachment_preview(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
+    anonymous: Option<Extension<Arc<super::AnonymousReads>>>,
     Path(id): Path<i64>,
 ) -> Result<axum::Json<crate::preview::Preview>, LificError> {
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
     authorize_read(&db, &identity, &attachment)?;
+
+    if identity.is_none()
+        && let Some(Extension(reads)) = anonymous
+    {
+        let permit = super::anonymous::derivation_permit(&reads, &attachment)?;
+        let sha256 = attachment.sha256.clone();
+        let preview = super::anonymous::run_derivation(permit, move || {
+            let bytes = store.read(&sha256)?;
+            crate::preview::preview_bytes(&bytes)
+        })
+        .await?;
+        return Ok(axum::Json(preview));
+    }
 
     let bytes = store.read(&attachment.sha256)?;
     Ok(axum::Json(crate::preview::preview_bytes(&bytes)?))
@@ -1327,10 +1371,11 @@ pub(crate) fn authorize_read(
             )),
         }
     } else {
-        // Viewer on ANY linked project is enough to read.
+        // Read access to ANY linked project is enough: Viewer, or the
+        // project being published.
         let mut last_err = None;
         for pid in project_ids {
-            match authz::require_role(db, identity, pid, Role::Viewer) {
+            match authz::require_read(db, identity, pid) {
                 Ok(()) => return Ok(()),
                 Err(e) => last_err = Some(e),
             }

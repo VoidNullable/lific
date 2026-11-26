@@ -43,6 +43,13 @@ pub(crate) const MAX_SOCKETS_PER_USER: usize = 16;
 /// Generous enough that a real instance never reaches it: 1024 sockets is 64
 /// fully saturated users.
 pub(crate) const MAX_SOCKETS_TOTAL: usize = 1024;
+/// LIF-583: concurrent event sockets shared by every anonymous reader of a
+/// published project. A quarter of the instance cap at most, so anonymous
+/// readers cannot exhaust it.
+pub(crate) const MAX_ANONYMOUS_SOCKETS: usize = 64;
+/// The slot key the anonymous budget is counted under. No account has it.
+const ANONYMOUS_SOCKET_KEY: i64 = i64::MIN;
+const _: () = assert!(MAX_ANONYMOUS_SOCKETS * 4 <= MAX_SOCKETS_TOTAL);
 /// The instance cap must leave room for at least one fully saturated user, and
 /// the socket-cap tests fill the instance budget a whole user at a time.
 const _: () = assert!(
@@ -213,12 +220,23 @@ impl RealtimeHub {
     /// `MAX_SOCKETS_TOTAL`. The returned permit releases the slot on drop, so a
     /// slot can never leak past its socket task.
     pub(crate) fn try_acquire_socket(&self, user_id: i64) -> Option<SocketPermit> {
+        self.try_acquire_slot(user_id, MAX_SOCKETS_PER_USER)
+    }
+
+    /// LIF-583: claim a slot for an anonymous socket. Every anonymous reader
+    /// shares one budget of [`MAX_ANONYMOUS_SOCKETS`], inside the instance-wide
+    /// cap, so strangers can never take the sockets signed-in users need.
+    pub(crate) fn try_acquire_anonymous_socket(&self) -> Option<SocketPermit> {
+        self.try_acquire_slot(ANONYMOUS_SOCKET_KEY, MAX_ANONYMOUS_SOCKETS)
+    }
+
+    fn try_acquire_slot(&self, user_id: i64, cap: usize) -> Option<SocketPermit> {
         let mut connections = self.connections.lock().expect("connections lock poisoned");
         if connections.total >= MAX_SOCKETS_TOTAL {
             return None;
         }
         let count = connections.per_user.entry(user_id).or_insert(0);
-        if *count >= MAX_SOCKETS_PER_USER {
+        if *count >= cap {
             return None;
         }
         *count += 1;
@@ -420,15 +438,36 @@ pub enum RealtimeEvent {
     ActivityBaseline { day_count: i64 },
 }
 
+/// Who is on the other end of an events socket.
+#[derive(Debug, Clone)]
+pub enum SocketViewer {
+    /// A signed-in browser session, revalidated as the socket runs.
+    Session {
+        token: String,
+        user: crate::db::models::AuthUser,
+    },
+    /// LIF-583: a reader with no account. Sees events for published projects
+    /// only, and nothing addressed to particular users.
+    Anonymous,
+}
+
+impl SocketViewer {
+    fn user_id(&self) -> Option<i64> {
+        match self {
+            Self::Session { user, .. } => Some(user.id),
+            Self::Anonymous => None,
+        }
+    }
+}
+
 pub async fn serve_socket(
     mut socket: WebSocket,
     hub: RealtimeHub,
     db: crate::db::DbPool,
-    session_token: String,
-    mut auth_user: crate::db::models::AuthUser,
+    mut viewer: SocketViewer,
     _permit: SocketPermit,
 ) {
-    let mut visible_projects = visible_projects_for(&db, &auth_user).await;
+    let mut visible_projects = visible_projects_for(&db, &viewer).await;
     let connected_at = Instant::now();
     let mut client = ClientState::new(connected_at);
     let mut rx = hub.subscribe();
@@ -453,21 +492,19 @@ pub async fn serve_socket(
         );
         let flow = match input {
             SocketInput::Revalidate => {
-                let flow =
-                    revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
+                let flow = revalidate_session(&mut socket, &db, &mut viewer).await;
                 if flow == SocketFlow::Open {
-                    visible_projects = visible_projects_for(&db, &auth_user).await;
+                    visible_projects = visible_projects_for(&db, &viewer).await;
                     client.invalidate_activity_baseline();
                 }
                 flow
             }
-            SocketInput::Revocation(revoked) => match revocation_flow(revoked, auth_user.id) {
+            SocketInput::Revocation(revoked) => match revocation_flow(revoked, viewer.user_id()) {
                 RevocationFlow::Ignore => SocketFlow::Open,
                 RevocationFlow::Revalidate => {
-                    let flow =
-                        revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
+                    let flow = revalidate_session(&mut socket, &db, &mut viewer).await;
                     if flow == SocketFlow::Open {
-                        visible_projects = visible_projects_for(&db, &auth_user).await;
+                        visible_projects = visible_projects_for(&db, &viewer).await;
                         client.invalidate_activity_baseline();
                     }
                     flow
@@ -479,8 +516,7 @@ pub async fn serve_socket(
                 forward_event(
                     &mut socket,
                     &db,
-                    &session_token,
-                    &mut auth_user,
+                    &mut viewer,
                     &mut visible_projects,
                     &mut client,
                     event,
@@ -488,16 +524,8 @@ pub async fn serve_socket(
                 .await
             }
             SocketInput::Message(message) => {
-                handle_client_message(
-                    &mut socket,
-                    &hub,
-                    &db,
-                    &session_token,
-                    &mut auth_user,
-                    &mut client,
-                    message,
-                )
-                .await
+                handle_client_message(&mut socket, &hub, &db, &mut viewer, &mut client, message)
+                    .await
             }
             SocketInput::ProgressDeadline => close_socket(&mut socket).await,
         };
@@ -569,9 +597,9 @@ enum RevocationFlow {
     Close,
 }
 
-fn revocation_flow(revoked: Result<i64, RecvError>, user_id: i64) -> RevocationFlow {
+fn revocation_flow(revoked: Result<i64, RecvError>, user_id: Option<i64>) -> RevocationFlow {
     match revoked {
-        Ok(id) if id != user_id => RevocationFlow::Ignore,
+        Ok(id) if Some(id) != user_id => RevocationFlow::Ignore,
         Ok(_) | Err(RecvError::Closed) => RevocationFlow::Close,
         Err(RecvError::Lagged(_)) => RevocationFlow::Revalidate,
     }
@@ -741,11 +769,19 @@ async fn send_close_frame(socket: &mut WebSocket) {
 async fn revalidate_session(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
-    session_token: &str,
-    auth_user: &mut crate::db::models::AuthUser,
+    viewer: &mut SocketViewer,
 ) -> SocketFlow {
+    let SocketViewer::Session {
+        token: session_token,
+        user: auth_user,
+    } = viewer
+    else {
+        // No session to expire. What an anonymous socket may see is decided
+        // per event from the project's publication, read fresh each time.
+        return SocketFlow::Open;
+    };
     let db = db.clone();
-    let session_token = session_token.to_owned();
+    let session_token = session_token.clone();
     let state = tokio::task::spawn_blocking(move || session_state(&db, &session_token))
         .await
         .unwrap_or_else(|error| {
@@ -773,22 +809,21 @@ async fn revalidate_session(
 async fn forward_event(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
-    session_token: &str,
-    auth_user: &mut crate::db::models::AuthUser,
+    viewer: &mut SocketViewer,
     visible_projects: &mut Option<HashSet<i64>>,
     client: &mut ClientState,
     event: Result<RealtimeMessage, RecvError>,
 ) -> SocketFlow {
-    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+    if revalidate_session(socket, db, viewer).await == SocketFlow::Close {
         return SocketFlow::Close;
     }
     match event {
         Ok(message) => {
             let visibility_db = db.clone();
-            let visibility_user = auth_user.clone();
+            let visibility_viewer = viewer.clone();
             let visibility_message = message.clone();
             let visibility = tokio::task::spawn_blocking(move || {
-                visible_to(&visibility_db, &visibility_user, &visibility_message)
+                visible_to_viewer(&visibility_db, &visibility_viewer, &visibility_message)
             })
             .await
             .unwrap_or_else(|error| {
@@ -838,8 +873,7 @@ async fn handle_client_message(
     socket: &mut WebSocket,
     hub: &RealtimeHub,
     db: &crate::db::DbPool,
-    session_token: &str,
-    auth_user: &mut crate::db::models::AuthUser,
+    viewer: &mut SocketViewer,
     client: &mut ClientState,
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
@@ -855,20 +889,11 @@ async fn handle_client_message(
                 ClientAction::Send(message) => send_bounded(socket, message).await,
                 ClientAction::ActivityBaseline => {
                     client.record_progress(now);
-                    send_activity_baseline(socket, db, session_token, auth_user, client).await
+                    send_activity_baseline(socket, db, viewer, client).await
                 }
                 ClientAction::Resume { project_id, cursor } => {
                     client.record_progress(now);
-                    replay_for_client(
-                        socket,
-                        hub,
-                        db,
-                        session_token,
-                        auth_user,
-                        project_id,
-                        cursor,
-                    )
-                    .await
+                    replay_for_client(socket, hub, db, viewer, project_id, cursor).await
                 }
                 ClientAction::Heartbeat | ClientAction::Pong => {
                     client.record_progress(now);
@@ -904,15 +929,14 @@ async fn replay_for_client(
     socket: &mut WebSocket,
     hub: &RealtimeHub,
     db: &crate::db::DbPool,
-    session_token: &str,
-    auth_user: &mut crate::db::models::AuthUser,
+    viewer: &mut SocketViewer,
     project_id: i64,
     cursor: i64,
 ) -> SocketFlow {
-    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+    if revalidate_session(socket, db, viewer).await == SocketFlow::Close {
         return SocketFlow::Close;
     }
-    if !project_visible(db, auth_user, project_id).await {
+    if !project_visible(db, viewer, project_id).await {
         return send_event(socket, &RealtimeEvent::SyncRequired { project_id }).await;
     }
     match hub.resume(project_id, cursor, Instant::now()) {
@@ -921,12 +945,10 @@ async fn replay_for_client(
         }
         ResumeOutcome::Replay(messages) => {
             for message in messages {
-                if revalidate_session(socket, db, session_token, auth_user).await
-                    == SocketFlow::Close
-                {
+                if revalidate_session(socket, db, viewer).await == SocketFlow::Close {
                     return SocketFlow::Close;
                 }
-                if !project_visible(db, auth_user, project_id).await {
+                if !project_visible(db, viewer, project_id).await {
                     return send_event(socket, &RealtimeEvent::SyncRequired { project_id }).await;
                 }
                 if send_bounded(socket, message).await == SocketFlow::Close {
@@ -938,39 +960,29 @@ async fn replay_for_client(
     }
 }
 
-async fn project_visible(
-    db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
-    project_id: i64,
-) -> bool {
+async fn project_visible(db: &crate::db::DbPool, viewer: &SocketViewer, project_id: i64) -> bool {
     let db = db.clone();
-    let auth_user = auth_user.clone();
-    tokio::task::spawn_blocking(move || {
-        let identity = crate::resolve_caller::ResolvedIdentity {
-            user: auth_user,
-            transport: crate::actor::Transport::Web,
-        };
-        crate::authz::can_view_project(&db, &identity, project_id).unwrap_or(false)
-    })
-    .await
-    .unwrap_or_else(|error| {
-        warn!(error = %error, "websocket replay visibility task failed");
-        false
-    })
+    let viewer = viewer.clone();
+    tokio::task::spawn_blocking(move || can_see_project(&db, &viewer, project_id).unwrap_or(false))
+        .await
+        .unwrap_or_else(|error| {
+            warn!(error = %error, "websocket replay visibility task failed");
+            false
+        })
 }
 
 async fn send_activity_baseline(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
-    session_token: &str,
-    auth_user: &mut crate::db::models::AuthUser,
+    viewer: &mut SocketViewer,
     client: &mut ClientState,
 ) -> SocketFlow {
-    let was_admin = auth_user.is_admin;
-    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+    let is_admin = |viewer: &SocketViewer| matches!(viewer, SocketViewer::Session { user, .. } if user.is_admin);
+    let was_admin = is_admin(viewer);
+    if revalidate_session(socket, db, viewer).await == SocketFlow::Close {
         return SocketFlow::Close;
     }
-    if was_admin != auth_user.is_admin {
+    if was_admin != is_admin(viewer) {
         client.invalidate_activity_baseline();
     }
     let now = Instant::now();
@@ -978,15 +990,18 @@ async fn send_activity_baseline(
         Some(event) => Ok(event),
         None => {
             let baseline_db = db.clone();
-            let baseline_user = auth_user.clone();
-            tokio::task::spawn_blocking(move || activity_baseline(&baseline_db, &baseline_user))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(crate::error::LificError::Internal(format!(
-                        "websocket baseline task failed: {error}"
-                    )))
-                })
-                .inspect(|event| client.cache_activity_baseline(now, event.clone()))
+            let baseline_viewer = viewer.clone();
+            tokio::task::spawn_blocking(move || match &baseline_viewer {
+                SocketViewer::Session { user, .. } => activity_baseline(&baseline_db, user),
+                SocketViewer::Anonymous => anonymous_activity_baseline(&baseline_db),
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(crate::error::LificError::Internal(format!(
+                    "websocket baseline task failed: {error}"
+                )))
+            })
+            .inspect(|event| client.cache_activity_baseline(now, event.clone()))
         }
     };
     match baseline_response(baseline) {
@@ -1084,16 +1099,21 @@ fn session_user(
 
 async fn visible_projects_for(
     db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
+    viewer: &SocketViewer,
 ) -> Option<HashSet<i64>> {
     let db = db.clone();
-    let auth_user = auth_user.clone();
-    tokio::task::spawn_blocking(move || query_visible_projects(&db, &auth_user))
-        .await
-        .unwrap_or_else(|error| {
-            warn!(error = %error, "websocket project visibility task failed");
-            None
-        })
+    let viewer = viewer.clone();
+    tokio::task::spawn_blocking(move || match &viewer {
+        SocketViewer::Session { user, .. } => query_visible_projects(&db, user),
+        SocketViewer::Anonymous => crate::authz::readable_project_ids(&db, &None)
+            .ok()
+            .flatten(),
+    })
+    .await
+    .unwrap_or_else(|error| {
+        warn!(error = %error, "websocket project visibility task failed");
+        None
+    })
 }
 
 fn query_visible_projects(
@@ -1104,9 +1124,57 @@ fn query_visible_projects(
         user: auth_user.clone(),
         transport: crate::actor::Transport::Web,
     };
-    crate::authz::visible_project_ids(db, &Some(identity))
+    crate::authz::readable_project_ids(db, &Some(identity))
         .ok()
         .flatten()
+}
+
+/// Whether `viewer` may see events about `project_id`: read access, so a
+/// published project's events reach every socket, signed in or not.
+fn can_see_project(
+    db: &crate::db::DbPool,
+    viewer: &SocketViewer,
+    project_id: i64,
+) -> Result<bool, crate::error::LificError> {
+    let identity = match viewer {
+        SocketViewer::Session { user, .. } => Some(crate::resolve_caller::ResolvedIdentity {
+            user: user.clone(),
+            transport: crate::actor::Transport::Web,
+        }),
+        SocketViewer::Anonymous => None,
+    };
+    crate::authz::can_read_project(db, &identity, project_id)
+}
+
+/// The activity counter's baseline for an anonymous socket: today's activity
+/// across the published projects.
+fn anonymous_activity_baseline(
+    db: &crate::db::DbPool,
+) -> Result<RealtimeEvent, crate::error::LificError> {
+    let readable = crate::authz::readable_project_ids(db, &None)?;
+    let conn = db.read()?;
+    let day_count = crate::db::queries::activity::activity_count(&conn, readable.as_ref())?;
+    Ok(RealtimeEvent::ActivityBaseline { day_count })
+}
+
+fn visible_to_viewer(
+    db: &crate::db::DbPool,
+    viewer: &SocketViewer,
+    message: &RealtimeMessage,
+) -> EventVisibility {
+    match viewer {
+        SocketViewer::Session { user, .. } => visible_to(db, user, message),
+        SocketViewer::Anonymous => match (&message.audience, message.event.project_id()) {
+            (RealtimeAudience::Users(_), _) => EventVisibility::Hidden,
+            (RealtimeAudience::Event, Some(project_id)) => {
+                match can_see_project(db, viewer, project_id) {
+                    Ok(true) => EventVisibility::Visible,
+                    Ok(false) | Err(_) => EventVisibility::Hidden,
+                }
+            }
+            (RealtimeAudience::Event, None) => EventVisibility::Visible,
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1130,11 +1198,11 @@ fn visible_to(
         }
         RealtimeAudience::Event => match message.event.project_id() {
             Some(project_id) => {
-                let identity = crate::resolve_caller::ResolvedIdentity {
+                let viewer = SocketViewer::Session {
+                    token: String::new(),
                     user: auth_user.clone(),
-                    transport: crate::actor::Transport::Web,
                 };
-                match crate::authz::can_view_project(db, &identity, project_id) {
+                match can_see_project(db, &viewer, project_id) {
                     Ok(true) => EventVisibility::Visible,
                     Ok(false) | Err(_) => EventVisibility::Hidden,
                 }
@@ -1715,15 +1783,15 @@ mod tests {
     #[test]
     fn revocation_receiver_lag_revalidates_and_closure_fails_closed() {
         assert_eq!(
-            revocation_flow(Err(RecvError::Lagged(1)), 42),
+            revocation_flow(Err(RecvError::Lagged(1)), Some(42)),
             RevocationFlow::Revalidate
         );
         assert_eq!(
-            revocation_flow(Err(RecvError::Closed), 42),
+            revocation_flow(Err(RecvError::Closed), Some(42)),
             RevocationFlow::Close
         );
-        assert_eq!(revocation_flow(Ok(7), 42), RevocationFlow::Ignore);
-        assert_eq!(revocation_flow(Ok(42), 42), RevocationFlow::Close);
+        assert_eq!(revocation_flow(Ok(7), Some(42)), RevocationFlow::Ignore);
+        assert_eq!(revocation_flow(Ok(42), Some(42)), RevocationFlow::Close);
     }
 
     /// One recovery must reach every socket the account has open, and no
@@ -1738,15 +1806,15 @@ mod tests {
         hub.revoke_user(42);
 
         assert_eq!(
-            revocation_flow(Ok(first.try_recv().unwrap()), 42),
+            revocation_flow(Ok(first.try_recv().unwrap()), Some(42)),
             RevocationFlow::Close
         );
         assert_eq!(
-            revocation_flow(Ok(second.try_recv().unwrap()), 42),
+            revocation_flow(Ok(second.try_recv().unwrap()), Some(42)),
             RevocationFlow::Close
         );
         // The same message, judged by a socket belonging to someone else.
-        assert_eq!(revocation_flow(Ok(42), 7), RevocationFlow::Ignore);
+        assert_eq!(revocation_flow(Ok(42), Some(7)), RevocationFlow::Ignore);
     }
 
     /// A revocation is dispatched as an ordinary [`SocketInput`], so once its
@@ -1771,7 +1839,7 @@ mod tests {
             (Err(RecvError::Lagged(3)), RevocationFlow::Revalidate),
             (Err(RecvError::Closed), RevocationFlow::Close),
         ] {
-            assert_eq!(revocation_flow(input, 42), flow);
+            assert_eq!(revocation_flow(input, Some(42)), flow);
         }
     }
 

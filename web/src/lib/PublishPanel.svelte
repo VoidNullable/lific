@@ -23,7 +23,9 @@
   let saving = $state(false);
   let error = $state("");
 
-  let url = $derived(`${window.location.origin}/public/${project.identifier}`);
+  // LIF-583: there is no separate public view. A published project is read
+  // at its normal links, so the link to share is the overview's.
+  let url = $derived(`${window.location.origin}/${project.identifier}/overview`);
 
   async function setPublished(next: boolean) {
     saving = true;
@@ -49,12 +51,12 @@
     <Globe size={15} class="mt-0.5 shrink-0 text-[var(--text-muted)]" />
     <div class="flex-1 min-w-0">
       <h2 class="text-body-sm font-semibold text-[var(--text)]">
-        Public view
+        Public access
       </h2>
       <p class="text-caption text-[var(--text-muted)] mt-0.5">
         {project.is_public
-          ? "This project's current issues and pages are readable by anyone, with no account."
-          : "Off. Only people with access to this project can see its issues and pages."}
+          ? "Anyone can read this project at its normal links, with no account. Only members can change anything."
+          : "Off. Only people with access to this project can read it."}
       </p>
     </div>
     <span
@@ -71,7 +73,7 @@
   <div class="px-4 py-4 flex flex-col gap-4">
     {#if project.is_public}
       <div class="flex flex-col gap-2">
-        <p class="text-caption text-[var(--text-muted)]">Public address</p>
+        <p class="text-caption text-[var(--text-muted)]">Project link</p>
         <div class="flex items-center gap-2">
           <code
             class="flex-1 min-w-0 truncate text-body-sm font-mono px-2.5 py-1.5
@@ -82,8 +84,8 @@
             class="shrink-0 size-8 grid place-items-center rounded-md border
                    border-[var(--border)] text-[var(--text-muted)]
                    hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Copy public link"
-            onclick={() => copyToClipboard(url, "public link")}
+            aria-label="Copy project link"
+            onclick={() => copyToClipboard(url, "project link")}
           >
             <Copy size={14} />
           </button>
@@ -91,7 +93,7 @@
             class="shrink-0 size-8 grid place-items-center rounded-md border
                    border-[var(--border)] text-[var(--text-muted)]
                    hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Open public view"
+            aria-label="Open project link"
             href={url}
             target="_blank"
             rel="noopener noreferrer"
@@ -100,8 +102,9 @@
           </a>
         </div>
         <p class="text-caption text-[var(--text-faint)]">
-          The address stays the same. Turning public access off and on again
-          brings this exact link back.
+          This is the project's ordinary link, and so is every issue, page
+          and plan link inside it. Someone without an account can read them;
+          a member who signs in can edit as usual.
         </p>
       </div>
 
@@ -117,8 +120,8 @@
           {saving ? "Working…" : "Turn off public access"}
         </button>
         <p class="text-caption text-[var(--text-faint)]">
-          Closes the link immediately. Copies people already downloaded stay
-          downloaded.
+          Signed-out readers lose access immediately. Copies people already
+          downloaded stay downloaded.
         </p>
       </div>
     {:else}
@@ -134,24 +137,23 @@
           </p>
           <ul class="list-disc pl-4 flex flex-col gap-1 text-[var(--text-muted)]">
             <li>
-              Every current issue and page in this project, including full
-              descriptions, labels, modules and folders.
+              Every issue, page, plan and module in this project, with full
+              descriptions, labels and folders.
             </li>
             <li>
-              Every comment on those issues and pages, shown with the
-              commenter's display name.
+              Every comment, the activity history and insights, with the
+              names of the people and agents behind them.
             </li>
             <li>
-              Every file attached to those issues, pages and comments,
-              downloadable by anyone.
+              Every file attached to this project, downloadable by anyone.
             </li>
           </ul>
           <p class="text-[var(--text-muted)]">
-            Plans, history, deleted items, usernames and your member list stay
-            private. Nobody needs an account or a password, and there is no
-            secret in the link, so search engines can find it. Turning this
-            back off closes the link but cannot recall anything already
-            downloaded.
+            Your member list and project settings stay private, and only
+            members can change anything. Nobody needs an account or a
+            password to read, and there is no secret in the link, so search
+            engines can find it. Turning this back off closes the project to
+            readers but cannot recall anything already downloaded.
           </p>
         </div>
       </div>
@@ -163,8 +165,8 @@
           class="mt-0.5 accent-[var(--accent)]"
         />
         <span class="text-[var(--text-muted)]">
-          I've reviewed this project's issues, pages, comments and
-          attachments, and they can be public.
+          I've reviewed this project's issues, pages, plans, comments and
+          files, and they can be public.
         </span>
       </label>
 
@@ -178,7 +180,7 @@
           disabled={!acknowledged || saving}
           onclick={() => setPublished(true)}
         >
-          {saving ? "Publishing…" : "Publish issues"}
+          {saving ? "Publishing…" : "Publish project"}
         </button>
       </div>
     {/if}

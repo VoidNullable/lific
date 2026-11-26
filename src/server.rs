@@ -57,8 +57,60 @@ mod inline_attachment_tests {
     }
 }
 
+/// LIF-583: where a link to the retired public view now lives. A published
+/// project is read at its ordinary address, so `/public/LIF/issues/LIF-1` is
+/// `/LIF/issues/LIF-1`. The two short forms the old view accepted keep their
+/// meaning: `/public/LIF` was the issue list and `/public/LIF/LIF-1` an issue.
+///
+/// `None` for anything that is not such a link, including a first segment
+/// that is not a project identifier, so the result is always a same-site
+/// path and never `//host`.
+fn legacy_public_location(path: &str, query: Option<&str>) -> Option<String> {
+    let rest = path.strip_prefix("/public/")?;
+    let mut segments = rest.splitn(2, '/');
+    let project = segments.next()?;
+    let tail = segments.next().unwrap_or("").trim_end_matches('/');
+    let is_identifier = |s: &str| {
+        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    if !is_identifier(project) || project.eq_ignore_ascii_case("api") {
+        return None;
+    }
+    let is_issue_key = |s: &str| {
+        s.rsplit_once('-').is_some_and(|(prefix, number)| {
+            is_identifier(prefix)
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    let target = if tail.is_empty() {
+        format!("/{project}/issues")
+    } else if is_issue_key(tail) {
+        format!("/{project}/issues/{tail}")
+    } else {
+        format!("/{project}/{tail}")
+    };
+    Some(match query {
+        Some(query) if !query.is_empty() => format!("{target}?{query}"),
+        _ => target,
+    })
+}
+
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
 fn serve_frontend(uri: axum::http::Uri) -> Response {
+    if let Some(location) = legacy_public_location(uri.path(), uri.query()) {
+        return (
+            StatusCode::MOVED_PERMANENTLY,
+            [(header::LOCATION, location)],
+        )
+            .into_response();
+    }
+    // The retired public API: gone, and not an SPA page.
+    if uri.path() == "/public/api" || uri.path().starts_with("/public/api/") {
+        return crate::error::LificError::NotFound("not found".into()).into_response();
+    }
     let path = uri.path().trim_start_matches('/');
 
     // Try the exact path first (e.g. assets/index-abc.js)
@@ -393,7 +445,13 @@ pub(crate) fn build_app_with_store(
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth_middleware_wrapper,
-        ));
+        ))
+        // LIF-583: outside the auth middleware so it can hand a credential-less
+        // read of a published project to the anonymous budgets, and the
+        // events socket can charge an anonymous connection against them.
+        .layer(axum::Extension(Arc::new(api::AnonymousReads::new(
+            trusted_proxies.clone(),
+        ))));
 
     // OAuth client registration rate limiter: 10 clients per IP per hour.
     // /oauth/register is unauthenticated per RFC 7591; without this anyone
@@ -412,27 +470,19 @@ pub(crate) fn build_app_with_store(
         issuer_is_explicit: cfg.server.public_url.is_some(),
         allowed_hosts: mcp_allowed_hosts.clone().into(),
         register_limiter: oauth_register_limiter,
-        trusted_proxies: trusted_proxies.clone(),
+        trusted_proxies,
         client_documents: Arc::new(oauth::cimd::HttpsSource),
     };
 
     let app = authed_routes.merge(oauth::router(oauth_state));
-    // LIF-465: the anonymous project view. Merged here, *after* the auth
-    // middleware has been layered onto `authed_routes`, so it is genuinely
-    // outside that middleware rather than carved out of it by path. Nothing in
-    // `api::public` can see an identity extension or auth config, because
-    // neither is layered onto this router. Only
-    // published projects are reachable through it (the flag is checked in the
-    // SQL of every read), and only with `GET`.
     // An upload ticket's URL is its own credential (the MCP files
     // extension's `credentials: "omit"`), so the route sits outside the auth
-    // middleware like the public view.
+    // middleware.
     let app = app.merge(api::upload_tickets::router(
-        pool.clone(),
-        attachment_store.clone(),
+        pool,
+        attachment_store,
         realtime,
     ));
-    let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
     with_compression(
         app.fallback(frontend_fallback)
             // Top-level CORS layer.
@@ -1418,312 +1468,8 @@ mod frontend_security_headers_tests {
     }
 }
 
-/// LIF-465: the anonymous project view through the router `lific start`
-/// builds. `api::public`'s own tests prove the handlers and the SQL; only the
-/// assembled app can prove that mounting it did not put it behind the auth
-/// middleware, or the authenticated API in front of it.
 #[cfg(test)]
-mod public_surface_tests {
-    use super::*;
-    use crate::db::models::*;
-    use axum::body::Body;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-
-    struct Deployed {
-        app: Router,
-        _store_guard: tempfile::TempDir,
-        attachment_id: i64,
-        private_issue_id: i64,
-        session_token: String,
-    }
-
-    /// Auth required, one published project with an issue, a comment and an
-    /// attachment, and one private project holding a secret.
-    fn deploy() -> Deployed {
-        let pool = db::open_memory().expect("test db");
-        let tmp = tempfile::tempdir().expect("attachment tempdir");
-        let store = storage::AttachmentStore::new(tmp.path().to_path_buf());
-
-        let (attachment_id, private_issue_id, session_token) = {
-            let conn = pool.write().unwrap();
-            conn.execute(
-                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
-                 VALUES ('owner', 'owner@test.local', 'x', 'Owner', 1, 0)",
-                [],
-            )
-            .unwrap();
-
-            let published = db::queries::create_project(
-                &conn,
-                &CreateProject {
-                    name: "Published".into(),
-                    identifier: "PUB".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE projects SET is_public = 1 WHERE id = ?1",
-                [published.id],
-            )
-            .unwrap();
-            let private = db::queries::create_project(
-                &conn,
-                &CreateProject {
-                    name: "Private".into(),
-                    identifier: "PRIV".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-            let issue = db::queries::create_issue(
-                &conn,
-                &CreateIssue {
-                    project_id: published.id,
-                    title: "Public issue".into(),
-                    description: "A body anyone may read".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            let secret = db::queries::create_issue(
-                &conn,
-                &CreateIssue {
-                    project_id: private.id,
-                    title: "Private issue".into(),
-                    description: "classified".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            db::queries::comments::create_comment_with_mentions(
-                &conn,
-                db::queries::comments::CommentParent::Issue(issue.id),
-                None,
-                CommentActor {
-                    user_id: 1,
-                    is_admin: true,
-                },
-                AttachmentActor::TrustedLocal,
-                "A public comment",
-            )
-            .unwrap();
-
-            let bytes = b"public attachment bytes".to_vec();
-            let sha = store.write(&bytes).unwrap();
-            let attachment = db::queries::attachments::create_attachment(
-                &conn,
-                &sha,
-                "spec.pdf",
-                "application/pdf",
-                bytes.len() as i64,
-                None,
-            )
-            .unwrap();
-            db::queries::attachments::link_attachment(
-                &conn,
-                attachment.id,
-                AttachmentEntity::Issue,
-                issue.id,
-            )
-            .unwrap();
-
-            let session = db::queries::users::create_session(&conn, 1, None).unwrap();
-            (attachment.id, secret.id, session.token)
-        };
-
-        let mut cfg = Config::default();
-        cfg.auth.required = true;
-        cfg.server.host = "127.0.0.1".into();
-        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
-            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
-        );
-        let app = build_app_with_store(
-            &cfg,
-            pool,
-            realtime::RealtimeHub::new(),
-            trusted_proxies,
-            store,
-        );
-
-        Deployed {
-            app,
-            _store_guard: tmp,
-            attachment_id,
-            private_issue_id,
-            session_token,
-        }
-    }
-
-    /// Deliberately sends no `Authorization` header and no cookie.
-    async fn anonymous(app: &Router, method: &str, uri: &str) -> axum::response::Response {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
-    async fn with_session(app: &Router, token: &str, uri: &str) -> axum::response::Response {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("cookie", format!("lific_token={token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
-    async fn body_string(response: axum::response::Response) -> String {
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        String::from_utf8_lossy(&bytes).to_string()
-    }
-
-    /// A visitor with no account reads the list, the detail, the comments
-    /// and the file, over the production middleware stack.
-    #[tokio::test]
-    async fn a_visitor_with_no_credentials_reads_a_published_project() {
-        let d = deploy();
-        for uri in [
-            "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/index".to_string(),
-            "/public/api/projects/PUB/issues/resolve/PUB-1".to_string(),
-            format!("/public/api/projects/PUB/attachments/{}", d.attachment_id),
-        ] {
-            let response = anonymous(&d.app, "GET", &uri).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::OK,
-                "{uri} must be readable without any credential"
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CACHE_CONTROL)
-                    .and_then(|v| v.to_str().ok()),
-                Some("no-store, no-cache, must-revalidate"),
-                "{uri} lost its no-store header somewhere in the stack"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_authenticated_rest_attachment_download_uses_the_scoped_store() {
-        let d = deploy();
-        let response = with_session(
-            &d.app,
-            &d.session_token,
-            &format!("/api/attachments/{}", d.attachment_id),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_string(response).await, "public attachment bytes");
-    }
-
-    /// Adding the public router loosened nothing: every ordinary API path
-    /// still answers 401, including ones serving the same content.
-    #[tokio::test]
-    async fn the_ordinary_api_is_still_closed_to_anonymous_callers() {
-        let d = deploy();
-        for uri in [
-            "/api/projects".to_string(),
-            "/api/issues".to_string(),
-            format!("/api/issues/{}", d.private_issue_id),
-            "/api/issues/resolve/PUB-1".to_string(),
-            "/api/pages".to_string(),
-            "/api/search?q=classified".to_string(),
-            "/api/auth/me".to_string(),
-            "/api/users".to_string(),
-            format!("/api/attachments/{}", d.attachment_id),
-        ] {
-            let response = anonymous(&d.app, "GET", &uri).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must still require authentication"
-            );
-        }
-    }
-
-    /// A private project is not reachable through the public prefix, and says
-    /// exactly what a project that was never created says.
-    #[tokio::test]
-    async fn a_private_project_is_not_reachable_through_the_public_prefix() {
-        let d = deploy();
-        let hidden = anonymous(&d.app, "GET", "/public/api/projects/PRIV/index").await;
-        let missing = anonymous(&d.app, "GET", "/public/api/projects/NOPE/index").await;
-        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        let (hidden, missing) = (body_string(hidden).await, body_string(missing).await);
-        assert_eq!(hidden, missing);
-        assert!(!hidden.contains("classified"));
-    }
-
-    /// Nothing on the public prefix writes, in the assembled app as much as
-    /// in the isolated router.
-    #[tokio::test]
-    async fn the_public_prefix_refuses_every_write() {
-        let d = deploy();
-        for method in ["POST", "PUT", "PATCH", "DELETE"] {
-            let response = anonymous(&d.app, method, "/public/api/projects/PUB/index").await;
-            assert_eq!(
-                response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
-                "{method} on the public prefix"
-            );
-        }
-    }
-
-    /// The load bounds are the only thing between an anonymous stranger and
-    /// the read pool, so "wired in" is asserted where the wiring happens.
-    #[tokio::test]
-    async fn public_reads_are_rate_limited_in_the_assembled_app() {
-        let d = deploy();
-        let mut refused = 0;
-        for _ in 0..300 {
-            if anonymous(&d.app, "GET", "/public/api/projects/PUB")
-                .await
-                .status()
-                == StatusCode::TOO_MANY_REQUESTS
-            {
-                refused += 1;
-            }
-        }
-        assert!(
-            refused > 0,
-            "300 anonymous reads in a row were all served; no rate limit is wired in"
-        );
-
-        // The authenticated API is not collateral damage: it has its own
-        // limits and must not share the public bucket.
-        assert_eq!(
-            anonymous(&d.app, "GET", "/api/projects").await.status(),
-            StatusCode::UNAUTHORIZED,
-            "the ordinary API must still answer 401, not the public 429"
-        );
-    }
-
-    /// `/public/PUB` is the address a person shares. It is not an API route;
-    /// it falls through to the SPA, which then renders the public view from
-    /// the JSON endpoints above. The assertion is only that it is not a 401
-    /// or a 404, the same treatment `/DEMO/issues` gets.
-    #[tokio::test]
-    async fn the_shareable_address_serves_the_app_without_a_login() {
-        let d = deploy();
-        let response = anonymous(&d.app, "GET", "/public/PUB").await;
-        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-}
+mod public_read_tests;
 
 #[cfg(test)]
 mod authenticated_mcp_tests {
