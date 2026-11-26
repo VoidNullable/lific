@@ -7252,45 +7252,39 @@ mod tests {
         std::iter::from_fn(|| rx.try_recv().ok().map(|message| message.event)).collect()
     }
 
-    /// Seed a project via manage_resource, return identifier.
+    /// Seed a project the way `manage_resource` creates one, caller as lead,
+    /// but with no conventions page and its reminder off. LIF-524 tests
+    /// create projects with `manage_resource` itself; the rest keep their
+    /// page numbering and briefings to what they test. Returns identifier.
     pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
-        let result = mcp.manage_resource(Parameters(ManageResourceInput {
-            conventions: None,
-            resource_type: "project".into(),
-            action: "create".into(),
-            name: Some(name.into()),
-            identifier: Some(ident.into()),
-            description: None,
-            project: None,
-            current_name: None,
-            status: None,
-            color: None,
-            emoji: None,
-        }));
-        assert!(result.starts_with("Created project"), "got: {result}");
-        purge_conventions_page(mcp, ident);
+        seed_project_with(mcp, name, ident, "");
         ident.to_string()
     }
 
-    /// LIF-524: a project starts with an empty conventions page. Most tests
-    /// number their own pages from DOC-1, so the seeds purge it; the
-    /// conventions tests create projects without them. Its audit rows go
-    /// too, so activity counts stay what those tests expect.
-    pub(super) fn purge_conventions_page(mcp: &LificMcp, ident: &str) {
-        mcp.write(|conn| {
-            conn.execute(
-                "DELETE FROM pages WHERE project_id =
-                    (SELECT id FROM projects WHERE identifier = ?1)",
-                [ident],
-            )?;
-            conn.execute(
-                "DELETE FROM audit_log WHERE entity_type = 'page' AND project_id =
-                    (SELECT id FROM projects WHERE identifier = ?1)",
-                [ident],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    pub(super) fn seed_project_with(mcp: &LificMcp, name: &str, ident: &str, description: &str) {
+        let caller = crate::mcp::current_auth_user();
+        let project = mcp
+            .write(|conn| {
+                let lead_user_id = crate::authz::effective_user(conn, &caller)
+                    .map(|user| user.id)
+                    .filter(|id| queries::users::get_user_by_id(conn, *id).is_ok());
+                let project = queries::create_project(
+                    conn,
+                    &models::CreateProject {
+                        name: name.into(),
+                        identifier: ident.into(),
+                        description: description.into(),
+                        lead_user_id,
+                        ..Default::default()
+                    },
+                )?;
+                queries::dismiss_conventions_hint(conn, project.id)?;
+                Ok(project)
+            })
+            .unwrap();
+        mcp.emit(crate::realtime::RealtimeEvent::ProjectCreated {
+            project_id: project.id,
+        });
     }
 
     pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
@@ -9505,16 +9499,7 @@ mod tests {
     }
 
     fn seed_described_project(m: &LificMcp, name: &str, ident: &str, description: &str) {
-        let result = m.manage_resource(Parameters(ManageResourceInput {
-            resource_type: "project".into(),
-            action: "create".into(),
-            name: Some(name.into()),
-            identifier: Some(ident.into()),
-            description: Some(description.into()),
-            ..Default::default()
-        }));
-        assert!(result.starts_with("Created project"), "got: {result}");
-        purge_conventions_page(m, ident);
+        seed_project_with(m, name, ident, description);
     }
 
     fn project_row(listing: &str, ident: &str) -> String {
@@ -13460,12 +13445,11 @@ mod tests {
             "got: {project}"
         );
         assert!(
-            // Page id 1 was the conventions page `seed_project` purges.
-            page.contains("activity entries for [TST-DOC-1](https://tracker.example/TST/pages/2):"),
+            page.contains("activity entries for [TST-DOC-1](https://tracker.example/TST/pages/1):"),
             "got: {page}"
         );
         for expected in [
-            "[TST-DOC-1](https://tracker.example/TST/pages/2)",
+            "[TST-DOC-1](https://tracker.example/TST/pages/1)",
             "[TST-PLAN-1](https://tracker.example/TST/plans/1)",
             "[Backend](https://tracker.example/TST/modules/1)",
         ] {
