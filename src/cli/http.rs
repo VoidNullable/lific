@@ -481,7 +481,7 @@ impl HttpBackend {
                     // the authenticated caller (LIF-409).
                     ..Default::default()
                 };
-                self.send_json(Method::POST, "/api/issues", &body).await
+                self.send_create("/api/issues", &body).await
             }
             IssueAction::Update {
                 identifier,
@@ -850,8 +850,7 @@ impl HttpBackend {
                 let (project_id, folder_id) = self
                     .page_scope(project.as_deref(), folder.as_deref())
                     .await?;
-                self.send_json(
-                    Method::POST,
+                self.send_create(
                     "/api/pages",
                     &models::CreatePage {
                         project_id,
@@ -940,8 +939,7 @@ impl HttpBackend {
                     ))
                 })?;
                 let issue = self.issue_identity(identifier).await?;
-                self.send_json(
-                    Method::POST,
+                self.send_create(
                     &format!("/api/issues/{}/comments", issue.id),
                     &models::CreateComment {
                         content: content.clone(),
@@ -1389,6 +1387,34 @@ impl HttpBackend {
             .await?)
     }
 
+    /// POST a create with a fresh `Idempotency-Key`, and POST it once more
+    /// with the same key when the first attempt is lost in transit (LIF-526).
+    /// If that attempt had committed, the server replays its result instead
+    /// of writing twice.
+    async fn send_create<T: Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<Value> {
+        let key = format!("lific-cli-{:032x}", rand::random::<u128>());
+        let post = || async {
+            Ok::<Value, anyhow::Error>(
+                self.send(
+                    self.request_builder(Method::POST, path)
+                        .header(crate::api::idempotency::KEY_HEADER, &key)
+                        .json(body),
+                )
+                .await?
+                .json()
+                .await?,
+            )
+        };
+        match post().await {
+            Err(error) if lost_in_transit(&error) => post().await,
+            other => other,
+        }
+    }
+
     /// Delete a resource and answer with the shape the SQL backend prints
     /// (LIF-341). The server replies `204 No Content`, so the name the user
     /// asked us to delete is the only thing left to report, and both backends
@@ -1420,6 +1446,14 @@ impl HttpBackend {
             None => request,
         }
     }
+}
+
+/// Whether a request failed before a whole reply arrived, so the server may
+/// or may not have acted on it. An HTTP error status is an answer, not a loss.
+fn lost_in_transit(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+        error.is_connect() || error.is_timeout() || error.is_request() || error.is_body()
+    })
 }
 
 /// The `aliases` array both repo endpoints take.
@@ -3876,5 +3910,148 @@ mod tests {
         );
         assert_eq!(value[0]["owner"]["name"], "Ada");
         assert!(value[0]["owner"].get("web_url").is_none());
+    }
+
+    /// Read one HTTP/1.1 request off `socket` and return its
+    /// `Idempotency-Key`.
+    async fn read_idempotency_key(socket: &mut tokio::net::TcpStream) -> Option<String> {
+        use tokio::io::AsyncReadExt;
+        let mut raw = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                continue;
+            };
+            let header = |name: &str| {
+                head.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+            };
+            let length: usize = header("content-length").map_or(0, |v| v.parse().unwrap());
+            if body.len() >= length || read == 0 {
+                return header("idempotency-key");
+            }
+        }
+    }
+
+    /// LIF-526: the first POST reaches the server and the connection drops
+    /// before any reply. The backend sends the create again with the same key,
+    /// so a server that committed the first one replays it.
+    #[tokio::test]
+    async fn a_create_lost_in_transit_is_resent_once_with_the_same_idempotency_key() {
+        use tokio::io::AsyncWriteExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut keys = Vec::new();
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                keys.push(read_idempotency_key(&mut socket).await);
+                if attempt == 0 {
+                    continue; // dropped: the reply is lost
+                }
+                let body = r#"{"id":1,"identifier":"TST-1"}"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            keys
+        });
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let created = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap();
+
+        assert_eq!(created["identifier"], "TST-1");
+        let keys = server.await.unwrap();
+        let first = keys[0].clone().expect("the create carried a key");
+        assert!(first.starts_with("lific-cli-"), "{first}");
+        assert_eq!(keys[1].as_deref(), Some(first.as_str()));
+    }
+
+    /// An HTTP error is the server's answer, so it is reported, not resent.
+    #[tokio::test]
+    async fn a_create_the_server_refused_is_not_resent() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        let router = Router::new().route(
+            "/api/issues",
+            any(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                failed_request()
+            }),
+        );
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("request rejected"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// The commands that create send their key through the real router, which
+    /// replays a repeat of the same key instead of writing twice.
+    #[tokio::test]
+    async fn the_real_api_replays_a_repeated_cli_idempotency_key() {
+        let fixture = spawn_real_api_server().await;
+        let project_id: i64 = fixture
+            .db
+            .read()
+            .unwrap()
+            .query_row("SELECT id FROM projects", [], |row| row.get(0))
+            .unwrap();
+        let client = reqwest::Client::new();
+        let post = || async {
+            let response = client
+                .post(format!("{}/api/issues", fixture.url))
+                .header(crate::api::idempotency::KEY_HEADER, "lific-cli-fixed")
+                .json(&json!({"project_id": project_id, "title": "Twice sent"}))
+                .send()
+                .await
+                .unwrap();
+            let replayed = response.headers().contains_key("idempotent-replayed");
+            (
+                replayed,
+                response.json::<serde_json::Value>().await.unwrap(),
+            )
+        };
+        let (first_replayed, first) = post().await;
+        let (again_replayed, again) = post().await;
+
+        assert!(!first_replayed);
+        assert!(again_replayed);
+        assert_eq!(first["id"], again["id"]);
+        let count: i64 = fixture
+            .db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE title = 'Twice sent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        fixture.server.abort();
     }
 }
