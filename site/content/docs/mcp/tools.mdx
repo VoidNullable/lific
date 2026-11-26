@@ -40,7 +40,7 @@ Every tool carries MCP annotations, so a client can decide which calls to run wi
 
 ## Structured results
 
-`list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
+`list_issues`, `search`, `list_resources` and `get_briefing` declare an `outputSchema` and return `structuredContent` alongside their text, so a client that calls tools from code can read fields instead of parsing lines. The text is the same as without it. `list_issues` returns `issues` with each row's identifier, title, status and priority. `search` returns `results` with each hit's type, id, identifier and title; a comment or attachment hit carries the identifier of the issue or page it belongs to. `list_resources` returns the `resource_type` and its `items`: projects, modules, labels and folders by `name`, issues, pages and plans by `title`, with ids, identifiers and status where they have them. `get_briefing` returns the `project` and its `sections` in order, each with a stable `section` key (`conventions`, `human_queue`, `changes`, `plans`, `due`, `blocked`, `workable`, `pages`, `active`, `stale`, `triage`), its full `total`, and the `items` its lines show. A row carries a `url` when its text renders a link, and a paged list carries `next_offset` when more results follow. Empty answers return empty arrays; a failed call returns only its `Error:` text.
 
 ## Which tools use a repository binding
 
@@ -323,6 +323,8 @@ Lists projects, modules, labels, folders, pages, issues or plans. It is the disc
 | `order` | `string` | No | Pages only: `asc` (default) or `desc`. |
 | `limit` | `integer` | No | Issues and pages default to 100, plans to 50; all cap at 500. Ignored for projects, modules, labels and folders. |
 | `offset` | `integer` | No | Zero-based, for issues, pages and plans. |
+
+A project's [conventions page](/docs/concepts/pages#conventions-page) is marked in page listings: its line ends with `(this project's conventions page)`, or `(this project's conventions page, turned off)`, and its structured row has `conventions: true`.
 | `members` | `string[]` | No | Projects only: keep projects where any of these users has a role. `"me"` is you; name others by username, with or without `@`. `"all"` is rejected. |
 | `roles` | `string[]` | No | Projects only: the roles that count for `members`: `lead`, `maintainer`, `viewer` or `all` (default). Without `members`, means your own roles. |
 | `statuses` | `string[]` | No | Projects only: which per-status issue counts each row prints: `backlog`, `todo`, `active`, `done`, `cancelled` or `all` (default). `[]` prints none. |
@@ -355,11 +357,12 @@ Creates or updates a project, module, label or folder. Deletion is `delete`.
 | `status` | `string` | No | Modules only: `backlog`, `planned`, `active` (default on create), `paused`, `done` or `cancelled`. |
 | `color` | `string` | No | Labels only: hex color, e.g. `#EF4444`. Defaults to `#6B7280` on create. |
 | `emoji` | `string` | No | Project or module icon: `lucide:<Name>` or a literal emoji. Omit to leave it unchanged; pass `""` to clear it. |
+| `conventions` | `string` | No | Projects only. The [conventions page](/docs/concepts/pages#conventions-page) template: `empty` (default on create), `ai_managed`, `human_managed` or `human_owned`. On update, also `none`. |
 
 | Resource and action | Required | Fields applied |
 | --- | --- | --- |
-| project, create | `name`, `identifier` | `description`, `emoji`. An authenticated caller becomes the project's primary lead. |
-| project, update | `project` | `name`, `identifier`, `description`, `emoji`. Passing `current_name` without `project` is an error. |
+| project, create | `name`, `identifier` | `description`, `emoji`, `conventions`. An authenticated caller becomes the project's primary lead. The project starts with a **Conventions** page holding the chosen template. |
+| project, update | `project` | `name`, `identifier`, `description`, `emoji`, `conventions`. Passing `current_name` without `project` is an error. |
 | module, create | `project`, `name` | `description`, `status`, `emoji` |
 | module, update | `project`, `current_name` | `name`, `description`, `status`, `emoji` |
 | label, create | `project`, `name` | `color` |
@@ -368,6 +371,8 @@ Creates or updates a project, module, label or folder. Deletion is `delete`.
 | folder, update | `project`, `current_name` | `name` |
 
 Updating a project takes `lead`. Module, label and folder changes take `maintainer`. An unsupported pair returns a line naming the accepted types and actions.
+
+On a project update, a `conventions` template creates the conventions page for a project that has none, and `none` stops the briefing reminding you that it has none. Both are refused while the project has a conventions page. The tool's description asks the agent to check with the user how the project will work with agents before it picks a template.
 
 ### `delete`
 
@@ -385,7 +390,7 @@ A deleted issue goes to the [trash](/docs/concepts/issues#deleting-and-restoring
 
 ### `get_page`
 
-Returns one page: its status, folder, `seq` (what [`update_page`](#update_page) checks `expected_seq` against), labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
+Returns one page: whether it is the project's conventions page, its status, folder, `seq` (what [`update_page`](#update_page) checks `expected_seq` against), labels, pin state and timestamps, then its content. A page of up to 30,000 characters comes back whole. A longer one comes back as its outline plus its opening, and you read the rest by section or by offset. The budget keeps a response under the roughly 50 KB at which agent harnesses silently cut tool output off.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -424,6 +429,7 @@ Creates a page in a project, or a workspace page when `project` is omitted.
 | `folder` | `string` | No | Folder name. Needs `project`. |
 | `status` | `string` | No | `draft` (default), `active`, `complete` or `archived`. |
 | `labels` | `string[]` | No | Label names. Labels belong to a project, so this is ignored on workspace pages. |
+| `conventions` | `boolean` | No | Make it the project's [conventions page](/docs/concepts/pages#conventions-page). Refused while the project has one, and on workspace pages. |
 
 Workspace pages take an administrator when membership is enforced.
 
@@ -585,7 +591,7 @@ Deletes a comment. Only the author or an administrator can delete.
 
 ### `get_briefing`
 
-Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters. Call it first in a session, as `get_briefing(project='APP', since='last')`, instead of rebuilding the picture from searches, pages, issue lists and plans.
+Summarizes a project for an agent resuming work, in one bounded read of at most 6,000 characters plus the project's conventions. Call it first in a session, as `get_briefing(project='APP', since='last')`, instead of rebuilding the picture from searches, pages, issue lists and plans.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -601,6 +607,7 @@ Sections follow in this order, and a section with nothing to report is left out:
 
 | Section | What it lists |
 | --- | --- |
+| Conventions | The project's [conventions page](/docs/concepts/pages#conventions-page), when it has text and is turned on, with its headings moved one level down. Up to 4,000 characters, cut at a line break, then how much was shown and the `get_page` call that reads the rest. This section does not count against the 6,000-character budget. A project that has never had a conventions page gets a one-line reminder in the header instead, naming the `manage_resource` call that creates one or turns the reminder off. |
 | Human queue | Open issues assigned to a person (`human` or named people) in every project you can view, not only this one. Ranked by how many open issues each blocks, then due date (undated last), then age, oldest first. Each line shows who it is for, how many it blocks, its due date, the day it was opened, and other queue items with the same title as possible duplicates. Counts stop at 500. |
 | Since your last briefing, or since the date | Only with `since`. Counts of issues created, closed (`done` or `cancelled`) and otherwise moved, pages edited, and comments added, then the most recent of each kind with who made it (`by @name`; system writes name no one). A comment shows its first line. Status changes are net per issue, so an issue moved and moved back is not listed. Changes to deleted issues, pages and comments are left out. When nothing changed, the header says so instead. |
 | Active plans | Each with its progress and the next open step: the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named. |
@@ -633,6 +640,8 @@ An attachment matches on its filename or on the extracted text of a small text u
 In `fts` mode every word is a required prefix term. When no result in the requested scope contains every word, the search runs again with any word allowed, ranks those hits by relevance (or recency, with `sort=recent`), and opens with `No result contains every word; showing partial matches ranked by relevance.` (or `most recent first.`). Paging walks the same partial list. A one-word query and `literal` mode never fall back.
 
 A project you cannot see returns `No results found.`, the same as a project with no matches.
+
+With `sort=relevance` in `fts` mode, a project's turned-on [conventions page](/docs/concepts/pages#conventions-page) counts double, so it comes first when it covers the query about as well as anything else. An issue that matches the query much better still ranks above it.
 
 ### `get_activity`
 
