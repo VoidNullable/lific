@@ -1053,8 +1053,9 @@ pub fn extract_mention_usernames(body: &str) -> Vec<String> {
 
 /// List the users who may be `@`-mentioned in a given project's comments.
 ///
-/// The candidates are the people who can see the project: its members and the
-/// instance admins, so nobody who can't see it is ever suggested. Bots are
+/// The candidates are the people who belong to the project, its members and
+/// the instance admins ([`crate::authz::BELONGS_TO_PROJECT_SQL`]), so nobody
+/// who can't see it is ever suggested. Bots are
 /// excluded: an `@`-mention targets a person, and a connected tool isn't one
 /// a human would address in a thread.
 ///
@@ -1068,17 +1069,15 @@ pub fn mention_candidates(
     let Some(pid) = project_id else {
         return Ok(Vec::new());
     };
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT u.id, u.username, u.display_name
          FROM users u
-         WHERE u.is_bot = 0
-           AND (u.is_admin = 1
-                OR EXISTS (SELECT 1 FROM project_members m
-                           WHERE m.project_id = ?1 AND m.user_id = u.id))
+         WHERE u.is_bot = 0 AND {}
          ORDER BY u.username COLLATE NOCASE",
-    )?;
+        crate::authz::BELONGS_TO_PROJECT_SQL
+    ))?;
     let rows = stmt
-        .query_map(params![pid], |row| {
+        .query_map(rusqlite::named_params! { ":project_id": pid }, |row| {
             Ok(crate::db::models::MentionCandidate {
                 user_id: row.get(0)?,
                 username: row.get(1)?,

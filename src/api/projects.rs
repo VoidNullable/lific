@@ -24,17 +24,7 @@ pub(super) fn sidebar_visibility(
 ) -> Result<Option<HashSet<i64>>, LificError> {
     let fresh = crate::auth::fresh_caller(conn, user_id)?;
     let effective = authz::effective_user(conn, &Some(crate::auth::fresh_auth_user(&fresh)));
-    if matches!(&effective, Some(user) if user.is_admin) {
-        return Ok(None);
-    }
-    let Some(user) = effective else {
-        return Ok(Some(HashSet::new()));
-    };
-    Ok(Some(
-        crate::db::queries::members::list_project_ids_for_user(conn, user.id)?
-            .into_iter()
-            .collect(),
-    ))
+    authz::visible_project_ids_conn(conn, &effective)
 }
 
 /// REST ranks describe positions in the visible response, not storage ranks.

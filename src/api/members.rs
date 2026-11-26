@@ -70,10 +70,7 @@ pub(super) async fn my_project_role(
         let auth_user = identity.as_ref().map(|i| i.user.clone());
         let effective = authz::effective_user(conn, &auth_user);
         let is_admin = matches!(&effective, Some(u) if u.is_admin);
-        let role = match &effective {
-            Some(u) => members::get_member_role(conn, project_id, u.id)?,
-            None => None,
-        };
+        let role = authz::membership_role(conn, &effective, project_id)?;
         Ok((role, is_admin))
     })?;
 

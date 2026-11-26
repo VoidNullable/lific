@@ -15,10 +15,20 @@
 //! what people had actually done and recorded who lost access (see
 //! [`crate::db::queries::access_losses`]), and the switch is gone.
 //!
-//! [`project_role`] is the one place a role is decided. [`require_role_conn`],
-//! [`can_view_project`] and [`visible_project_ids`] all answer from it, so a
-//! rule that grants access without a membership row (published projects, for
-//! instance) is added there and nowhere else.
+//! Where membership is decided:
+//!
+//! - [`project_role`] decides what a caller may do on one project. Every gate
+//!   ([`require_role_conn`] and the helpers built on it, [`can_view_project`])
+//!   answers from it. A rule that grants access without a membership row
+//!   (published projects, for instance) is added there.
+//! - [`visible_project_ids_conn`] is its set form, for cross-project reads and
+//!   the sidebar. It must grant the same projects, so such a rule is mirrored
+//!   there; a test compares the two.
+//! - [`membership_role`] is the caller's own row without the admin pass, which
+//!   `my-role` reports.
+//! - [`BELONGS_TO_PROJECT_SQL`] decides whether a *named other person* belongs
+//!   to a project (member or admin): who can be assigned or `@`-mentioned. It
+//!   is not an access check and does not follow read-without-a-role rules.
 //!
 //! `is_admin` passes every check. Bots resolve to their owner
 //! (`007_bot_owners.sql`) before any check runs: an agent can never exceed
@@ -120,8 +130,36 @@ fn project_role(
     if user.is_admin {
         return Ok(Some(Role::Lead));
     }
-    queries::members::get_member_role(conn, project_id, user.id)
+    membership_role(conn, effective, project_id)
 }
+
+/// The role `effective`'s own membership row grants on `project_id`, without
+/// the admin pass. What `GET /api/projects/{id}/my-role` reports as `role`;
+/// access decisions go through [`project_role`].
+pub(crate) fn membership_role(
+    conn: &Connection,
+    effective: &Option<AuthUser>,
+    project_id: i64,
+) -> Result<Option<Role>, LificError> {
+    match effective {
+        Some(user) => queries::members::get_member_role(conn, project_id, user.id),
+        None => Ok(None),
+    }
+}
+
+/// SQL predicate: the user aliased `u` belongs to the project bound to the
+/// named parameter `:project_id`, as a member or an instance admin.
+///
+/// This answers a different question from [`project_role`]: not "may this
+/// caller read or write here" but "is this named person someone the project
+/// can assign work to or `@`-mention". Assignee eligibility
+/// (`db::queries::assignees`) and mention candidates
+/// (`db::queries::comments::mention_candidates`) both use it, so the two
+/// cannot drift. A rule that lets a caller read a project without a role does
+/// not belong here.
+pub(crate) const BELONGS_TO_PROJECT_SQL: &str = "(u.is_admin = 1 OR EXISTS (\
+     SELECT 1 FROM project_members m \
+     WHERE m.project_id = :project_id AND m.user_id = u.id))";
 
 fn insufficient_role(min: Role) -> LificError {
     LificError::Forbidden(format!(
@@ -262,16 +300,27 @@ pub fn visible_project_ids(
     identity: &Option<ResolvedIdentity>,
 ) -> Result<Option<HashSet<i64>>, LificError> {
     let conn = db.read()?;
-
     let effective = effective_user(&conn, &user_of(identity));
+    visible_project_ids_conn(&conn, &effective)
+}
+
+/// [`visible_project_ids`] for an already resolved effective user, on a
+/// caller-supplied connection (the sidebar snapshot resolves its own).
+///
+/// It must grant exactly the projects [`project_role`] answers `Some` for;
+/// `visible_projects_match_project_role` pins that. It is a set query rather
+/// than a loop over `project_role` because every list request runs it.
+pub(crate) fn visible_project_ids_conn(
+    conn: &Connection,
+    effective: &Option<AuthUser>,
+) -> Result<Option<HashSet<i64>>, LificError> {
     let Some(user) = effective else {
         return Ok(Some(HashSet::new()));
     };
     if user.is_admin {
         return Ok(None);
     }
-
-    let ids = queries::members::list_project_ids_for_user(&conn, user.id)?;
+    let ids = queries::members::list_project_ids_for_user(conn, user.id)?;
     Ok(Some(ids.into_iter().collect()))
 }
 
@@ -405,6 +454,48 @@ mod tests {
         )
         .unwrap()
         .id
+    }
+
+    /// `visible_project_ids_conn` is the set form of `project_role`: for
+    /// every kind of caller it must grant exactly the projects `project_role`
+    /// gives any role on.
+    #[test]
+    fn visible_projects_match_project_role() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let projects = [
+            seed_project(&conn, "ONE"),
+            seed_project(&conn, "TWO"),
+            seed_project(&conn, "THR"),
+        ];
+        let admin = seed_user(&conn, "admin", true);
+        let member = seed_user(&conn, "member", false);
+        let outsider = seed_user(&conn, "outsider", false);
+        let owned_bot = seed_bot(&conn, "member-bot", Some(member.id));
+        let lone_bot = seed_bot(&conn, "lone-bot", None);
+        upsert_member(&conn, projects[0], member.id, Role::Viewer).unwrap();
+        upsert_member(&conn, projects[2], member.id, Role::Lead).unwrap();
+        upsert_member(&conn, projects[1], lone_bot.id, Role::Maintainer).unwrap();
+
+        for caller in [
+            None,
+            Some(admin),
+            Some(member),
+            Some(outsider),
+            Some(owned_bot),
+            Some(lone_bot),
+        ] {
+            let effective = effective_user(&conn, &caller);
+            let by_role: HashSet<i64> = projects
+                .iter()
+                .copied()
+                .filter(|p| project_role(&conn, &effective, *p).unwrap().is_some())
+                .collect();
+            let visible = visible_project_ids_conn(&conn, &effective)
+                .unwrap()
+                .unwrap_or_else(|| projects.iter().copied().collect());
+            assert_eq!(visible, by_role, "caller {caller:?}");
+        }
     }
 
     // ── Role matrix ──────────────────────────────────────────────
