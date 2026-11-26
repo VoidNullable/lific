@@ -33,7 +33,7 @@
   import { inPublicScope } from "../lib/publicScope"; // LIF-471
   import { CommentThread } from "../lib/detail/commentThread.svelte";
   import { readingMinutes, wordCount } from "../lib/detail/outline";
-  import { PenLine, CircleDot, CheckCircle2, Archive, Pin } from "lucide-svelte";
+  import { PenLine, CircleDot, CheckCircle2, Archive, Pin, ScrollText } from "lucide-svelte";
 
   // LIF-112: page lifecycle statuses.
   const PAGE_STATUSES = [
@@ -247,6 +247,13 @@
     if (page) void saveField({ pinned: !page.pinned });
   }
 
+  // LIF-524: off keeps the text and only takes the page out of briefings.
+  const conventionsOn = $derived(page?.conventions_enabled !== false);
+
+  function toggleConventions() {
+    if (page?.conventions) void saveField({ conventions_enabled: !conventionsOn });
+  }
+
   // LIF-105: the backend replaces the whole set, so send all of it.
   async function toggleLabel(name: string) {
     if (!page) return;
@@ -324,6 +331,13 @@
           })),
       },
       { id: "toggle-pin", title: p.pinned ? "Unpin page" : "Pin page", run: togglePin },
+      ...(p.conventions
+        ? [{
+            id: "toggle-conventions",
+            title: conventionsOn ? "Leave conventions out of briefings" : "Put conventions back in briefings",
+            run: toggleConventions,
+          }]
+        : []),
       ...(p.project_id !== null && labels.length > 0
         ? [
             {
@@ -407,6 +421,59 @@
          the page is and when it last changed. -->
     {#if page}
       <div class="mb-7 flex flex-col gap-2.5">
+        {#if page.conventions}
+          <!-- LIF-524: the project's conventions page, and its switch for
+               agents' briefings. -->
+          <div
+            class="mb-1.5 flex items-start gap-3 rounded-lg border border-[var(--border)]
+                   bg-[var(--surface)] px-3 py-2.5"
+            data-testid="conventions-banner"
+          >
+            <ScrollText
+              size={16}
+              class="shrink-0 mt-0.5 {conventionsOn ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'}"
+            />
+            <div class="flex-1 min-w-0">
+              <p class="text-body-sm font-medium text-[var(--text)]">This project's conventions</p>
+              <p class="text-caption text-[var(--text-muted)] leading-snug mt-0.5">
+                {conventionsOn
+                  ? "Agents get this page at the top of their briefing when a session starts."
+                  : "Agents' briefings leave it out. The text stays here."}
+              </p>
+            </div>
+            {#if editable}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={conventionsOn}
+                aria-label="Include in agents' briefings"
+                title={conventionsOn ? "Leave it out of briefings" : "Put it back in briefings"}
+                class="shrink-0 flex items-center gap-2 rounded-md px-1 py-1 -my-0.5
+                       text-caption font-medium text-[var(--text-muted)]
+                       focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
+                       disabled:opacity-50"
+                disabled={saving}
+                onclick={toggleConventions}
+              >
+                <span class="w-6 text-right">{conventionsOn ? "On" : "Off"}</span>
+                <span
+                  class="relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors
+                         {conventionsOn ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}"
+                >
+                  <span
+                    class="absolute top-0.5 left-0.5 size-4 rounded-full bg-[var(--surface)] shadow
+                           motion-safe:transition-transform
+                           {conventionsOn ? 'translate-x-4' : 'translate-x-0'}"
+                  ></span>
+                </span>
+              </button>
+            {:else}
+              <span class="shrink-0 text-caption font-medium text-[var(--text-muted)]">
+                {conventionsOn ? "On" : "Off"}
+              </span>
+            {/if}
+          </div>
+        {/if}
         <div class="flex flex-wrap items-center gap-2">
           {#if editable}
             <Select options={statusOptions} value={page.status} onchange={(o) => setStatus(String(o.value))} size="sm" class="w-auto">
