@@ -159,6 +159,21 @@ struct HttpForwarder {
     client: reqwest::Client,
     endpoint: String,
     credential: Option<String>,
+    /// LIF-525: one id for this proxy process, sent as `X-Lific-Worker` on
+    /// every request so the server tells this session's claims apart from
+    /// another session's on the same key, as it does for local stdio.
+    worker: String,
+}
+
+impl HttpForwarder {
+    fn new(client: reqwest::Client, endpoint: String, credential: Option<String>) -> Self {
+        Self {
+            client,
+            endpoint,
+            credential,
+            worker: crate::db::queries::claims::mint_worker("r"),
+        }
+    }
 }
 
 impl Forwarder for HttpForwarder {
@@ -170,6 +185,7 @@ impl Forwarder for HttpForwarder {
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
+            .header("x-lific-worker", &self.worker)
             .body(body);
         for (name, value) in routing {
             request = request.header(name, value);
@@ -575,11 +591,7 @@ pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn 
     let bound = resolve_binding(&client, &url, credential.as_deref()).await;
 
     let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
-    let forwarder = HttpForwarder {
-        client,
-        endpoint,
-        credential,
-    };
+    let forwarder = HttpForwarder::new(client, endpoint, credential);
 
     tracing::info!(
         endpoint = %forwarder.endpoint,
@@ -870,11 +882,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: format!("http://{address}/mcp"),
-            credential: None,
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            format!("http://{address}/mcp"),
+            None,
+        );
 
         let requests = format!(
             "{}\n{}\n",
@@ -911,11 +923,11 @@ mod tests {
     #[tokio::test]
     async fn remote_stdio_serves_legacy_and_2026_07_28_clients() {
         let served = server::test_server::serve("Proxy project", "PRX").await;
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: served.endpoint.clone(),
-            credential: Some(served.key.clone()),
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            served.endpoint.clone(),
+            Some(served.key.clone()),
+        );
 
         let meta = crate::mcp::protocol_tests::modern_meta();
         let list_projects = serde_json::json!({
@@ -976,6 +988,51 @@ mod tests {
         }
     }
 
+    /// LIF-525: two `lific mcp --remote` processes on one key are two
+    /// workers, so the second cannot claim what the first holds.
+    #[tokio::test]
+    async fn two_remote_stdio_processes_on_one_key_claim_apart() {
+        let served = server::test_server::serve("Proxy project", "PRX").await;
+        let process = || {
+            HttpForwarder::new(
+                reqwest::Client::new(),
+                served.endpoint.clone(),
+                Some(served.key.clone()),
+            )
+        };
+        let (first, second) = (process(), process());
+        async fn run(forwarder: &HttpForwarder, name: &str, arguments: Value) -> String {
+            let mut stdout = Vec::new();
+            pump(
+                BufReader::new(call(name, arguments).as_bytes()),
+                &mut stdout,
+                forwarder,
+                None,
+            )
+            .await
+            .unwrap();
+            let reply: Value = serde_json::from_slice(&stdout).unwrap();
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+        run(
+            &first,
+            "create_issue",
+            serde_json::json!({"project": "PRX", "title": "Contested", "status": "todo"}),
+        )
+        .await;
+        let claim = serde_json::json!({"identifier": "PRX-1", "claim": true});
+        let held = run(&first, "update_issue", claim.clone()).await;
+        assert!(held.contains("Claim held"), "{held}");
+        let refused = run(&second, "update_issue", claim).await;
+        assert!(
+            refused.starts_with("Error:") && refused.contains("is claimed by"),
+            "{refused}"
+        );
+    }
+
     /// Noise, so the PNG encoder cannot shrink it below the size under test.
     fn noisy_png(width: u32, height: u32) -> Vec<u8> {
         let mut state = 0x2545_f491_u32;
@@ -1002,11 +1059,11 @@ mod tests {
         use sha2::Digest;
 
         let served = server::test_server::serve("Proxy project", "PRX").await;
-        let forwarder = HttpForwarder {
-            client: reqwest::Client::new(),
-            endpoint: served.endpoint.clone(),
-            credential: Some(served.key.clone()),
-        };
+        let forwarder = HttpForwarder::new(
+            reqwest::Client::new(),
+            served.endpoint.clone(),
+            Some(served.key.clone()),
+        );
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("screen.png");
         let png = noisy_png(1000, 1000);
