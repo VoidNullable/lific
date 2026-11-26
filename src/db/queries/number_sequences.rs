@@ -40,7 +40,11 @@ pub(crate) fn next(
         )
         .optional()?
     } else {
-        assert!(matches!(entity, Entity::Page));
+        if !matches!(entity, Entity::Page) {
+            return Err(LificError::Internal(
+                "only pages can allocate workspace identifier numbers".into(),
+            ));
+        }
         conn.query_row(
             "UPDATE workspace_page_sequence SET value = value + 1
              WHERE id = 1 AND value < 9223372036854775807 RETURNING value",

@@ -17,6 +17,9 @@ use crate::storage::{AttachmentStore, valid_sha256};
 /// Formats 1 and 2 still import: see [`upgrade_manifest`].
 const VERSION: u32 = 3;
 
+/// Imported marks must leave room for future allocations.
+const MAX_NUMBER_HIGH_WATER: i64 = 1_000_000_000;
+
 /// One resource profile for a whole export or import.
 ///
 /// Every ceiling in this module reads from the profile that is active on the
@@ -1359,6 +1362,17 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
         .ok_or_else(|| invalid("missing number high-water marks"))?;
     if marks.issues < 0 || marks.pages < 0 || marks.plans < 0 {
         return Err(invalid("negative number high-water mark"));
+    }
+    for (entity, value) in [
+        ("issue", marks.issues),
+        ("page", marks.pages),
+        ("plan", marks.plans),
+    ] {
+        if value > MAX_NUMBER_HIGH_WATER {
+            return Err(invalid(format!(
+                "{entity} number high-water mark exceeds {MAX_NUMBER_HIGH_WATER}"
+            )));
+        }
     }
     if m.tables.len() != SPECS.len() {
         return Err(invalid("missing or extra tables"));

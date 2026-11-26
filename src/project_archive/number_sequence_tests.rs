@@ -179,3 +179,50 @@ fn project_archive_rejects_missing_or_negative_current_marks() {
         );
     }
 }
+
+#[test]
+fn project_archive_bounds_each_number_mark_with_room_for_future_allocations() {
+    let (source, _dir, _store) = tests::fixture();
+    seed_numbers(&source);
+    let mut manifest = collect_manifest(&source.read().unwrap(), "NUM").unwrap();
+    manifest.number_high_water = Some(NumberHighWater {
+        issues: MAX_NUMBER_HIGH_WATER,
+        pages: MAX_NUMBER_HIGH_WATER,
+        plans: MAX_NUMBER_HIGH_WATER,
+    });
+    validate_manifest(&manifest).unwrap();
+    for value in [MAX_NUMBER_HIGH_WATER + 1, i64::MAX] {
+        for (entity, marks) in [
+            (
+                "issue",
+                NumberHighWater {
+                    issues: value,
+                    ..Default::default()
+                },
+            ),
+            (
+                "page",
+                NumberHighWater {
+                    pages: value,
+                    ..Default::default()
+                },
+            ),
+            (
+                "plan",
+                NumberHighWater {
+                    plans: value,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            manifest.number_high_water = Some(marks);
+            assert!(matches!(
+                validate_manifest(&manifest),
+                Err(LificError::BadRequest(message))
+                    if message == format!(
+                        "project archive: {entity} number high-water mark exceeds {MAX_NUMBER_HIGH_WATER}"
+                    )
+            ));
+        }
+    }
+}

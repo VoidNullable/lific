@@ -85,6 +85,8 @@ Archives also keep the highest number assigned to each kind of item, including n
 
 Project archives exported by Lific 3.0 use format 3 and require Lific 3.0 or later to import. Format 1 and 2 archives still import into 3.0.
 
+Archive number counters cannot exceed 1,000,000,000. Larger values are rejected so an imported counter cannot exhaust the range available for new items.
+
 Links to attachments written as `/api/attachments/123` in descriptions, comments, pages and history are rewritten to the new file IDs. A link to a file that is not in the archive is changed to `/unresolved-source-attachment/123`, so it cannot point at an unrelated file on the destination, and it is listed in the report. Links written as full URLs are left as they are and listed for you to check. Other text is not changed or cleaned.
 
 Relations to issues in other projects are left out and listed in the report. Neighboring projects are never included.

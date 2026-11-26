@@ -266,3 +266,17 @@ fn unnumbered_legacy_pages_do_not_change_marks() {
     assert_eq!(page(&conn, Some(pid)).sequence, Some(1));
     assert_eq!(page(&conn, None).sequence, Some(1));
 }
+
+#[test]
+fn workspace_issue_and_plan_allocations_return_errors_without_reserving_numbers() {
+    let pool = db::open_memory().unwrap();
+    let conn = pool.write().unwrap();
+    for entity in [Entity::Issue, Entity::Plan] {
+        assert!(matches!(
+            next(&conn, None, entity),
+            Err(LificError::Internal(message))
+                if message == "only pages can allocate workspace identifier numbers"
+        ));
+    }
+    assert_eq!(page(&conn, None).sequence, Some(1));
+}
