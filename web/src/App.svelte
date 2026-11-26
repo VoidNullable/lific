@@ -33,8 +33,6 @@
     getInstance,
     autoLogin,
     saveSession,
-    clearSession,
-    me,
     probeSession,
     sessionKey,
     listProjects,
@@ -48,6 +46,7 @@
     realtimeOpened,
   } from "./lib/sync/readModel.svelte"; // LIF-442
   import { createSyncClient } from "./lib/sync/leader"; // LIF-443
+  import { readModelAccount, readModelScope } from "./lib/sync/account";
   import {
     commentTargetFromHash,
     routeForCommentHash,
@@ -66,7 +65,6 @@
     isSignedOut,
     onSignedOutChange,
     rewritePublicRoute,
-    setSignedOut,
   } from "./lib/signedOut"; // LIF-583
   import { fade } from "svelte/transition";
   import { onDestroy, onMount, setContext, untrack } from "svelte";
@@ -119,6 +117,7 @@
   // session change. Signed out, a published project's pages render in the
   // normal Layout, read-only; everything else goes to login.
   let signedOut = $state(isSignedOut());
+  let accountScope = $state(readModelScope());
   $effect(() => onSignedOutChange((next) => {
     signedOut = next;
     published = null;
@@ -126,7 +125,16 @@
     publishedRetriedFor = null;
   }));
   $effect(() => onSessionChange(() => {
-    if (!bootstrapping) setSignedOut(!hasSession());
+    accountScope = readModelScope();
+    if (initializing) return;
+    bootstrapping = readModelAccount() === undefined;
+    if (bootstrapping) {
+      closeRealtimeSocket();
+      bootstrapError = sessionKey() === null ? "" : "Couldn't verify the session. Try again.";
+    } else {
+      bootstrapError = "";
+      syncRealtimeSocket();
+    }
   }));
 
   // The projects a signed-out reader may open: `listProjects()` answers an
@@ -207,6 +215,8 @@
   // the normal answer, not an error). LIF-215: when it is not signed in and
   // the instance has web auto-login on, silently mint an admin session first.
   let bootstrapping = $state(true);
+  let initializing = true;
+  let bootstrapError = $state("");
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —
@@ -255,10 +265,18 @@
     realtimeActivityRevision += 1;
   }
 
-  onMount(async () => {
+  async function initializeSession() {
+    initializing = true;
+    bootstrapping = true;
+    bootstrapError = "";
     // Probe the instance once; its auto-login flag decides single-user mode.
     // The session probe runs alongside it.
-    const [inst] = await Promise.all([getInstance(), probeSession()]);
+    const [inst, probe] = await Promise.all([getInstance(), probeSession()]);
+    if (!probe.ok && probe.status !== 401) {
+      initializing = false;
+      bootstrapError = probe.error;
+      return;
+    }
 
     // Single-user mode: no valid session, so silently mint a fresh admin
     // session (covers both a cold load with no cookie and an expired one).
@@ -267,10 +285,17 @@
       if (res.ok) saveSession();
     }
 
-    setSignedOut(!hasSession());
+    initializing = false;
+    accountScope = readModelScope();
+    if (readModelAccount() === undefined) {
+      bootstrapError = "Couldn't verify the session. Try again.";
+      return;
+    }
     bootstrapping = false;
     if (!realtimeDisposed) syncRealtimeSocket();
-  });
+  }
+
+  onMount(() => { void initializeSession(); });
 
   onDestroy(() => {
     realtimeDisposed = true;
@@ -483,18 +508,12 @@
   }
 
   async function reconnectAfterFailedRealtimeAttempt(attemptSession: string | null) {
-    const session = await me();
+    await probeSession();
 
     // A stale probe must not clear a session established after this socket
     // attempt ended. Network failures have no HTTP status and must keep
     // reconnecting so a temporarily unavailable server can recover.
     if (realtimeDisposed || sessionKey() !== attemptSession) return;
-
-    if (!session.ok && session.status === 401) {
-      clearSession();
-      navigate(loginRouteFor(routeToResume()));
-      return;
-    }
 
     scheduleRealtimeReconnect();
   }
@@ -835,7 +854,15 @@
   }
 </script>
 
-{#if bootstrapping}
+{#if bootstrapError}
+  <div class="min-h-dvh flex items-center justify-center">
+    <ErrorState title="Couldn't check your session" message={bootstrapError}>
+      <button class="text-body-sm text-[var(--accent)]" onclick={() => void initializeSession()}>
+        Try again
+      </button>
+    </ErrorState>
+  </div>
+{:else if bootstrapping}
   <div class="min-h-dvh flex items-center justify-center">
     <div
       class="size-6 rounded-full border-2 border-[var(--border)]
@@ -889,7 +916,7 @@
 {:else}
   <!-- Keyed so signing in or out rebuilds the shell and the route for the
        new reader rather than patching the old one. -->
-  {#key signedOut}
+  {#key accountScope}
   <Layout {navigate} {route} bind:onProjectChange>
     <svelte:boundary
       onerror={(error) => {

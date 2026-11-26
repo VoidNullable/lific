@@ -1,4 +1,6 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
+import { clearReadModelAccount, invalidateReadModelAccount, readModelAccount, readModelAccountRevision, readModelScope, reconcileReadModelProjects, setReadModelAccount } from "./sync/account";
+import { clearPrivateSnapshots, pruneProjectSnapshots, removeScopeSnapshots } from "./sync/persistence";
 
 const BASE = "/api";
 
@@ -246,17 +248,21 @@ export async function signup(
   email: string,
   password: string
 ) {
-  return request<AuthResponse>("/auth/signup", {
+  const result = await request<AuthResponse>("/auth/signup", {
     method: "POST",
     body: JSON.stringify({ username, email, password }),
   });
+  if (result.ok) await confirmNewSession();
+  return result;
 }
 
 export async function login(identity: string, password: string) {
-  return request<AuthResponse>("/auth/login", {
+  const result = await request<AuthResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ identity, password }),
   });
+  if (result.ok) await confirmNewSession();
+  return result;
 }
 
 /** Single-user mode (LIF-215): mint an admin session without a password when
@@ -267,7 +273,9 @@ export async function login(identity: string, password: string) {
  *  whoever is already using the tab. To freshen an existing session, use
  *  `refreshSession`, whose entire contract is "same user". */
 export async function autoLogin() {
-  return request<AuthResponse>("/auth/auto-login", { method: "POST" });
+  const result = await request<AuthResponse>("/auth/auto-login", { method: "POST" });
+  if (result.ok) await confirmNewSession();
+  return result;
 }
 
 /** Swap this browser's session for a fresh one, for the same account.
@@ -295,14 +303,14 @@ export async function refreshSession(password?: string) {
 export async function logout(): Promise<RequestResult<{ logged_out: boolean }>> {
   const result = await request<{ logged_out: boolean }>("/auth/logout", { method: "POST" });
   if (result.ok || result.status === 401) {
-    clearSession();
+    await clearSession();
     return { ok: true, data: { logged_out: true } };
   }
   return result;
 }
 
 export async function me() {
-  return request<AuthUser>("/auth/me");
+  return readSession(readModelAccount(), false);
 }
 
 // LIF-190: account settings.
@@ -346,7 +354,7 @@ export async function changePassword(input: { current_password: string; new_pass
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
   if (result.ok) {
-    clearSession();
+    await clearSession();
   }
   return result;
 }
@@ -395,21 +403,36 @@ function setSession(next: boolean, broadcast: boolean) {
 // this tab forgets which account it is on and asks the server, which is the
 // only authority on what the cookie now holds.
 sessionChannel?.addEventListener("message", () => {
+  const previousAccount = readModelAccount();
   sessionKnown = false;
   sessionGeneration += 1;
+  const cleared = invalidateReadModelAccount();
   notifySession();
-  void probeSession();
+  void cleared.then(() => probeSession(previousAccount));
 });
+
+async function confirmNewSession(): Promise<void> {
+  const previousAccount = readModelAccount();
+  sessionKnown = false;
+  sessionGeneration += 1;
+  const cleared = invalidateReadModelAccount();
+  notifySession();
+  await cleared;
+  await readSession(previousAccount, false);
+}
 
 /** Mark this tab signed in, after a response that set the session cookie. */
 export function saveSession() {
+  if (readModelAccount() === null) setReadModelAccount(undefined);
   setSession(true, true);
 }
 
 /** Mark this tab signed out. The cookie itself is cleared by the server
  *  (`logout`, `revokeAllSessions`); this only stops the app acting signed in. */
 export function clearSession() {
+  const cleared = clearReadModelAccount();
   setSession(false, true);
+  return cleared;
 }
 
 export function onSessionChange(listener: () => void) {
@@ -436,17 +459,37 @@ export function sessionKey(): string | null {
 /** Learn whether the browser's cookie is a live session. A 401 means signed
  *  out. Any other failure (the server unreachable) is no evidence either way:
  *  the tab keeps what it last knew, and a later probe or request corrects it. */
-export async function probeSession(): Promise<RequestResult<AuthUser>> {
+export async function probeSession(previousAccount = readModelAccount()): Promise<RequestResult<AuthUser>> {
+  return readSession(previousAccount, true);
+}
+
+async function readSession(
+  previousAccount: number | null | undefined,
+  publishSession: boolean,
+): Promise<RequestResult<AuthUser>> {
   const started = sessionGeneration;
-  const result = await me();
+  const accountRevision = readModelAccountRevision();
+  const account = readModelAccount();
+  const result = await request<AuthUser>("/auth/me");
   // A sign-in, sign-out or cross-tab notice that landed while the probe was
   // out is newer than its answer.
-  if (started !== sessionGeneration) return result;
+  if (started !== sessionGeneration || accountRevision !== readModelAccountRevision()) return result;
   if (result.ok) {
-    if (!signedIn || !sessionKnown) setSession(true, false);
+    if (typeof previousAccount === "number" && previousAccount !== result.data.id) {
+      setReadModelAccount(undefined);
+      const clearingRevision = readModelAccountRevision();
+      await removeScopeSnapshots(`private:${previousAccount}:`);
+      if (started !== sessionGeneration || clearingRevision !== readModelAccountRevision()) return result;
+    }
+    setReadModelAccount(result.data.id);
+    if ((publishSession || (account !== undefined && account !== result.data.id)) &&
+        (!signedIn || !sessionKnown || account !== result.data.id)) setSession(true, false);
   } else if (result.status === 401) {
-    if (signedIn || !sessionKnown) setSession(false, false);
-  } else if (!sessionKnown) {
+    setReadModelAccount(null);
+    if ((publishSession || (account !== undefined && account !== null)) &&
+        (signedIn || !sessionKnown || account !== null)) setSession(false, false);
+    await clearPrivateSnapshots();
+  } else if (publishSession && !sessionKnown) {
     setSession(signedIn, false);
   }
   return result;
@@ -682,7 +725,15 @@ export interface Project {
 }
 
 export async function listProjects() {
-  return request<Project[]>("/projects");
+  const scope = readModelScope();
+  const revision = readModelAccountRevision();
+  const result = await request<Project[]>("/projects");
+  if (result.ok && scope === readModelScope() && revision === readModelAccountRevision()) {
+    const ids = result.data.map(project => project.id);
+    reconcileReadModelProjects(scope, ids);
+    await pruneProjectSnapshots(scope, ids);
+  }
+  return result;
 }
 
 // LIF-233: persist sidebar order. Send the full id list top-to-bottom; the

@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readModelAccount, setReadModelAccount, readModelScope } from "../src/lib/sync/account";
+import { isSignedOut, setSignedOut } from "../src/lib/signedOut";
 
 // The session is the HttpOnly `lific_token` cookie, which page script cannot
 // read. These pin down what api.ts keeps instead (signed in or not, and a key
@@ -24,6 +26,7 @@ let reply: Reply;
 const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
+  setReadModelAccount(undefined);
   storage = new MemoryStorage();
   (globalThis as { localStorage: unknown }).localStorage = storage;
   (globalThis as { window?: unknown }).window ??= {
@@ -47,6 +50,75 @@ beforeEach(() => {
   }) as unknown as typeof fetch;
 });
 
+describe("read-model account identity", () => {
+  test("an ordinary identity read keeps the session key used by its caller", async () => {
+    const { me, sessionKey } = await api();
+    const before = sessionKey();
+    reply = { status: 200, body: { id: 7 } };
+    await me();
+    expect(readModelAccount()).toBe(7);
+    expect(sessionKey()).toBe(before);
+  });
+
+  test("a different confirmed account invalidates the old session's views", async () => {
+    const { me, saveSession, sessionKey } = await api();
+    setReadModelAccount(7);
+    saveSession();
+    const before = sessionKey();
+    reply = { status: 200, body: { id: 8 } };
+    await me();
+    expect(readModelAccount()).toBe(8);
+    expect(sessionKey()).not.toBe(before);
+  });
+
+  test("signed-out state and the disk scope share the confirmed account", async () => {
+    const { probeSession, saveSession } = await api();
+    setSignedOut(true);
+    expect(readModelAccount()).toBeNull();
+    expect(readModelScope()).toBe("signed-out:");
+    expect(isSignedOut()).toBe(readModelAccount() === null);
+    reply = { status: 200, body: { id: 8 } };
+    await probeSession();
+    expect(readModelScope()).toBe("private:8:");
+    expect(isSignedOut()).toBe(false);
+    saveSession();
+    expect(readModelScope()).toBe("private:8:");
+    reply = { status: 200, body: { id: 9 } };
+    await probeSession();
+    expect(readModelScope()).toBe("private:9:");
+    expect(isSignedOut()).toBe(readModelAccount() === null);
+  });
+
+  test("only adopts the server-confirmed account", async () => {
+    const { me } = await api();
+    expect(readModelAccount()).toBeUndefined();
+    reply = { status: 200, body: { id: 7 } };
+    await me();
+    expect(readModelAccount()).toBe(7);
+  });
+
+  test("an expired session clears the account", async () => {
+    const { me } = await api();
+    setReadModelAccount(7);
+    reply = { status: 401, body: { error: "expired" } };
+    await me();
+    expect(readModelAccount()).toBeNull();
+    expect(isSignedOut()).toBe(true);
+  });
+
+  test("a late identity response cannot undo sign-out", async () => {
+    const { me, clearSession } = await api();
+    setReadModelAccount(7);
+    let release!: (response: Response) => void;
+    globalThis.fetch = (() => new Promise<Response>(resolve => { release = resolve; })) as typeof fetch;
+    const pending = me();
+    await clearSession();
+    release(new Response(JSON.stringify({ id: 7 })));
+    await pending;
+    expect(readModelAccount()).toBeNull();
+  });
+});
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
 });
@@ -58,6 +130,21 @@ async function api() {
 const USER = { id: 7, username: "blake", email: "b@x", display_name: "Blake", is_admin: false };
 
 describe("signing in", () => {
+  test("login confirms the account before saveSession publishes the new session", async () => {
+    const { login, clearSession, saveSession, hasSession } = await api();
+    await clearSession();
+    globalThis.fetch = (async (url: string) => new Response(JSON.stringify(
+      url.endsWith("/auth/me") ? USER : { user: USER, expires_at: "2099-01-01" },
+    ))) as typeof fetch;
+    const result = await login("blake", "pw");
+    expect(result.ok).toBe(true);
+    expect(readModelAccount()).toBe(USER.id);
+    expect(hasSession()).toBe(false);
+    saveSession();
+    expect(hasSession()).toBe(true);
+    expect(readModelAccount()).toBe(USER.id);
+  });
+
   test("login sends no script-held credential and the answer carries no token", async () => {
     const { login, saveSession, hasSession, me } = await api();
     reply = { status: 200, body: { user: USER, expires_at: "2099-01-01T00:00:00Z" } };

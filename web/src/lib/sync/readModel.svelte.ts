@@ -23,13 +23,15 @@
 // gaps are impossible because the cursor only ever moves by applying rows.
 
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
-import { isSignedOut } from "../signedOut";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
+import { onReadModelAccountChange, onReadModelProjects, readModelAccount, readModelScope } from "./account";
+import { loadSnapshot, removeScopeSnapshots, removeSnapshot, snapshotOf, storeSnapshot } from "./persistence";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
  *  from one bulk mutation becomes a single request, short enough that a
  *  single edit still feels immediate. */
 const PULL_DEBOUNCE_MS = 150;
+const WRITE_BEHIND_MS = 250;
 
 export type ReadModelStatus = "cold" | "loading" | "ready";
 
@@ -74,6 +76,13 @@ export class ProjectReadModel {
    *  reads its cursor before its rows, so the snapshot may predate that
    *  write; pull once the bootstrap settles rather than dropping it. */
   private pullAfterBootstrap = false;
+  private writeTimer: ReturnType<typeof setTimeout> | null = null;
+  private epoch: string | null = null;
+  private databaseId = "";
+  private skipCache = false;
+  private disposed = false;
+  private revision = 0;
+  private resetRun: Promise<void> | null = null;
 
   constructor(projectId: number, key: string = modelKey(projectId)) {
     this.projectId = projectId;
@@ -83,7 +92,54 @@ export class ProjectReadModel {
   /** False once the client has signed in or out since this model was
    *  created; see `key`. */
   private inScope(): boolean {
-    return modelKey(this.projectId) === this.key;
+    return !this.disposed && modelKey(this.projectId) === this.key;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (models.get(this.key) === this) models.delete(this.key);
+    if (this.pullTimer) clearTimeout(this.pullTimer);
+    if (this.writeTimer) clearTimeout(this.writeTimer);
+    this.pullTimer = this.writeTimer = null;
+    this.issues = new Map();
+    this.pages = new Map();
+    this.cursor = 0;
+    this.status = "cold";
+  }
+
+  private persist(): void {
+    if (!this.inScope() || this.epoch === null || this.writeTimer) return;
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = null;
+      if (!this.inScope() || this.epoch === null) return;
+      void storeSnapshot(this.key, snapshotOf(this.databaseId, this.cursor, this.issues, this.pages), this.epoch);
+    }, WRITE_BEHIND_MS);
+  }
+
+  reset(): Promise<void> {
+    if (!this.inScope()) return Promise.resolve();
+    if (this.resetRun) return this.resetRun;
+    this.revision++;
+    this.skipCache = true;
+    if (this.writeTimer) clearTimeout(this.writeTimer);
+    if (this.pullTimer) clearTimeout(this.pullTimer);
+    this.writeTimer = this.pullTimer = null;
+    this.issues = new Map();
+    this.pages = new Map();
+    this.cursor = 0;
+    this.databaseId = "";
+    this.epoch = null;
+    this.status = "loading";
+    const pending = this.bootstrapping;
+    this.resetRun = (async () => {
+      await pending;
+      await removeSnapshot(this.key);
+      if (this.inScope()) await this.bootstrap();
+    })().finally(() => {
+      this.resetRun = null;
+      if (this.status === "ready") this.schedulePull();
+    });
+    return this.resetRun;
   }
 
   /** Cold start. Idempotent: concurrent callers share one request, and a
@@ -96,9 +152,29 @@ export class ProjectReadModel {
       return Promise.resolve();
     }
     this.status = "loading";
+    const revision = this.revision;
     this.bootstrapping = (async () => {
+      // Unverified sessions cannot hydrate or persist any account's disk cache.
+      if (readModelAccount() !== undefined) {
+        const cached = await loadSnapshot(this.key);
+        if (!this.inScope() || revision !== this.revision) return;
+        this.epoch = cached.epoch;
+        if (cached.snapshot && !this.skipCache) {
+          this.issues = new Map(cached.snapshot.issues.map(row => [row.id, row]));
+          this.pages = new Map(cached.snapshot.pages.map(row => [row.id, row]));
+          this.cursor = cached.snapshot.cursor;
+          this.databaseId = cached.snapshot.database_id;
+          this.error = "";
+          this.status = "ready";
+          this.pullAfterBootstrap = true;
+          return;
+        }
+      }
+      this.skipCache = false;
       const res = await getProjectIndex(this.projectId);
+      if (!this.inScope() || revision !== this.revision) return;
       if (res.ok) {
+        this.databaseId = res.data.database_id;
         const issues = new Map<number, IssueRow>();
         for (const row of res.data.issues) issues.set(row.id, row);
         const pages = new Map<number, PageRow>();
@@ -111,6 +187,8 @@ export class ProjectReadModel {
         if (res.data.cursor > this.cursor) this.cursor = res.data.cursor;
         this.error = "";
         this.status = "ready";
+        this.persist();
+        this.pullAfterBootstrap = true;
       } else {
         this.error = res.error;
         this.status = "cold";
@@ -128,6 +206,7 @@ export class ProjectReadModel {
   /** Queue a catch-up pull, coalescing anything scheduled in the same
    *  ~150ms window into one request. */
   schedulePull(): void {
+    if (!this.inScope() || this.resetRun) return;
     if (this.bootstrapping) {
       // The snapshot in flight will land a cursor; pull from there.
       this.pullAfterBootstrap = true;
@@ -150,6 +229,10 @@ export class ProjectReadModel {
    *  has been applied, so a write the caller already saw acknowledged is in
    *  the replica by then. */
   async pull(): Promise<void> {
+    if (this.resetRun) {
+      await this.resetRun;
+      return;
+    }
     if (this.bootstrapping) {
       // Never race a snapshot with a delta: the snapshot would land second
       // and could overwrite newer rows.
@@ -181,8 +264,22 @@ export class ProjectReadModel {
         // cursor, so one call drains a large backlog.
         for (;;) {
           if (!this.inScope()) return;
+          const revision = this.revision;
           const res = await getProjectChanges(this.projectId, this.cursor);
-          if (!res.ok) return;
+          if (!this.inScope() || revision !== this.revision) return;
+          if (!res.ok) {
+            // Revoked access must not leave cached private rows on screen.
+            if (res.status === 401 || res.status === 403 || res.status === 404) {
+              this.dispose();
+              this.error = res.error;
+              void removeSnapshot(this.key);
+            }
+            return;
+          }
+          if (res.data.reset || res.data.database_id !== this.databaseId) {
+            await this.reset();
+            return;
+          }
           this.applyChanges(res.data);
           if (!res.data.has_more) break;
         }
@@ -198,6 +295,7 @@ export class ProjectReadModel {
    *  cursor. Comment rows ride the same stream and are skipped — the
    *  detail views own comments. */
   applyChanges(page: ChangesPage): void {
+    if (!this.inScope()) return;
     let issues = this.issues;
     let pages = this.pages;
     let issuesDirty = false;
@@ -233,6 +331,7 @@ export class ProjectReadModel {
     if (issuesDirty) this.issues = issues;
     if (pagesDirty) this.pages = pages;
     if (page.cursor > this.cursor) this.cursor = page.cursor;
+    this.persist();
   }
 
   /** Handle one realtime envelope. Returns whether it scheduled a pull, so
@@ -266,12 +365,8 @@ export class ProjectReadModel {
 // served to the other (LIF-583).
 const models = new Map<string, ProjectReadModel>();
 
-function audience(): string {
-  return isSignedOut() ? "signed-out" : "session";
-}
-
 function modelKey(projectId: number): string {
-  return `${audience()}:${projectId}`;
+  return `${readModelScope()}${projectId}`;
 }
 
 /** The project whose websocket resume frame we send on reconnect. Set by
@@ -354,10 +449,13 @@ export function handleRealtimeEvent(event: SyncEvent): void {
   // A dropped-and-restored connection invalidates every replica's
   // assumption that it saw the intervening events.
   if (event.type === "resync.required") {
-    const current = `${audience()}:`;
-    for (const model of models.values()) {
-      if (model.key.startsWith(current)) model.schedulePull();
-    }
+    const current = readModelScope();
+    void removeScopeSnapshots(current).then(() => {
+      if (readModelScope() !== current) return;
+      for (const model of models.values()) {
+        if (model.key.startsWith(current)) void model.reset();
+      }
+    });
     return;
   }
 
@@ -414,7 +512,7 @@ function installGlobalListeners(): void {
 const projectsByIdentifier = new Map<string, Project>();
 
 function projectKey(identifier: string): string {
-  return `${audience()}:${identifier.toLowerCase()}`;
+  return `${readModelScope()}${identifier.toLowerCase()}`;
 }
 
 export function cacheProjects(projects: Project[]): void {
@@ -426,3 +524,20 @@ export function cacheProjects(projects: Project[]): void {
 export function cachedProject(identifier: string): Project | null {
   return projectsByIdentifier.get(projectKey(identifier)) ?? null;
 }
+
+onReadModelAccountChange(() => {
+  for (const model of models.values()) model.dispose();
+  models.clear();
+  projectsByIdentifier.clear();
+  activeProjectId = null;
+});
+
+onReadModelProjects((scope, projects) => {
+  const allowed = new Set(projects);
+  for (const model of models.values()) {
+    if (model.key.startsWith(scope) && !allowed.has(model.projectId)) model.dispose();
+  }
+  for (const [key, project] of projectsByIdentifier) {
+    if (key.startsWith(scope) && !allowed.has(project.id)) projectsByIdentifier.delete(key);
+  }
+});

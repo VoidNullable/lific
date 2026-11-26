@@ -2097,6 +2097,21 @@ mod tests {
         let repaired = check_database(&cfg, DatabaseCheckMode::Repair);
         assert_eq!(repaired.status, Status::Pass, "detail: {}", repaired.detail);
         assert!(repaired.detail.contains("migrations applied"));
+        let identity = crate::db::queries::changes::database_id(
+            &rusqlite::Connection::open(&db_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            check_database(&cfg, DatabaseCheckMode::Repair).status,
+            Status::Pass
+        );
+        assert_eq!(
+            identity,
+            crate::db::queries::changes::database_id(
+                &rusqlite::Connection::open(&db_path).unwrap(),
+            )
+            .unwrap()
+        );
     }
 
     fn has_migration_table(path: &Path) -> bool {

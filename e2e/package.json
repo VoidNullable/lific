@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "warm-start": "bun warm-start.ts",
     "smoke": "bun smoke.ts",
     "cookie-session": "bun cookie-session.ts",
     "public": "bun public-projects.ts",

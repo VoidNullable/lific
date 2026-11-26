@@ -3,30 +3,35 @@
 // A published project is readable at its ordinary links by anyone; the same
 // Layout and routes serve a signed-out reader, with every way of changing
 // something hidden. This module holds the one fact those components need:
-// is this tab signed out? `App.svelte` sets it from the session check once
-// bootstrap (including single-user auto-login) has settled, and again on
-// every session change.
+// is this tab signed out? Its answer comes from the account confirmed by
+// /api/auth/me. App.svelte waits for that check, including after a cookie
+// changes in another tab, before rendering the new reader's routes.
 //
-// A plain module variable rather than a rune so plain TS (the read-model
-// registry, the role store, Markdown's sanitizer hooks) can read it at call
-// time. Subscribers hear about transitions so caches keyed on the audience
-// can drop what they hold.
+// Plain functions let the read-model registry, role store and Markdown hooks
+// read the same account state. Subscribers hear about audience transitions.
 
 import { commentTargetFromHash, routeWithCommentTarget, splitResourcePath } from "./commentLinks";
 import { loginRouteFor } from "./loginRedirect";
+import { onReadModelAccountChange, readModelAccount, setReadModelAccount } from "./sync/account";
 
-let signedOut = false;
 const listeners = new Set<(signedOut: boolean) => void>();
 
 export function isSignedOut(): boolean {
-  return signedOut;
+  return readModelAccount() === null;
 }
 
 export function setSignedOut(next: boolean): void {
-  if (next === signedOut) return;
-  signedOut = next;
-  for (const listener of listeners) listener(next);
+  if (next) setReadModelAccount(null);
+  else if (isSignedOut()) setReadModelAccount(undefined);
 }
+
+let previous = isSignedOut();
+onReadModelAccountChange(() => {
+  const next = isSignedOut();
+  if (next === previous) return;
+  previous = next;
+  for (const listener of listeners) listener(next);
+});
 
 /** Subscribe to transitions. Returns an unsubscribe. */
 export function onSignedOutChange(listener: (signedOut: boolean) => void): () => void {

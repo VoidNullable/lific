@@ -110,6 +110,7 @@ export type Change = IssueRow | PageRow | CommentRow | Tombstone;
  *  `cursor` is read before the lists, so a write racing the bootstrap is
  *  re-delivered by the first `/changes` pull rather than skipped. */
 export interface IndexSnapshot {
+  database_id: string;
   cursor: number;
   issues: IssueRow[];
   pages: PageRow[];
@@ -117,6 +118,8 @@ export interface IndexSnapshot {
 
 /** `GET /api/projects/{id}/changes?since=N` — ascending by seq. */
 export interface ChangesPage {
+  database_id: string;
+  reset?: boolean;
   changes: Change[];
   cursor: number;
   has_more: boolean;

@@ -69,6 +69,14 @@ Newest first. Each section lists what changed for someone upgrading past that ve
 
 ### v3.0
 
+#### Cached sync replicas
+
+Custom sync clients must save the `database_id` returned by `/index` and
+`/changes`. If it changes, discard the replica and fetch `/index`. Do the same
+when `/changes` returns `reset: true`: the requested cursor is ahead of the
+database, typically after restoring a backup. A reset response uses cursor 0;
+do not merge it into a replica whose cursor only advances.
+
 #### Project roles are always enforced
 
 Lific 3.0 removes the `authz_enforced` setting. Every instance checks project roles on every REST and MCP call, reads included. A user who is not a member of a project gets `403` on it, and the project is left out of their lists, search and cross-project reads. Administrators, and API keys created at the server's shell that are not bound to a user, still pass every check.

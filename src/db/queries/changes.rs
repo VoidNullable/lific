@@ -346,6 +346,16 @@ pub fn list_changes(
     // never move a client backwards.
     let since = since.max(0);
     let limit = limit.max(1);
+    let database_id = database_id(conn)?;
+    if since > index_cursor(conn)? {
+        return Ok(ChangesPage {
+            database_id,
+            reset: true,
+            changes: Vec::new(),
+            cursor: 0,
+            has_more: false,
+        });
+    }
 
     let sql = format!(
         "SELECT * FROM (
@@ -413,6 +423,8 @@ pub fn list_changes(
 
     let cursor = changes.last().map_or(since, Change::seq);
     Ok(ChangesPage {
+        database_id,
+        reset: false,
         changes,
         cursor,
         has_more,
@@ -431,6 +443,14 @@ pub fn index_cursor(conn: &Connection) -> Result<i64, LificError> {
         .prepare_cached("SELECT value FROM sync_seq WHERE id = 1")?
         .query_row([], |row| row.get::<_, i64>(0))
         .unwrap_or(0))
+}
+
+pub fn database_id(conn: &Connection) -> Result<String, LificError> {
+    Ok(conn.query_row(
+        "SELECT value FROM database_identity WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 /// The highest seq among one project's own rows: its issues, pages and their
@@ -528,6 +548,7 @@ pub fn get_index(conn: &Connection, project_id: i64) -> Result<IndexSnapshot, Li
     let cursor = index_cursor(conn)?;
     let (issues, pages) = index_rows(conn, project_id)?;
     Ok(IndexSnapshot {
+        database_id: database_id(conn)?,
         cursor,
         issues,
         pages,
@@ -546,6 +567,7 @@ pub fn get_project_index(conn: &Connection, project_id: i64) -> Result<IndexSnap
     let cursor = project_cursor(conn, project_id)?;
     let (issues, pages) = index_rows(conn, project_id)?;
     Ok(IndexSnapshot {
+        database_id: database_id(conn)?,
         cursor,
         issues,
         pages,
@@ -759,6 +781,46 @@ mod tests {
         assert!(page.changes.is_empty());
         assert_eq!(page.cursor, cursor, "cursor must never move backwards");
         assert!(!page.has_more);
+        assert!(!page.reset);
+    }
+
+    #[test]
+    fn a_cursor_ahead_of_a_restored_database_requires_a_new_snapshot() {
+        let (db, project, _) = seed();
+        new_issue(&db, project, "restored row");
+        let conn = db.read().unwrap();
+        let snapshot = get_index(&conn, project).unwrap();
+        let page = list_changes(&conn, project, snapshot.cursor + 20, 100).unwrap();
+        assert!(page.reset);
+        assert!(page.changes.is_empty());
+        assert!(!page.has_more);
+        assert_eq!(page.cursor, 0);
+        assert_eq!(page.database_id, snapshot.database_id);
+    }
+
+    #[test]
+    fn database_identity_is_unique_and_survives_migration_reapplication_and_backup() {
+        let (db, project, _) = seed();
+        let (other, _, _) = seed();
+        let conn = db.write().unwrap();
+        let identity = database_id(&conn).unwrap();
+        assert_eq!(identity.len(), 32);
+        assert_ne!(identity, database_id(&other.read().unwrap()).unwrap());
+        conn.execute_batch(include_str!("../../../migrations/077_database_identity.sql"))
+            .unwrap();
+        crate::db::migrate::run(&conn).unwrap();
+        assert_eq!(identity, database_id(&conn).unwrap());
+        assert_eq!(identity, get_index(&conn, project).unwrap().database_id);
+        assert_eq!(
+            identity,
+            list_changes(&conn, project, 0, 100).unwrap().database_id
+        );
+        let mut restored = Connection::open_in_memory().unwrap();
+        rusqlite::backup::Backup::new(&conn, &mut restored)
+            .unwrap()
+            .run_to_completion(100, std::time::Duration::from_millis(0), None)
+            .unwrap();
+        assert_eq!(identity, database_id(&restored).unwrap());
     }
 
     #[test]
