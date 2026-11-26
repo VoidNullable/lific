@@ -529,6 +529,38 @@ async fn a_published_plan_hides_steps_linked_into_a_private_project() {
     assert!(!plan.contains("PRIV-1"), "{plan}");
 }
 
+/// The comment `kind` filter works for a visitor too: asking for decisions
+/// returns only the decision, with nothing left over to page through.
+#[tokio::test]
+async fn a_visitor_can_filter_comments_by_kind() {
+    let d = deploy();
+    let uri = format!("/api/issues/{}/comments", d.issue);
+    let posted = send(
+        &d.app,
+        "POST",
+        &uri,
+        Some(&d.owner_key),
+        Some(serde_json::json!({"content": "We chose SQLite", "kind": "decision"})),
+    )
+    .await;
+    assert_eq!(posted.status(), StatusCode::OK);
+
+    let response = anonymous(&d.app, "GET", &format!("{uri}?kind=decision&limit=1")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::api::comments::HAS_MORE_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        Some("false")
+    );
+    let comments: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let comments = comments.as_array().unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0]["kind"], "decision");
+    assert_eq!(comments[0]["content"], "We chose SQLite");
+}
+
 /// The owner still sees everything, through a key as through a session.
 #[tokio::test]
 async fn the_owner_is_unaffected() {
