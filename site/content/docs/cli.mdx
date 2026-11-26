@@ -352,6 +352,8 @@ lific comment list <IDENTIFIER> [--limit <LIMIT>] [--offset <OFFSET>] [--order d
 lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>] [--kind comment|decision]
 ```
 
+When recording a decision over HTTP, the CLI checks the kind returned by the server. An older server that stores an ordinary comment instead produces an error naming the already-created comment. Upgrade the server before trying again; retrying blindly would duplicate the comment.
+
 `list` shows one page of an issue's comments, newest first, and never the whole thread at once. When more comments exist past the page, the last line says which offset to ask for next:
 
 ```
