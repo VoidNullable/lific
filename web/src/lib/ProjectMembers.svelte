@@ -34,7 +34,14 @@
   import Skeleton from "./Skeleton.svelte";
   import { formatDate } from "./format";
 
-  let { projectId }: { projectId: number } = $props();
+  let {
+    projectId,
+    showHeading = true,
+  }: {
+    projectId: number;
+    /** False when the parent titles the section itself. */
+    showHeading?: boolean;
+  } = $props();
 
   let currentUser = $state<AuthUser | null>(null);
   let members = $state<ProjectMember[]>([]);
@@ -336,13 +343,15 @@
 </script>
 
 <section>
-  <div class="flex items-center gap-1.5 mb-3">
-    <UsersRound size={14} class="text-[var(--text-muted)]" />
-    <h2 class="text-body-sm font-semibold text-[var(--text)]">Members</h2>
-    {#if members.length > 0}
-      <span class="text-caption font-normal text-[var(--text-faint)] tabular-nums">{members.length}</span>
-    {/if}
-  </div>
+  {#if showHeading}
+    <div class="flex items-center gap-1.5 mb-3">
+      <UsersRound size={14} class="text-[var(--text-muted)]" />
+      <h2 class="text-body-sm font-semibold text-[var(--text)]">Members</h2>
+      {#if members.length > 0}
+        <span class="text-caption font-normal text-[var(--text-faint)] tabular-nums">{members.length}</span>
+      {/if}
+    </div>
+  {/if}
 
   <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden">
     {#if amLead}

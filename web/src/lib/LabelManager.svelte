@@ -32,8 +32,11 @@
     onChange,
     onOpenLabel,
     canEdit = true,
+    showHeading = true,
   }: {
     projectId: number;
+    /** False when the parent titles the section itself; the toolbar stays. */
+    showHeading?: boolean;
     /** Project issues, used for per-label usage counts. */
     issues?: Issue[];
     /** Fired after any create/update/delete/merge so the parent can refresh. */
@@ -250,14 +253,16 @@
 </script>
 
 <section>
-  <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-    <h2 class="text-body-sm font-semibold text-[var(--text)] flex items-center gap-1.5">
-      <Tag size={14} class="text-[var(--text-muted)]" />
-      Labels
-      {#if labels.length > 0}
-        <span class="text-caption font-normal text-[var(--text-faint)] tabular-nums">{labels.length}</span>
-      {/if}
-    </h2>
+  <div class="flex items-center gap-3 mb-3 flex-wrap {showHeading ? 'justify-between' : 'justify-end'}">
+    {#if showHeading}
+      <h2 class="text-body-sm font-semibold text-[var(--text)] flex items-center gap-1.5">
+        <Tag size={14} class="text-[var(--text-muted)]" />
+        Labels
+        {#if labels.length > 0}
+          <span class="text-caption font-normal text-[var(--text-faint)] tabular-nums">{labels.length}</span>
+        {/if}
+      </h2>
+    {/if}
 
     {#if showToolbar}
       <div class="flex items-center gap-2">
