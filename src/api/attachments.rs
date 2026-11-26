@@ -3859,29 +3859,28 @@ mod cookie_fallback_tests {
         assert_eq!(resp.headers().get("content-type").unwrap(), "image/webp");
     }
 
-    // 1c) The two XHR-only derived routes stay header-only.
+    // 1c) The web app reads every route with the cookie, the XHR-only derived
+    //     routes included: it holds no bearer token to send instead.
     #[tokio::test]
-    async fn cookie_authed_links_and_preview_are_unauthorized() {
+    async fn cookie_authed_links_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "derivuser");
         let att_id = upload_png(&app, &session).await;
 
-        for suffix in ["links", "preview"] {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/api/attachments/{att_id}/{suffix}"))
-                        .header("cookie", format!("lific_token={session}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{suffix}");
-        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/attachments/{att_id}/links"))
+                    .header("cookie", format!("lific_token={session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // 2) Garbage cookie value → 401.
@@ -3935,33 +3934,58 @@ mod cookie_fallback_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 4) Cookie-authed DELETE → 401 (method not GET; mutations stay header-only).
+    async fn cookie_delete(
+        app: &axum::Router,
+        att_id: i64,
+        session: &str,
+        origin: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/attachments/{att_id}"))
+            .header("host", "example.com")
+            .header("x-forwarded-proto", "https")
+            .header("cookie", format!("lific_token={session}"));
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    // 4) A cookie-authed DELETE is a write: it needs an Origin naming this
+    //    server, so a page on another site cannot ride the cookie.
     #[tokio::test]
-    async fn cookie_authed_delete_is_unauthorized() {
+    async fn cookie_authed_delete_needs_this_servers_origin() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "deleteuser");
         let att_id = upload_png(&app, &session).await;
 
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/attachments/{att_id}"))
-                    .header("cookie", format!("lific_token={session}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            cookie_delete(&app, att_id, &session, None).await,
+            StatusCode::FORBIDDEN,
+            "no Origin"
+        );
+        assert_eq!(
+            cookie_delete(&app, att_id, &session, Some("https://evil.example")).await,
+            StatusCode::FORBIDDEN,
+            "foreign Origin"
+        );
+        assert!(
+            cookie_delete(&app, att_id, &session, Some("https://example.com"))
+                .await
+                .is_success(),
+            "this server's own page may delete"
+        );
     }
 
-    // 5) Cookie-authed GET on the list route → 401 (path is not the download
-    //    route; the list endpoint stays header-only).
+    // 5) The list route reads with the cookie like every other route.
     #[tokio::test]
-    async fn cookie_authed_list_route_is_unauthorized() {
+    async fn cookie_authed_list_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "listuser");
@@ -3978,12 +4002,12 @@ mod cookie_fallback_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // 6) Cookie-authed GET on an unrelated route → 401.
+    // 6) An unrelated read authenticates with the cookie too.
     #[tokio::test]
-    async fn cookie_authed_unrelated_route_is_unauthorized() {
+    async fn cookie_authed_unrelated_route_is_readable() {
         let db = crate::db::open_memory().unwrap();
         let app = real_middleware_app(db.clone());
         let (_uid, session) = user_with_session(&db, "otheruser");
@@ -4000,6 +4024,6 @@ mod cookie_fallback_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -546,7 +546,10 @@ fn validate_websocket_request(
     }
 }
 
-fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+/// Whether the request's `Origin` is one of `allowed_origins` or the same
+/// scheme and host the request was addressed to. A missing Origin passes;
+/// the cookie write check in `crate::auth` requires one before asking.
+pub(crate) fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
     match headers.get(header::ORIGIN).map(|value| value.to_str()) {
         None => true,
         Some(Ok(origin)) => {

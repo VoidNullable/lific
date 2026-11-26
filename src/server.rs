@@ -396,7 +396,11 @@ pub(crate) fn build_app_with_store(
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth_middleware_wrapper,
-        ));
+        ))
+        // Outside the auth middleware so its cookie origin check can read it.
+        .layer(axum::Extension(auth::CookieOrigins(
+            cfg.server.cors_origins.clone().into(),
+        )));
 
     // OAuth client registration rate limiter: 10 clients per IP per hour.
     // /oauth/register is unauthenticated per RFC 7591; without this anyone
@@ -1786,6 +1790,234 @@ mod public_surface_tests {
         let d = deploy();
         let response = anonymous(&d.app, "GET", "/public/PUB").await;
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// The web app authenticates with the HttpOnly session cookie, so the cookie
+/// is now an ambient credential for writes. These drive the production router
+/// the way the community proxy reaches it: `public_url` set, the request's
+/// Host rewritten to the public name and marked HTTPS.
+#[cfg(test)]
+mod cookie_session_tests {
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const PUBLIC: &str = "https://lific.example";
+    const EXTRA: &str = "https://other.lific.example";
+
+    struct Deployed {
+        app: Router,
+        session: String,
+        api_key: String,
+    }
+
+    fn deploy() -> Deployed {
+        let pool = db::open_memory().expect("test db");
+        let (session, api_key) = {
+            let conn = pool.write().unwrap();
+            let user = db::queries::users::create_user(
+                &conn,
+                &db::models::CreateUser {
+                    username: "writer".into(),
+                    email: "writer@test.local".into(),
+                    password: "writerpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let session = db::queries::users::create_session(&conn, user.id, None)
+                .unwrap()
+                .token;
+            drop(conn);
+            let key = auth::create_api_key(&pool, "script", Some(user.id)).unwrap();
+            (session, key)
+        };
+
+        let mut cfg = Config::default();
+        cfg.auth.required = true;
+        cfg.server.host = "127.0.0.1".into();
+        cfg.server.public_url = Some(PUBLIC.into());
+        cfg.server.cors_origins = vec![EXTRA.into()];
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app(&cfg, pool, realtime::RealtimeHub::new(), trusted_proxies);
+        Deployed {
+            app,
+            session,
+            api_key,
+        }
+    }
+
+    enum Credential<'a> {
+        Cookie(&'a str),
+        Bearer(&'a str),
+    }
+
+    async fn create_project(
+        app: &Router,
+        credential: Credential<'_>,
+        origin: Option<&str>,
+        identifier: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("host", "lific.example")
+            .header("x-forwarded-proto", "https")
+            .header("content-type", "application/json");
+        builder = match credential {
+            Credential::Cookie(token) => builder.header("cookie", format!("lific_token={token}")),
+            Credential::Bearer(token) => builder.header("authorization", format!("Bearer {token}")),
+        };
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let body = serde_json::json!({ "name": identifier, "identifier": identifier });
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_post_riding_the_cookie_is_refused() {
+        let d = deploy();
+        let (status, body) = create_project(
+            &d.app,
+            Credential::Cookie(&d.session),
+            Some("https://evil.example"),
+            "EVIL",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cross-origin"),
+            "{body}"
+        );
+
+        // Nothing was written.
+        let (status, _) =
+            create_project(&d.app, Credential::Cookie(&d.session), Some(PUBLIC), "EVIL").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the refused request created nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_without_an_origin_is_refused() {
+        let d = deploy();
+        let (status, body) =
+            create_project(&d.app, Credential::Cookie(&d.session), None, "BARE").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_cookie_post_from_the_public_url_or_a_cors_origin_is_allowed() {
+        let d = deploy();
+        for (origin, identifier) in [(PUBLIC, "MINE"), (EXTRA, "PEER")] {
+            let (status, body) = create_project(
+                &d.app,
+                Credential::Cookie(&d.session),
+                Some(origin),
+                identifier,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{origin}: {body}");
+        }
+    }
+
+    /// API keys and OAuth tokens are not ambient: a page on another site
+    /// cannot attach someone's Authorization header, so they skip the check.
+    #[tokio::test]
+    async fn an_api_key_write_is_unaffected_by_origin() {
+        let d = deploy();
+        for (origin, identifier) in [(None, "KEYA"), (Some("https://evil.example"), "KEYB")] {
+            let (status, body) =
+                create_project(&d.app, Credential::Bearer(&d.api_key), origin, identifier).await;
+            assert_eq!(status, StatusCode::OK, "{origin:?}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cookie_alone_signs_in_the_web_app() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Logout is a cookie write like any other, and it ends the session on
+    /// the server: the cookie stops working even if a copy survives.
+    #[tokio::test]
+    async fn logout_with_the_cookie_ends_the_session_and_clears_it() {
+        let d = deploy();
+        let response = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header("host", "lific.example")
+                    .header("x-forwarded-proto", "https")
+                    .header("origin", PUBLIC)
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(cleared.starts_with("lific_token=;"), "{cleared}");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(cleared.contains("; Secure"), "{cleared}");
+
+        let after = d
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("lific_token={}", d.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
