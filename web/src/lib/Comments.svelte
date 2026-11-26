@@ -21,6 +21,8 @@
     type AttachmentEntity,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
+  import SignInButton from "./SignInButton.svelte";
+  import { isSignedOut } from "./signedOut";
   import { MENTION_RE } from "./mentions";
   import { MessageSquare, CornerDownLeft, MoreHorizontal } from "lucide-svelte";
   import { fly } from "svelte/transition";
@@ -180,7 +182,8 @@
 
   $effect(() => {
     const pid = projectId;
-    if (pid == null) {
+    // LIF-583: the member list is not for signed-out readers.
+    if (pid == null || isSignedOut()) {
       candidates = [];
       return;
     }
@@ -676,6 +679,12 @@
         </div>
       </AttachComposer>
     </div>
+  {:else if isSignedOut()}
+    <!-- LIF-583: where the composer would be for a signed-out reader. -->
+    <div class="cmt__signin">
+      <span>Sign in to join the conversation.</span>
+      <SignInButton label="Sign in to comment" />
+    </div>
   {/if}
 </section>
 
@@ -973,6 +982,18 @@
     border-top-left-radius: 0.75rem;
     border-top-right-radius: 0.75rem;
     overflow: visible;
+  }
+  .cmt__signin {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.75rem 0.875rem;
+    border: 1px dashed var(--border);
+    border-radius: 0.75rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
   }
   .cmt__composer:focus-within {
     border-color: var(--accent);

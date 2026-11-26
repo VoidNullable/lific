@@ -29,6 +29,8 @@
   import Skeleton from "./Skeleton.svelte";
   import TimeAgo from "./TimeAgo.svelte";
   import Breadcrumbs, { type Crumb } from "./Breadcrumbs.svelte";
+  import SignInButton from "./SignInButton.svelte";
+  import { isSignedOut } from "./signedOut";
   import { Check, Download, Link2, ListTree, MessageSquare, PanelRight, X } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
   import type { Activity, AuthUser, Comment } from "./api";
@@ -651,6 +653,11 @@
             <MessageSquare size={14} />
             {commentCount}{hasOlderComments ? "+" : ""}
           </button>
+        {/if}
+
+        {#if isSignedOut()}
+          <!-- LIF-583: a signed-out reader's way to the edit controls. -->
+          <SignInButton />
         {/if}
 
         <DeleteMenu

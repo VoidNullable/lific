@@ -57,7 +57,7 @@
   import { ArrowUpRight, CalendarDays, ChevronDown, FolderInput, Plus, Tag, X } from "lucide-svelte";
   import { getContext } from "svelte";
   import { pageTitle, PAGE_TITLE_CONTEXT } from "../lib/pageTitle";
-  import { inPublicScope } from "../lib/publicScope"; // LIF-471
+  import { isSignedOut } from "../lib/signedOut"; // LIF-583
 
   let {
     navigate,
@@ -111,9 +111,11 @@
     titleCtx?.set(pageTitle(issue.identifier, issue.title, projectIdentifier));
   });
 
-  void me().then((res) => {
-    if (res.ok) currentUser = res.data;
-  });
+  if (!isSignedOut()) {
+    void me().then((res) => {
+      if (res.ok) currentUser = res.data;
+    });
+  }
 
   const thread = new CommentThread({
     list: (id, before, size) => listComments(id, before, size),
@@ -151,7 +153,7 @@
   let exporting = false;
   // LIF-488: "Move to project", from the menu or the palette.
   let moveOpen = $state(false);
-  const canMove = $derived(editable && !inPublicScope());
+  const canMove = $derived(editable && !isSignedOut());
 
   $effect(() => {
     const id = issueIdentifier;
@@ -572,9 +574,11 @@
 
   const readOnlyNote = $derived(
     projectRole.enforced
-      ? inPublicScope()
-        ? "Read-only. This is the public view of the project; sign in to edit or comment."
-        : "You're a viewer on this project. You can still comment."
+      ? isSignedOut()
+        ? "Read-only. Sign in to edit or comment."
+        : projectRole.role === null
+          ? "Read-only. You're not a member of this project."
+          : "You're a viewer on this project. You can still comment."
       : null,
   );
 </script>
@@ -614,7 +618,7 @@
   autofocusWhenEmpty
   {saving}
   {savedAt}
-  onExport={inPublicScope() ? undefined : exportMarkdown}
+  onExport={isSignedOut() ? undefined : exportMarkdown}
   {exportError}
   deleteNoun="issue"
   deleteLabel={issue?.identifier ?? ""}

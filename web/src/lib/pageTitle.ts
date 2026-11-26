@@ -54,12 +54,10 @@ export const PAGE_TITLE_CONTEXT = "lific:title";
 // page degrades to the bare app name.
 
 export interface RouteTitleInput {
-  type: "auth" | "public" | "public-redirect" | "app" | "loading" | "not-found";
+  type: "auth" | "app" | "loading" | "not-found";
   page?: string;
   project?: string;
   identifier?: string;
-  /** The `public` wrapper carries the page it shows. */
-  inner?: RouteTitleInput;
 }
 
 const SECTION_LABELS: Record<string, string> = {
@@ -74,10 +72,8 @@ const SECTION_LABELS: Record<string, string> = {
   insights: "Insights",
 };
 
-/** Title for a parsed route. Public routes resolve to their inner page so
- *  a stranger's tab reads the same as a signed-in maintainer's. */
+/** Title for a parsed route. */
 export function routePageTitle(p: RouteTitleInput): string {
-  if (p.type === "public" && p.inner) return routePageTitle(p.inner);
   if (p.type === "auth") {
     return pageTitle(p.page === "login" ? "Sign in" : "Create account");
   }

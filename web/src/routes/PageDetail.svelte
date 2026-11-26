@@ -30,7 +30,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { projectRole, loadProjectRole, ensureMeAdmin } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
-  import { inPublicScope } from "../lib/publicScope"; // LIF-471
+  import { isSignedOut } from "../lib/signedOut"; // LIF-583
   import { CommentThread } from "../lib/detail/commentThread.svelte";
   import { readingMinutes, wordCount } from "../lib/detail/outline";
   import { PenLine, CircleDot, CheckCircle2, Archive, Pin } from "lucide-svelte";
@@ -86,9 +86,11 @@
   let loading = $state(true);
   let error = $state("");
 
-  void me().then((res) => {
-    if (res.ok) currentUser = res.data;
-  });
+  if (!isSignedOut()) {
+    void me().then((res) => {
+      if (res.ok) currentUser = res.data;
+    });
+  }
 
   let saving = $state(false);
   let savedAt = $state<number | null>(null);
@@ -345,11 +347,13 @@
 
   const readOnlyNote = $derived(
     (isWorkspacePage ? projectRole.globalEnforced : projectRole.enforced)
-      ? inPublicScope()
-        ? "Read-only. This is the public view of the project; sign in to edit or comment."
+      ? isSignedOut()
+        ? "Read-only. Sign in to edit or comment."
         : isWorkspacePage
           ? "Workspace pages can only be edited by an admin."
-          : "You're a viewer on this project. You can still comment."
+          : projectRole.role === null
+            ? "Read-only. You're not a member of this project."
+            : "You're a viewer on this project. You can still comment."
       : null,
   );
 </script>
@@ -381,7 +385,7 @@
   onSaveBody={saveBody}
   {saving}
   {savedAt}
-  onExport={inPublicScope() ? undefined : exportMarkdown}
+  onExport={isSignedOut() ? undefined : exportMarkdown}
   {exportError}
   deleteNoun="page"
   deleteLabel={page?.identifier ?? ""}

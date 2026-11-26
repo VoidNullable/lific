@@ -33,7 +33,7 @@
 // still safely denied server-side.
 
 import { getMyProjectRole, me, type ProjectRole } from "./api";
-import { inPublicScope, onPublicScopeChange } from "./publicScope";
+import { isSignedOut, onSignedOutChange } from "./signedOut";
 
 /** The three inputs the pure derivation needs. Kept separate from the
  *  reactive store so the derivation can be unit-tested without runes. */
@@ -161,10 +161,10 @@ let inFlightFor: number | null = null;
  *  the store is already on this project and loaded, and dedupes concurrent
  *  callers via the cache + in-flight guard. */
 export async function loadProjectRole(projectId: number): Promise<void> {
-  // LIF-471: a public page is read-only for everyone, whatever the cache says
-  // about the signed-in reader. Applied every call and never cached, so the
-  // private answer is neither consulted here nor overwritten for later.
-  if (inPublicScope()) {
+  // LIF-583: a signed-out reader has no role anywhere. The server answers
+  // the same (role null, enforced), so apply it without asking, and never
+  // fail open the way a signed-in load does below.
+  if (isSignedOut()) {
     apply(projectId, { role: null, enforced: true, isAdmin: false });
     return;
   }
@@ -194,21 +194,6 @@ export async function loadProjectRole(projectId: number): Promise<void> {
   // this result so we don't overwrite the current project's state.
   if (inFlightFor !== projectId) return;
   inFlightFor = null;
-  // LIF-471: the client crossed into the public view while this was in
-  // flight. The read-only answer applied there must not be overwritten by a
-  // private one landing late. Cache it anyway: it is still the right answer
-  // for the private view.
-  if (inPublicScope()) {
-    if (res.ok) {
-      cache.set(projectId, {
-        role: res.data.role,
-        enforced: res.data.enforced,
-        isAdmin: res.data.is_admin,
-      });
-    }
-    return;
-  }
-
   if (res.ok) {
     const inputs: RoleInputs = {
       role: res.data.role,
@@ -237,12 +222,14 @@ function apply(projectId: number, inputs: RoleInputs): void {
   projectRole.globalEnforced = inputs.enforced;
 }
 
-// Crossing the public boundary in either direction throws the visible answer
-// away, so a route on the other side has to load its own. The per-project
-// cache is private-only and untouched by public loads, so it survives.
-onPublicScopeChange(() => {
+// Signing in or out changes who is asking, so every remembered answer goes:
+// the visible one, the per-project cache, and the admin flag. Clearing
+// `inFlightFor` drops a load that was started by the other audience.
+onSignedOutChange(() => {
+  cache.clear();
   projectRole.loaded = false;
   projectRole.projectId = null;
+  projectRole.meIsAdmin = null;
   inFlightFor = null;
 });
 
@@ -250,7 +237,7 @@ onPublicScopeChange(() => {
  *  gating workspace/project-less pages. Cheap and idempotent — no-ops after
  *  the first successful read. */
 export async function ensureMeAdmin(): Promise<void> {
-  if (projectRole.meIsAdmin !== null) return;
+  if (projectRole.meIsAdmin !== null || isSignedOut()) return;
   const res = await me();
   if (res.ok) projectRole.meIsAdmin = res.data.is_admin;
 }

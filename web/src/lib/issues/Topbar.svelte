@@ -17,6 +17,8 @@
     Square, SquareMinus, SquareCheck, X,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
+  import SignInButton from "../SignInButton.svelte";
+  import { isSignedOut } from "../signedOut";
   import SubTabs, { type SubTab } from "../SubTabs.svelte";
   import Breadcrumbs from "../Breadcrumbs.svelte";
   import StatusIcon from "../StatusIcon.svelte";
@@ -499,6 +501,9 @@
         </div>
       {/if}
     </div>
+    {:else if isSignedOut()}
+      <!-- LIF-583: where New issue would be, for a signed-out reader. -->
+      <SignInButton />
     {/if}
   </div>
 
