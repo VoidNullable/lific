@@ -2224,10 +2224,14 @@ impl LificMcp {
             matches!(scope_reference.kind, ReferenceKind::Project(_))
                 .then_some(scope_identifier.as_str())
         });
+        // LIF-583: only the rows of the feed this key may see.
+        let access = crate::authz::activity_access(&self.db, &super::current_identity(&self.db))
+            .map_err(|e| e.to_string())?;
         let rendered = self.read(|conn| {
-            let feed = queries::activity::list_activity_since(
+            let feed = queries::activity::list_activity_for(
                 conn,
                 scope,
+                &access,
                 since.as_deref(),
                 Some(limit),
                 Some(offset),
@@ -17673,6 +17677,91 @@ mod authz_gating_tests {
             }))
         });
         assert!(is_forbidden(&update), "{update}");
+    }
+
+    /// A private plan linking a published issue and a relation into a
+    /// private project both write rows the published feeds would otherwise
+    /// show; membership rows would show the roster.
+    #[test]
+    fn get_activity_shows_a_reader_only_what_they_may_read() {
+        let (m, _admin, _lead, maintainer, viewer, non_member, project_id, _guard) =
+            setup_membership_mcp();
+        as_user(&maintainer, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: Some("MEM".into()),
+                title: "Published target".into(),
+                ..Default::default()
+            }))
+        });
+        {
+            let conn = m.db.write().unwrap();
+            let private = queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Private".into(),
+                    identifier: "PRIV".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let secret = queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: private.id,
+                    title: "classified".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let target = queries::resolve_identifier(&conn, "MEM-1").unwrap();
+            queries::plans::create_plan(
+                &conn,
+                &serde_json::from_value(serde_json::json!({
+                    "project_id": private.id,
+                    "title": "PRIVATE PLAN TITLE",
+                    "steps": [{ "title": "PRIVATE STEP TITLE", "issue_id": target }],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            queries::link_issues(&conn, target, secret.id, "blocks").unwrap();
+            conn.execute(
+                "UPDATE projects SET is_public = 1 WHERE id = ?1",
+                [project_id],
+            )
+            .unwrap();
+        }
+        let feed = |user: &models::AuthUser, identifier: &str| {
+            as_user(user, || {
+                m.get_activity(Parameters(GetActivityInput {
+                    identifier: identifier.into(),
+                    limit: Some(200),
+                    ..Default::default()
+                }))
+            })
+        };
+        for user in [&non_member, &viewer] {
+            for identifier in ["MEM-1", "MEM"] {
+                let text = feed(user, identifier);
+                assert!(!is_forbidden(&text), "{identifier}: {text}");
+                for secret in ["PRIVATE", "PRIV-1", "PRIV-PLAN"] {
+                    assert!(
+                        !text.contains(secret),
+                        "{} on {identifier} leaks {secret}: {text}",
+                        user.username
+                    );
+                }
+            }
+        }
+        let issue = feed(&non_member, "MEM-1");
+        assert!(issue.contains(queries::activity::HIDDEN_ISSUE), "{issue}");
+        // The roster stays with the members.
+        assert!(
+            !feed(&non_member, "MEM").contains("member"),
+            "non-member sees roster"
+        );
+        let member_view = feed(&viewer, "MEM");
+        assert!(member_view.contains("member"), "{member_view}");
     }
 
     fn text_of_result(result: &rmcp::model::CallToolResult) -> String {

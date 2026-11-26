@@ -453,6 +453,26 @@ pub(crate) fn can_read_project(
     }
 }
 
+/// LIF-583: what the caller may see of the audit log. Rows from projects
+/// they cannot read are left out, and roster rows (membership, repository
+/// bindings) are left to members of the project, so publishing a project
+/// does not publish who belongs to it. An anonymous caller is a member of
+/// nothing, whatever the authorization mode.
+pub fn activity_access(
+    db: &DbPool,
+    identity: &Option<ResolvedIdentity>,
+) -> Result<queries::activity::ActivityAccess, LificError> {
+    let members_of = if identity.is_none() {
+        Some(HashSet::new())
+    } else {
+        visible_project_ids(db, identity)?
+    };
+    Ok(queries::activity::ActivityAccess {
+        readable: readable_project_ids(db, identity)?,
+        members_of,
+    })
+}
+
 /// A plan can anchor on, and link steps to, issues in other projects. Drop
 /// the identifier and status of every such issue the caller cannot read, so
 /// a published plan does not name issues in a private project.

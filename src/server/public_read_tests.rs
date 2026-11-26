@@ -25,6 +25,7 @@ struct Deployed {
     owner_session: String,
     owner_key: String,
     stranger_session: String,
+    reader_session: String,
 }
 
 /// Enforced authorization, auth required. `PUB` is published and holds an
@@ -48,7 +49,8 @@ fn deploy() -> Deployed {
         conn.execute(
             "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
              VALUES ('owner', 'owner@test.local', 'x', 'Owner', 1, 0),
-                    ('stranger', 'stranger@test.local', 'x', 'Stranger', 0, 0)",
+                    ('stranger', 'stranger@test.local', 'x', 'Stranger', 0, 0),
+                    ('reader', 'reader@test.local', 'x', 'Reader', 0, 0)",
             [],
         )
         .unwrap();
@@ -156,6 +158,25 @@ fn deploy() -> Deployed {
         let stranger_session = db::queries::users::create_session(&conn, 2, None)
             .unwrap()
             .token;
+
+        // Private history that touches the published issue: a private plan
+        // whose step links it, and a relation from it into PRIV.
+        db::queries::plans::create_plan(
+            &conn,
+            &serde_json::from_value(serde_json::json!({
+                "project_id": private,
+                "title": "PRIVATE PLAN TITLE",
+                "steps": [{ "title": "PRIVATE STEP TITLE", "issue_id": issue.id }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        db::queries::link_issues(&conn, issue.id, private_issue.id, "blocks").unwrap();
+        // A Viewer of PUB who is not a member of PRIV.
+        db::queries::members::upsert_member(&conn, published, 3, Role::Viewer).unwrap();
+        let reader_session = db::queries::users::create_session(&conn, 3, None)
+            .unwrap()
+            .token;
         (
             published,
             private,
@@ -166,6 +187,7 @@ fn deploy() -> Deployed {
             attachment.id,
             owner_session,
             stranger_session,
+            reader_session,
         )
     };
     let owner_key = crate::auth::create_api_key(&pool, "owner-key", Some(1)).unwrap();
@@ -193,6 +215,7 @@ fn deploy() -> Deployed {
         attachment,
         owner_session,
         stranger_session,
+        reader_session,
     ) = seeded;
     Deployed {
         app,
@@ -207,6 +230,7 @@ fn deploy() -> Deployed {
         owner_session,
         owner_key,
         stranger_session,
+        reader_session,
     }
 }
 
@@ -668,5 +692,128 @@ async fn a_project_link_serves_the_app_signed_out() {
     for uri in ["/PUB/issues/PUB-1", "/PRIV/issues/PRIV-1", "/"] {
         let response = anonymous(&d.app, "GET", uri).await;
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+// ── Activity: only rows the reader may see (LIF-583 review) ─────────
+
+/// Strings that only exist in the private project's history.
+const PRIVATE_HISTORY: [&str; 4] = [
+    "PRIVATE PLAN TITLE",
+    "PRIVATE STEP TITLE",
+    "PRIV-PLAN-1",
+    "PRIV-1",
+];
+
+impl Deployed {
+    fn activity_feeds(&self) -> [String; 3] {
+        [
+            format!("/api/issues/{}/activity?limit=200", self.issue),
+            format!("/api/projects/{}/activity?limit=200", self.published),
+            format!("/api/plans/{}/activity?limit=200", self.plan),
+        ]
+    }
+
+    /// The feed as anonymous, signed-in non-member and PUB-only Viewer.
+    async fn feeds_as_readers(&self, uri: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "anonymous",
+                body_string(anonymous(&self.app, "GET", uri).await).await,
+            ),
+            (
+                "non-member",
+                body_string(bearer(&self.app, &self.stranger_session, "GET", uri).await).await,
+            ),
+            (
+                "PUB viewer",
+                body_string(bearer(&self.app, &self.reader_session, "GET", uri).await).await,
+            ),
+        ]
+    }
+}
+
+/// A private plan whose step links a published issue, and a relation from
+/// the published issue into the private project, both write rows the
+/// published issue's feed would otherwise return.
+#[tokio::test]
+async fn activity_never_shows_another_projects_private_history() {
+    let d = deploy();
+    for uri in d.activity_feeds() {
+        for (reader, body) in d.feeds_as_readers(&uri).await {
+            assert!(body.starts_with("{\"items\""), "{reader} {uri}: {body}");
+            for secret in PRIVATE_HISTORY {
+                assert!(
+                    !body.contains(secret),
+                    "{reader} {uri} leaks {secret}: {body}"
+                );
+            }
+        }
+    }
+    // The relation row itself is still there, with its target hidden.
+    let feed =
+        body_string(anonymous(&d.app, "GET", &format!("/api/issues/{}/activity", d.issue)).await)
+            .await;
+    let feed: serde_json::Value = serde_json::from_str(&feed).unwrap();
+    let link = feed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["action"] == "link")
+        .expect("the relation row is kept");
+    assert_eq!(
+        link["new_value"],
+        crate::db::queries::activity::HIDDEN_ISSUE,
+        "{link}"
+    );
+    // A plan step in PUB linked to a PRIV issue keeps its row but loses the
+    // private issue id.
+    let plan =
+        body_string(anonymous(&d.app, "GET", &format!("/api/plans/{}/activity", d.plan)).await)
+            .await;
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert!(
+        plan["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["issue_id"] != d.private_issue),
+        "{plan}"
+    );
+}
+
+/// Someone who may read both projects sees all of it.
+#[tokio::test]
+async fn activity_is_whole_for_a_reader_of_both_projects() {
+    let d = deploy();
+    let body = body_string(
+        bearer(
+            &d.app,
+            &d.owner_key,
+            "GET",
+            &format!("/api/issues/{}/activity?limit=200", d.issue),
+        )
+        .await,
+    )
+    .await;
+    // The plan's own title is on the plan's feed, not the issue's.
+    for secret in &PRIVATE_HISTORY[1..] {
+        assert!(body.contains(secret), "owner misses {secret}: {body}");
+    }
+}
+
+/// Membership rows say who belongs to the project; publishing it does not
+/// publish that. Members still see them.
+#[tokio::test]
+async fn membership_activity_stays_with_members() {
+    let d = deploy();
+    let uri = format!("/api/projects/{}/activity?limit=200", d.published);
+    for (reader, body) in d.feeds_as_readers(&uri).await {
+        let has_member_rows = body.contains("\"entity_type\":\"member\"");
+        assert_eq!(
+            has_member_rows,
+            reader == "PUB viewer",
+            "{reader} membership rows: {body}"
+        );
     }
 }

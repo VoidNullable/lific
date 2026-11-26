@@ -7,7 +7,7 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::queries::activity::{ActivityScope, actor_stats, list_activity};
+use crate::db::queries::activity::{ActivityScope, actor_stats, list_activity_for};
 use crate::db::{
     DbPool,
     models::{ActivityFeed, ActorStat},
@@ -40,6 +40,21 @@ fn require_scope_viewer(
     authz::require_read_or_workspace(db, identity, project_id)
 }
 
+/// LIF-583: the scope gate says the caller may read the feed; this reads
+/// only the rows of it they may see.
+fn read_feed(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    scope: ActivityScope,
+    q: &ActivityQuery,
+) -> Result<Json<ActivityFeed>, LificError> {
+    let access = authz::activity_access(db, identity)?;
+    with_read(db, |conn| {
+        list_activity_for(conn, scope, &access, None, q.limit, q.offset)
+    })
+    .map(Json)
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct ActivityQuery {
     pub limit: Option<i64>,
@@ -56,7 +71,7 @@ pub(super) async fn issue_activity(
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Issue(id);
     require_scope_viewer(&db, &identity, &scope)?;
-    with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
+    read_feed(&db, &identity, scope, &q)
 }
 
 /// GET /api/pages/{id}/activity
@@ -68,7 +83,7 @@ pub(super) async fn page_activity(
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Page(id);
     require_scope_viewer(&db, &identity, &scope)?;
-    with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
+    read_feed(&db, &identity, scope, &q)
 }
 
 /// GET /api/plans/{id}/activity — the plan's own edits plus every step
@@ -81,7 +96,7 @@ pub(super) async fn plan_activity(
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Plan(id);
     require_scope_viewer(&db, &identity, &scope)?;
-    with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
+    read_feed(&db, &identity, scope, &q)
 }
 
 /// GET /api/projects/{id}/activity — everything in the project, newest
@@ -94,7 +109,7 @@ pub(super) async fn project_activity(
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Project(id);
     require_scope_viewer(&db, &identity, &scope)?;
-    with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
+    read_feed(&db, &identity, scope, &q)
 }
 
 /// GET /api/projects/{id}/activity/actors — per-actor rollup, most
