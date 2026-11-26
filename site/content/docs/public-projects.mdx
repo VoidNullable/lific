@@ -1,117 +1,109 @@
 ---
 title: Public projects
-description: Publish one project's current issues, pages, comments and files for anyone to read without an account, and know what stays private.
+description: Publish a project so anyone can read it at its normal links without an account, while every change still needs a member's role.
 ---
 
-Publishing a project lets anyone read its issues and pages without an account. It is off for every project until a lead turns it on, it applies to one project at a time, and you can turn it off again.
+Publishing a project makes it readable by everyone: visitors with no account, every signed-in account on the instance, and every API key and MCP connection. They read it at the project's normal links, the same ones members use. Changing anything still needs a role in the project. Publishing is off for every project until a lead turns it on, applies to one project at a time, and can be turned off again.
 
-The public address comes from the project identifier:
+There is no separate public address. A link to an issue, page or plan in a published project works for anyone it is sent to:
 
 ```
-https://your-instance.example/public/APP
+https://your-instance.example/APP/issues/APP-42
+https://your-instance.example/APP/pages/APP-DOC-3
+https://your-instance.example/APP/plans/APP-PLAN-1
 ```
 
-The link contains no secret. Search engines, scrapers and anyone who is sent it can all read the project. If you want a specific group of people to read a project, add them as [project members](/docs/concepts/projects#members-and-roles) instead.
-
-Readers get the same issue list, board, issue view, page tree and page view as a signed-in user, with filters, grouping, search and sort. They cannot edit, create, comment on or delete anything, and those controls are not shown.
+The links contain no secret. Search engines, scrapers and anyone who is sent one can read the project. If you want a specific group of people to read a project, add them as [project members](/docs/concepts/projects#members-and-roles) instead.
 
 ## Before you publish
 
-- **Publishing exposes what is already there.** Every current issue, page, comment and attached file becomes public, including those written long before. Look through old descriptions, comments and files for internal hostnames, customer names, credentials and other private material first.
+- **Publishing exposes what is already there.** Every issue, page, plan, comment and attached file becomes readable, including those written long before, and so does the history of how they changed. Look through old descriptions, comments, edit history and files for internal hostnames, customer names, credentials and other private material first.
 - **Secure the instance.** Set `auth.required = true` in the server configuration and turn off single-user mode (`web_auto_login`) before the server is reachable from the Internet. Publishing does not override either setting, and either one left open can give a visitor administrator access to everything, not only the published project. See [Authentication](/docs/self-hosting#authentication).
 - **Unpublishing cannot recall anything.** Pages someone saved, files they downloaded and pages a crawler indexed stay out of your control.
 
 ## Who can publish
 
-A project's lead or an instance administrator, whether or not project permissions are enforced on the instance. A connected AI tool can publish only a project its owner could publish.
+A project's lead or an instance administrator. A connected AI tool can publish only a project its owner could publish.
 
 ## Publish or unpublish a project
 
 In the web UI:
 
-1. Open the project's **Overview** and find **Public view**. Other members do not see this panel.
-2. Read the list of what becomes public, tick the box confirming you reviewed the content, and choose **Publish issues**.
-3. Copy the address from the panel, or open it, and check it while signed out.
+1. Open the project's **Overview** and find **Public access**. Other members do not see this panel.
+2. Read the list of what becomes readable, tick the box confirming you reviewed the content, and choose **Publish project**.
+3. Copy the project link from the panel, or open it, and check it while signed out.
 
-To unpublish, choose **Turn off public access** in the same panel. It takes effect immediately and does not ask for confirmation. Publishing again later brings back the same address, so old links work again.
+To unpublish, choose **Turn off public access** in the same panel. It takes effect on the next request and does not ask for confirmation. Readers without a role in the project then get the same answer as for a project that does not exist.
 
 The CLI and MCP have no publication command. From a script, send `PUT /api/projects/{id}` with `{"is_public": true}` or `{"is_public": false}` as a lead or administrator. Every publish and unpublish is recorded in the project's activity log with the account that made the change.
 
 Importing a [project archive](/docs/project-archives) always creates a private project, even if the source was published.
 
-## What becomes public
+## What readers see
 
-- Every **current issue**: title, description, status, priority, module, labels, dates, and its relations to other issues in the same project.
-- Every **current page**: title, content, status, folder and labels.
-- The project's **modules, labels and folders**: names and descriptions.
-- Every **current comment** on those issues and pages, with the commenter's display name.
-- Every **file attached** to one of those issues, pages or comments, which anyone can download.
+Anyone can read everything a project member with the Viewer role can read:
 
-"Current" means not deleted. A deleted issue, page or comment disappears from the public view at once, along with any file attached only to it.
+- Every issue, with its description, status, priority, module, labels, dates, assignees, waits and relations.
+- Every page, with its content, status, folder and labels.
+- Every plan and its steps.
+- Every comment, with its author.
+- The project's modules, labels and folders.
+- Activity, edit history, insights and the board.
+- Every file attached to the project, which anyone can download.
+- Live updates, so an open page refreshes as members work.
+
+Usernames and display names are part of that, because assignees, comment authors and activity name the people and agents behind them.
 
 ## What stays private
 
-- Plans and plan steps.
-- Activity, edit history and status changes.
-- Deleted items.
-- Members, the project lead, and account details. Comments show a display name only (no username, user ID or email), and files show no uploader.
-- Where an issue was imported from, and relations to issues in other projects.
-- Waits on a person or a date, including their notes.
-- Assignments: who must do an issue, including the "any person" mark.
-- Workspace pages, and every other project, published or not.
-- Search, exports, live updates, the ordinary REST API and MCP. These keep their usual authentication.
+- Email addresses, passwords, API keys and session tokens, for every account.
+- The project's member list, @mention suggestions, saved views and repository bindings.
+- Project settings, and every instance setting.
+- Exports and project archives, which still need a signed-in account (exports) or the lead role (archives).
+- Deleted items in the trash.
+- Workspace pages, and every project that is not published. A plan step or relation that points into a private project shows no identifier or status for it.
+
+## Reading without an account
+
+A signed-out visitor who opens a project link reads the project directly, with no sign-in step. Where a member would see an edit control, the visitor sees a **Sign in** button instead. Signing in keeps them on the same page; if their account has a role in the project, the edit controls appear.
+
+Opening the instance's home address while signed out:
+
+- with one published project, opens that project's overview;
+- with several, lists them;
+- with none, shows the sign-in page.
+
+A link into a project that is not published shows the sign-in page, and the API answers exactly as it does for a project that does not exist.
+
+Markdown is rendered more strictly for signed-out readers than for members. Images load only when they point at this instance's attachments; any other image shows its alt text. Elements that load content on their own (video, audio, frames, embedded objects, stylesheets, SVG and forms) are removed. Ordinary links remain, because the reader chooses whether to follow them.
+
+## Signed-in accounts and API keys
+
+An account or key with no role in a published project reads it like any visitor, through the ordinary REST API and MCP tools, and gets `403` for every change. The project appears in its project list and sidebar. Its own views, such as home, the inbox and briefings, still cover only projects it is a member of, so publishing a project does not fill strangers' dashboards with its work.
 
 ## Limits
 
-Anonymous readers share limits so they cannot crowd out signed-in users:
+Requests with no credential share limits so they cannot crowd out signed-in users. Signed-in reads are not affected.
 
 | Limit | Value | When exceeded |
 | --- | --- | --- |
 | Reads per client IP | 240 per minute | `429` with `Retry-After` |
-| Public requests in progress, whole instance | 4 | `503` with `Retry-After` |
-| File downloads in progress, whole instance | 4 | `503` with `Retry-After` |
-| Thumbnails or previews being generated | 1 at a time | `503` with `Retry-After` |
-| Largest file a thumbnail or preview is generated from | 32 MiB | `404` for the thumbnail or preview; the file still downloads |
+| Anonymous requests in progress, whole instance | 4 | `503` with `Retry-After` |
+| Anonymous file downloads in progress, whole instance | 4 | `503` with `Retry-After` |
+| Thumbnails or previews being generated for anonymous readers | 1 at a time | `503` with `Retry-After` |
+| Largest file a thumbnail or preview is generated from for an anonymous reader | 32 MiB | `404` for the thumbnail or preview; the file still downloads |
+| Live-update connections from anonymous readers, whole instance | 64 | `429` |
 
 A thumbnail that already exists, for example because a signed-in user viewed the file, is served whatever the file's size.
 
-A download that stalls for 15 seconds, or runs for 5 minutes, is ended with an error rather than a clean finish. If you run Lific behind a reverse proxy, list it in `server.trusted_proxies` so each visitor is counted separately; otherwise every visitor shares the proxy's one bucket. See [Client addresses behind a proxy](/docs/self-hosting#client-addresses-behind-a-proxy). Set bandwidth and connection limits on the proxy too, because slow readers can still hold network connections open.
+An anonymous download that stalls for 15 seconds, or runs for 5 minutes, is ended with an error rather than a clean finish. If you run Lific behind a reverse proxy, list it in `server.trusted_proxies` so each visitor is counted separately; otherwise every visitor shares the proxy's one bucket. See [Client addresses behind a proxy](/docs/self-hosting#client-addresses-behind-a-proxy). Set bandwidth and connection limits on the proxy too, because slow readers can still hold network connections open.
 
-## The public API
+Every response to a request with no credential carries `Cache-Control: no-store`, `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`, so nothing outlives an unpublish in a shared cache. Anonymous downloads also carry `Content-Security-Policy: default-src 'none'; sandbox`; anything other than a plain image or media file downloads rather than opening in the browser, and SVG files are served as `application/octet-stream`.
 
-The public page is the ordinary web app reading from a separate, anonymous set of routes under `/public/api/projects/{PROJ}`. Each mirrors a private route, with `/api` replaced by that prefix, and returns the same JSON without the private fields listed above. Only `GET` is accepted, and any other path under `/public/api` answers `404`.
+[Reading without a credential](/docs/rest-api/public) lists the API routes a visitor can use.
 
-| Public route | Mirrors | Returns |
-| --- | --- | --- |
-| `/public/api/projects/{PROJ}` | `GET /api/projects/{id}` | The project, with `lead_user_id` set to `null`. |
-| `…/index` | `GET /api/projects/{id}/index` | Every current issue and page as short rows, plus a sync cursor. |
-| `…/changes?since=&limit=` | `GET /api/projects/{id}/changes` | Rows changed since the cursor, without comment rows. |
-| `…/modules`, `…/labels`, `…/folders` | `GET /api/modules?project_id=` and the others | The project's structure. |
-| `…/issues/resolve/{PROJ-42}` | `GET /api/issues/resolve/{ident}` | One issue with its description and in-project relations. |
-| `…/issues/{id}` | `GET /api/issues/{id}` | The same, by row ID. |
-| `…/issues/{id}/comments` | `GET /api/issues/{id}/comments` | Comments, with the `x-comment-*` paging headers. |
-| `…/pages/{id}` | `GET /api/pages/{id}` | One page with its content. |
-| `…/pages/{id}/comments` | `GET /api/pages/{id}/comments` | Its comments. |
-| `…/attachments?entity_type=&entity_id=` | `GET /api/attachments?…` | File details for a current issue, page or comment. |
-| `…/attachments/{id}` | `GET /api/attachments/{id}` | The file itself. |
-| `…/attachments/{id}/thumbnail`, `…/preview` | The same routes under `/api` | A thumbnail, or a structured preview of an archive or database. |
+## Upgrading from 2.x
 
-Things to know when building against these routes:
-
-- **Hidden and missing look the same.** A private project, a missing one, and an issue, page, comment or file that is deleted, belongs to another project or is not attached to anything current all return the same `404`.
-- **The project in the path is enforced.** `/public/api/projects/DEMO/issues/resolve/PRIV-1` is refused before anything is read, and a file ID that is not attached to current content in that project is a `404`.
-- **Responses are not cached and are locked down.** Every response carries `Cache-Control: no-store`, `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`. Downloads also carry `Content-Security-Policy: default-src 'none'; sandbox`. Anything other than a plain image or media file downloads rather than opening in the browser, and SVG files are served as `application/octet-stream`.
-- **The sync cursor is per project.** The cursor from `/index` is the highest sequence number among this project's rows, so changes elsewhere do not move it. `/changes` includes a marker for each deleted issue or page (its numeric ID and sequence number, never its content), so the fact that an issue number once existed is public too.
-- **`/index` is not paged.** Like its private twin, it returns every current issue and page in one response.
-
-## How public content is displayed
-
-The public page sends every request to the routes above without any credential, so a signed-in maintainer opening a public link sees exactly what a stranger sees.
-
-Markdown is rendered and sanitized as in the signed-in app, with stricter rules. Issue identifiers still link and show their status, and every link stays under `/public/…`. Images load only when they point at this instance's attachments; any other image shows its alt text. Elements that load content on their own (video, audio, frames, embedded objects, stylesheets, SVG and forms) are removed. Ordinary links remain, because the reader chooses whether to follow them.
-
-## Upgrading and storage
+Lific 2.x served published projects on a separate, reduced view under `/public/APP` and `/public/api/projects/APP`. Lific 3.0 removes both. Old `/public/APP/...` links redirect to the same place under `/APP/...`, and `/public/api/...` answers `404`. What a published project shows has also grown: plans, edit history, assignees and waits are now readable. See [Upgrading](/docs/upgrading#v30) before you upgrade an instance with a published project.
 
 Publication is a per-project setting stored in the database. It defaults to off, and upgrading publishes nothing.
-
-Keep the attachment directory and its parent directories safe from untrusted writes, since public downloads read from it.

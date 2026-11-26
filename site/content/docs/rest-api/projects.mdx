@@ -38,7 +38,7 @@ Changes project settings. **Lead.** Every field is optional: `name`, `identifier
 
 Setting `lead_user_id` to a user also gives them a `lead` membership, so that one change needs a recent browser session. Clearing it does not.
 
-`is_public: true` publishes the project on the anonymous [public read API](/docs/rest-api/public), and `false` withdraws it on the next request. See [Public projects](/docs/public-projects) before turning it on: it exposes existing content, not just what you write afterwards.
+`is_public: true` makes the project readable by everyone through the ordinary routes, [with or without a credential](/docs/rest-api/public), and `false` withdraws that on the next request. See [Public projects](/docs/public-projects) before turning it on: it exposes existing content, not just what you write afterwards.
 
 Changing the identifier renames every issue, page and plan identifier in the project at once; old written references stop resolving. Returns the `Project`.
 

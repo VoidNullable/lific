@@ -7,7 +7,7 @@ Every Lific server answers JSON over HTTP on the same address as its web UI. The
 
 ## Call it
 
-Paths in this reference are complete: they already start with `/api`, `/public/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
+Paths in this reference are complete: they already start with `/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
 
 Sign in to get a token, then send it as a bearer token:
 
@@ -46,7 +46,7 @@ Use a session token for a person at a keyboard and an API key for a script. An a
 
 Login also sets an HttpOnly cookie named `lific_token` holding the same session token. The REST API ignores that cookie everywhere except three places: `GET /api/attachments/{id}` (so a browser `<img>` tag can load an attachment, and only when the request has no `Authorization` header), the realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws), which accepts nothing else, and the OAuth consent pages. Every other request needs the header, including requests from a browser.
 
-These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [public read API](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
+These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [reads of published projects](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
 
 Two cases act as the instance's first administrator:
 
@@ -143,9 +143,9 @@ Handlers answer failures with a JSON object carrying one `error` string, and a s
 | `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, or an `expected_seq` mismatch (see above). |
 | `413` | The request or its result is larger than Lific accepts. The message names the limit. |
 | `415`, `422` | The body is not JSON, or does not have the expected shape. These come from the request parser as plain text. |
-| `429` | A shared slot is taken: exports, project archives, the public read API's rate limit. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
+| `429` | A shared slot is taken: exports, project archives, the rate limit on requests with no credential. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
 | `500` | Something broke on the server. The body says only `internal server error`; the detail is in the server log. |
-| `503` | Temporarily unable, and the same request will work shortly. Carries `Retry-After: 2`. Seen when a backup or restore holds the attachment store, when the public read API is busy, and when a trusted proxy's client-identity headers do not verify. |
+| `503` | Temporarily unable, and the same request will work shortly. Carries `Retry-After: 2`. Seen when a backup or restore holds the attachment store, when too many requests with no credential are in progress, and when a trusted proxy's client-identity headers do not verify. |
 
 The OAuth endpoints follow the OAuth specifications instead: `{"error": "invalid_grant", "error_description": "..."}`, where `error` is a machine-readable code and `error_description` is optional. The consent pages under `/oauth` are HTML for a person, not JSON.
 
@@ -244,7 +244,7 @@ Unless an endpoint says otherwise, a successful delete answers `{"deleted": true
 | [Search, sync and realtime](/docs/rest-api/sync) | Search, the delta sync endpoints and the realtime WebSocket. |
 | [Exports and archives](/docs/rest-api/export) | Markdown, JSON and ZIP exports, and whole-project archives. |
 | [Repositories and commits](/docs/rest-api/repositories) | Repository bindings and closing issues from commit messages. |
-| [Public read API](/docs/rest-api/public) | The anonymous, read-only routes for a published project. |
+| [Reading without a credential](/docs/rest-api/public) | The routes that answer anyone for a published project. |
 | [OAuth and discovery](/docs/rest-api/oauth) | Client registration, authorization, device login, tokens and metadata. |
 
 The MCP endpoint, `/mcp`, is served by the same process and takes the same bearer credentials. It is documented under [MCP](/docs/mcp).

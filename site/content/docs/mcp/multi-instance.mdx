@@ -16,8 +16,8 @@ something that does serve them, give that server its own MCP entry.
 Use it when you keep a private tracker and also work in a community tracker.
 Instead of two copies of every tool, the agent sees one `create_issue` with an
 `instance` argument. The servers remain separate databases; this connection
-does not synchronize them. Publishing a project does not grant anonymous access
-to its MCP endpoint.
+does not synchronize them. Publishing a project lets every key on that server
+read it, but its MCP endpoint still needs a credential.
 
 The proxy makes independent authenticated requests to each server. Servers need
 no shared configuration, and each alias's credential is sent only to that

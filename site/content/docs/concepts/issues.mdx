@@ -76,7 +76,7 @@ Only human accounts can be named; an agent's own account cannot, because unassig
 
 Responses carry `needs_human` (true for the second and third states) and `assignees` (the named people). `workable=true` does not look at assignment; filter with `assignee`: `none` for the agents' pool, `human` for every issue a person must do, `me`, or a username. The web UI's home page lists the open issues that name you, the ones marked for any person, and the ones waiting on you.
 
-Assignments are private: the public view of a [published project](/docs/public-projects) leaves them out. A project archive carries them by username; on import, a name with no matching person falls back to "any person".
+Assignments are readable by anyone who can read the project, which includes everyone when it is [published](/docs/public-projects). A project archive carries them by username; on import, a name with no matching person falls back to "any person".
 
 ## Waiting on a person or a date
 
@@ -99,7 +99,7 @@ A due or overdue wait stays on the issue until someone clears it, so the follow-
 
 "Today" is the server's local calendar day, for every client. MCP, the REST API and the web UI therefore agree on whether an issue is blocked even when a browser is in another timezone.
 
-An issue can wait on a given person once and on a given window once. A wait's note is at most 500 characters. Waits are private: the public view of a [published project](/docs/public-projects) leaves them out. Add and clear waits in the web UI's **Waiting on** field, with MCP `link_issues` and `unlink_issues`, or through `/api/issues/{id}/waits`.
+An issue can wait on a given person once and on a given window once. A wait's note is at most 500 characters. Waits, notes included, are readable by anyone who can read the project, which includes everyone when it is [published](/docs/public-projects). Add and clear waits in the web UI's **Waiting on** field, with MCP `link_issues` and `unlink_issues`, or through `/api/issues/{id}/waits`.
 
 ## Ready and blocked work
 

@@ -59,12 +59,27 @@ Migrations run on this first start.
 5. Sign in to the web UI and open a representative project. Check issues, pages, plans, comments, attachments and saved views before making changes.
 6. Test one API client and one MCP client. Refresh MCP tool discovery. With multi-instance MCP, confirm every backend passed discovery and check `list_instances` before writing. Restart any device login started before the upgrade.
 7. If you use a proxy, confirm the server logs real client addresses and does not trust forwarded headers from anywhere else.
-8. Confirm existing projects are still private. If you publish one, open its public address while signed out and check that ordinary routes still require sign-in.
+8. Confirm which projects are published, and that the rest are still private. Open a link into a published project while signed out, and check that an unpublished project's link still asks you to sign in.
 9. Keep the backup until the web UI, API, MCP, scheduled backups and a service restart have all been checked.
 
 ## Release notes
 
 Newest first. Each section lists what changed for someone upgrading past that version.
+
+### v3.0
+
+#### Published projects are read at their normal links
+
+A published project is no longer served on a separate, reduced view. Everyone can read it at its ordinary links and through the ordinary API: visitors with no account, every signed-in account on the instance, and every API key and MCP connection. Changing anything still needs a role in the project. See [Public projects](/docs/public-projects).
+
+- **More becomes readable.** Plans and their steps, activity and edit history, insights, assignees, waits with their notes, comment authors' usernames and live updates are now readable in a published project. Before upgrading an instance with a published project, review its plans, history and waits, or unpublish it until you have.
+- **Every account and key can read published projects.** An account or API key with no role in a published project now reads it, sees it in its project list and sidebar, and gets `403` when it tries to change it. Email addresses, keys, tokens, member lists and settings stay private.
+- **`/public/api` is gone.** Every route under `/public/api/projects/{project}` now answers `404`. Clients use the ordinary routes with no credential instead, for example `GET /api/issues/resolve/APP-12`. [Reading without a credential](/docs/rest-api/public) lists them. The anonymous limits are unchanged: 240 reads per minute per client address, 4 requests in progress, 4 downloads, and 1 thumbnail or preview at a time.
+- **Old public links redirect.** `/public/APP/...` answers `301` to `/APP/...`, so a shared `/public/APP/issues/APP-1` opens `/APP/issues/APP-1`. `/public/APP` opens the issue list.
+- **The signed-out home page changes.** With auth required, opening `/` while signed out shows the only published project, a list when there are several, and the sign-in page when there are none.
+- **Rate limits and caching.** Only requests with no credential count against the anonymous limits. Responses to them are never cached (`Cache-Control: no-store`). If a proxy or CDN in front of Lific special-cased `/public/`, apply the same rules to requests without an `Authorization` header or `lific_token` cookie instead.
+
+No migration is involved: publication stays a per-project setting, and upgrading publishes nothing.
 
 ### v2.11
 
