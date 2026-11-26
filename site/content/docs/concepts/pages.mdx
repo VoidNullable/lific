@@ -14,10 +14,12 @@ Most pages belong to a project. A workspace page belongs to no project and is me
 | Identifier | `APP-DOC-3`, numbered within the project | `DOC-3`, numbered across the workspace |
 | Folders | Yes | No |
 | Labels | Yes, from its project | No |
-| Who can read it | Anyone who can read the project | While [membership is enforced](/docs/concepts/projects#when-membership-is-enforced), administrators only. Otherwise everyone. |
+| Who can read it | Anyone who can read the project | Administrators only |
 | Who can change it | `maintainer` on the project | The same as reading it |
 
 A page stays where it was created. It cannot move to another project or between a project and the workspace. To move one, create it in the new place and delete the old one.
+
+Page numbers only increase within their scope. Deleting a page, including permanently removing it from the trash, never frees its number for another page.
 
 Over MCP, `create_page` makes a workspace page when you leave out `project`.
 
@@ -58,11 +60,30 @@ Folder names are not unique. Tools that take a folder by name, such as `folder` 
 
 Deleting a folder deletes every folder beneath it too. The pages inside are not deleted: they move to the project root. Folders have no trash.
 
-Creating, renaming and deleting folders takes `maintainer` while membership is enforced, and `lead` while it is off, the same as modules and labels.
+Creating, renaming and deleting folders takes `maintainer`, the same as modules and labels.
 
 ## Labels
 
 A project page can carry any number of its project's labels, the same ones its issues use. Sending `labels` on an update replaces the complete set; leave it out to keep the current labels. [Modules and labels](/docs/concepts/modules-and-labels#setting-labels) covers the matching rules.
+
+## Conventions page
+
+Each project can have one conventions page: the rules for working with its issues, pages and plans, such as who files issues, who closes them, and what proof a closed issue needs. It is an ordinary project page with a mark on it, so it has a title, folder, labels, comments and history like any other.
+
+A new project starts with one, titled **Conventions**. You choose its starting text when you create the project:
+
+| Template | For a project where |
+| --- | --- |
+| `empty` | The default. The page starts blank. |
+| `ai_managed` | Agents file, edit and close issues themselves. |
+| `human_managed` | People write the issues and agents work and close them. |
+| `human_owned` | People write and close issues; agents do the work and comment. |
+
+[`get_briefing`](/docs/mcp/tools#get_briefing) opens with the page when it has text and is turned on, so every agent session starts from the same rules. Turning it off (the switch on the page in the web UI, or `conventions_enabled: false` on `PUT /api/pages/{id}`) keeps the text but takes it out of the briefing and search ranking. Search ranks a turned-on conventions page above other results of similar relevance, but not above an issue that matches the query much better.
+
+A project can only have one. Deleting it leaves the project without one, and a new one can then be made with `create_page(conventions=true)` or from the project's page list in the web UI. Restoring the deleted page from the trash brings it back as the conventions page, unless a replacement was created meanwhile; then it comes back as an ordinary page. Project archives carry the mark.
+
+Projects created before conventions pages existed have none. Their briefing shows a one-line reminder until the project gets one, through `manage_resource(resource_type='project', action='update', conventions='<template>')` or the web UI, or until someone passes `conventions='none'` to stop it.
 
 ## Pinning
 

@@ -6,6 +6,7 @@
     getArchiveCapabilities,
     me,
     type CreateProjectInput,
+    type ConventionTemplateKey,
   } from "../lib/api";
   import {
     RECENT_AUTH_ERROR,
@@ -36,6 +37,7 @@
   let emoji = $state("");
   let leadUserId = $state<number | null>(null);
   let groupId = $state<number | null>(null);
+  let conventions = $state<ConventionTemplateKey>("empty");
   let saving = $state(false);
   let error = $state("");
   let currentUserId = $state<number | null>(null);
@@ -139,6 +141,7 @@
         description: description.trim() || undefined,
         emoji: emoji.trim() || undefined,
         lead_user_id: leadUserId ?? undefined,
+        conventions,
       },
       groupId,
       userId: currentUserId,
@@ -191,6 +194,7 @@
       bind:emoji
       bind:leadUserId
       bind:groupId
+      bind:conventions
       mode="create"
     />
     {#if pendingCreate}

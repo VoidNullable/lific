@@ -53,7 +53,19 @@
 
   {@render footer?.()}
 
-  {#if composer.pendingPaste}
+  {#if composer.imagePaste}
+    <div class="bp" role="status">
+      <span class="bp__text">
+        {composer.imagePaste.error ?? (composer.imagePaste.busy ? "Importing image…" : "Save this image in Lific?")}
+      </span>
+      <button type="button" class="bp__btn bp__btn--primary"
+        disabled={composer.imagePaste.busy} onclick={() => composer.importImage()}>
+        {composer.imagePaste.error ? "Retry import" : "Import as attachment"}
+      </button>
+      <button type="button" class="bp__btn" disabled={composer.imagePaste.busy}
+        onclick={() => composer.keepImageUrl()}>Keep URL</button>
+    </div>
+  {:else if composer.pendingPaste}
     <!-- Inline, not modal: the textarea keeps focus and typing carries on
          while this sits there. Enter attaches, Escape pastes inline, and the
          buttons do the same for anyone reaching for the mouse. -->

@@ -1,48 +1,6 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
-import { inPublicScope, publicMirror, publicSynthetic } from "./publicScope";
 
 const BASE = "/api";
-
-// ── LIF-471: the public-scope chokepoint ─────────────────────
-//
-// Every request in this file resolves its URL through `resolveRequest` (or
-// `resolveUrl` for the `src=`/`href=` builders). In public scope that means
-// one of three things: the path is answered synthetically (no account, no
-// role, no history), it is rewritten onto `/public/api/projects/{P}/...` and
-// sent with NO credential, or it is refused outright. A path with no public
-// mirror never reaches `/api` from a public page, so a component that grows
-// a new fetch fails visibly in the public view instead of quietly sending a
-// signed-in reader's token somewhere a stranger could not follow.
-
-type Resolved =
-  | { kind: "private"; url: string }
-  | { kind: "public"; url: string }
-  | { kind: "synthetic"; status: number; body: unknown }
-  | { kind: "refused" };
-
-function resolveRequest(path: string): Resolved {
-  if (!inPublicScope()) return { kind: "private", url: `${BASE}${path}` };
-  const synthetic = publicSynthetic(path);
-  if (synthetic) return { kind: "synthetic", ...synthetic };
-  const mirrored = publicMirror(path);
-  if (mirrored) return { kind: "public", url: mirrored };
-  return { kind: "refused" };
-}
-
-/** The URL a browser subresource (`<img src>`, `<a href>`) should load for a
- *  private `/api` path. In public scope an unmirrored path resolves to a URL
- *  that cannot succeed, rather than to the private one. */
-function resolveUrl(path: string): string {
-  const r = resolveRequest(path);
-  if (r.kind === "private" || r.kind === "public") return r.url;
-  return "/public/api/refused";
-}
-
-const REFUSED: { ok: false; error: string; status: number } = {
-  ok: false,
-  error: "This isn't available in the public view.",
-  status: 403,
-};
 
 export interface AuthUser {
   id: number;
@@ -77,29 +35,15 @@ async function requestWithHeaders<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<HeadedResult<T>> {
-  const resolved = resolveRequest(path);
-  if (resolved.kind === "refused") return REFUSED;
-  if (resolved.kind === "synthetic") {
-    if (resolved.status >= 400) {
-      const body = resolved.body as { error?: string };
-      return { ok: false, error: body?.error ?? `HTTP ${resolved.status}`, status: resolved.status };
-    }
-    return { ok: true, data: resolved.body as T, headers: new Headers() };
-  }
-
+  // The session cookie the browser attaches on its own authenticates the
+  // request; page script holds no credential.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
-  // A private request is authenticated by the session cookie the browser
-  // attaches on its own. The public surface never sees it (`credentials:
-  // "omit"`): a signed-in reader and a stranger must get byte-identical
-  // answers.
-  const credentials: RequestCredentials | undefined =
-    resolved.kind === "public" ? "omit" : undefined;
 
   try {
-    const res = await fetch(resolved.url, { ...options, headers, credentials });
+    const res = await fetch(`${BASE}${path}`, { ...options, headers });
     let body;
     try {
       body = await res.json();
@@ -109,9 +53,6 @@ async function requestWithHeaders<T>(
       if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, status: res.status };
       throw error;
     }
-    // `/projects` mirrors onto the one published project; the callers expect
-    // the list shape.
-    if (resolved.kind === "public" && path === "/projects" && res.ok) body = [body];
 
     if (!res.ok) {
       return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
@@ -136,13 +77,7 @@ async function request<T>(
 }
 
 export async function download(path: string, filename?: string) {
-  const resolved = resolveRequest(path);
-  if (resolved.kind !== "private" && resolved.kind !== "public") {
-    return { ok: false as const, error: REFUSED.error };
-  }
-  const res = await fetch(resolved.url, {
-    credentials: resolved.kind === "public" ? "omit" : undefined,
-  });
+  const res = await fetch(`${BASE}${path}`);
   if (!res.ok) {
     let error = `HTTP ${res.status}`;
     try {
@@ -282,10 +217,6 @@ export interface InstanceSettings {
   session_lifetime_days: number;
   login_message: string | null;
   web_auto_login: boolean;
-  /** LIF-197: operator toggle for project-scoped authorization (epic
-   *  LIF-194). Off by default — see src/authz.rs for the legacy vs
-   *  enforced mode split. */
-  authz_enforced: boolean;
 }
 
 export interface InstanceSettingsPatch {
@@ -297,7 +228,6 @@ export interface InstanceSettingsPatch {
   /** "" clears. */
   login_message?: string;
   web_auto_login?: boolean;
-  authz_enforced?: boolean;
 }
 
 export async function getInstanceSettings() {
@@ -653,9 +583,8 @@ export async function reactivateUser(id: number) {
 // ── Project members (LIF-199 / LIF-200) ─────────────────────
 //
 // Project-scoped roles: viewer < maintainer < lead. See LIF-DOC-7 for the
-// authorization design. `GET` is visible to any project member (and to
-// everyone while `authz_enforced` is off); writes are lead-only (or
-// instance admin).
+// authorization design. `GET` is visible to any project member; writes are
+// lead-only (or instance admin).
 
 export type ProjectRole = "viewer" | "maintainer" | "lead";
 
@@ -701,8 +630,8 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 // ── My effective role (LIF-234) ─────────────────────────────
 //
-// The caller's own role on one project, plus whether enforcement is on and
-// whether they're a workspace admin. Drives role-aware UI affordances
+// The caller's own role on one project, plus whether they're a workspace
+// admin. Drives role-aware UI affordances
 // (`lib/projectRole.svelte.ts`) — one Viewer-gated call per project switch,
 // so a plain viewer can learn what to hide/disable without reading the full
 // roster or the admin-only instance settings. `role` is null for a
@@ -710,9 +639,6 @@ export async function removeProjectMember(projectId: number, userId: number) {
 
 export interface MyProjectRole {
   role: ProjectRole | null;
-  /** Whether the instance's project-scoped authorization is enforced. When
-   *  false (legacy/local-first default), the UI stays fully interactive. */
-  enforced: boolean;
   /** Workspace admin — bypasses all gating, UI stays fully interactive. */
   is_admin: boolean;
 }
@@ -723,9 +649,9 @@ export async function getMyProjectRole(projectId: number) {
 
 // ── @mention candidates (LIF-263) ───────────────────────────
 //
-// The users a comment composer may `@`-mention in this project. Scoped to
-// project members when `authz_enforced` is on, all non-bot users otherwise
-// — the server never returns anyone who can't see the project.
+// The users a comment composer may `@`-mention in this project: its members
+// and the instance admins, never a bot. The server never returns anyone who
+// can't see the project.
 
 export interface MentionCandidate {
   user_id: number;
@@ -750,8 +676,8 @@ export interface Project {
   sort_order: number;
   created_at: string;
   updated_at: string;
-  /** LIF-465: whether anyone can read this project's current issues at
-   *  `/public/{identifier}` without an account. Default false. */
+  /** LIF-465: whether anyone can read this project at its normal links
+   *  without an account (LIF-583). Default false. */
   is_public: boolean;
 }
 
@@ -778,6 +704,9 @@ export interface CreateProjectInput {
   description?: string;
   emoji?: string;
   lead_user_id?: number;
+  /** LIF-524: the template the project's conventions page starts from.
+   *  The server defaults to `"empty"`. */
+  conventions?: ConventionTemplateKey;
 }
 
 export async function createProject(input: CreateProjectInput) {
@@ -972,8 +901,25 @@ export interface Issue {
   /** LIF-147: the named people. Absent for unassigned issues and for
    *  issues marked for any person. Always human accounts. */
   assignees?: IssueAssignee[];
+  /** LIF-525: the live claim, when a worker holds the issue right now.
+   *  Absent otherwise, including once a claim has expired. */
+  claim?: IssueClaim;
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+}
+
+/** LIF-525: a worker's time-limited hold on an issue. Timestamps are UTC
+ *  `YYYY-MM-DD HH:MM:SS`. */
+export interface IssueClaim {
+  user_id: number;
+  username: string;
+  display_name?: string | null;
+  /** The session holding it. Absent when the whole account holds it. */
+  worker?: string;
+  /** When this holder first claimed it; re-claims keep it. */
+  claimed_at: string;
+  /** Each re-claim moves it. */
+  expires_at: string;
 }
 
 // ── Assignment (LIF-147) ───────────────────────────────────
@@ -1046,6 +992,8 @@ export async function addIssueWait(issueId: number, input: CreateWaitInput) {
 export interface ServerClock {
   today: string;
   utc_offset_minutes: number;
+  /** LIF-525: the server's current time in epoch milliseconds. */
+  now_ms: number;
 }
 
 export async function getServerClock() {
@@ -1363,7 +1311,7 @@ export interface Comment {
   updated_at: string;
   /** "verification" marks evidence recorded when the issue was closed.
    *  Absent from a server too old to send it. */
-  kind?: "comment" | "verification";
+  kind?: "comment" | "verification" | "decision";
 }
 
 // ── Activity / audit log (LIF-156/157) ─────────────────
@@ -1486,9 +1434,11 @@ async function commentPage(
   path: string,
   before: CommentCursor | null,
   pageSize: number,
+  kind?: "decision",
 ): Promise<RequestResult<CommentPage>> {
   const size = Math.max(1, Math.min(pageSize, COMMENT_MAX_LIMIT - 1));
   const params = new URLSearchParams({ order: "desc", limit: String(size + 1) });
+  if (kind) params.set("kind", kind);
   if (before) {
     params.set("before_created_at", before.created_at);
     params.set("before_id", String(before.id));
@@ -1514,14 +1464,15 @@ export async function listComments(
   issueId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/issues/${issueId}/comments`, before, pageSize);
+  return commentPage(`/issues/${issueId}/comments`, before, pageSize, kind);
 }
 
-export async function createComment(issueId: number, content: string) {
+export async function createComment(issueId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/issues/${issueId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 
@@ -1529,14 +1480,15 @@ export async function listPageComments(
   pageId: number,
   before: CommentCursor | null = null,
   pageSize = COMMENT_PAGE_SIZE,
+  kind?: "decision",
 ) {
-  return commentPage(`/pages/${pageId}/comments`, before, pageSize);
+  return commentPage(`/pages/${pageId}/comments`, before, pageSize, kind);
 }
 
-export async function createPageComment(pageId: number, content: string) {
+export async function createPageComment(pageId: number, content: string, kind: "comment" | "decision" = "comment") {
   return request<Comment>(`/pages/${pageId}/comments`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, kind }),
   });
 }
 
@@ -1587,15 +1539,24 @@ export interface UploadResponse {
 
 export type AttachmentEntity = "issue" | "page" | "comment";
 
-/** Upload one file. Optionally link it to an entity immediately (used by the
- *  detail-view "Attach" affordance); otherwise it stays unlinked until the
- *  entity's markdown is saved and re-scanned server-side. Returns a discrete
- *  result so callers can surface the exact server reason via a toast. */
+/** Fetch a public image only after the person accepts the paste offer. */
+export function importImageAttachment(
+  url: string,
+  link: { entity_type: AttachmentEntity; entity_id: number } | null,
+  signal: AbortSignal,
+): Promise<RequestResult<UploadResponse>> {
+  return request("/attachments/import", {
+    method: "POST",
+    body: JSON.stringify({ url, ...link }),
+    signal,
+  });
+}
+
+/** Upload one file, optionally linking it to an existing entity. */
 export async function uploadAttachment(
   file: File,
   link?: { entity_type: AttachmentEntity; entity_id: number },
 ): Promise<{ ok: true; data: UploadResponse } | { ok: false; error: string }> {
-  if (inPublicScope()) return { ok: false, error: REFUSED.error };
   const form = new FormData();
   form.append("file", file, file.name);
   if (link) {
@@ -1652,14 +1613,6 @@ export function uploadAttachmentWithProgress(
     onProgress?: (p: UploadProgress) => void;
   } = {},
 ): UploadHandle {
-  // A public page cannot upload: settle without opening a request, so not
-  // even the session cookie travels.
-  if (inPublicScope()) {
-    return {
-      result: Promise.resolve({ ok: false, error: REFUSED.error, status: 403, canceled: false }),
-      abort: () => {},
-    };
-  }
   const form = new FormData();
   form.append("file", file, file.name);
   if (opts.link) {
@@ -1891,13 +1844,13 @@ export async function getAttachmentLinks(id: number) {
  *  the browser sends the session cookie with the load like any other
  *  same-origin request. */
 export function attachmentUrl(id: number): string {
-  return resolveUrl(`/attachments/${id}`);
+  return `${BASE}/attachments/${id}`;
 }
 
 /** Server-generated webp preview. 404s when the attachment has none, so every
  *  consumer must have an onerror path back to the full asset. */
 export function attachmentThumbnailUrl(id: number): string {
-  return resolveUrl(`/attachments/${id}/thumbnail`);
+  return `${BASE}/attachments/${id}/thumbnail`;
 }
 
 export interface ZipPreviewEntry {
@@ -1934,14 +1887,8 @@ export async function getAttachmentPreview(id: number) {
 export async function fetchAttachmentText(
   id: number,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const resolved = resolveRequest(`/attachments/${id}`);
-  if (resolved.kind !== "private" && resolved.kind !== "public") {
-    return { ok: false, error: REFUSED.error };
-  }
   try {
-    const res = await fetch(resolved.url, {
-      credentials: resolved.kind === "public" ? "omit" : undefined,
-    });
+    const res = await fetch(`${BASE}/attachments/${id}`);
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, text: await res.text() };
   } catch {
@@ -1988,6 +1935,27 @@ export interface Page {
   labels: string[];
   /** LIF-436: instance-wide write sequence; send back as `expected_seq`. */
   seq?: number;
+  /** LIF-524: true only for the project's conventions page. */
+  conventions?: boolean;
+  /** LIF-524: whether agents get the conventions page in their briefing.
+   *  Meaningful only when `conventions` is true. */
+  conventions_enabled?: boolean;
+}
+
+/** LIF-524: the starting points for a conventions page, in server order. */
+export type ConventionTemplateKey = "empty" | "ai_managed" | "human_managed" | "human_owned";
+
+export interface ConventionTemplate {
+  key: ConventionTemplateKey;
+  name: string;
+  /** One line describing who the template suits. */
+  summary: string;
+  /** The Markdown body; `""` for the empty template. */
+  content: string;
+}
+
+export async function listConventionTemplates() {
+  return request<ConventionTemplate[]>("/conventions/templates");
 }
 
 export interface Folder {
@@ -2036,6 +2004,9 @@ export interface CreatePageInput {
   status?: string;
   /** LIF-105: label names to attach. Ignored on workspace pages. */
   labels?: string[];
+  /** LIF-524: make this the project's conventions page. 409 when the
+   *  project already has one. */
+  conventions?: boolean;
 }
 
 export async function createPage(input: CreatePageInput) {
@@ -2057,6 +2028,9 @@ export interface UpdatePageInput {
   labels?: string[];
   /** LIF-441: refuse the write (409) unless the page still has this seq. */
   expected_seq?: number;
+  /** LIF-524: turn a conventions page on or off for agents. 400 on any
+   *  other page. */
+  conventions_enabled?: boolean;
 }
 
 export async function updatePage(id: number, input: UpdatePageInput) {
@@ -2592,6 +2566,18 @@ export interface HomeOverview {
   since: SinceSummary | null;
   /** Issues the caller or their agents moved to done, last 84 days. */
   my_done: DayCount[];
+  /** LIF-525: open issues under a live claim, most recently claimed first. */
+  claims: ClaimedIssue[];
+}
+
+export interface ClaimedIssue {
+  issue_id: number;
+  project_id: number;
+  identifier: string;
+  title: string;
+  status: string;
+  priority: string;
+  claim: IssueClaim;
 }
 
 /** With `projectId`, every aggregate covers that one project (the project

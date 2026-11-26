@@ -15,14 +15,17 @@
 // renders the shared chrome around whatever markup the caller passes.
 
 import type { AttachmentEntity } from "../api";
+import { importImageAttachment } from "../api";
 import {
   createUploadController,
   type ComposerText,
   type UploadController,
   type UploadSource,
 } from "./uploads.svelte";
-import { filesFromClipboard, insertSnippetAt } from "./compose";
+import { filesFromClipboard, insertSnippetAt, markdownFor } from "./compose";
 import { describePaste, isBigPaste, pasteFileFrom } from "./bigPaste";
+import { imageUrlFromPaste, replacePastedUrl } from "./imageUrl";
+import { toast } from "../toast/toast.svelte";
 
 export type { ComposerText, UploadSource };
 
@@ -52,6 +55,9 @@ export interface PendingPaste {
 }
 
 export interface ComposerAttachments {
+  readonly imagePaste: { url: string; busy: boolean; error: string | null } | null;
+  importImage: () => void;
+  keepImageUrl: () => void;
   readonly uploads: UploadController;
   /** Non-null while a big paste is waiting on Enter (attach) or Esc (inline). */
   readonly pendingPaste: PendingPaste | null;
@@ -67,6 +73,8 @@ export interface ComposerAttachments {
   /** `onkeydown` handler. Returns true when it consumed the key, so the host
    *  can bail before its own Enter/Escape handling runs. */
   handleKeydown: (e: KeyboardEvent) => boolean;
+  handleEdit: () => void;
+  handleSelection: () => void;
   /** Resolve a pending paste as a `text/plain` attachment. */
   attachPaste: () => void;
   /** Resolve a pending paste by inserting it at the caret after all. */
@@ -85,7 +93,44 @@ export function createComposerAttachments(
   opts: ComposerAttachmentsOptions,
 ): ComposerAttachments {
   let pendingPaste = $state<PendingPaste | null>(null);
+  let imagePaste = $state<{ url: string; offset: number; busy: boolean; error: string | null } | null>(null);
+  let imageRequest: AbortController | null = null;
   let fileInput: HTMLInputElement | null = null;
+
+  // Textareas report their own edits and selection changes. CodeMirror uses
+  // the same handlers through its change/selection hooks.
+  $effect(() => {
+    const el = opts.el();
+    if (typeof HTMLTextAreaElement === "undefined" || !(el instanceof HTMLTextAreaElement)) return;
+    el.addEventListener("input", handleEdit);
+    el.addEventListener("select", handleSelection);
+    el.addEventListener("selectionchange", handleSelection);
+    el.addEventListener("keyup", handleSelection);
+    el.addEventListener("pointerup", handleSelection);
+    return () => {
+      el.removeEventListener("input", handleEdit);
+      el.removeEventListener("select", handleSelection);
+      el.removeEventListener("selectionchange", handleSelection);
+      el.removeEventListener("keyup", handleSelection);
+      el.removeEventListener("pointerup", handleSelection);
+    };
+  });
+
+  function handleEdit() {
+    if (imagePaste && !imagePaste.busy) imagePaste = null;
+  }
+
+  function handleSelection() {
+    const held = imagePaste;
+    const el = opts.el();
+    if (!held || held.busy || !el) return;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    if (start === null || end === null || start < held.offset || end > held.offset + held.url.length
+      || opts.text.read().slice(held.offset, held.offset + held.url.length) !== held.url) {
+      imagePaste = null;
+    }
+  }
 
   /** Splice `insert` in over the current selection, verbatim (no markdown
    *  spacing). Used by the inline branch of the big-paste offer. */
@@ -111,6 +156,7 @@ export function createComposerAttachments(
   }
 
   const uploads = createUploadController({
+    externalPending: () => imagePaste?.busy ?? false,
     link: opts.link,
     onInsert: insertMarkdown,
     text: opts.text,
@@ -128,6 +174,14 @@ export function createComposerAttachments(
       return;
     }
     const text = e.clipboardData?.getData("text/plain") ?? "";
+    const imageUrl = imageUrlFromPaste(text);
+    if (imageUrl && !imagePaste?.busy) {
+      e.preventDefault();
+      const offset = opts.el()?.selectionStart ?? opts.text.read().length;
+      spliceAtCaret(text);
+      imagePaste = { url: imageUrl, offset: offset + text.indexOf(imageUrl), busy: false, error: null };
+      return;
+    }
     if (!isBigPaste(text)) return;
     // Hold the text rather than dropping it in. Nothing is lost either way:
     // both answers put the content somewhere, and the textarea keeps focus so
@@ -154,6 +208,18 @@ export function createComposerAttachments(
   }
 
   function handleKeydown(e: KeyboardEvent): boolean {
+    handleSelection();
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) {
+      handleEdit();
+      return false;
+    }
+    if (imagePaste && !imagePaste.busy && (e.key === "Enter" || e.key === "Escape")) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Enter") void importImage();
+      else imagePaste = null;
+      return true;
+    }
     if (!pendingPaste) return false;
     if (e.key === "Enter") {
       e.preventDefault();
@@ -187,12 +253,42 @@ export function createComposerAttachments(
     }
   }
 
+  async function importImage() {
+    const held = imagePaste;
+    if (!held || held.busy) return;
+    held.busy = true;
+    held.error = null;
+    const request = new AbortController();
+    imageRequest = request;
+    const link = opts.link?.() ?? null;
+    const result = await importImageAttachment(held.url, link, request.signal);
+    if (request.signal.aborted) return;
+    imageRequest = null;
+    if (!result.ok) {
+      held.busy = false;
+      held.error = result.error;
+      return;
+    }
+    const snippet = markdownFor(result.data, result.data.filename);
+    const replacement = replacePastedUrl(opts.text.read(), held.url, held.offset, snippet);
+    if (replacement) opts.text.write(replacement.text, replacement.caret);
+    else toast(link
+      ? "Image imported but not inserted. Find it in Attachments."
+      : "Image imported but not inserted because the URL changed.");
+    imagePaste = null;
+  }
+
   function destroy() {
+    imageRequest?.abort();
+    imagePaste = null;
     pendingPaste = null;
     uploads.destroy();
   }
 
   return {
+    get imagePaste() { return imagePaste; },
+    importImage: () => { void importImage(); },
+    keepImageUrl: () => { imagePaste = null; opts.el()?.focus(); },
     get uploads() {
       return uploads;
     },
@@ -203,6 +299,8 @@ export function createComposerAttachments(
     insert: insertMarkdown,
     handlePaste,
     handleKeydown,
+    handleEdit,
+    handleSelection,
     attachPaste,
     pasteInline,
     bindFileInput,

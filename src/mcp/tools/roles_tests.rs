@@ -417,34 +417,6 @@ fn a_project_a_bot_creates_is_led_by_its_owner() {
     assert_has(&module, "Core");
 }
 
-#[test]
-fn legacy_mode_non_member_sees_rosters_but_holds_no_role() {
-    let (m, _admin, _lead, _maintainer, _viewer, non_member, .., _guard) = setup_membership_mcp();
-    m.write(|conn| {
-        queries::settings::update(
-            conn,
-            queries::settings::InstanceSettingsPatch {
-                authz_enforced: Some(false),
-                ..Default::default()
-            },
-        )
-        .map(|_| ())
-    })
-    .unwrap();
-
-    let listing = projects(&m, Some(&non_member), json!({}));
-    assert_ends(
-        row(&listing, "MEM"),
-        " | lead @lead · maintainer @maintainer · 1 viewer | no issues",
-    );
-
-    let mine = projects(&m, Some(&non_member), json!({"members": ["me"]}));
-    assert_eq!(
-        mine,
-        "No projects where you have a role (among projects you can see)."
-    );
-}
-
 // ── Schema ────────────────────────────────────────────────────────────
 
 /// Assert `tool` advertises `fields` as optional, described string lists.

@@ -45,6 +45,8 @@ The server URL is `--url` or `LIFIC_URL`, then `server.public_url` from the conf
 
 Changes made over HTTP are attributed to the user the credential belongs to, and that user's project permissions apply. That is why `comment add --user` only works with the local backend.
 
+`issue create`, `page create` and `comment add` send an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key) and, when the connection drops or times out before the reply arrives, send the request once more with the same key, but only when the server's `/api/instance` lists the `idempotency-key` capability (asked once per run). If the first attempt had been written, the server returns it instead of creating a second one. An older server would write it twice, so there the lost connection is reported instead. An error reply from the server is reported, not resent.
+
 Credentials are only sent to a non-loopback host over HTTPS. A credentials file that is malformed or unsafe stops the lookup rather than being treated as empty.
 
 Both backends print the same output. Issues, projects, pages, plans, modules and comments carry a `web_url` in JSON, and human-readable output turns their identifiers into Markdown links. Over HTTP the link uses the server URL. Locally it uses `server.public_url`, and without one there is no address to link to, so local output has no links.
@@ -151,7 +153,7 @@ Without a terminal, `connect` defaults to the remote transport, and you must nam
 | `--oauth` | Writes a remote entry with no key and lets the tool sign in with OAuth. Creates no bot or key. Tools that cannot do OAuth are skipped with a note. Cannot be combined with `--stdio` or `--key`. |
 | `--url <URL>` | The remote MCP address. Defaults to `server.public_url` plus `/mcp`, or `http://127.0.0.1:<port>/mcp`. |
 | `--key <API_KEY>` | Writes this key for every selected tool instead of creating new ones. |
-| `--user <USERNAME>` | The person who owns the new bots. The bots get that person's project access when membership is enforced. |
+| `--user <USERNAME>` | The person who owns the new bots. The bots get that person's project access. |
 | `--yes` | Skips confirmation prompts. |
 | `--dry-run` | Shows what would be written and creates nothing. |
 | `--skip-agents` | Leaves `./AGENTS.md` alone. Otherwise `connect` adds or updates a Lific section in it. |
@@ -175,6 +177,8 @@ Plain `lific mcp` opens the local database. The session acts as the user whose k
 | `--instances <FILE>` | Forwards to several servers named in a TOML file, each with its own credential. Cannot be combined with `--remote` or a typed `--url`; an exported `LIFIC_URL` is ignored. See [Multiple instances](/docs/mcp/multi-instance). |
 
 When the working directory is a checkout [bound to a project](/docs/repository-bindings), local and remote sessions use that project whenever a tool call leaves `project` out.
+
+With `--remote`, a create the server lists with an `op_key` parameter gets a key when the agent sent none, and is forwarded once more with that key when the connection drops or times out. See [Retrying a create](/docs/mcp/tools#retrying-a-create-with-op_key).
 
 ### agents-md
 
@@ -236,7 +240,7 @@ A key with no user acts as the operator and is not limited by project membership
 
 ### member
 
-Controls which projects a user can see and change when project membership is enforced, which it is by default on instances created with Lific 2.1 or later. A new user sees no projects until you add them. [Projects](/docs/concepts/projects#members-and-roles) explains the roles.
+Controls which projects a user can see and change. A new user sees no projects until you add them. [Projects](/docs/concepts/projects#members-and-roles) explains the roles.
 
 ```shell
 lific member list --project <PROJECT>
@@ -258,7 +262,7 @@ Shows and changes instance-wide settings. These live in the database, not in `li
 
 ```shell
 lific instance info
-lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMAINS>] [--session-days <DAYS>] [--login-message <MESSAGE>] [--auto-login <BOOLEAN>] [--authz-enforced <BOOLEAN>] [--stale-active-days <DAYS>] [--stale-active-reset-days <DAYS>]
+lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMAINS>] [--session-days <DAYS>] [--login-message <MESSAGE>] [--auto-login <BOOLEAN>] [--stale-active-days <DAYS>] [--stale-active-reset-days <DAYS>]
 ```
 
 `info` prints the settings, the configured server details and user counts. `set` changes only the settings you pass.
@@ -271,9 +275,8 @@ lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMA
 | `--session-days <DAYS>` | How long a browser sign-in lasts, from 1 to 365 days. |
 | `--login-message <MESSAGE>` | A short message on the sign-in screen, up to 280 characters. An empty string clears it. |
 | `--auto-login <BOOLEAN>` | Signs the browser in as the administrator without a login screen. REST and MCP still need credentials. Turning it on is refused when the configuration makes the instance reachable from outside, by the same rule `lific start` applies. Turning it off always works. |
-| `--authz-enforced <BOOLEAN>` | Enforces project membership on every REST and MCP call, reads included. On by default for instances created with 2.1 or later; upgraded instances keep it off until you turn it on. |
-| `--stale-active-days <DAYS>` | How long an active issue may go untouched before the MCP briefing and `list_issues(stale=true)` report it as stale, from 1 to 365 days. Default 3. Not in the web UI yet. |
-| `--stale-active-reset-days <DAYS>` | How long an active issue may go untouched before `lific start` moves it back to `todo`, from 0 to 365 days. Default 14; `0` turns it off. The server checks once a day and leaves a comment from `Lific` on each issue it moves; the change is audited as `system`. Not in the web UI yet. |
+| `--stale-active-days <DAYS>` | How long an active issue may go untouched (no edit, comment, label change or [claim](/docs/concepts/issues#claims)) before the MCP briefing and `list_issues(stale=true)` report it as stale, from 1 to 365 days. Default 3. Not in the web UI yet. |
+| `--stale-active-reset-days <DAYS>` | How long an active issue may go untouched, claims included, before `lific start` moves it back to `todo`, from 0 to 365 days. Default 14; `0` turns it off. The server checks once a day and leaves a comment from `Lific` on each issue it moves; the change is audited as `system`. Not in the web UI yet. |
 
 ### login and logout
 
@@ -303,7 +306,7 @@ These commands work with either [backend](#local-and-http-backends). Identifiers
 ```shell
 lific project list
 lific project get <IDENTIFIER>
-lific project create --name <NAME> --identifier <IDENTIFIER> [--description <TEXT>]
+lific project create --name <NAME> --identifier <IDENTIFIER> [--description <TEXT>] [--conventions <TEMPLATE>]
 lific project update <IDENTIFIER> [--name <NAME>] [--description <TEXT>]
 ```
 
@@ -312,6 +315,7 @@ lific project update <IDENTIFIER> [--name <NAME>] [--description <TEXT>]
 | `-n, --name <NAME>` | The project's display name. |
 | `-i, --identifier <IDENTIFIER>` | One to five uppercase letters or digits, starting with a letter. It prefixes every issue number, so `APP` gives `APP-1`. `DOC` is reserved. |
 | `-d, --description <TEXT>` | The project description. Empty by default. |
+| `--conventions <TEMPLATE>` | `create` only. The template the project's [conventions page](/docs/concepts/pages#conventions-page) starts from: `empty` (default), `ai_managed`, `human_managed` or `human_owned`. |
 
 ### issue
 
@@ -349,8 +353,10 @@ Filters combine, so `--status todo --label bug` shows issues that match both.
 
 ```shell
 lific comment list <IDENTIFIER> [--limit <LIMIT>] [--offset <OFFSET>] [--order desc|asc]
-lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>]
+lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>] [--kind comment|decision]
 ```
+
+When recording a decision over HTTP, the CLI checks the kind returned by the server. An older server that stores an ordinary comment instead produces an error naming the already-created comment. Upgrade the server before trying again; retrying blindly would duplicate the comment.
 
 `list` shows one page of an issue's comments, newest first, and never the whole thread at once. When more comments exist past the page, the last line says which offset to ask for next:
 
@@ -567,5 +573,7 @@ lific doctor [--key <API_KEY>] [--repair]
 | --- | --- |
 | `--key <API_KEY>` | Uses this key for an authorized MCP check. Also read from `LIFIC_API_KEY`. Without a key, `doctor` still checks that authentication is enforced and discovery is advertised. |
 | `--repair` | Applies pending database migrations while checking. Needs a readable configuration or an explicit `--db`. |
+
+On an instance upgraded from one that ran with project permissions switched off, the `project_access` check warns while anyone who lost access to a project in the [3.0 upgrade](/docs/upgrading#v30) still has no role in it, names them, and passes once every one is resolved. The text report names the first ten; with `--json`, the check's `entries` array lists every one. The check also runs on a database named with `--db` when the configuration could not be read.
 
 Without `--repair`, `doctor` does not change the database: it runs no migrations and writes no data, although SQLite may still touch its WAL and SHM files. If the configuration cannot be read, `doctor` reports that and skips the checks that depend on it rather than running them against defaults. Pass `--db <PATH>` to inspect a particular database anyway.

@@ -341,6 +341,36 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "upload tickets",
         include_str!("../../migrations/069_upload_tickets.sql"),
     ),
+    (
+        70,
+        "enforce project roles",
+        include_str!("../../migrations/070_enforce_project_roles.sql"),
+    ),
+    (
+        71,
+        "number high water",
+        include_str!("../../migrations/071_number_high_water.sql"),
+    ),
+    (
+        72,
+        "decision comments",
+        include_str!("../../migrations/072_decision_comments.sql"),
+    ),
+    (
+        73,
+        "op keys",
+        include_str!("../../migrations/073_op_keys.sql"),
+    ),
+    (
+        74,
+        "issue claims",
+        include_str!("../../migrations/074_issue_claims.sql"),
+    ),
+    (
+        75,
+        "project conventions",
+        include_str!("../../migrations/075_project_conventions.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page
@@ -374,7 +404,7 @@ const PAGE_AUDIT_DIFF_MIGRATION: i64 = 63;
 /// before its savepoint releases, and `run_inner` repeats the check
 /// batch-wide before commit to cover every other migration that ran while
 /// enforcement was off.
-const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50, 57];
+const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50, 57, 72];
 
 /// Highest migration version this binary knows how to apply. Used by
 /// `lific dump`/`restore` (LIF-266) to stamp and gate archives on schema
@@ -528,7 +558,7 @@ fn run_inner(conn: &Connection, fk_off: bool) -> Result<(), crate::error::LificE
             info!(version, name, "applying migration");
             let sp = format!("migrate_v{version}");
             crate::db::queries::savepoint(conn, &sp, || {
-                let triggers = if version == 50 {
+                let triggers = if matches!(version, 50 | 72) {
                     suspend_triggers(conn)?
                 } else {
                     Vec::new()
@@ -664,6 +694,100 @@ pub(crate) fn suspend_triggers(conn: &Connection) -> Result<Vec<String>, crate::
     Ok(triggers.into_iter().map(|(_, sql)| sql).collect())
 }
 
+/// Bring `conn` to the state a real instance is in just before migration
+/// `stop`: every earlier migration applied and stamped, as an older Lific left
+/// it. Upgrade tests build their fixtures on top of this.
+#[cfg(test)]
+pub(crate) fn apply_up_to(conn: &Connection, stop: i64) {
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    conn.execute_batch(
+        "CREATE TABLE _migrations (
+            version    INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .unwrap();
+    // A table-rebuild migration needs the same two connection pragmas the
+    // real runner sets around it (see `FK_REBUILD_MIGRATIONS`); without
+    // them the rebuild fails outright, so a fixture that stops past one
+    // has to reproduce them.
+    let rebuilds = FK_REBUILD_MIGRATIONS.iter().any(|version| *version < stop);
+    if rebuilds {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;",
+        )
+        .unwrap();
+    }
+    for &(version, name, sql) in MIGRATIONS {
+        if version >= stop {
+            break;
+        }
+        let triggers = if matches!(version, 50 | 72) {
+            suspend_triggers(conn).unwrap()
+        } else {
+            Vec::new()
+        };
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("migration {version} ({name}): {e}"));
+        for sql in triggers {
+            conn.execute_batch(&sql).unwrap();
+        }
+        if version == PAGE_AUDIT_DIFF_MIGRATION {
+            crate::db::page_audit::compact(conn, None, 0).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+            rusqlite::params![version, name],
+        )
+        .unwrap();
+    }
+    if rebuilds {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA legacy_alter_table = OFF;",
+        )
+        .unwrap();
+    }
+}
+
+/// The pre-3.0 shape migration 070 upgrades: two projects, a lead with no
+/// membership row, someone who wrote issues, a commenter, a connected
+/// tool whose work counts for its owner, an outsider, a deactivated user
+/// and an admin. `enforced` is the old `authz_enforced` value.
+#[cfg(test)]
+pub(crate) fn seed_pre_enforcement_instance(conn: &Connection, enforced: bool) {
+    conn.execute(
+        "INSERT INTO instance_settings (id, allow_signup, authz_enforced) VALUES (1, 0, ?1)",
+        [enforced],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO users (id, username, email, password_hash, display_name, is_admin, is_bot, owner_id, is_active)
+         VALUES (1, 'admin',     'admin@t.local',  'x', 'Admin',  1, 0, NULL, 1),
+                (2, 'lead',      'lead@t.local',   'x', 'Lead',   0, 0, NULL, 1),
+                (3, 'author',    'author@t.local', 'x', 'Author', 0, 0, NULL, 1),
+                (4, 'talker',    'talk@t.local',   'x', 'Talker', 0, 0, NULL, 1),
+                (5, 'owner',     'owner@t.local',  'x', 'Owner',  0, 0, NULL, 1),
+                (6, 'tool-owner','tool@t.local',   'x', 'Tool',   0, 1, 5,    1),
+                (7, 'outsider',  'out@t.local',    'x', 'Out',    0, 0, NULL, 1),
+                (8, 'gone',      'gone@t.local',   'x', 'Gone',   0, 0, NULL, 0),
+                (9, 'watcher',   'watch@t.local',  'x', 'Watch',  0, 0, NULL, 1);
+         INSERT INTO projects (id, name, identifier, lead_user_id)
+         VALUES (10, 'Legacy', 'LEG', 2), (11, 'Other', 'OTH', NULL);
+         INSERT INTO project_members (project_id, user_id, role) VALUES (10, 9, 'viewer');
+         INSERT INTO issues (id, project_id, sequence, title) VALUES (100, 10, 1, 'Old work');
+         INSERT INTO comments (issue_id, user_id, content) VALUES (100, 4, 'a remark');
+         INSERT INTO audit_log (actor_user_id, transport, entity_type, entity_id, project_id, action)
+         VALUES (3, 'web', 'issue', 100, 10, 'create'),
+                (6, 'mcp', 'page', 1, 10, 'create'),
+                (9, 'web', 'issue', 100, 10, 'update'),
+                (1, 'web', 'issue', 100, 11, 'create');",
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,57 +798,7 @@ mod tests {
     /// the only way to exercise an upgrade path's data handling.
     pub(super) fn migrated_up_to(stop: i64) -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute_batch(
-            "CREATE TABLE _migrations (
-                version    INTEGER PRIMARY KEY,
-                name       TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );",
-        )
-        .unwrap();
-        // A table-rebuild migration needs the same two connection pragmas the
-        // real runner sets around it (see `FK_REBUILD_MIGRATIONS`); without
-        // them the rebuild fails outright, so a fixture that stops past one
-        // has to reproduce them.
-        let rebuilds = FK_REBUILD_MIGRATIONS.iter().any(|version| *version < stop);
-        if rebuilds {
-            conn.execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 PRAGMA legacy_alter_table = ON;",
-            )
-            .unwrap();
-        }
-        for &(version, name, sql) in MIGRATIONS {
-            if version >= stop {
-                break;
-            }
-            let triggers = if version == 50 {
-                suspend_triggers(&conn).unwrap()
-            } else {
-                Vec::new()
-            };
-            conn.execute_batch(sql)
-                .unwrap_or_else(|e| panic!("migration {version} ({name}): {e}"));
-            for sql in triggers {
-                conn.execute_batch(&sql).unwrap();
-            }
-            if version == PAGE_AUDIT_DIFF_MIGRATION {
-                crate::db::page_audit::compact(&conn, None, 0).unwrap();
-            }
-            conn.execute(
-                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
-                rusqlite::params![version, name],
-            )
-            .unwrap();
-        }
-        if rebuilds {
-            conn.execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA legacy_alter_table = OFF;",
-            )
-            .unwrap();
-        }
+        super::apply_up_to(&conn, stop);
         conn
     }
 
@@ -735,6 +809,122 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run(&conn).expect("initial migration");
         conn
+    }
+
+    fn roles(conn: &Connection) -> Vec<(i64, i64, String)> {
+        let mut stmt = conn
+            .prepare("SELECT project_id, user_id, role FROM project_members ORDER BY 1, 2")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn losses(conn: &Connection) -> Vec<(i64, i64)> {
+        let mut stmt = conn
+            .prepare("SELECT user_id, project_id FROM authz_upgrade_losses ORDER BY 1, 2")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    #[test]
+    fn legacy_upgrade_seeds_roles_from_evidence_and_records_who_lost_access() {
+        let conn = migrated_up_to(70);
+        super::seed_pre_enforcement_instance(&conn, false);
+        run(&conn).unwrap();
+
+        assert!(!has_column(&conn, "instance_settings", "authz_enforced"));
+        let lead = |u: i64| (10, u, "lead".to_string());
+        let maintainer = |u: i64| (10, u, "maintainer".to_string());
+        assert_eq!(
+            roles(&conn),
+            vec![
+                lead(2),
+                maintainer(3),
+                maintainer(4),
+                // The tool's page counts for its owner; the tool needs no row.
+                maintainer(5),
+                // An explicit role someone chose is left alone.
+                (10, 9, "viewer".to_string()),
+            ]
+        );
+        // The outsider loses both projects; everyone else loses the project
+        // they never wrote in. Admins, tools and deactivated users are absent.
+        assert_eq!(
+            losses(&conn),
+            vec![
+                (2, 11),
+                (3, 11),
+                (4, 11),
+                (5, 11),
+                (7, 10),
+                (7, 11),
+                (9, 11)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_upgrade_of_a_lead_with_a_lesser_row_makes_them_lead() {
+        let conn = migrated_up_to(70);
+        super::seed_pre_enforcement_instance(&conn, false);
+        conn.execute(
+            "INSERT INTO project_members (project_id, user_id, role) VALUES (10, 2, 'viewer')",
+            [],
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        assert!(roles(&conn).contains(&(10, 2, "lead".to_string())));
+    }
+
+    #[test]
+    fn an_instance_that_already_enforced_roles_upgrades_untouched() {
+        let conn = migrated_up_to(70);
+        super::seed_pre_enforcement_instance(&conn, true);
+        run(&conn).unwrap();
+
+        assert!(!has_column(&conn, "instance_settings", "authz_enforced"));
+        assert_eq!(roles(&conn), vec![(10, 9, "viewer".to_string())]);
+        assert!(losses(&conn).is_empty());
+    }
+
+    #[test]
+    fn number_high_water_upgrade_seeds_tombstones_aliases_and_each_scope() {
+        let conn = migrated_up_to(71);
+        conn.execute_batch(
+            "INSERT INTO projects(id, name, identifier) VALUES (1, 'One', 'ONE'), (2, 'Empty', 'EMPTY');
+             INSERT INTO issues(id, project_id, sequence, title) VALUES (1, 1, 3, 'Last issue');
+             INSERT INTO issue_aliases(project_id, sequence, issue_id, seq) VALUES (1, 8, 1, 1);
+             INSERT INTO pages(project_id, sequence, title) VALUES (1, 5, 'Last page'), (NULL, 7, 'Workspace');
+             INSERT INTO plans(project_id, sequence, title) VALUES (1, 6, 'Last plan');
+             UPDATE issues SET deleted_at = '2000-01-01';
+             UPDATE pages SET deleted_at = '2000-01-01';",
+        ).unwrap();
+        run(&conn).unwrap();
+        crate::db::queries::trash::purge_tombstones(&conn, 30).unwrap();
+        conn.execute("DELETE FROM plans", []).unwrap();
+        use crate::db::queries::number_sequences::{Entity, next};
+        assert_eq!(next(&conn, Some(1), Entity::Issue).unwrap(), 9);
+        assert_eq!(next(&conn, Some(1), Entity::Page).unwrap(), 6);
+        assert_eq!(next(&conn, Some(1), Entity::Plan).unwrap(), 7);
+        assert_eq!(next(&conn, None, Entity::Page).unwrap(), 8);
+        assert_eq!(next(&conn, Some(2), Entity::Issue).unwrap(), 1);
+        run(&conn).unwrap();
+        assert_eq!(next(&conn, Some(1), Entity::Issue).unwrap(), 10);
     }
 
     #[test]
@@ -939,6 +1129,70 @@ mod tests {
             )
             .is_err(),
             "the CHECK constraint must reject an unknown kind"
+        );
+    }
+
+    #[test]
+    fn decision_migration_preserves_history_mentions_search_and_sync() {
+        let conn = migrated_up_to(72);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES(1,'owner','owner@test','hash');
+             INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO comments(id,issue_id,user_id,content,kind) VALUES
+               (1,1,1,'Existing searchable decision','comment'),
+               (2,1,1,'Tests pass','verification');
+             INSERT INTO comment_mentions(comment_id,user_id) VALUES(1,1);
+             INSERT INTO comments(id,issue_id,user_id,content) VALUES(90,1,1,'Gone');
+             DELETE FROM comments WHERE id=90;",
+        ).unwrap();
+        let seq = count(&conn, "SELECT seq FROM comments WHERE id=1");
+        let audit = count(&conn, "SELECT count(*) FROM audit_log");
+        // Later migrations add triggers of their own, so check that every
+        // trigger the rebuild suspended came back rather than the total.
+        let trigger_names = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let triggers = trigger_names(&conn);
+        run(&conn).unwrap();
+        assert_eq!(count(&conn, "SELECT seq FROM comments WHERE id=1"), seq);
+        assert_eq!(count(&conn, "SELECT count(*) FROM audit_log"), audit);
+        assert_eq!(count(&conn, "SELECT count(*) FROM comment_mentions"), 1);
+        let after = trigger_names(&conn);
+        let missing: Vec<_> = triggers.iter().filter(|t| !after.contains(t)).collect();
+        assert!(missing.is_empty(), "triggers lost: {missing:?}");
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM comments WHERE kind='verification'"
+            ),
+            1
+        );
+        conn.execute(
+            "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'Chosen','decision')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 91);
+        assert!(count(&conn, "SELECT seq FROM comments WHERE id=91") > seq);
+        assert!(count(&conn, "SELECT count(*) FROM audit_log") > audit);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM search_index WHERE entity_type='comment' AND body='Chosen'"
+            ),
+            1
+        );
+        assert_eq!(count(&conn, "PRAGMA foreign_keys"), 1);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM pragma_foreign_key_check"),
+            0
         );
     }
 

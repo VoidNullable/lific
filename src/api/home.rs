@@ -50,7 +50,7 @@ pub(super) async fn home_overview(
                 user_id,
                 since: q.since.as_deref(),
                 tz_minutes: q.tz.unwrap_or(0),
-                now: chrono::Utc::now().naive_utc(),
+                now: crate::db::queries::claims::now(),
             },
         )
     })

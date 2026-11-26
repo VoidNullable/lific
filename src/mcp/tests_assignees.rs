@@ -24,7 +24,7 @@ struct Setup {
 }
 
 /// The shared membership fixture (project MEM with lead, maintainer and
-/// viewer; enforcement on) plus a bot owned by the maintainer.
+/// viewer) plus a bot owned by the maintainer.
 fn setup() -> Setup {
     let (db, _admin, _lead, maintainer, _viewer, _outsider, _project_id) =
         crate::api::test_helpers::setup_membership_test();

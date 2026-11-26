@@ -196,10 +196,13 @@ async fn wait_routes_are_gated_viewer_to_read_and_maintainer_to_write() {
 async fn the_clock_reports_the_servers_day_and_utc_offset() {
     let app = test_app();
     let _day = crate::db::queries::waits::pin_today("2026-09-26");
+    let _now = crate::db::queries::claims::pin_now("2026-09-26 12:00:00");
     let resp = json_get(&app, "/api/clock").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let clock = parse_json(resp).await;
     assert_eq!(clock["today"], "2026-09-26");
+    // LIF-525: the instant, for claim expiry in the web client.
+    assert_eq!(clock["now_ms"], 1_790_424_000_000_i64);
     assert_eq!(
         clock["utc_offset_minutes"],
         chrono::Local::now().offset().local_minus_utc() / 60
@@ -207,7 +210,9 @@ async fn the_clock_reports_the_servers_day_and_utc_offset() {
 }
 
 #[tokio::test]
-async fn the_clock_needs_a_signed_in_caller() {
+async fn the_clock_answers_an_anonymous_reader() {
+    // LIF-583: it carries no project data, and a reader of a published
+    // project needs it to show waits as a member sees them.
     let (db, ..) = setup_membership_test();
     let anonymous = with_client_ip_test_layers(
         crate::api::router(db, &[]).layer(axum::Extension(
@@ -217,6 +222,6 @@ async fn the_clock_needs_a_signed_in_caller() {
     );
     assert_eq!(
         json_get(&anonymous, "/api/clock").await.status(),
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
 }

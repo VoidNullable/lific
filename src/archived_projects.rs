@@ -99,7 +99,7 @@ const AUTHORED: &[(&str, &str, bool)] = &[
 pub struct Archived {
     pub record: ArchivedProject,
     pub project_id: i64,
-    pub audience: Option<Vec<i64>>,
+    pub audience: Vec<i64>,
 }
 
 /// The result of unarchiving.

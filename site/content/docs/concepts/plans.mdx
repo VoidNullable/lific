@@ -20,6 +20,8 @@ Plans are where hierarchy lives in Lific. Issues stay flat, with no sub-issues. 
 
 Plan lists show how many steps each plan has and how many are done.
 
+Plan numbers only increase within their project. Deleting a plan never frees its number for another plan.
+
 ## Steps
 
 Each step has a title, an optional Markdown description, a done state, and optionally one issue it mirrors. A step can have child steps, to any depth.
@@ -77,7 +79,7 @@ When an issue a step mirrors is deleted, it goes to the trash and the link stays
 
 Reading a plan takes `viewer` on its project. Creating, editing and deleting plans and steps takes `maintainer`. When a step or anchor points at an issue in another project, attaching that issue, or checking off a step that would close it, also takes `maintainer` on the issue's project.
 
-Plans are private to the project's members. [Publishing a project](/docs/public-projects) does not expose its plans.
+Plans are readable by the project's members, and by everyone once the project is [published](/docs/public-projects). A step linked to an issue in a project the reader cannot see shows no identifier or status for it.
 
 ## Deleting a plan
 

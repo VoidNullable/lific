@@ -1,9 +1,8 @@
 //! Archived projects over HTTP. See [`crate::archived_projects`].
 //!
 //! Archiving is gated exactly like deleting the project, because to everyone
-//! but an instance admin it is a deletion: Lead with enforcement on, instance
-//! admin with it off. Listing and unarchiving need an instance admin in both
-//! modes, because unarchiving creates a project and grants a lead membership,
+//! but an instance admin it is a deletion: Lead. Listing and unarchiving need
+//! an instance admin, because unarchiving creates a project and grants a lead membership,
 //! the same reason importing a project archive does. Every gate is re-run on
 //! state read inside the writer transaction that acts on it.
 
@@ -81,10 +80,7 @@ pub(super) async fn archive_project(
     let event = RealtimeEvent::ProjectDeleted {
         project_id: archived.project_id,
     };
-    match archived.audience {
-        Some(user_ids) => realtime.send_to_users(event, user_ids),
-        None => realtime.send(event),
-    }
+    realtime.send_to_users(event, archived.audience);
     Ok((StatusCode::CREATED, Json(archived.record)).into_response())
 }
 

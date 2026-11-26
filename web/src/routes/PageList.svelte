@@ -59,6 +59,8 @@
   import { loadSubTab, saveSubTab } from "../lib/subtab";
   import { toast } from "../lib/toast/toast.svelte";
   import { safeLabelColor } from "../lib/labelColors";
+  import ConventionsSection from "../lib/pages/ConventionsSection.svelte";
+  import { conventionsState } from "../lib/pages/conventions";
 
   // LIF-234: pages are content — create/edit/delete + folder management are
   // maintainer-gated. A viewer browses the tree read-only.
@@ -240,10 +242,18 @@
   // Default to hiding archived pages.
   let filterStatus = $state(HIDE_ARCHIVED);
 
+  // LIF-524: the conventions page gets its own block above the Browse tree,
+  // so the tree, the pinned cards and the overview leave it out. Search and
+  // the flat tabs still list it with every other page.
+  let conventions = $derived(conventionsState(pages));
+  let treePages = $derived(
+    conventions.kind === "none" ? pages : pages.filter((p) => p.id !== conventions.page.id),
+  );
+
   // Browse filters are applied locally so the same complete collection can
   // also power the zero-config LIF-305 flat tabs.
   let visiblePages = $derived(
-    pages.filter((p) => {
+    treePages.filter((p) => {
       if (filterLabel && !p.labels.includes(filterLabel)) return false;
       if (filterStatus === HIDE_ARCHIVED) return p.status !== "archived";
       return !filterStatus || p.status === filterStatus;
@@ -890,7 +900,7 @@
     <div class="order-3 ml-auto flex items-center gap-1.5 shrink-0">
       <!-- LIF-231: overview/folder-navigator toggle (below lg, where the
            sidebar is off-canvas). -->
-      {#if !loading && !error && (pages.length > 0 || folders.length > 0)}
+      {#if !loading && !error && (treePages.length > 0 || folders.length > 0)}
         <Tooltip content="Overview & folders" placement="bottom">
           <button
             class="lg:hidden size-9 sm:size-7 flex items-center justify-center rounded-md
@@ -1147,7 +1157,12 @@
       <div class="px-6 py-4">
         {@render flatPageList(archivedPages, "No archived pages")}
       </div>
-    {:else if pages.length === 0 && folders.length === 0 && !createTarget}
+    {:else if treePages.length === 0 && folders.length === 0 && !createTarget}
+      {#if project}
+        <div class="px-6 pt-4">
+          {@render conventionsBlock(project.id)}
+        </div>
+      {/if}
       <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[460px] mx-auto text-center">
         <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} />
         <div class="flex flex-col items-center gap-1.5">
@@ -1275,6 +1290,10 @@
           </div>
         {/if}
 
+        {#if project && focusedFolderId === null}
+          {@render conventionsBlock(project.id)}
+        {/if}
+
         <!-- LIF-183: Pinned section. Surfaced above the tree so key docs are
              one glance away regardless of which folder they live in. Hidden
              while focused on a single folder to keep that view clean. -->
@@ -1359,7 +1378,7 @@
   <!-- LIF-185: right sidebar — project page overview + folder navigator.
        Fills the empty right space and lets you focus a single folder.
        LIF-231: off-canvas drawer below lg, docked at lg+. -->
-   {#if activeSubTab === "browse" && !loading && !error && (pages.length > 0 || folders.length > 0)}
+   {#if activeSubTab === "browse" && !loading && !error && (treePages.length > 0 || folders.length > 0)}
     {#if overviewOpen}
       <button
         class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
@@ -1528,6 +1547,16 @@
     </div>
   </div>
 {/if}
+
+{#snippet conventionsBlock(projectId: number)}
+  <ConventionsSection
+    state={conventions}
+    {projectId}
+    {projectIdentifier}
+    {canEdit}
+    {navigate}
+  />
+{/snippet}
 
 {#snippet flatPageList(pageList: PageRow[], emptyTitle: string, emptyDescription: string = "")}
   {#if pageList.length === 0}

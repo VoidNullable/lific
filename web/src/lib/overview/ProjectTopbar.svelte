@@ -3,6 +3,7 @@
   // are, a switch between the two, and the page's own actions on the right.
   import { LayoutDashboard, Settings2 } from "lucide-svelte";
   import { navLink } from "../navLink";
+  import { isSignedOut } from "../signedOut";
 
   let {
     identifier,
@@ -16,10 +17,13 @@
     actions?: import("svelte").Snippet;
   } = $props();
 
-  const TABS = [
-    ["overview", "Overview", LayoutDashboard],
-    ["settings", "Settings", Settings2],
-  ] as const;
+  // LIF-583: settings need an account, so a signed-out reader gets no switch.
+  const TABS = isSignedOut()
+    ? []
+    : ([
+        ["overview", "Overview", LayoutDashboard],
+        ["settings", "Settings", Settings2],
+      ] as const);
 </script>
 
 <div class="flex items-center gap-2 md:gap-4 px-3 md:px-6 h-12 md:h-[3.25rem] w-full">
@@ -37,6 +41,7 @@
     </h1>
   </div>
 
+  {#if TABS.length > 0}
   <nav
     aria-label="Project overview and settings"
     class="flex items-center gap-0.5 p-[3px] rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
@@ -57,6 +62,7 @@
       </a>
     {/each}
   </nav>
+  {/if}
 
   <div class="flex-1"></div>
 

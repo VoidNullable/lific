@@ -16,10 +16,12 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::queries::changes::{clamp_changes_limit, get_index, list_changes};
+use crate::db::queries::changes::{
+    clamp_changes_limit, get_index, get_project_index, list_changes,
+};
 use crate::db::{
     DbPool,
-    models::{ChangesPage, IndexSnapshot, Role},
+    models::{ChangesPage, IndexSnapshot},
 };
 use crate::error::LificError;
 
@@ -42,7 +44,7 @@ pub(super) async fn project_changes(
     Path(id): Path<i64>,
     Query(q): Query<ChangesQuery>,
 ) -> Result<Json<ChangesPage>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     let limit = clamp_changes_limit(q.limit);
     let since = q.since.unwrap_or(0);
     with_read(&db, |conn| list_changes(conn, id, since, limit)).map(Json)
@@ -54,7 +56,17 @@ pub(super) async fn project_index(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<IndexSnapshot>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
+    // An anonymous reader gets the project's own watermark rather than the
+    // instance-wide counter, so polling a published project cannot be used to
+    // watch how often private projects are written to.
+    if identity.is_none() {
+        return with_read(&db, |conn| {
+            let tx = conn.unchecked_transaction()?;
+            get_project_index(&tx, id)
+        })
+        .map(Json);
+    }
     with_read(&db, |conn| get_index(conn, id)).map(Json)
 }
 
@@ -105,9 +117,12 @@ mod tests {
         assert!(issues[0].get("description").is_none());
 
         let pages = body["pages"].as_array().unwrap();
-        assert_eq!(pages.len(), 1);
+        assert_eq!(pages.len(), 2);
         assert_eq!(pages[0]["identifier"], "TST-DOC-1");
-        assert!(pages[0].get("content").is_none());
+        assert_eq!(pages[0]["conventions"], true);
+        assert_eq!(pages[1]["identifier"], "TST-DOC-2");
+        assert_eq!(pages[1]["conventions"], false);
+        assert!(pages[1].get("content").is_none());
 
         let cursor = body["cursor"].as_i64().unwrap();
         assert!(
@@ -235,11 +250,11 @@ mod tests {
             first["changes"][1]["seq"].as_i64().unwrap()
         );
 
-        let mut ids: Vec<i64> = first["changes"]
+        let mut ids: Vec<String> = first["changes"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|c| c["id"].as_i64().unwrap())
+            .map(|c| format!("{}:{}", c["kind"], c["id"]))
             .collect();
         let mut cursor = first["cursor"].as_i64().unwrap();
         loop {
@@ -256,7 +271,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|c| c["id"].as_i64().unwrap()),
+                    .map(|c| format!("{}:{}", c["kind"], c["id"])),
             );
             cursor = next["cursor"].as_i64().unwrap();
             if !next["has_more"].as_bool().unwrap() {
@@ -264,11 +279,12 @@ mod tests {
             }
         }
 
-        assert_eq!(ids.len(), 5, "every issue arrived exactly once");
+        // Five issues and the conventions page the project starts with.
+        assert_eq!(ids.len(), 6, "every row arrived exactly once");
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), 5);
+        assert_eq!(unique.len(), 6);
     }
 
     /// An oversized `limit` must not let a caller dump the instance in one
@@ -290,7 +306,8 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK, "{uri}");
             let body = parse_json(resp).await;
             let count = body["changes"].as_array().unwrap().len();
-            assert!(count <= 3, "{uri} returned {count}");
+            // Three issues plus the project's conventions page.
+            assert!(count <= 4, "{uri} returned {count}");
         }
 
         // `limit=-1` must floor at 1 rather than becoming SQLite's "no limit".

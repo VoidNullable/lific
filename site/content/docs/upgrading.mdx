@@ -1,9 +1,9 @@
 ---
-title: Upgrade from 2.0 through 2.10
-description: Back up a Lific 2.x instance, read the notes for each newer version, replace the binary, and check the result, with release notes from 2.10 back to 2.1.
+title: Upgrade from 2.0 through 3.0
+description: Back up a Lific instance, read the notes for each newer version, replace the binary, and check the result.
 ---
 
-This guide covers upgrading an existing installation of Lific 2.0 or later to 2.10. You can go straight to the newest version: the new binary applies every pending database migration when it starts, so you do not need to install the versions in between. Upgrading from before 2.0 is not covered here.
+This guide covers upgrading an existing installation of Lific 2.0 or later to 3.0. You can go straight to the newest version: the new binary applies every pending database migration when it starts, so you do not need to install the versions in between. Upgrading from before 2.0 is not covered here.
 
 ## Upgrade procedure
 
@@ -32,6 +32,7 @@ Read each section under [Release notes](#release-notes) for versions newer than 
 | `lific login` on other machines | Before a server moves to [v2.8](#v28) or later, upgrade those CLIs first. |
 | Multi-instance MCP | From [v2.9](#v29), every backend must have identical tool definitions. Upgrade them together before restarting the proxy. |
 | Agents running `lific mcp` over stdio | From [v2.11](#v211), stop every process that opens the database, agent sessions included, and upgrade them all together. |
+| Project permissions switched off | From [v3.0](#v30), project roles are always enforced. Roles are seeded from what people did, and anyone left out is reported. |
 
 `lific doctor` reports pending migrations without applying them. `lific doctor --repair` does apply them, so only run it after taking the backup.
 
@@ -47,7 +48,7 @@ Migrations run on this first start.
 
 1. Run `lific --version` using the executable the service actually runs, not another copy on your `PATH`.
 2. Run `lific doctor` and fix any configuration, database, backup, server, OAuth or MCP failure before letting users back in.
-3. Run `lific instance info` and confirm the database, public URL, sign-up policy and `authz_enforced` state are what you expect.
+3. Run `lific instance info` and confirm the database, public URL and sign-up policy are what you expect. On 3.0 or later, `lific doctor` also warns while anyone the [project roles upgrade](#project-roles-are-always-enforced) left without access is still waiting for a role.
 4. Review keys and memberships:
 
    ```shell
@@ -59,14 +60,79 @@ Migrations run on this first start.
 5. Sign in to the web UI and open a representative project. Check issues, pages, plans, comments, attachments and saved views before making changes.
 6. Test one API client and one MCP client. Refresh MCP tool discovery. With multi-instance MCP, confirm every backend passed discovery and check `list_instances` before writing. Restart any device login started before the upgrade.
 7. If you use a proxy, confirm the server logs real client addresses and does not trust forwarded headers from anywhere else.
-8. Confirm existing projects are still private. If you publish one, open its public address while signed out and check that ordinary routes still require sign-in.
+8. Confirm which projects are published, and that the rest are still private. Open a link into a published project while signed out, and check that an unpublished project's link still asks you to sign in.
 9. Keep the backup until the web UI, API, MCP, scheduled backups and a service restart have all been checked.
 
 ## Release notes
 
 Newest first. Each section lists what changed for someone upgrading past that version.
 
-### 3.0
+### v3.0
+
+#### Project roles are always enforced
+
+Lific 3.0 removes the `authz_enforced` setting. Every instance checks project roles on every REST and MCP call, reads included. A user who is not a member of a project gets `403` on it, and the project is left out of their lists, search and cross-project reads. Administrators, and API keys created at the server's shell that are not bound to a user, still pass every check.
+
+An instance that already enforced roles upgrades unchanged. That covers every instance created with 2.1 or later, and any instance where an administrator turned the setting on. Run `lific instance info` on the old version first if you are not sure which kind you have.
+
+An instance that still had the setting off used to let anyone who could sign in read and write every project. So that people keep the access they actually used, migration 070 gives out roles from evidence on the first start of 3.0:
+
+- A project's primary lead gets `lead`, even if an existing membership gave them less.
+- Anyone who wrote in a project gets `maintainer`. Writing means creating or changing an issue, page, comment, plan or plan step there, as recorded in the [activity log](/docs/concepts/comments-and-activity#activity-log), or having authored a comment there. Work done by a connected tool counts for the person who owns it.
+- Existing memberships stay as they are. Administrators need no membership and get none, except that an administrator who is a project's primary lead gets a `lead` membership there like any other lead.
+- Everyone else gets no role. Someone who only ever read a project loses access to it.
+
+The activity log is the evidence, so if you set `[backup] audit_retention_days`, work older than that was already pruned and does not count.
+
+The server lists everyone who lost access in its log once, on that first start: every active account, and every connected tool without an owner, that could reach a project before and holds no role in it now, with the projects they lost. `lific doctor` shows the same list as a `project_access` warning until each entry is resolved, which happens when the user gets any role in the project, becomes an administrator, or is deactivated. To give someone their access back:
+
+```shell
+lific member add --project <PROJECT> --user <name> --role maintainer
+```
+
+Use `--role viewer` for read-only access, or `--all` in place of `--project` to add the user to every project. A project's lead can do the same from the project's Members settings.
+
+Other changes that come with it:
+
+- `PATCH /api/instance/settings` with `"authz_enforced": false` returns `400` and changes nothing. `true` is accepted and ignored. `GET /api/instance/settings` no longer returns the field, and `GET /api/projects/{id}/my-role` no longer returns `enforced`.
+- `lific instance set --authz-enforced` is gone, so a script that passes it fails. The web UI's instance settings no longer have a **Project permissions** switch.
+- The rules that only applied with the setting off are gone too. A project's lead can delete or archive it, `maintainer` can change modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only match people who can see the project.
+
+Going back to 2.11 means restoring the backup you took before upgrading: 2.11 refuses a database that 3.0 has migrated.
+
+#### Replace credential-in-path MCP connections
+
+The `/mcp/<token>` endpoint has been removed and returns `404`. Credentials in URLs can appear in proxy logs and browser or shell history.
+
+The `mcp_path_token` and `mcp_path_user` settings in `[server]` are accepted but ignored, so an existing configuration can still start. Startup and `lific doctor` warn for each present key that it no longer has any effect and should be removed. Remove these keys from `lific.toml`; other unknown settings still fail validation.
+
+Change each affected client's URL to `https://your-server.example/mcp` and choose one replacement:
+
+- Send `Authorization: Bearer <API_KEY>` in the request headers. Create a key with `lific key create --name <NAME>` or reconnect with `lific connect --client <CLIENT> --url https://your-server.example/mcp --yes`.
+- Use the client's OAuth login with that same `/mcp` URL. For clients supported by the command, run `lific connect --oauth --client <CLIENT> --url https://your-server.example/mcp --yes`.
+
+The old `mcp_path_token` was a separate server secret, not an API key. Copying it into an Authorization header will not make it work. If the old URL instead contained a valid API key, that key can be sent in the header.
+
+Run `lific doctor` to find old URLs in supported clients' global and current-project configuration files, then restart the affected clients. The check reports the file to edit without printing the secret. Inspect any files doctor could not read or parse manually.
+
+#### Project archive number counters
+
+Project archives now use format 3 to preserve issue, page and plan numbers after permanent deletion. Upgrade the destination to Lific 3.0 before importing an archive exported by 3.0. Existing format 1 and 2 archives still import.
+
+The database migration seeds number counters from existing rows, including trashed items and moved-issue aliases. Numbers already purged before the upgrade, or absent from an older archive, cannot be recovered.
+
+#### Published projects are read at their normal links
+
+A published project is no longer served on a separate, reduced view. Everyone can read it at its ordinary links and through the ordinary API: visitors with no account, every signed-in account on the instance, and every API key and MCP connection. Changing anything still needs a role in the project. See [Public projects](/docs/public-projects).
+
+- **More becomes readable.** Plans and their steps, activity and edit history, insights, assignees, waits with their notes, comment authors' usernames and live updates are now readable in a published project. Before upgrading an instance with a published project, review its plans, history and waits, or unpublish it until you have.
+- **Every account and key can read published projects.** An account or API key with no role in a published project now reads it, sees it in its project list and sidebar, and gets `403` when it tries to change it. Email addresses, keys, tokens, member lists and settings stay private, and so do the membership and repository-binding entries in a project's activity. Activity also stops showing any reader rows recorded by a project they cannot read, and shows "a private issue" for an issue identifier in such a project.
+- **`/public/api` is gone.** Every route under `/public/api/projects/{project}` now answers `404`. Clients use the ordinary routes with no credential instead, for example `GET /api/issues/resolve/APP-12`. [Reading without a credential](/docs/rest-api/public) lists them. The per-address limit rises from 240 to 600 reads a minute, because a signed-out reader now loads the full app; the other anonymous limits are unchanged: 4 requests in progress, 4 downloads, and 1 thumbnail or preview at a time.
+- **Old public links redirect.** `/public/APP/...` answers `301` to `/APP/...`, so a shared `/public/APP/issues/APP-1` opens `/APP/issues/APP-1`. `/public/APP` opens the issue list.
+- **The signed-out home page changes.** With auth required, opening `/` while signed out shows the only published project, a list when there are several, and the sign-in page when there are none.
+- **Rate limits and caching.** Only requests with no credential count against the anonymous limits. Responses to them are never cached (`Cache-Control: no-store`). If a proxy or CDN in front of Lific special-cased `/public/`, apply the same rules to requests that carry neither an `Authorization: Bearer` header nor a `lific_token` session cookie instead. A request whose `lific_token` cookie has expired is also read anonymously, so a proxy that cannot check the cookie should still not cache a response to a request that carries one.
+
+No migration is involved: publication stays a per-project setting, and upgrading publishes nothing.
 
 #### The web UI signs in with an HttpOnly cookie only
 
@@ -367,17 +433,9 @@ The largest upgrade since 2.0. Three things need an operator decision before you
 - `--config` is honored by `init` and service installation, and configuration/database discovery follows standard OS directories.
 - Private instances may set `[auth] required = false`; this is a shell-controlled operator setting and must remain local or firewalled.
 
-## Authorization rollout
+## Authorization
 
-An existing 2.0 instance keeps its persisted authorization setting during the upgrade. Inspect it before changing anything. With enforcement on, viewers can read and comment, maintainers can mutate project content and structure, and leads manage settings, membership, and deletion. Cross-project relations and plan-step links require the appropriate role in every project involved.
-
-To change the setting deliberately:
-
-```shell
-lific instance set --authz-enforced true
-```
-
-Before enabling it, ensure every human and bot that needs access has a project membership, and keep an operator-trusted key available for recovery. To roll back the setting on a private instance, use `--authz-enforced false` and then investigate the missing membership or role rather than distributing a broader key.
+Viewers can read and comment, maintainers can change project content and structure, and leads manage settings, membership and deletion. Cross-project relations and plan-step links require the role in every project involved. From 3.0 this is always enforced; [v3.0](#v30) explains how an instance that had it switched off is upgraded. Keep an operator-trusted key available for recovery rather than handing out a broader key when someone is missing a membership.
 
 For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe anywhere others can reach it. Startup requires a loopback bind and an absent, empty, loopback, or private-network `public_url`. Treat both settings as operator changes that require shell access and a verification step.
 

@@ -7,7 +7,7 @@ Every Lific server answers JSON over HTTP on the same address as its web UI. The
 
 ## Call it
 
-Paths in this reference are complete: they already start with `/api`, `/public/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
+Paths in this reference are complete: they already start with `/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
 
 Create an API key under **Settings → API keys** in the web UI, or with `lific key create --user <you>` on the server, then send it as a bearer token:
 
@@ -42,7 +42,7 @@ The session lives in an HttpOnly, `SameSite=Lax` cookie named `lific_token`, whi
 
 A request the cookie authenticates that can change something (any method but `GET`, `HEAD` and `OPTIONS`) must also carry an `Origin` header naming this server: the address the request was sent to, the origin of `public_url`, or an entry in `cors_origins`. A missing Origin, `null`, or any other origin gets `403 cross-origin request refused`, and nothing is written. An empty `cors_origins` does not widen this. Requests authenticated by a `Bearer` header skip the check, since a page on another site cannot make a browser attach one.
 
-These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [public read API](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
+These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [reads of published projects](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
 
 Two cases act as the instance's first administrator:
 
@@ -81,17 +81,9 @@ A role is held on one project. Each role includes everything below it. The [proj
 
 A connected tool or OAuth client acts with the access of the person who owns it and never more. An operation that touches two projects, such as linking issues across them, needs the role in both.
 
-Each endpoint in this reference names the minimum role it checks. That is the rule when the instance setting `authz_enforced` is on, which is the default for new installs. With it on, a caller without the role gets `403`, and a project they cannot read is simply missing from lists, search and cross-project reads rather than appearing as an error.
+Each endpoint in this reference names the minimum role it checks. A caller without the role gets `403`, and a project they cannot read is simply missing from lists, search and cross-project reads rather than appearing as an error. Workspace pages (pages with no project) are administrator-only, for reads as well as writes.
 
-With `authz_enforced` off, which is how an instance upgraded from a version before project membership starts:
-
-- Endpoints that need `viewer` or `maintainer` accept any authenticated caller.
-- Endpoints that need `lead` accept the project's primary lead, any `lead` member or an administrator. A project with no lead can only be changed by an administrator.
-- Module, label and folder changes need `lead` instead of `maintainer`.
-- Deleting a project needs an administrator.
-- Workspace pages (pages with no project) are open to every caller. With enforcement on they are administrator-only, for reads as well as writes.
-
-`GET /api/projects/{id}/my-role` tells a client which role it holds and whether enforcement is on.
+`GET /api/projects/{id}/my-role` tells a client which role it holds.
 
 ## Requests
 
@@ -121,6 +113,19 @@ By default the last write wins. To avoid overwriting somebody else's change, sen
 
 `current` has the same shape as the `GET` response, so a client can merge and retry without another request.
 
+## Retrying a create with `Idempotency-Key`
+
+When a create times out, a client cannot tell whether it was written. Send an `Idempotency-Key` header with any unique string (at most 255 bytes) on `POST /api/issues`, `POST /api/issues/{issue_id}/comments`, `POST /api/pages/{page_id}/comments`, `POST /api/pages` and `POST /api/plans`, and repeat the same key when you retry:
+
+- The same key and the same body return the body the first call returned, with the header `Idempotent-Replayed: true`. Nothing new is written.
+- The same key with a different body, or on a different route, is refused with `409` and writes nothing.
+- A call that failed records no key, so a corrected retry with the same key goes through.
+- A replay needs the same permission a new create would. A caller who lost access since gets that refusal, not the stored body.
+- A retry sent while the first call is still writing waits for it and gets the replay.
+- A response body over 1 MiB is not kept. Its key still blocks a second write: the retry gets `409` with `Idempotent-Replayed: true`, and should read the record directly.
+
+The key is recorded in the same transaction as the write, so it exists exactly when the write committed. Keys belong to the user who sent them and are kept for 24 hours; after that the same key starts a new write. A server that honors the header lists `idempotency-key` in the `capabilities` of [`GET /api/instance`](/docs/rest-api/identity); an older one ignores it, so resending a lost create to it can write twice. The CLI's HTTP backend sends a key on every create and, against a server that lists the capability, retries once after a lost connection.
+
 ## Errors
 
 Handlers answer failures with a JSON object carrying one `error` string, and a status that says what kind of failure it was:
@@ -136,12 +141,12 @@ Handlers answer failures with a JSON object carrying one `error` string, and a s
 | `403` | Authenticated but not allowed, including `recent authentication required`. The refusal of an OAuth token on an account route is plain text. |
 | `404` | The record does not exist, is in the trash, or is hidden from you in a way that must not reveal that it exists. |
 | `405` | The path exists but not with that method. |
-| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, or an `expected_seq` mismatch (see above). |
+| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, an `expected_seq` mismatch, or an `Idempotency-Key` reused for a different request (see above). |
 | `413` | The request or its result is larger than Lific accepts. The message names the limit. |
 | `415`, `422` | The body is not JSON, or does not have the expected shape. These come from the request parser as plain text. |
-| `429` | A shared slot is taken: exports, project archives, the public read API's rate limit. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
+| `429` | A shared slot is taken: exports, project archives, the rate limit on requests with no credential. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
 | `500` | Something broke on the server. The body says only `internal server error`; the detail is in the server log. |
-| `503` | Temporarily unable, and the same request will work shortly. Carries `Retry-After: 2`. Seen when a backup or restore holds the attachment store, when the public read API is busy, and when a trusted proxy's client-identity headers do not verify. |
+| `503` | Temporarily unable, and the same request will work shortly. Carries `Retry-After: 2`. Seen when a backup or restore holds the attachment store, when too many requests with no credential are in progress, and when a trusted proxy's client-identity headers do not verify. |
 
 The OAuth endpoints follow the OAuth specifications instead: `{"error": "invalid_grant", "error_description": "..."}`, where `error` is a machine-readable code and `error_description` is optional. The consent pages under `/oauth` are HTML for a person, not JSON.
 
@@ -213,11 +218,11 @@ These records appear across many endpoints. Other shapes are described with the 
 
 ### Page
 
-`id`, `project_id` (null for a workspace page), `sequence`, `identifier` (`APP-DOC-1`, or `DOC-1` for a workspace page), `folder_id`, `title`, `content` (Markdown), `sort_order`, `status` (`draft`, `active`, `complete` or `archived`), `pinned`, `created_at`, `updated_at`, `seq` and `labels`. Workspace pages have no labels.
+`id`, `project_id` (null for a workspace page), `sequence`, `identifier` (`APP-DOC-1`, or `DOC-1` for a workspace page), `folder_id`, `title`, `content` (Markdown), `sort_order`, `status` (`draft`, `active`, `complete` or `archived`), `pinned`, `conventions` (whether it is its project's [conventions page](/docs/concepts/pages#conventions-page)), `conventions_enabled` (whether that page is turned on), `created_at`, `updated_at`, `seq` and `labels`. Workspace pages have no labels.
 
 ### Comment
 
-`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at`, `seq` and `kind`. `kind` is `comment`, or `verification` for the evidence an agent recorded while closing an issue through MCP `update_issue`. A verification comment otherwise behaves like any other: its author can edit or delete it.
+`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at`, `seq` and `kind`. `kind` is `comment`, `decision`, or `verification` for the evidence an agent recorded while closing an issue through MCP `update_issue`. Typed comments otherwise behave like any other: their authors can edit or delete them.
 
 ### Module, label and folder
 
@@ -240,7 +245,7 @@ Unless an endpoint says otherwise, a successful delete answers `{"deleted": true
 | [Search, sync and realtime](/docs/rest-api/sync) | Search, the delta sync endpoints and the realtime WebSocket. |
 | [Exports and archives](/docs/rest-api/export) | Markdown, JSON and ZIP exports, and whole-project archives. |
 | [Repositories and commits](/docs/rest-api/repositories) | Repository bindings and closing issues from commit messages. |
-| [Public read API](/docs/rest-api/public) | The anonymous, read-only routes for a published project. |
+| [Reading without a credential](/docs/rest-api/public) | The routes that answer anyone for a published project. |
 | [OAuth and discovery](/docs/rest-api/oauth) | Client registration, authorization, device login, tokens and metadata. |
 
 The MCP endpoint, `/mcp`, is served by the same process and takes the same bearer credentials. It is documented under [MCP](/docs/mcp).

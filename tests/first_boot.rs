@@ -203,12 +203,34 @@ fn init_if_missing_creates_an_authenticated_instance_with_the_env_admin() {
         "auth must stay required on first boot"
     );
 
-    // Anonymous access is refused: the flag does not weaken auth.
+    // Anonymous access is refused: the flag does not weaken auth. A visitor
+    // may list published projects (LIF-583), and a fresh instance has none.
     let anonymous = client
+        .get(format!("{base}/api/auth/me"))
+        .send()
+        .expect("GET /api/auth/me");
+    assert_eq!(
+        anonymous.status().as_u16(),
+        401,
+        "anonymous account read allowed"
+    );
+    let published: serde_json::Value = client
         .get(format!("{base}/api/projects"))
         .send()
-        .expect("GET /api/projects");
-    assert_eq!(anonymous.status().as_u16(), 401, "anonymous read allowed");
+        .expect("GET /api/projects")
+        .json()
+        .expect("project list json");
+    assert_eq!(
+        published,
+        serde_json::json!([]),
+        "a fresh instance published something"
+    );
+    let write = client
+        .post(format!("{base}/api/projects"))
+        .json(&serde_json::json!({ "name": "Nope", "identifier": "NOPE" }))
+        .send()
+        .expect("POST /api/projects");
+    assert_eq!(write.status().as_u16(), 401, "anonymous write allowed");
 
     // The env credentials really do sign in.
     let login = client

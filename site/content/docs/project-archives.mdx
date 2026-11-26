@@ -25,7 +25,7 @@ Use a different tool for other jobs:
 | Export | The project's lead or an instance administrator, signed in to the source in a browser. | Anyone who can run `lific` against the source database file. |
 | Import | An instance administrator, signed in to the destination in a browser. | Anyone who can run `lific` against the destination database file, naming an active administrator with `--user`. |
 
-The web routes accept only a signed-in browser session. API keys, OAuth tokens, connected tools, and the automatic administrator an instance without authentication uses are all refused, because an archive holds the project's entire history. Import requires an administrator even when project permissions are not enforced.
+The web routes accept only a signed-in browser session. API keys, OAuth tokens, connected tools, and the automatic administrator an instance without authentication uses are all refused, because an archive holds the project's entire history. Import requires an administrator.
 
 There is no MCP interface for archives.
 
@@ -72,7 +72,7 @@ The imported project is private, even if the source was published. To publish it
 ## What transfers
 
 - The project, its modules, labels and folders.
-- Issues, pages, plans and plan steps, and comments, including deleted ones. Each comment keeps its kind, so verification evidence recorded when an issue was closed arrives as verification evidence.
+- Issues, pages, plans and plan steps, and comments, including deleted ones. Each comment keeps its kind, so decisions and verification evidence retain their badges after import.
 - Labels on issues and pages, relations between issues in the project, and links between pages and issues.
 - Attached files that are linked to exported content.
 - Waits on a person or a date, with their notes. A wait on a person names that person by username and is bound to the destination account with the same username; when no active account has that name, the wait is left out and listed in the report. Date waits transfer as written.
@@ -80,6 +80,12 @@ The imported project is private, even if the source was published. To publish it
 - The project's change history and status history. The version history `get_page(since_seq)` reads from does not transfer; an imported page starts its history at its next edit.
 
 Issue, page and plan numbers, timestamps, ordering, statuses and issue import sources are kept. Internal database IDs are assigned fresh on the destination, and every link between exported records is updated to match.
+
+Archives also keep the highest number assigned to each kind of item, including numbers whose items have been permanently deleted. New items on the destination continue above those numbers. Archives made before Lific 3.0 seed these counters from the rows they contain.
+
+Project archives exported by Lific 3.0 use format 3 and require Lific 3.0 or later to import. Format 1 and 2 archives still import into 3.0.
+
+Archive number counters cannot exceed 1,000,000,000. Larger values are rejected so an imported counter cannot exhaust the range available for new items.
 
 Links to attachments written as `/api/attachments/123` in descriptions, comments, pages and history are rewritten to the new file IDs. A link to a file that is not in the archive is changed to `/unresolved-source-attachment/123`, so it cannot point at an unrelated file on the destination, and it is listed in the report. Links written as full URLs are left as they are and listed for you to check. Other text is not changed or cleaned.
 

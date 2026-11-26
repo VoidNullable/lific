@@ -21,7 +21,7 @@ An issue is one piece of work inside a project. It is identified by the project'
 
 When you update an issue and include `labels`, the list you send becomes the issue's complete label set. Leave `labels` out to keep the current ones.
 
-The number in an identifier counts up within its project. A number is not handed out again while a deleted issue that held it is still in the trash, so restoring an issue never collides with a newer one.
+The number in an identifier counts up within its project. Once assigned, it is never handed out again, even after the issue is permanently removed from the trash. Old references cannot point to a different issue.
 
 ## Status
 
@@ -60,7 +60,7 @@ Two issues can be linked in one of three ways. Links may cross projects, but an 
 
 Only `blocks` changes behavior. A duplicate is not closed automatically; set its status yourself.
 
-When project-scoped authorization is enforced, every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins, and instances without enforcement, see every relation.
+Every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins see every relation.
 
 ## Assignment
 
@@ -76,7 +76,7 @@ Only human accounts can be named; an agent's own account cannot, because unassig
 
 Responses carry `needs_human` (true for the second and third states) and `assignees` (the named people). `workable=true` does not look at assignment; filter with `assignee`: `none` for the agents' pool, `human` for every issue a person must do, `me`, or a username. The web UI's home page lists the open issues that name you, the ones marked for any person, and the ones waiting on you.
 
-Assignments are private: the public view of a [published project](/docs/public-projects) leaves them out. A project archive carries them by username; on import, a name with no matching person falls back to "any person".
+Assignments are readable by anyone who can read the project, which includes everyone when it is [published](/docs/public-projects). A project archive carries them by username; on import, a name with no matching person falls back to "any person".
 
 ## Waiting on a person or a date
 
@@ -99,23 +99,49 @@ A due or overdue wait stays on the issue until someone clears it, so the follow-
 
 "Today" is the server's local calendar day, for every client. MCP, the REST API and the web UI therefore agree on whether an issue is blocked even when a browser is in another timezone.
 
-An issue can wait on a given person once and on a given window once. A wait's note is at most 500 characters. Waits are private: the public view of a [published project](/docs/public-projects) leaves them out. Add and clear waits in the web UI's **Waiting on** field, with MCP `link_issues` and `unlink_issues`, or through `/api/issues/{id}/waits`.
+An issue can wait on a given person once and on a given window once. A wait's note is at most 500 characters. Waits, notes included, are readable by anyone who can read the project, which includes everyone when it is [published](/docs/public-projects). Add and clear waits in the web UI's **Waiting on** field, with MCP `link_issues` and `unlink_issues`, or through `/api/issues/{id}/waits`.
 
 ## Ready and blocked work
 
 Two filters answer "what can be worked on now" without walking the relation graph yourself. Both exist on the MCP `list_issues` tool and the REST issue list; the CLI has `lific issue list --workable`.
 
-`workable=true` returns issues that are open (not `done` or `cancelled`), whose blocking issues are all `done`, and that have no holding wait. A deleted blocker no longer counts.
+`workable=true` returns issues that are open (not `done` or `cancelled`), whose blocking issues are all `done`, that have no holding wait, and that no other worker has [claimed](#claims). A deleted blocker no longer counts.
 
 `blocked=true` returns issues with at least one blocking issue that is not `done`, or at least one holding wait. It does not look at the issue's own status, so a closed issue with an open blocker still appears.
 
 A blocker that was `cancelled` still blocks. That is deliberate: cancelling the prerequisite does not make the dependent work possible. When the dependency no longer matters, remove the `blocks` relation.
 
+## Claims
+
+A claim holds an issue for one worker for a limited time, so two agents do not start the same work. While the claim lasts, another worker's claim is refused with an error naming the holder and when the claim ends, and `workable=true` leaves the issue out of every other worker's list. When the time passes the claim simply stops counting; nothing has to clean it up.
+
+A worker is an account plus the session it works from:
+
+| Connection | Worker id |
+| --- | --- |
+| `lific mcp` over stdio | One per process, such as `p-1a2b3c4d`. |
+| `lific mcp --remote` | One per process, such as `r-1a2b3c4d`, sent as `X-Lific-Worker`. |
+| HTTP MCP or REST with an `X-Lific-Worker` header | The header as sent, when it is up to 64 letters, digits, `.`, `_`, `:` or `-`. Any other value is hashed into an id such as `s-1a2b3c4d`. |
+| HTTP MCP or REST with an `Mcp-Session-Id` header and no `X-Lific-Worker` | Hashed from the session id, such as `s-1a2b3c4d`. |
+| HTTP without either header | None: the claim belongs to the whole account, and every session of that account holds it. |
+
+Two sessions on the same key are therefore two workers. Bots are their own accounts, so a bot's claim is never held by the person who owns it.
+
+Claim with MCP [`update_issue`](/docs/mcp/tools#update_issue) and `claim: true`, or with [`POST /api/issues/{id}/claim`](/docs/rest-api/work#post-apiissuesidclaim). A claim lasts 15 minutes unless you ask for 1 to 1440. Claiming again while you hold it moves the end time and keeps the time you first claimed it. A claim on a `todo` or `backlog` issue moves it to `active`.
+
+A new session takes over a claim by working as the worker the claim reported, for its claims and its reads alike. Over HTTP, send that id as `X-Lific-Worker` on every request. Over stdio, pass it once as `update_issue`'s `worker`: `lific mcp` and `lific mcp --remote` keep it for the rest of the process. An HTTP call whose `worker` differs from its header is refused, because nothing would remember it for the next call.
+
+A claim ends early when its holder releases it, when the issue is closed or deleted, or when it moves to another project, where its holder may have no right to release it. Only the holder can release a live claim. `done` and `cancelled` issues cannot be claimed.
+
+Claims are not recorded in the activity log, the public view of a [published project](/docs/public-projects) leaves them out, and a project archive does not carry them. A claim also counts as activity for [stale active issues](/docs/cli#instance): an issue whose claim is live, or was renewed or released within the threshold, is not reported as stale or moved back to `todo`.
+
+The web UI shows the holder in the issue's **Claimed by** field and the peek panel, and Home lists every claimed issue under the agent queue.
+
 ## Moving to another project
 
 An issue can move to another project with MCP `move_issue` or `POST /api/issues/{id}/move`, which need maintainer rights on both projects. It takes the next number in its new project, so `APP-12` might become `OPS-4`. The old identifier is never handed out again and keeps pointing at the issue: links, `get_issue`, the REST resolve endpoint and search all find it by either name. Comments, relations, waits, history, attachments and plan steps come along unchanged.
 
-Labels and modules belong to a project. A label is kept when the new project has one with the same name, and dropped otherwise. The module is the one you name, or one with the same name as before, or none. People assigned to the issue who cannot see the new project are unassigned. The response lists everything that was dropped.
+Labels and modules belong to a project. A label is kept when the new project has one with the same name, and dropped otherwise. The module is the one you name, or one with the same name as before, or none. People assigned to the issue who cannot see the new project are unassigned, and a [claim](#claims) on it ends. The response lists everything that was dropped.
 
 ## Deleting and restoring
 
@@ -129,4 +155,4 @@ By default the last write wins. To avoid overwriting someone else's change, send
 
 ## Who can change an issue
 
-When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
+Reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.

@@ -44,6 +44,12 @@
 //!    holds locked = warn (inconclusive, not corrupt). `--repair` opts into
 //!    applying pending migrations through the normal database opener.
 //!
+//!    **project_access** follows it, only on a database that went through the
+//!    3.0 upgrade from legacy authorization (it records who lost access then).
+//!    Anyone still without a role in a project they could reach before = warn,
+//!    naming them and the `lific member add` command that restores access;
+//!    everyone restored or gone = pass. Read-only, like the database check.
+//!
 //!    Read-only inspection is a **logical** contract: it opens the file with
 //!    `SQLITE_OPEN_READ_ONLY`, bounds contention with a busy timeout, and reads
 //!    both facts inside one deferred transaction, so it never runs migrations
@@ -87,6 +93,8 @@ use serde::Serialize;
 use crate::cli::service::{self, Manager, StatusReport};
 use crate::config::Config;
 
+mod client_configs;
+
 /// How long read-only inspection waits for a competing lock before reporting
 /// the database as busy. Bounded so `doctor` stays a fast command even when the
 /// server is mid-write.
@@ -110,7 +118,14 @@ pub struct Check {
     pub name: String,
     pub status: Status,
     pub detail: String,
+    /// Every item the check is about, when it is about a list. JSON carries
+    /// all of them; the text report shows the first [`TEXT_ENTRIES_SHOWN`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
 }
+
+/// How many [`Check::entries`] the text report lists before summarizing.
+const TEXT_ENTRIES_SHOWN: usize = 10;
 
 impl Check {
     fn new(name: &str, status: Status, detail: impl Into<String>) -> Self {
@@ -118,7 +133,34 @@ impl Check {
             name: name.to_string(),
             status,
             detail: detail.into(),
+            entries: Vec::new(),
         }
+    }
+
+    fn with_entries(mut self, entries: Vec<String>) -> Self {
+        self.entries = entries;
+        self
+    }
+
+    /// The detail as the text report prints it, with the entries shortened.
+    fn text_detail(&self) -> String {
+        if self.entries.is_empty() {
+            return self.detail.clone();
+        }
+        let mut listed = self
+            .entries
+            .iter()
+            .take(TEXT_ENTRIES_SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.entries.len() > TEXT_ENTRIES_SHOWN {
+            listed.push_str(&format!(
+                "; and {} more (--json lists every one)",
+                self.entries.len() - TEXT_ENTRIES_SHOWN
+            ));
+        }
+        format!("{} {listed}", self.detail)
     }
 }
 
@@ -399,8 +441,15 @@ async fn build_report(
         cfg.database.path = path.to_owned();
     }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
+    checks.extend(check_project_access(&cfg.database.path));
+    checks.extend(
+        cfg.server
+            .removed_setting_warnings()
+            .map(|warning| Check::new("removed_setting", Status::Warn, warning)),
+    );
     checks.extend(check_backups(&cfg));
     checks.push(service_check);
+    checks.extend(client_configs::check(&cfg));
     checks.extend(check_remote(&cfg, key).await);
     Report::new(checks)
 }
@@ -424,9 +473,14 @@ fn unconfigured_checks(
             format!("{CONFIG_UNRESOLVED} (pass --db PATH to inspect one anyway)"),
         ),
     };
-    vec![
-        config_check,
-        database,
+    // Reads only the named database, so it runs whenever that was inspected.
+    let project_access = match database_override {
+        Some(path) if database.status != Status::Fail => check_project_access(path),
+        _ => None,
+    };
+    let mut checks = vec![config_check, database];
+    checks.extend(project_access);
+    checks.extend([
         Check::new("backups", Status::Skipped, CONFIG_UNRESOLVED),
         // Reads no configured value — it inspects the machine's installed
         // service — so the fail-closed policy does not hold it back; same
@@ -435,11 +489,24 @@ fn unconfigured_checks(
         Check::new("server", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("oauth_discovery", Status::Skipped, CONFIG_UNRESOLVED),
         Check::new("mcp", Status::Skipped, CONFIG_UNRESOLVED),
-    ]
+    ]);
+    checks
 }
 
 /// Run checks that depend on the configured server or its credentials.
 async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
+    if cfg
+        .server
+        .public_url
+        .as_deref()
+        .is_some_and(super::connect::is_path_token_url)
+    {
+        return vec![Check::new(
+            "public_url",
+            Status::Fail,
+            super::connect::PATH_TOKEN_GUIDANCE,
+        )];
+    }
     let base = connect_base(cfg);
     let credential_base = cfg.server.public_url.as_deref().unwrap_or(&base);
     let mut checks = Vec::new();
@@ -464,6 +531,23 @@ async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
     }
 
     checks
+}
+
+#[cfg(test)]
+mod removed_mcp_url_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn doctor_rejects_path_credentials_before_remote_probes() {
+        let mut cfg = Config::default();
+        cfg.server.public_url = Some("https://example.test/mcp/DO_NOT_PRINT".into());
+        let checks = check_remote(&cfg, Some("header-secret")).await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Fail);
+        assert_eq!(checks[0].name, "public_url");
+        assert!(checks[0].detail.contains("Authorization"));
+        assert!(!checks[0].detail.contains("DO_NOT_PRINT"));
+    }
 }
 
 /// Run the server checks sharing the local configured endpoint.
@@ -845,6 +929,48 @@ fn dir_is_writable(dir: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+// ── Project access after the 3.0 upgrade ─────────────────────────────────
+
+/// LIF-518: who could reach a project before roles were enforced everywhere
+/// and still holds no role in it. Omitted when the database can't be read or
+/// never went through that upgrade (a fresh install records nothing).
+fn check_project_access(path: &Path) -> Option<Check> {
+    let conn = open_inspection_connection(path, DATABASE_BUSY_TIMEOUT).ok()?;
+    let recorded: i64 = conn
+        .query_row("SELECT COUNT(*) FROM authz_upgrade_losses", [], |row| {
+            row.get(0)
+        })
+        .ok()?;
+    if recorded == 0 {
+        return None;
+    }
+    let losses = crate::db::queries::access_losses::unresolved(&conn).ok()?;
+    Some(project_access_check(&losses))
+}
+
+fn project_access_check(losses: &[crate::db::queries::access_losses::AccessLoss]) -> Check {
+    if losses.is_empty() {
+        return Check::new(
+            "project_access",
+            Status::Pass,
+            "everyone left without a role by the 3.0 upgrade has a role again or is gone",
+        );
+    }
+    let lines = crate::db::queries::access_losses::summarize(losses);
+    Check::new(
+        "project_access",
+        Status::Warn,
+        format!(
+            "{} user{} could reach projects before 3.0 and hold no role in them now. Restore \
+             anyone who needs access with `lific member add --project <PROJECT> --user <name> \
+             --role maintainer`. Still left out:",
+            lines.len(),
+            plural(lines.len()),
+        ),
+    )
+    .with_entries(lines)
 }
 
 // ── Check 3: backups ─────────────────────────────────────────────────────
@@ -1311,7 +1437,12 @@ fn print_report(report: &Report, json: bool) {
         .unwrap_or(0);
 
     for c in &report.checks {
-        let line = format!("{:<width$}  {}", c.name, c.detail, width = name_width);
+        let line = format!(
+            "{:<width$}  {}",
+            c.name,
+            c.text_detail(),
+            width = name_width
+        );
         match c.status {
             Status::Pass => ui::step(line),
             Status::Warn => ui::warn(line),
@@ -1605,6 +1736,108 @@ mod tests {
         let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
         assert!(c.detail.contains("no migrations run"));
+    }
+
+    /// Seed `users` users who each lost access to one project, as migration
+    /// 070 records it.
+    fn seed_access_losses(db_path: &Path, users: usize) {
+        let pool = crate::db::open(db_path).unwrap();
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, identifier) VALUES ('Api', 'API')",
+            [],
+        )
+        .unwrap();
+        for n in 0..users {
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, is_admin, is_bot)
+                 VALUES (?1, ?1 || '@test.local', 'x', 0, 0)",
+                [format!("user{n:02}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO authz_upgrade_losses (user_id, project_id)
+             SELECT u.id, p.id FROM users u, projects p",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_access_json_lists_every_entry_and_text_shortens_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        seed_access_losses(&db_path, TEXT_ENTRIES_SHOWN + 3);
+
+        let check = check_project_access(&db_path).unwrap();
+        let json = serde_json::to_value(Report::new(vec![check.clone()])).unwrap();
+        let entries = json["checks"][0]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), TEXT_ENTRIES_SHOWN + 3);
+        assert_eq!(entries.last().unwrap(), "user12: API");
+        assert!(!json.to_string().contains("more"), "{json}");
+
+        let text = check.text_detail();
+        assert!(text.contains("user09: API"), "{text}");
+        assert!(!text.contains("user10: API"), "{text}");
+        assert!(text.contains("and 3 more"), "{text}");
+    }
+
+    #[test]
+    fn checks_without_entries_serialize_as_before() {
+        let json = serde_json::to_value(check("database", Status::Pass)).unwrap();
+        assert!(json.get("entries").is_none(), "{json}");
+    }
+
+    #[test]
+    fn project_access_is_omitted_without_an_upgrade_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        let _pool = crate::db::open(&db_path).unwrap();
+        assert!(check_project_access(&db_path).is_none());
+        assert!(check_project_access(&tmp.path().join("missing.db")).is_none());
+    }
+
+    #[test]
+    fn project_access_names_who_is_still_left_out_until_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("lific.db");
+        let pool = crate::db::open(&db_path).unwrap();
+        let project_id = {
+            let conn = pool.write().unwrap();
+            conn.execute_batch(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('bob', 'bob@test.local', 'x', 'Bob', 0, 0);
+                 INSERT INTO projects (name, identifier) VALUES ('Api', 'API');
+                 INSERT INTO authz_upgrade_losses (user_id, project_id)
+                 SELECT u.id, p.id FROM users u, projects p;",
+            )
+            .unwrap();
+            conn.query_row("SELECT id FROM projects", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+
+        let c = check_project_access(&db_path).expect("recorded losses are reported");
+        assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
+        assert_eq!(c.entries, vec!["bob: API".to_string()]);
+        assert!(c.text_detail().contains("bob: API"), "{}", c.text_detail());
+        assert!(
+            c.detail.contains("lific member add"),
+            "detail: {}",
+            c.detail
+        );
+
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO project_members (project_id, user_id, role)
+                 SELECT ?1, id, 'viewer' FROM users WHERE username = 'bob'",
+                [project_id],
+            )
+            .unwrap();
+        }
+        let c = check_project_access(&db_path).unwrap();
+        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
     }
 
     #[test]
@@ -2513,6 +2746,31 @@ mod tests {
         assert!(detail.contains("no migrations run"), "{detail}");
         assert_config_dependent_checks_skipped(&report);
         assert!(!report.ok, "the configuration failure is retained");
+        assert_eq!(status_of(&report.checks, "project_access"), None);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_reports_project_access_after_a_config_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database_path = tmp.path().join("override.db");
+        seed_access_losses(&database_path, 1);
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(
+            resolution,
+            Witnesses::default(),
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        assert_eq!(
+            status_of(&report.checks, "project_access"),
+            Some(Status::Warn)
+        );
+        assert_config_dependent_checks_skipped(&report);
     }
 
     #[tokio::test]

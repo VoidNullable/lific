@@ -134,8 +134,8 @@ fn authorize_export(
     authz::require_role_conn(conn, &identity, project_id, Role::Lead)
 }
 
-/// Instance admin in both authorization modes: this creates a project and
-/// grants a lead membership, which the legacy mode has no role model for.
+/// Instance admin only: this creates a project and grants a lead membership,
+/// which no project role can authorize.
 fn authorize_import(conn: &Connection, token: &str, user_id: i64) -> Result<User, LificError> {
     let user = session_user(conn, token, user_id)?;
     if !user.is_admin {

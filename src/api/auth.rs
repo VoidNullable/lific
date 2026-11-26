@@ -8,7 +8,6 @@ use std::{net::SocketAddr, sync::Arc};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
-use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_admin, require_user, with_read, with_write};
 
@@ -501,6 +500,8 @@ pub(super) async fn instance_info(
         // the SPA's bootstrap signal, not the stored setting (the admin
         // settings endpoint keeps reporting the real DB flag).
         "web_auto_login": settings.web_auto_login || !auth_cfg.required,
+        // LIF-526: what clients may rely on before they act on it.
+        "capabilities": [super::idempotency::CAPABILITY],
     })))
 }
 
@@ -513,10 +514,6 @@ fn settings_json(s: &crate::db::queries::settings::InstanceSettings) -> serde_js
         "session_lifetime_days": s.session_lifetime_days,
         "login_message": s.login_message,
         "web_auto_login": s.web_auto_login,
-        // LIF-197: the operator toggle for epic LIF-194's project-scoped
-        // authorization (src/authz.rs). Off by default — see that module's
-        // doc comment for the full legacy-vs-enforced mode split.
-        "authz_enforced": s.authz_enforced,
         "stale_active_days": s.stale_active_days,
         "stale_active_reset_days": s.stale_active_reset_days,
     })
@@ -540,9 +537,9 @@ pub(super) struct InstanceSettingsPatchReq {
     session_lifetime_days: Option<i64>,
     login_message: Option<String>,
     web_auto_login: Option<bool>,
-    /// LIF-197: the operator toggle for LIF-194's project-scoped
-    /// authorization. Off by default; flipping it takes effect on the very
-    /// next request (see `src/authz.rs`'s runtime-read doc comment).
+    /// LIF-518: no longer a setting. Accepted only so that an old client
+    /// asking to turn enforcement off is told why it can't, instead of having
+    /// the field silently dropped.
     authz_enforced: Option<bool>,
     /// LIF-492: days an active issue may sit untouched before it is stale.
     stale_active_days: Option<i64>,
@@ -557,15 +554,13 @@ pub(super) struct InstanceSettingsPatchReq {
 /// Every patch, not a classified subset. Several of these fields expand who can
 /// reach the instance: `allow_signup` opens self-service registration,
 /// `signup_email_domains` widens who may use it, `web_auto_login` hands an
-/// admin session to anyone who loads the page, and `authz_enforced` off removes
-/// project-scoped authorization wholesale. Trying to gate only the "expanding"
+/// admin session to anyone who loads the page. Trying to gate only the "expanding"
 /// direction of each one means a per-field rule that has to be re-derived every
 /// time a field is added, and a single miss reopens the hole. There are a
 /// handful of these writes a week, made by a human at a keyboard, so the cost
 /// of gating all of them is nil and the rule is one sentence.
 pub(super) async fn instance_settings_patch(
     State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     reachability: Option<Extension<crate::server::Reachability>>,
     headers: HeaderMap,
@@ -574,6 +569,14 @@ pub(super) async fn instance_settings_patch(
     require_admin(&identity)?;
     let admin = require_user(&identity)?;
     let session_token = crate::auth::recent_session_token(&headers)?;
+
+    if input.authz_enforced == Some(false) {
+        return Err(LificError::BadRequest(
+            "project roles are always enforced; the authz_enforced setting was removed in 3.0. \
+             Grant access with project members instead"
+                .into(),
+        ));
+    }
 
     // LIF-406: `lific start` refuses to boot with web auto-login enabled on a
     // publicly reachable instance, but that check only ever ran at startup,
@@ -598,26 +601,17 @@ pub(super) async fn instance_settings_patch(
         session_lifetime_days: input.session_lifetime_days,
         login_message: input.login_message,
         web_auto_login: input.web_auto_login,
-        authz_enforced: input.authz_enforced,
         stale_active_days: input.stale_active_days,
         stale_active_reset_days: input.stale_active_reset_days,
     };
-    let authz_enforced = input.authz_enforced;
     // The reachability guard above is a precheck on the request; the
     // authorization check and the persisted mutation are one transaction, so a
     // lockdown cannot land between them.
-    let (s, authz_changed) = db.transaction(move |tx| {
+    let s = db.transaction(move |tx| {
         let fresh = crate::auth::revalidate_recent_session(tx, &session_token, admin.id)?;
         crate::auth::require_fresh_admin(&fresh)?;
-        let previous_authz_enforced = crate::db::queries::settings::get(tx)?.authz_enforced;
-        let settings = crate::db::queries::settings::update(tx, patch)?;
-        let authz_changed =
-            authz_enforced.is_some_and(|_| settings.authz_enforced != previous_authz_enforced);
-        Ok((settings, authz_changed))
+        crate::db::queries::settings::update(tx, patch)
     })?;
-    if authz_changed {
-        realtime.send(RealtimeEvent::ResyncRequired);
-    }
     Ok(Json(settings_json(&s)))
 }
 
@@ -3256,9 +3250,8 @@ mod tests {
 
     /// LIF-364: the first signup on a zero-user instance bootstraps as
     /// instance admin; every later signup is a plain user. Without this a
-    /// web-signup-only instance has no admin at all, and under the
-    /// enforced-authz default (LIF-261 seeds it ON for fresh installs) the
-    /// operator can't even see projects their other users create.
+    /// web-signup-only instance has no admin at all, and with project roles
+    /// enforced the operator can't even see projects their other users create.
     #[tokio::test]
     async fn first_signup_bootstraps_admin_second_does_not() {
         let app = zero_user_app(crate::db::open_memory().expect("test db"));
@@ -3490,72 +3483,44 @@ mod tests {
         assert_eq!(pub_data["instance_name"], "Acme Eng");
     }
 
-    // LIF-197: the operator toggle for LIF-194's project-scoped
-    // authorization. Defaults off, round-trips through the admin PATCH, and
-    // rides along in both the admin GET and the settings_json() shape.
+    // LIF-518: enforcement is no longer a setting. The admin GET doesn't
+    // report it, a request to turn it off is refused with the reason, and an
+    // old client re-sending `true` is harmless.
     #[tokio::test]
-    async fn instance_settings_exposes_authz_enforced_toggle() {
+    async fn authz_enforced_is_no_longer_a_setting() {
         let app = test_app();
 
         let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
-        assert_eq!(data["authz_enforced"], false, "off by default");
+        assert!(data.get("authz_enforced").is_none(), "{data}");
 
-        let patch = json_patch(
+        let off = json_patch(
+            &app,
+            "/api/instance/settings",
+            serde_json::json!({ "authz_enforced": false, "instance_name": "Nope" }),
+        )
+        .await;
+        assert_eq!(off.status(), StatusCode::BAD_REQUEST);
+        let body = parse_json(off).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("always enforced"),
+            "{body}"
+        );
+        let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
+        assert_ne!(
+            data["instance_name"], "Nope",
+            "a refused patch writes nothing"
+        );
+
+        let on = json_patch(
             &app,
             "/api/instance/settings",
             serde_json::json!({ "authz_enforced": true }),
         )
         .await;
-        assert_eq!(patch.status(), StatusCode::OK);
-        assert_eq!(parse_json(patch).await["authz_enforced"], true);
-
-        let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
-        assert_eq!(data["authz_enforced"], true, "persisted");
-    }
-
-    #[tokio::test]
-    async fn changing_authz_enforcement_emits_resync_required() {
-        let test = test_app_with_realtime();
-        let mut events = test.realtime.subscribe();
-
-        let resp = json_patch(
-            &test.app,
-            "/api/instance/settings",
-            serde_json::json!({ "authz_enforced": true }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let axum::extract::ws::Message::Text(text) = event.message else {
-            panic!("expected text realtime event");
-        };
-        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(event["type"], "resync.required");
-    }
-
-    #[tokio::test]
-    async fn patching_authz_enforcement_to_its_current_value_emits_nothing() {
-        let test = test_app_with_realtime();
-        let mut events = test.realtime.subscribe();
-
-        // Fresh instances default to authz_enforced = false; patching the
-        // same value is a no-op and must not trigger a fleet-wide resync.
-        let resp = json_patch(
-            &test.app,
-            "/api/instance/settings",
-            serde_json::json!({ "authz_enforced": false }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        assert!(
-            events.try_recv().is_err(),
-            "no realtime event should be emitted for a no-op authz patch"
-        );
+        assert_eq!(on.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -42,11 +42,33 @@ pub(crate) const MAX_REQUEST_BODY_BYTES: usize =
 #[cfg(test)]
 static MCP_HANDLER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Per-request user identity storage.
-/// Protected from races by MCP_HANDLER_LOCK ensuring serial access.
-/// Uses unwrap_or_else to recover from poison (e.g. if a handler panics).
+/// Per-request user identity storage for direct-call tests, one slot per test
+/// thread.
+///
+/// It used to be one process-wide slot. Tests that hold `MCP_HANDLER_LOCK`
+/// serialized among themselves, but a test that calls a tool with no user
+/// set (expecting the first-admin fallback) could read whatever user another
+/// thread's test had just written. Legacy authorization let any user write
+/// anything, so the leak never showed; with roles always enforced it turns
+/// into spurious 403s. Each test thread now sees only what it set.
 #[cfg(test)]
-static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
+pub(crate) struct ThreadRequestUser;
+
+#[cfg(test)]
+impl ThreadRequestUser {
+    pub(crate) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'static, Option<AuthUser>>> {
+        thread_local! {
+            static SLOT: &'static Mutex<Option<AuthUser>> =
+                Box::leak(Box::new(Mutex::new(None)));
+        }
+        SLOT.with(|slot| slot.lock())
+    }
+}
+
+#[cfg(test)]
+pub(crate) static MCP_REQUEST_USER: ThreadRequestUser = ThreadRequestUser;
 
 /// Per-request external origin used for structured resource links.
 /// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
@@ -65,6 +87,31 @@ tokio::task_local! {
     static REQUEST_DATA: RequestData;
     /// The MCP revision the current tool call's client speaks, when known.
     static CLIENT_PROTOCOL_VERSION: Option<String>;
+    /// LIF-525: the worker id an HTTP request's session header names, when
+    /// it sends one.
+    static REQUEST_WORKER: Option<String>;
+}
+
+/// Run `future` as a call whose HTTP session header named `worker`.
+#[cfg(test)]
+pub(crate) async fn with_request_worker<Fut, R>(worker: Option<String>, future: Fut) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    REQUEST_WORKER.scope(worker, future).await
+}
+
+/// LIF-525: the worker id an HTTP request's headers name, if any.
+/// `X-Lific-Worker` comes first and is taken as sent when it is a valid
+/// worker id (what `lific mcp --remote` sends, and how a client resumes a
+/// claim); `Mcp-Session-Id`, the protocol's own, is hashed.
+pub(crate) fn worker_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    header("x-lific-worker")
+        .and_then(crate::db::queries::claims::worker_from_header)
+        .or_else(|| {
+            header("mcp-session-id").and_then(crate::db::queries::claims::worker_from_session)
+        })
 }
 
 /// Whether the current tool call's client understands `resource_link`
@@ -390,7 +437,8 @@ const SERVER_INSTRUCTIONS: &str = "Lific is an issue tracker. Open every session
      When you finish an issue, set status='done'. Keep each issue one self-contained change, filed in one of the project's modules. \
      For small text changes use edit_issue and edit_page, not full updates. \
      Use plans (create_plan) for multi-step or multi-session work; a step can mirror an issue. get_plan(plan='X-PLAN-1') gives a plan's full tree. \
-     Use pages for documentation and design notes.";
+     Use pages for documentation and design notes. \
+     A project can have a conventions page, the rules for working with its issues, pages and plans; get_briefing opens with it, and you follow it when working in that tracker.";
 
 /// LIF-452: the one sentence a repository-bound stdio session appends to
 /// [`SERVER_INSTRUCTIONS`]. Kept to a single clause for the same reason the
@@ -428,6 +476,10 @@ pub struct LificMcp {
     /// [`LificMcp::project_or_bound`] for the per-tool policy. Always `None`
     /// on the HTTP transport, which has no single working directory to bind.
     bound_project: Option<String>,
+    /// LIF-525: this stdio process's worker id, minted at startup and
+    /// replaced when a claim passes back an earlier id to resume it. `None`
+    /// on HTTP, where the worker comes from each request's session header.
+    stdio_worker: Option<Arc<std::sync::Mutex<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,6 +506,7 @@ impl LificMcp {
             transport: McpTransport::Http,
             stdio_auth: None,
             bound_project: None,
+            stdio_worker: None,
         }
     }
 
@@ -475,8 +528,54 @@ impl LificMcp {
         Self {
             transport: McpTransport::Stdio,
             stdio_auth: auth.map(Arc::new),
+            stdio_worker: Some(Arc::new(std::sync::Mutex::new(
+                crate::db::queries::claims::mint_worker("p"),
+            ))),
             ..Self::with_realtime(db, RealtimeHub::new())
         }
+    }
+
+    /// LIF-525: this session's worker id: the HTTP request's session header,
+    /// else the stdio process's own id. `None` for a stateless HTTP request
+    /// with no session header, whose claims are tied to the account alone.
+    pub(crate) fn session_worker(&self) -> Option<String> {
+        REQUEST_WORKER
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                self.stdio_worker
+                    .as_ref()
+                    .map(|worker| worker.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            })
+    }
+
+    /// LIF-525: whether this server is a stdio process, which keeps a worker
+    /// id of its own and can take over another. Over HTTP the worker is each
+    /// request's header.
+    pub(crate) fn has_own_worker(&self) -> bool {
+        self.stdio_worker.is_some()
+    }
+
+    /// LIF-525: a stdio process takes over the worker id a resumed claim
+    /// named, so its later reads and claims see that claim as its own.
+    /// HTTP has no per-session state to keep it in; the client sends the id
+    /// as `X-Lific-Worker` instead.
+    pub(crate) fn adopt_worker(&self, worker: &str) {
+        if let Some(current) = &self.stdio_worker {
+            *current.lock().unwrap_or_else(|e| e.into_inner()) = worker.to_string();
+        }
+    }
+
+    /// LIF-525: who the current call claims as. The account that
+    /// authenticated (a bot is itself, not its owner), and `worker` when the
+    /// caller passed one, else the session's worker id.
+    pub(crate) fn claimant(&self, worker: Option<&str>) -> Option<crate::db::models::Claimant> {
+        let user_id = current_identity(&self.db)?.user.id;
+        Some(crate::db::models::Claimant {
+            user_id,
+            worker: worker.map(str::to_string).or_else(|| self.session_worker()),
+        })
     }
 
     /// The stdio revalidation seam. Every tool call goes through here.
@@ -824,6 +923,10 @@ impl ServerHandler for LificMcp {
                 .expect("MCP tool semaphore is never closed");
             let scope = self.take_request_scope(&mut context)?;
             let version = request_protocol_version(&context);
+            let worker = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| worker_from_headers(&parts.headers));
             let tool = request.name.clone();
             let provided: Vec<String> = request
                 .arguments
@@ -833,7 +936,9 @@ impl ServerHandler for LificMcp {
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
-            let result = with_client_protocol(version, scope.run(dispatch())).await;
+            let result =
+                with_client_protocol(version, REQUEST_WORKER.scope(worker, scope.run(dispatch())))
+                    .await;
             // rmcp reports argument deserialization failures as a failed tool
             // result rather than a protocol error, so the rewrite works on
             // the result text.
@@ -1180,17 +1285,10 @@ mod tests {
         let unbound_key = crate::auth::create_api_key(&pool, "mcp-operator", None).unwrap();
         let project = {
             let conn = pool.write().unwrap();
-            crate::db::queries::settings::update(
-                &conn,
-                crate::db::queries::settings::InstanceSettingsPatch {
-                    authz_enforced: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "MCP Gate".into(),
                     identifier: "MGT".into(),
                     description: String::new(),

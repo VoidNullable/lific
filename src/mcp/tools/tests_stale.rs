@@ -73,3 +73,32 @@ fn stale_lists_only_idle_active_issues() {
     );
     assert!(out.contains("stale lists active issues only"), "{out}");
 }
+
+/// LIF-525: a worker renewing a claim is working on the issue, even when
+/// nothing else about it changes, so a live claim keeps it off the list.
+#[test]
+fn a_live_claim_is_activity() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Stale list", "STA");
+    create(&m, "Quietly worked", "active");
+    pin(&m, "Quietly worked", "2001-01-01 00:00:00");
+    assert!(stale(&m, ListIssuesInput::default()).contains("Quietly worked"));
+
+    let claimed = m.update_issue(Parameters(UpdateIssueInput {
+        identifier: "STA-1".into(),
+        claim: Some(true),
+        ..Default::default()
+    }));
+    assert!(claimed.contains("Claim held"), "{claimed}");
+    assert_eq!(stale(&m, ListIssuesInput::default()), "No issues found.");
+
+    // Releasing ends the claim but not the record that someone just worked
+    // under it: the issue is not stale the moment its holder lets go.
+    let released = m.update_issue(Parameters(UpdateIssueInput {
+        identifier: "STA-1".into(),
+        claim: Some(false),
+        ..Default::default()
+    }));
+    assert!(released.contains("Claim released."), "{released}");
+    assert_eq!(stale(&m, ListIssuesInput::default()), "No issues found.");
+}

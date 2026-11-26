@@ -67,6 +67,8 @@
   import { safeLabelColor } from "../lib/labelColors";
   import { navLink } from "../lib/navLink";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
+  import { isSignedOut } from "../lib/signedOut";
+  import SignInButton from "../lib/SignInButton.svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { toast } from "../lib/toast/toast.svelte";
 
@@ -111,6 +113,8 @@
     load(id);
   });
 
+  const NO_ACCOUNT = { ok: false as const, error: "Sign in to see this.", status: 401 };
+
   async function load(ident: string, initial = true) {
     if (initial) {
       loading = true;
@@ -142,8 +146,10 @@
         listPlans(found.id, "active"),
         listPages(found.id, undefined, undefined, undefined, { order_by: "updated", order: "desc" }),
         listProjectActivity(found.id, 60),
-        listProjectMembers(found.id),
-        getHomeOverview(since, found.id),
+        // LIF-583: the member list and the per-reader digest need an
+        // account; a signed-out reader's overview goes without them.
+        signedOut ? Promise.resolve(NO_ACCOUNT) : listProjectMembers(found.id),
+        signedOut ? Promise.resolve(NO_ACCOUNT) : getHomeOverview(since, found.id),
         getInsights(found.id, 12),
         listProjectRelations(found.id),
       ]);
@@ -178,6 +184,8 @@
   );
 
   const canManage = $derived(projectRole.canManage);
+  // LIF-583: read once; App remounts the routes when this changes.
+  const signedOut = isSignedOut();
 
   // ── Identity: inline name and description edits ───────────────
   let editingName = $state(false);
@@ -436,19 +444,26 @@
 {#snippet topbarContent()}
   <ProjectTopbar identifier={projectIdentifier} current="overview" {navigate}>
     {#snippet actions()}
-      <button class="toolbar-pill" onclick={exportProject} disabled={exporting || !project}
-              title="Download every issue and page as Markdown">
-        <Download size={14} />
-        <span class="hidden sm:inline">{exporting ? "Exporting…" : "Export"}</span>
-      </button>
-      <a
-        href="#/{projectIdentifier}/issues/new"
-        use:navLink={navigate}
-        class="flex items-center gap-1.5 h-8 px-3 rounded-md text-body-sm font-medium
-               text-[var(--btn-success-text)] bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)] transition-colors"
-      >
-        <Plus size={14} /> <span class="hidden sm:inline">New issue</span>
-      </a>
+      {#if signedOut}
+        <!-- LIF-583: export and creation need an account. -->
+        <SignInButton />
+      {:else}
+        <button class="toolbar-pill" onclick={exportProject} disabled={exporting || !project}
+                title="Download every issue and page as Markdown">
+          <Download size={14} />
+          <span class="hidden sm:inline">{exporting ? "Exporting…" : "Export"}</span>
+        </button>
+        {#if projectRole.canEdit}
+          <a
+            href="#/{projectIdentifier}/issues/new"
+            use:navLink={navigate}
+            class="flex items-center gap-1.5 h-8 px-3 rounded-md text-body-sm font-medium
+                   text-[var(--btn-success-text)] bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)] transition-colors"
+          >
+            <Plus size={14} /> <span class="hidden sm:inline">New issue</span>
+          </a>
+        {/if}
+      {/if}
     {/snippet}
   </ProjectTopbar>
 {/snippet}
@@ -601,7 +616,7 @@
             <span
               class="inline-flex items-center gap-1 text-caption px-2 py-0.5 rounded-full
                      {project.is_public ? 'text-[var(--success)] bg-[var(--success-bg)]' : 'text-[var(--text-muted)] bg-[var(--chart-tile)]'}"
-              title={project.is_public ? "Anyone can read this project's issues and pages" : "Only people with access can see this project"}
+              title={project.is_public ? "Anyone can read this project, with no account" : "Only people with access can see this project"}
             >
               {#if project.is_public}<Globe size={11} /> Public{:else}<Lock size={11} /> Private{/if}
             </span>
@@ -689,6 +704,7 @@
               and what people and agents are doing.
             </p>
           </div>
+          {#if projectRole.canEdit}
           <div class="flex flex-wrap justify-center gap-2 mt-1">
             <a href="#/{projectIdentifier}/issues/new" use:navLink={navigate}
                class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
@@ -706,6 +722,7 @@
               <FileText size={14} /> Write a page
             </a>
           </div>
+          {/if}
         </section>
       {:else}
         <!-- ── PULSE ──────────────────────────────────────────── -->
@@ -1050,7 +1067,7 @@
 
           {#if labelRows.length > 0}
             <section data-testid="overview-labels">
-              {@render heading("Labels", "Open issues per label.", { href: `/${projectIdentifier}/settings?section=labels`, label: "Manage" })}
+              {@render heading("Labels", "Open issues per label.", canManage ? { href: `/${projectIdentifier}/settings?section=labels`, label: "Manage" } : undefined)}
               <div class="flex flex-wrap gap-1.5">
                 {#each labelRows.slice(0, 16) as { label, open } (label.id)}
                   <button

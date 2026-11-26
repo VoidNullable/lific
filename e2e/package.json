@@ -16,11 +16,14 @@
     "task-checkboxes": "bun task-checkboxes.ts",
     "cross-project-relations": "bun cross-project-relations.ts",
     "issue-assignees": "bun issue-assignees.ts",
+    "issue-claims": "bun issue-claims.ts",
     "image-layout": "bun image-layout.ts",
     "attachment-panel": "bun attachment-panel.ts",
+    "image-url-paste": "bun image-url-paste.ts",
     "lightbox": "bun lightbox.ts",
     "body-editor": "bun body-editor.ts",
-    "palette-design": "bun palette-design.ts"
+    "palette-design": "bun palette-design.ts",
+    "conventions": "bun conventions.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"

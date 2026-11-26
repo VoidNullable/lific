@@ -82,6 +82,10 @@ pub fn render(path: &Path, format: Format, entry: &CompiledEntry) -> Result<Rend
     render_from(read_existing(path)?.as_ref(), format, entry)
 }
 
+pub(crate) fn config_contents(path: &Path) -> Result<Option<String>, WriteError> {
+    read_existing(path).map(|existing| existing.map(|file| file.contents))
+}
+
 /// Merge `entry` into an already-read file. Split out so the write path reads
 /// the existing config exactly once — the same open descriptor supplies both
 /// the contents we merge into and the mode we preserve, leaving no window for

@@ -5,7 +5,7 @@ description: Where Lific looks for lific.toml, what every setting does and its d
 
 Lific reads its settings from one TOML file, `lific.toml`. `lific init` writes one for you. Every section and key is optional, and anything you leave out takes the default shown on this page.
 
-Some settings live in the database instead, because administrators change them while the server runs: the instance name, signup, session length, the login message, browser auto-login and membership enforcement. Change those in the web UI's instance settings or with [`lific instance set`](/docs/cli#instance).
+Some settings live in the database instead, because administrators change them while the server runs: the instance name, signup, session length, the login message and browser auto-login. Change those in the web UI's instance settings or with [`lific instance set`](/docs/cli#instance).
 
 ## File discovery
 
@@ -24,7 +24,7 @@ Lific uses the first of these files that exists:
 
 A file that exists but cannot be read or parsed stops Lific with an error naming the file. It does not fall through to the next location, because silently using another file, or the defaults, would quietly undo settings such as a loopback bind or closed signup. Unknown keys are errors too, so a typo like `allow_signupp` fails instead of being ignored.
 
-On Linux and macOS, Lific refuses a configuration file that is a symbolic link or not a regular file, and when the file can be read by other users it changes the permissions to owner-only. The file can hold secrets such as `mcp_path_token`.
+On Linux and macOS, Lific refuses a configuration file that is a symbolic link or not a regular file, and when the file can be read by other users it changes the permissions to owner-only.
 
 If no file exists anywhere, Lific uses the built-in defaults. Defaults never create a database: ordinary commands refuse a missing database and name the path they expected. Run `lific init`, restore a backup, or use the [container bootstrap](/docs/self-hosting#containers). `lific doctor` reports a missing or unreadable configuration and skips the checks that depend on it.
 
@@ -81,8 +81,6 @@ trash_days = 30
 | `public_url` | string | unset | The address people and tools use to reach the server, such as `https://lific.example.com`. See below. |
 | `cors_origins` | array of strings | `[]` | Browser origins allowed to call the API from another site. An empty list allows any origin. |
 | `trusted_proxies` | array of strings | `[]` | IP addresses or CIDR ranges of your reverse proxies. Only these may tell Lific the real client address. An invalid entry stops the server from starting. |
-| `mcp_path_token` | string | unset | Opens an MCP endpoint at `/mcp/<token>` that needs no other credential. |
-| `mcp_path_user` | string | unset | The username that requests through `mcp_path_token` are attributed to. Defaults to the first administrator. |
 
 `public_url` is the OAuth issuer that MCP clients discover, the base of the links in CLI and MCP output, and the address `lific connect` writes into remote tool configurations. Its host name is added to the hosts the MCP endpoint accepts, which a reverse proxy needs. Its scheme also decides the session cookie: an `https://` URL, or no URL at all, gives a cookie marked `Secure`, and only an explicit `http://` URL turns that off, because browsers discard `Secure` cookies over plain HTTP. One exception needs no setting: a plain-HTTP request to a loopback address (`localhost`, `127.0.0.1`, `::1`) gets the cookie without `Secure`, so a default local install can be signed in to from any browser.
 
@@ -90,7 +88,7 @@ trash_days = 30
 
 A trusted proxy can instead send the client address in `X-Lific-Client-IP`, together with `X-Lific-Proxy-Secret`. Lific accepts that pair only from an address in `trusted_proxies`, and only when the secret equals the `LIFIC_TRUSTED_PROXY_SECRET` environment variable of the server process. If a trusted proxy sends either header without a valid pair, including when the variable is unset, requests to rate-limited routes are answered with `503` rather than counted against a bucket every visitor shares. Set the variable before the proxy starts sending the headers, use a long random value, and have the proxy strip any copies of both headers that arrive from clients. [Self-hosting](/docs/self-hosting) shows complete proxy setups.
 
-`mcp_path_token` bypasses API keys and OAuth: anyone who knows the URL can use every MCP tool as `mcp_path_user`. It exists for MCP clients whose OAuth support is broken. Use a long random token and serve it only over HTTPS.
+The former `mcp_path_token` and `mcp_path_user` settings are accepted but ignored in 3.0. Startup and `lific doctor` warn for each present key that it no longer has any effect and should be removed. Connect clients to `/mcp` with an Authorization header or OAuth. Other unknown settings still fail validation. See [Upgrading](/docs/upgrading#v30).
 
 ## `[database]`
 
@@ -130,7 +128,7 @@ The level applies to `lific start` and `lific mcp`. Setting the `RUST_LOG` envir
 | --- | --- | --- | --- |
 | `trash_days` | integer | `30` | Days a deleted issue, page or comment stays in the trash, where it can still be restored, before it is removed for good. `0` never empties the trash. |
 
-The server empties the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving, and a changed value takes effect at the next restart.
+The server empties the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving, and a changed value takes effect at the next restart. The same sweep deletes create retry keys (`op_key` and `Idempotency-Key`) older than 24 hours, whatever `trash_days` says. A stdio `lific mcp` session deletes them too, when it starts and every six hours, but leaves the trash to the server.
 
 ## `[auth]`
 

@@ -72,7 +72,11 @@ async fn upgrade(
         .expect("session lookup")
         .expect("the test connects with a live session");
     let permit = hub.try_acquire_socket(user.id).expect("socket slot");
-    ws.on_upgrade(move |socket| serve_socket(socket, hub, db, query.token, user, permit))
+    let viewer = SocketViewer::Session {
+        token: query.token,
+        user,
+    };
+    ws.on_upgrade(move |socket| serve_socket(socket, hub, db, viewer, permit))
 }
 
 struct Recovery {
@@ -120,6 +124,7 @@ fn fixture() -> Recovery {
         let project = crate::db::queries::create_project(
             &conn,
             &crate::db::models::CreateProject {
+                conventions: None,
                 name: "Realtime".into(),
                 identifier: "RT".into(),
                 description: String::new(),
@@ -128,6 +133,15 @@ fn fixture() -> Recovery {
             },
         )
         .expect("project");
+        for member in [human.id, bystander.id] {
+            crate::db::queries::members::upsert_member(
+                &conn,
+                project.id,
+                member,
+                crate::db::models::Role::Viewer,
+            )
+            .expect("membership");
+        }
         (
             project.id,
             human.id,

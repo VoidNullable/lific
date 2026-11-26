@@ -37,6 +37,7 @@
     uploaderOptions,
   } from "../lib/files/files";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
+  import { isSignedOut } from "../lib/signedOut";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
@@ -176,7 +177,7 @@
     }
     project = found;
     void loadProjectRole(found.id);
-    if (viewerId === null) {
+    if (viewerId === null && !isSignedOut()) {
       const who = await me();
       if (who.ok) viewerId = who.data.id;
     }
@@ -265,6 +266,9 @@
   }
 
   function mayDelete(uploaderId: number | null): boolean {
+    // LIF-583: the check fails open on an unknown viewer; a signed-out
+    // reader is unknown by definition.
+    if (isSignedOut()) return false;
     return canDeleteAttachment({ uploaderId, viewerId, isAdmin, canEdit });
   }
 </script>

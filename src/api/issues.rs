@@ -8,24 +8,31 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency;
 use super::{filter_visible, retain_visible_relations, with_read, with_write};
+use crate::db::queries::op_keys::Written;
 
 pub(super) async fn list_issues(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Query(mut q): Query<ListIssuesQuery>,
 ) -> Result<Json<Vec<Issue>>, LificError> {
     if q.assignee.is_some() {
         q.caller_user_id = caller_id(&db, &identity)?;
     }
+    // LIF-525: workable leaves out what another worker holds.
+    if q.workable == Some(true) && identity.is_some() {
+        q.claimant = Some(rest_claimant(&identity, &headers)?);
+    }
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &identity, pid, Role::Viewer)?;
+        authz::require_read(&db, &identity, pid)?;
         let mut issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
         retain_visible_relations(&db, &identity, &mut issues)?;
         return Ok(Json(issues));
     }
     // Cross-project list: filter instead of denying (LIF-197 scope item 2).
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let mut issues = with_read(&db, |conn| {
         let mut issues = crate::db::queries::list_issues(conn, &q)?;
         crate::db::queries::retain_visible_relations(conn, &mut issues, visible.as_ref());
@@ -91,7 +98,7 @@ pub(super) async fn get_issue(
     Path(id): Path<i64>,
 ) -> Result<Json<Issue>, LificError> {
     let mut issue = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?;
-    authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, issue.project_id)?;
     retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
 }
@@ -105,7 +112,7 @@ pub(super) async fn resolve_issue(
         let id = crate::db::queries::resolve_identifier(conn, &identifier)?;
         crate::db::queries::get_issue(conn, id)
     })?;
-    authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    authz::require_read(&db, &identity, issue.project_id)?;
     let mut issue = issue;
     retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
@@ -115,22 +122,32 @@ pub(super) async fn create_issue(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(mut input): Json<CreateIssue>,
-) -> Result<Json<Issue>, LificError> {
+) -> Result<Written<Issue>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    let op_key = idempotency::key(&identity, &headers, "rest.create_issue", &input)?;
     // LIF-262/LIF-409: the description's attachment references are linked by
     // `create_issue` itself, inside its savepoint, with the caller's reach.
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
-    let issue = db.transaction(|conn| {
+    let written = db.transaction(|conn| {
         // The gate above ran on a read connection before this write began.
         // Re-run it here so the role that decides which attachment references
         // may be linked is read on the connection that writes those links,
         // inside one immediate transaction: no revocation can slip between.
         authz::require_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
+        if let Some(stored) = idempotency::replay(conn, op_key.as_ref())? {
+            return Ok(Written::Replayed(stored));
+        }
         resolve_me(conn, &identity, input.assignees.as_mut())?;
-        crate::db::queries::create_issue(conn, &input)
+        let issue = crate::db::queries::create_issue(conn, &input)?;
+        idempotency::record(conn, op_key.as_ref(), &issue)?;
+        Ok(Written::Fresh(issue))
     })?;
+    let Written::Fresh(issue) = written else {
+        return Ok(written);
+    };
     realtime.send_with_seq(
         RealtimeEvent::IssueCreated {
             project_id: issue.project_id,
@@ -138,7 +155,7 @@ pub(super) async fn create_issue(
         },
         issue.seq,
     );
-    Ok(Json(issue))
+    Ok(Written::Fresh(issue))
 }
 
 pub(super) async fn update_issue(
@@ -187,6 +204,136 @@ pub(super) fn commit_issue_update(
         issue.seq,
     );
     Ok(issue)
+}
+
+/// Optional body of `POST /api/issues/{id}/claim` and `/release` (LIF-525).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClaimRequest {
+    /// Claim length, 1 to 1440 minutes (default 15). Claim only.
+    pub minutes: Option<i64>,
+}
+
+impl ClaimRequest {
+    /// An empty body is the defaults.
+    fn parse(body: &[u8]) -> Result<Self, LificError> {
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Self::default());
+        }
+        serde_json::from_slice(body)
+            .map_err(|error| LificError::BadRequest(format!("invalid claim body: {error}")))
+    }
+}
+
+/// LIF-525: who a REST call claims as: the authenticated account, and the
+/// worker its `X-Lific-Worker` or `Mcp-Session-Id` header names. The header
+/// is the only source, so the list's `workable` filter, which reads the same
+/// header, always agrees with the claim. Neither header means a claim tied
+/// to the account alone.
+fn rest_claimant(
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    headers: &axum::http::HeaderMap,
+) -> Result<Claimant, LificError> {
+    let user = super::require_user(identity)?;
+    Ok(Claimant {
+        user_id: user.id,
+        worker: crate::mcp::worker_from_headers(headers),
+    })
+}
+
+/// LIF-525: `POST /api/issues/{id}/claim`. Hold the issue for the caller,
+/// or extend the claim they hold; a todo or backlog issue becomes active. A
+/// live claim held by someone else is refused with 409, naming the holder.
+pub(super) async fn claim_issue(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Result<Json<Issue>, LificError> {
+    let request = ClaimRequest::parse(&body)?;
+    let minutes = crate::db::queries::claims::minutes(request.minutes)?;
+    let claimant = rest_claimant(&identity, &headers)?;
+    let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
+    let (issue, moved) = db.transaction(|conn| {
+        let current = crate::db::queries::get_issue(conn, id)?;
+        authz::require_role_conn(conn, &identity, current.project_id, Role::Maintainer)?;
+        if matches!(current.status, Status::Done | Status::Cancelled) {
+            return Err(LificError::BadRequest(format!(
+                "{} is {}; only open issues can be claimed",
+                current.identifier, current.status
+            )));
+        }
+        crate::db::queries::claims::claim(conn, id, &current.identifier, &claimant, minutes)?;
+        match crate::db::queries::claims::status_on_claim(current.status) {
+            Some(status) => {
+                let issue = crate::db::queries::update_issue(
+                    conn,
+                    id,
+                    &UpdateIssue {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )?;
+                Ok((issue, true))
+            }
+            None => Ok((crate::db::queries::get_issue(conn, id)?, false)),
+        }
+    })?;
+    publish_claim_change(&realtime, &issue, moved);
+    let mut issue = issue;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
+    Ok(Json(issue))
+}
+
+/// LIF-525: `POST /api/issues/{id}/release`. End the caller's claim.
+/// Releasing when nothing is held succeeds; a live claim held by someone
+/// else is refused with 409.
+pub(super) async fn release_issue(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Result<Json<Issue>, LificError> {
+    let request = ClaimRequest::parse(&body)?;
+    if request.minutes.is_some() {
+        return Err(LificError::BadRequest(
+            "minutes applies to claim only".into(),
+        ));
+    }
+    let claimant = rest_claimant(&identity, &headers)?;
+    let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
+    let issue = db.transaction(|conn| {
+        let current = crate::db::queries::get_issue(conn, id)?;
+        authz::require_role_conn(conn, &identity, current.project_id, Role::Maintainer)?;
+        crate::db::queries::claims::release(conn, id, &current.identifier, &claimant)?;
+        crate::db::queries::get_issue(conn, id)
+    })?;
+    publish_claim_change(&realtime, &issue, false);
+    let mut issue = issue;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
+    Ok(Json(issue))
+}
+
+/// A claim alone writes no issue row, so its seq has not moved and a
+/// replaying client would drop a seq-stamped event as a duplicate: send it
+/// seq-less instead, as advice to refresh. A claim that also moved the
+/// status wrote the row and gets the ordinary replayable event.
+fn publish_claim_change(realtime: &RealtimeHub, issue: &Issue, wrote_row: bool) {
+    let event = RealtimeEvent::IssueUpdated {
+        project_id: issue.project_id,
+        issue_id: issue.id,
+    };
+    if wrote_row {
+        realtime.send_with_seq(event, issue.seq);
+    } else {
+        realtime.send(event);
+    }
 }
 
 /// Body of `POST /api/issues/{id}/move` (LIF-487). The target is named by id
@@ -325,7 +472,7 @@ pub(super) async fn project_relations(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<ProjectRelation>>, LificError> {
-    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    authz::require_read(&db, &identity, id)?;
     with_read(&db, |conn| {
         crate::db::queries::list_project_relations(conn, id)
     })
@@ -1431,6 +1578,7 @@ mod tests {
                     super::list_issues(
                         State(db.clone()),
                         Extension(identity.clone()),
+                        axum::http::HeaderMap::new(),
                         Query(crate::db::models::ListIssuesQuery {
                             project_id,
                             ..Default::default()
@@ -1521,3 +1669,7 @@ mod tests {
 #[cfg(test)]
 #[path = "issue_assignees_tests.rs"]
 mod assignee_tests;
+
+#[cfg(test)]
+#[path = "issue_claims_tests.rs"]
+mod claim_tests;

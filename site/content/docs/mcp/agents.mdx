@@ -36,10 +36,12 @@ When you do not know the project yet, start with `list_resources(resource_type='
 
 Then triage with `list_issues`:
 
-- `workable=true` returns issues that are open (not `done` or `cancelled`), whose blockers are all `done`, and that have no wait still holding. This answers "what can I start now".
+- `workable=true` returns issues that are open (not `done` or `cancelled`), whose blockers are all `done`, that have no wait still holding, and that no other worker has claimed. This answers "what can I start now".
 - `blocked=true` returns issues with at least one blocker that is not `done`, or a wait still holding, and annotates each row with `blocked_by:APP-3,APP-7` and any wait tokens. It ignores the issue's own status, so a closed issue with an open blocker still appears.
 
 These are independent filters, not opposites. A cancelled blocker still blocks, deliberately: cancelling a prerequisite does not make the dependent work possible. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
+
+When other agents may pick from the same list, claim the issue before you start: `update_issue(identifier='APP-12', claim=true)`. If another worker holds it, the call fails and names them, so pick something else. The claim lasts 15 minutes by default (`claim_minutes` up to 1440); call again before it ends to keep it, and pass `claim=false` when you stop without closing the issue. Closing it ends the claim. See [Claims](/docs/concepts/issues#claims).
 
 Rows show checklist progress when the description has a Markdown task list (`checklist: 2/5`), so you can see how far an issue got without opening it. Rows also show the due date when one is set (`due:2026-11-20`), so a deadline check needs no `get_issue` per issue.
 
@@ -112,7 +114,7 @@ Lists return one page, not the whole set, because a single comment can be 256 Ki
 
 `list_resources` returns every project, module, label or folder at once and ignores `limit` for them. `list_attachments` is not paged. `get_briefing` is not paged: its cut sections name the list call that shows everything.
 
-`get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones.
+`get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones. Every mode includes a separate Decisions section, capped at the newest 50 entries and 32 KiB. If earlier decisions are omitted, follow its `list_comments(kind="decision")` pointer. Record a choice with `add_comment(kind="decision")`; put its rationale below the first prose line.
 
 ## Read the error text
 
@@ -138,6 +140,6 @@ An explicit `project` always wins. The binding never changes what a call means: 
 
 ## You are your own identity
 
-Each tool connected with `lific connect`, or approved through OAuth, gets its own bot account and credential. Your writes are attributed to that bot in the [activity log](/docs/concepts/comments-and-activity#activity-log), with `mcp` as the transport, and everyone who can see the project sees them. You act with your owner's project access and never more. Where membership is enforced, reading and commenting take `viewer`, writing issues, pages and plans takes `maintainer`, and project settings take `lead`. See [Projects](/docs/concepts/projects#members-and-roles).
+Each tool connected with `lific connect`, or approved through OAuth, gets its own bot account and credential. Your writes are attributed to that bot in the [activity log](/docs/concepts/comments-and-activity#activity-log), with `mcp` as the transport, and everyone who can see the project sees them. You act with your owner's project access and never more. Reading and commenting take `viewer`, writing issues, pages and plans takes `maintainer`, and project settings take `lead`. See [Projects](/docs/concepts/projects#members-and-roles).
 
 Comments belong to their authors. `edit_comment` and `delete_comment` refuse a comment you did not write, unless the calling account is an administrator.

@@ -14,7 +14,7 @@ const fixture = `<script>
   // The route behind the preview belongs to a different, editable project.
   projectRole.projectId = 1;
   projectRole.role = 'maintainer';
-  projectRole.enforced = true;
+  projectRole.known = true;
   projectRole.loaded = true;
   window.openPreview = openPeek;
 </script>
@@ -49,11 +49,10 @@ try {
       : { headless: true, channel: "chromium" },
   );
   const cases = [
-    { name: "viewer", role: "viewer", enforced: true, is_admin: false, editable: false },
-    { name: "maintainer", role: "maintainer", enforced: true, is_admin: false, editable: true },
-    { name: "admin", role: null, enforced: true, is_admin: true, editable: true },
-    { name: "legacy", role: "viewer", enforced: false, is_admin: false, editable: true },
-    { name: "unavailable", role: null, enforced: true, is_admin: false, editable: false },
+    { name: "viewer", role: "viewer", is_admin: false, editable: false },
+    { name: "maintainer", role: "maintainer", is_admin: false, editable: true },
+    { name: "admin", role: null, is_admin: true, editable: true },
+    { name: "unavailable", role: null, is_admin: false, editable: false },
   ];
   for (const policy of cases) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });

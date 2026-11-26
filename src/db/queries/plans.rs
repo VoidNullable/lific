@@ -261,15 +261,12 @@ pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, Li
 
 /// Create a plan + its full nested step tree atomically.
 pub fn create_plan(conn: &Connection, input: &CreatePlan) -> Result<Plan, LificError> {
-    let next_seq: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM plans WHERE project_id = ?1",
-            params![input.project_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(1);
-
     let id = savepoint(conn, "create_plan", || {
+        let next_seq = super::number_sequences::next(
+            conn,
+            Some(input.project_id),
+            super::number_sequences::Entity::Plan,
+        )?;
         conn.execute(
             "INSERT INTO plans (project_id, sequence, issue_id, title)
              VALUES (?1, ?2, ?3, ?4)",

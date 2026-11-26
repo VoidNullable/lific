@@ -114,6 +114,7 @@ fn seeded() -> (LificMcp, McpTestGuard, String) {
                 ..Default::default()
             },
         ]),
+        op_key: None,
     }));
     assert!(plan.starts_with("Created"), "got: {plan}");
     page(&m, "BRF", "Canon", "The rules.");
@@ -279,6 +280,7 @@ fn a_large_project_stays_under_the_budget_and_says_what_it_trimmed() {
                 title: format!("Step {long}"),
                 ..Default::default()
             }]),
+            op_key: None,
         }));
         assert!(plan.starts_with("Created"), "got: {plan}");
     }
@@ -431,7 +433,7 @@ fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
         more: format!("more_{heading}()"),
     };
     let mut sections = vec![make("short", 2), make("long", 40), make("middle", 20)];
-    let out = fit_to_budget("header\n", &mut sections).unwrap();
+    let out = fit_to_budget("header\n", "", &mut sections).unwrap();
 
     assert!(
         out.chars().count() <= BUDGET_CHARS,
@@ -612,8 +614,10 @@ fn a_next_step_linked_into_an_invisible_project_is_not_named() {
 
 fn comment(m: &LificMcp, identifier: &str, content: &str) {
     let added = m.add_comment(Parameters(AddCommentInput {
+        kind: Default::default(),
         identifier: identifier.into(),
         content: content.into(),
+        op_key: None,
     }));
     assert!(!added.starts_with("Error"), "got: {added}");
 }
@@ -1151,6 +1155,7 @@ fn plan(m: &LificMcp, project: &str, title: &str, steps: &[(&str, bool)]) {
                 })
                 .collect(),
         ),
+        op_key: None,
     }));
     assert!(created.starts_with("Created"), "got: {created}");
 }

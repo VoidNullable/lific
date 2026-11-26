@@ -9,23 +9,26 @@ use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
+use super::idempotency;
 use super::{require_user, with_read};
+use crate::db::queries::op_keys::Written;
 
-/// Comments are gated at `Viewer` — anyone who can see a project
-/// can read and post comments on its issues/pages (the actual auth-required
-/// check for *who* the comment is attributed to is separate, below).
-/// Workspace-level pages (`project_id = None`) fall back to admin-only.
-fn require_comment_viewer(
+/// Reading comments follows the read gate: anyone may read the comments of a
+/// published project, a member any project they belong to. Posting stays at
+/// `Viewer` membership (see `create_for_parent`), so publishing a project does
+/// not open it to comments from strangers. Workspace-level pages
+/// (`project_id = None`) fall back to admin-only.
+fn require_comment_reader(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
-    let conn = db.read()?;
-    authz::require_project_or_workspace_role_conn(&conn, identity, project_id, Role::Viewer)
+    authz::require_read_or_workspace(db, identity, project_id)
 }
 
 #[derive(Default, serde::Deserialize)]
 pub(super) struct ListCommentsQuery {
+    pub(super) kind: Option<CommentKind>,
     /// Exact author username (case-insensitive).
     pub(super) author: Option<String>,
     /// Creation-time sort direction: asc (default) or desc.
@@ -159,9 +162,9 @@ fn list_for_parent(
     let cursor = q.cursor()?;
     let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
-    require_comment_viewer(db, identity, project_id)?;
+    require_comment_reader(db, identity, project_id)?;
     let page = with_read(db, |conn| {
-        comments::list_comments_keyset(
+        comments::list_comments_by_kind(
             conn,
             parent,
             q.author.as_deref(),
@@ -169,36 +172,64 @@ fn list_for_parent(
             Some(limit),
             Some(offset),
             cursor.as_ref(),
+            q.kind,
         )
     })?;
     let headers = paging_headers(&page, cursor.is_some(), q.order.as_deref() == Some("desc"));
     Ok((headers, Json(page.items)))
 }
 
+/// What an `Idempotency-Key` on a new comment is bound to: the parent and
+/// the whole request body, so a field added to [`CreateComment`] is part of
+/// the fingerprint without touching this.
+fn comment_fingerprint(
+    parent: CommentParent,
+    input: &CreateComment,
+) -> (&'static str, i64, &CreateComment) {
+    match parent {
+        CommentParent::Issue(id) => ("issue", id, input),
+        CommentParent::Page(id) => ("page", id, input),
+    }
+}
+
 fn create_for_parent(
     db: &DbPool,
     realtime: &RealtimeHub,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    headers: &axum::http::HeaderMap,
     parent: CommentParent,
-    content: &str,
-) -> Result<Json<Comment>, LificError> {
+    input: &CreateComment,
+) -> Result<Written<Comment>, LificError> {
     let user = require_user(identity)?;
-    let (comment, project_id) = db.transaction(|conn| {
+    let op_key = idempotency::key(
+        identity,
+        headers,
+        "rest.create_comment",
+        &comment_fingerprint(parent, input),
+    )?;
+    let written = db.transaction(|conn| {
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
-        let member_scoped = authz::authz_enforced_conn(conn)?;
+        if let Some(stored) = idempotency::replay(conn, op_key.as_ref())? {
+            return Ok(Written::Replayed(stored));
+        }
         let actor = CommentActor::from(&user);
-        let comment = comments::create_comment_with_mentions(
+        let comment = comments::create_typed_comment_with_mentions(
             conn,
             parent,
             project_id,
             actor,
             AttachmentActor::Authenticated(actor),
-            content,
-            member_scoped,
+            &input.content,
+            input.kind,
         )?;
-        Ok((comment, project_id))
+        idempotency::record(conn, op_key.as_ref(), &comment)?;
+        Ok(Written::Fresh((comment, project_id)))
     })?;
+    let (comment, project_id) = match written {
+        Written::Fresh(fresh) => fresh,
+        Written::Replayed(stored) => return Ok(Written::Replayed(stored)),
+    };
     if let Some(project_id) = project_id {
         realtime.send_with_seq(
             match parent {
@@ -208,7 +239,7 @@ fn create_for_parent(
             comment.seq,
         );
     }
-    Ok(Json(comment))
+    Ok(Written::Fresh(comment))
 }
 
 pub(super) async fn list_comments(
@@ -225,14 +256,16 @@ pub(super) async fn create_comment(
     Extension(realtime): Extension<RealtimeHub>,
     Path(issue_id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Json<Comment>, LificError> {
+) -> Result<Written<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
+        &headers,
         CommentParent::Issue(issue_id),
-        &input.content,
+        &input,
     )
 }
 
@@ -250,31 +283,32 @@ pub(super) async fn create_page_comment(
     Extension(realtime): Extension<RealtimeHub>,
     Path(page_id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<CreateComment>,
-) -> Result<Json<Comment>, LificError> {
+) -> Result<Written<Comment>, LificError> {
     create_for_parent(
         &db,
         &realtime,
         &identity,
+        &headers,
         CommentParent::Page(page_id),
-        &input.content,
+        &input,
     )
 }
 
 /// GET /api/projects/{id}/mention-candidates — the users who may be
 /// `@`-mentioned in this project's comments. Viewer-gated (same as reading
-/// any project data); a non-member is denied when enforcement is on, and the
-/// candidate list itself is member-scoped in that mode so it never leaks a
-/// user who can't see the project. Powers the composer autocomplete.
+/// any project data); a non-member is denied, and the candidate list itself
+/// is member-scoped so it never leaks a user who can't see the project.
+/// Powers the composer autocomplete.
 pub(super) async fn mention_candidates(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<MentionCandidate>>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let member_scoped = authz::authz_enforced(&db)?;
     with_read(&db, |conn| {
-        comments::mention_candidates(conn, Some(project_id), member_scoped)
+        comments::mention_candidates(conn, Some(project_id))
     })
     .map(Json)
 }
@@ -310,7 +344,6 @@ pub(super) async fn update_comment_handler(
         // before ownership (the Viewer gate above runs first, so a comment the
         // caller can't see never reveals whether they wrote it), now checked
         // in the same transaction as the write (PR #31).
-        let member_scoped = authz::authz_enforced_conn(conn)?;
         // The *editor's* reach, not the original author's: pulling a new
         // attachment reference into the body is the editor's act.
         let comment = comments::update_comment_with_mentions(
@@ -319,7 +352,6 @@ pub(super) async fn update_comment_handler(
             project_id,
             AttachmentActor::Authenticated(CommentActor::from(&user)),
             &input.content,
-            member_scoped,
         )?;
         Ok((comment, context))
     })?;
@@ -408,6 +440,8 @@ mod tests {
             },
         )
         .unwrap();
+        crate::db::queries::members::upsert_member(&conn, project.id, user.id, Role::Viewer)
+            .unwrap();
 
         let issue = crate::db::queries::create_issue(
             &conn,
@@ -460,6 +494,7 @@ mod tests {
         let data = parse_json(resp).await;
         assert_eq!(data["content"], "Hello from test");
         assert_eq!(data["author"], "commenter");
+        assert_eq!(data["kind"], "comment");
 
         // Create another
         let body = serde_json::json!({"content": "Second comment"});
@@ -482,6 +517,86 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Hello from test");
         assert_eq!(comments[1]["content"], "Second comment");
+    }
+
+    #[tokio::test]
+    async fn decision_comments_filter_before_paging_and_preserve_kind_on_edit() {
+        let (app, issue_id, _) = setup_comment_test();
+        let path = format!("/api/issues/{issue_id}/comments");
+        for (content, kind) in [
+            ("First choice", "decision"),
+            ("Discussion", "comment"),
+            ("Second choice", "decision"),
+        ] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({
+                    "content": content, "kind": kind
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(parse_json(response).await["kind"], kind);
+        }
+        let get = |query: String| {
+            let app = app.clone();
+            let path = path.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(format!("{path}?{query}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let response = get("kind=decision&order=desc&limit=1".into()).await;
+        assert_eq!(response.headers()[super::HAS_MORE_HEADER], "true");
+        let newest = parse_json(response).await;
+        assert_eq!(newest[0]["content"], "Second choice");
+        let response = get(format!(
+            "kind=decision&order=desc&limit=1&before_id={}&before_created_at={}",
+            newest[0]["id"],
+            newest[0]["created_at"]
+                .as_str()
+                .unwrap()
+                .replace(' ', "%20"),
+        ))
+        .await;
+        assert_eq!(response.headers()[super::HAS_MORE_HEADER], "false");
+        assert_eq!(parse_json(response).await[0]["content"], "First choice");
+        let response = get("kind=decision&order=desc&limit=1&offset=1".into()).await;
+        assert_eq!(parse_json(response).await[0]["content"], "First choice");
+        let id = newest[0]["id"].as_i64().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/comments/{id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"content":"Revised choice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(parse_json(response).await["kind"], "decision");
+        for kind in ["verification", "note"] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({"content":"invalid", "kind":kind}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(
+            get("kind=unknown".into()).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     // ── LIF-421: the paging answer travels in headers ───────────
@@ -1082,6 +1197,7 @@ mod tests {
                 "Mine",
             )
             .unwrap();
+            grant(&conn, project.id, &[owner.id, other.id]);
             (other, comment.id)
         };
 
@@ -1245,6 +1361,14 @@ mod tests {
 
     /// Set up a test app with a user, project, and page pre-seeded.
     /// Returns (app, page_id, user_id).
+    /// Give each user a maintainer role in `project_id`.
+    fn grant(conn: &rusqlite::Connection, project_id: i64, users: &[i64]) {
+        for &user_id in users {
+            crate::db::queries::members::upsert_member(conn, project_id, user_id, Role::Maintainer)
+                .unwrap();
+        }
+    }
+
     fn setup_page_comment_test() -> (axum::Router, i64, i64) {
         let db = crate::db::open_memory().expect("test db");
 
@@ -1274,6 +1398,7 @@ mod tests {
             )
             .unwrap();
 
+            grant(&conn, project.id, &[user.id]);
             let page = crate::db::queries::create_page(
                 &conn,
                 &CreatePage {
@@ -1348,6 +1473,36 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Comment on the page");
         assert_eq!(comments[1]["content"], "Another");
+    }
+
+    #[tokio::test]
+    async fn page_comments_accept_and_filter_decisions() {
+        let (app, page_id, _) = setup_page_comment_test();
+        let path = format!("/api/pages/{page_id}/comments");
+        for kind in ["comment", "decision"] {
+            let response = json_post(
+                &app,
+                &path,
+                serde_json::json!({
+                    "content": "Page note", "kind": kind
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(parse_json(response).await["kind"], kind);
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{path}?kind=decision"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let data = parse_json(response).await;
+        assert_eq!(data.as_array().unwrap().len(), 1);
+        assert_eq!(data[0]["kind"], "decision");
     }
 
     #[tokio::test]
@@ -1473,6 +1628,7 @@ mod tests {
                 "Owner's page comment",
             )
             .unwrap();
+            grant(&conn, project.id, &[owner.id, other.id]);
             (other, comment.id)
         };
 
@@ -1668,6 +1824,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[author.id, mentioned.id]);
             (author, mentioned, issue.id, project.id)
         };
 
@@ -1769,6 +1926,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[author.id, ada.id, bob.id]);
             (author, ada, bob, issue.id)
         };
 
@@ -1804,10 +1962,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mention_candidates_endpoint_open_lists_all_non_bots() {
+    async fn mention_candidates_endpoint_lists_members() {
         let (app, _issue_id, _) = setup_comment_test();
         // setup_comment_test creates exactly one project (id 1) in a fresh
-        // in-memory DB. Flag is OFF (default), so all non-bot users list.
+        // in-memory DB, with the commenter as its member.
         let resp = json_get(&app, "/api/projects/1/mention-candidates").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let cands = parse_json(resp).await;
@@ -1817,8 +1975,8 @@ mod tests {
 
     #[tokio::test]
     async fn authz_scoping_excludes_non_member_from_candidates_and_resolution() {
-        // Enforcement ON: only members are candidates, and a mention of a
-        // non-member never resolves.
+        // Only members are candidates, and a mention of a non-member never
+        // resolves.
         let (db, _admin, lead, _maintainer, _viewer, non_member, project_id) =
             setup_membership_test();
 
@@ -2021,6 +2179,7 @@ mod tests {
                 },
             )
             .unwrap();
+            grant(&conn, project.id, &[user.id]);
             (user, issue.id, page.id)
         };
 

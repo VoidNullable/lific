@@ -133,7 +133,7 @@ The proxy must pass `/api/events/ws` through as a WebSocket, including the `Upgr
 
 ### Client addresses behind a proxy
 
-Lific rate-limits sign-in, signup, session refresh, password changes, OAuth client registration, device authorization and public project reads by client address. Behind a proxy, every request arrives from the proxy's address, so Lific has to be told which peers may speak for someone else. `server.trusted_proxies` lists those IP addresses or CIDR ranges. The default is empty, which means every client of an undeclared proxy shares one rate-limit bucket. An invalid entry stops the server at startup.
+Lific rate-limits sign-in, signup, session refresh, password changes, OAuth client registration, device authorization and reads of published projects that carry no credential, by client address. Behind a proxy, every request arrives from the proxy's address, so Lific has to be told which peers may speak for someone else. `server.trusted_proxies` lists those IP addresses or CIDR ranges. The default is empty, which means every client of an undeclared proxy shares one rate-limit bucket. An invalid entry stops the server at startup.
 
 Forwarding headers from any other peer are ignored. For a trusted peer, Lific reads all `X-Forwarded-For` values as one chain, walks it right to left, skips the addresses in `trusted_proxies`, and uses the first address that is not a trusted proxy. `X-Real-IP` is read only when there is no `X-Forwarded-For` at all, and a malformed or entirely trusted chain falls back to the proxy's own address. List every proxy layer you run, and nothing else. If your proxy sets `X-Real-IP` rather than appending to `X-Forwarded-For`, make sure it overwrites any value the client sent.
 
@@ -166,7 +166,7 @@ The key is printed once. A key assigned to a user acts as that user, with that u
 
 "Reachable" means `server.host` is not a loopback address, or `server.public_url` is set to something that is not loopback or a private network. Private means a private, link-local or unique-local IP address, or a name ending in `.localhost`, `.local`, `.internal`, `.home.arpa` or `.lan`. A public DNS name counts as public even when it resolves to a private address, and that includes a Tailscale name such as `host.tailnet.ts.net`. The check reads only your configuration. A proxy you have not told Lific about is invisible to it, so passing the check does not prove the instance is private.
 
-If `server.mcp_path_token` is set, `/mcp/<token>` answers without any other credential; the path itself is the secret. It exists for MCP clients whose OAuth support is broken. Use a long random value and serve it only over HTTPS.
+HTTP MCP clients connect to `/mcp` using an `Authorization: Bearer <API_KEY>` header or OAuth. The credential-in-path endpoint was removed in 3.0; see [Upgrading](/docs/upgrading#v30).
 
 ## Accounts and access
 
@@ -182,7 +182,7 @@ lific user demote --username grace
 
 `--signup-domains` limits self-registration to a comma-separated list of email domains, and an empty string allows any. `user create` prompts for the password when you leave out `--password`. `--admin` and `user promote` make someone an instance administrator, who can see and change everything; `user demote` takes it away. The same actions are in the web UI's Instance tab.
 
-Project membership is a separate switch, the Instance tab's **Project permissions** or `lific instance set --authz-enforced true`. With it on, every REST and MCP call checks the caller's role in the project, reads included, and a new account sees nothing until someone adds it to a project, with `lific member add --project APP --user grace --role maintainer` or the project's Members settings. Administrators and unbound API keys bypass the check. It is on for an instance that had no users when its settings were first written, which includes instances created with `lific init`. An instance upgraded from an older release keeps it off until you turn it on; [Upgrading](/docs/upgrading#authorization-rollout) explains how to roll it out. [Projects](/docs/concepts/projects#members-and-roles) describes the three roles.
+Project membership decides what everyone else sees. Every REST and MCP call checks the caller's role in the project, reads included, and a new account sees nothing until someone adds it to a project, with `lific member add --project APP --user grace --role maintainer` or the project's Members settings. Administrators and unbound API keys bypass the check. An instance upgraded from a release that let this be switched off is handled as [Upgrading to 3.0](/docs/upgrading#v30) describes. [Projects](/docs/concepts/projects#members-and-roles) describes the three roles.
 
 ## Backups
 

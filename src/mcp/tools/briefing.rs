@@ -24,6 +24,9 @@ const PLAN_LINES: usize = 5;
 /// Lines per kind of change (closed, created, moved, pages).
 const CHANGE_LINES_PER_KIND: usize = 5;
 const RECENT_PAGES: i64 = 3;
+/// LIF-524: the conventions page prints up to this many characters, on top
+/// of [`BUDGET_CHARS`]; a longer page ends with a `get_page` pointer.
+pub(super) const CONVENTIONS_CHARS: usize = 4_000;
 const MAX_NAMED_PAGES: usize = 10;
 const TITLE_CHARS: usize = 80;
 /// How many rows a section reads to count what it does not show.
@@ -68,18 +71,26 @@ impl Section {
     }
 }
 
-/// Render the header and sections, then pop lines from the longest section
-/// (the later one on a tie) until the response fits the budget.
-fn fit_to_budget(header: &str, sections: &mut [Section]) -> Result<String, String> {
+/// Render the header, the conventions page and the sections, then pop lines
+/// from the longest section (the later one on a tie) until the response fits
+/// the budget. The conventions page is never trimmed by this pass and does
+/// not count against [`BUDGET_CHARS`]: it carries its own cap.
+fn fit_to_budget(
+    header: &str,
+    conventions: &str,
+    sections: &mut [Section],
+) -> Result<String, String> {
+    let budget = BUDGET_CHARS + conventions.chars().count();
     loop {
         let output = try_render(|output| {
             output.push_str(header);
+            output.push_str(conventions);
             sections
                 .iter()
                 .try_for_each(|section| section.render(output))
         })
         .map_err(|error| format!("failed to format briefing: {error}"))?;
-        if output.chars().count() <= BUDGET_CHARS {
+        if output.chars().count() <= budget {
             return Ok(output);
         }
         let Some(longest) = sections
@@ -94,22 +105,98 @@ fn fit_to_budget(header: &str, sections: &mut [Section]) -> Result<String, Strin
     }
 }
 
+/// LIF-524: the conventions page as the briefing prints it, `None` when the
+/// project has none or it is turned off or empty: those cost nothing.
+struct ConventionsBlock {
+    text: String,
+    item: outputs::BriefingItem,
+}
+
+fn conventions_block(
+    context: Option<&IssueLinkContext>,
+    ident: &str,
+    page: &models::Page,
+) -> Option<ConventionsBlock> {
+    let content = page.content.trim();
+    if !page.conventions_enabled || content.is_empty() {
+        return None;
+    }
+    let reference = page_reference(context, page);
+    let total = content.chars().count();
+    let shown = if total > CONVENTIONS_CHARS {
+        // Cut at the last line break inside the cap, so a rule is never
+        // printed half-way through.
+        let cap = content
+            .char_indices()
+            .nth(CONVENTIONS_CHARS)
+            .map_or(content.len(), |(index, _)| index);
+        let cut = content[..cap].rfind('\n').unwrap_or(cap);
+        content[..cut].trim_end()
+    } else {
+        content
+    };
+    let mut text = format!(
+        "\n## Conventions for {ident} ({reference})\nThe rules for working with this project's issues, pages and plans. Follow them in this tracker.\n\n"
+    );
+    // The page's own headings sit one level below this one.
+    let mut fenced = false;
+    for line in shown.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        if !fenced && line.starts_with('#') {
+            text.push('#');
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    if shown.len() < content.len() {
+        let _ = writeln!(
+            text,
+            "(Showing {} of {total} characters. Read the rest with get_page(identifier='{}').)",
+            shown.chars().count(),
+            page.identifier
+        );
+    }
+    Some(ConventionsBlock {
+        text,
+        item: item(
+            "page",
+            Some(reference),
+            &page.identifier,
+            Some(&page.title),
+            None,
+        ),
+    })
+}
+
 /// The structured briefing: each section's items for the lines it kept.
-fn structured_briefing(project: &str, sections: &[Section]) -> outputs::Briefing {
+fn structured_briefing(
+    project: &str,
+    conventions: Option<&ConventionsBlock>,
+    sections: &[Section],
+) -> outputs::Briefing {
+    let conventions = conventions.map(|block| outputs::BriefingSection {
+        section: "conventions".into(),
+        total: 1,
+        items: vec![block.item.clone()],
+    });
     outputs::Briefing {
         project: Some(project.to_string()),
-        sections: sections
-            .iter()
-            .map(|section| outputs::BriefingSection {
-                section: section.key.to_string(),
-                total: i64::try_from(section.total).unwrap_or(i64::MAX),
-                items: section
-                    .items
-                    .iter()
-                    .take(section.lines.len())
-                    .cloned()
-                    .collect(),
-            })
+        sections: conventions
+            .into_iter()
+            .chain(sections.iter().map(|section| {
+                outputs::BriefingSection {
+                    section: section.key.to_string(),
+                    total: i64::try_from(section.total).unwrap_or(i64::MAX),
+                    items: section
+                        .items
+                        .iter()
+                        .take(section.lines.len())
+                        .cloned()
+                        .collect(),
+                }
+            }))
             .collect(),
     }
 }
@@ -156,13 +243,18 @@ fn title(value: &str) -> TruncatedValue<'_> {
 }
 
 fn issue_line(context: Option<&IssueLinkContext>, issue: &models::Issue) -> String {
-    format!(
+    let mut line = format!(
         "{} | {} | {} | {}",
         issue_reference(context, &issue.identifier),
         issue.status,
         issue.priority,
         title(&issue.title)
-    )
+    );
+    // LIF-525: who is on it right now.
+    if let Some(claim) = &issue.claim {
+        let _ = write!(line, " | claimed by {}", claim.describe());
+    }
+    line
 }
 
 /// An issue line with how long it has gone untouched (LIF-492).
@@ -288,6 +380,23 @@ impl LificMcp {
             project_reference(context, ident),
             now.format("%Y-%m-%d %H:%M:%S"),
         );
+        // LIF-524: the project's conventions page leads the briefing. A
+        // project that never had one gets a one-line nudge instead.
+        let (conventions_page, conventions_hint) = self.read(|conn| {
+            Ok((
+                queries::conventions_page(conn, project.id)?,
+                queries::conventions_hint_due(conn, project.id)?,
+            ))
+        })?;
+        let conventions = conventions_page
+            .as_ref()
+            .and_then(|page| conventions_block(context, ident, page));
+        if conventions_hint {
+            let _ = writeln!(
+                header,
+                "No conventions page yet. Ask the user how agents should work here, then add one with manage_resource, or set conventions='none' to stop this reminder."
+            );
+        }
 
         let window = match (&since, &previous) {
             (Some(since), _) => Some((
@@ -362,8 +471,12 @@ impl LificMcp {
         if let Some(queue) = human_queue {
             sections.insert(0, queue);
         }
-        let output = fit_to_budget(&header, &mut sections)?;
-        let structured = structured_briefing(ident, &sections);
+        let output = fit_to_budget(
+            &header,
+            conventions.as_ref().map_or("", |block| block.text.as_str()),
+            &mut sections,
+        )?;
+        let structured = structured_briefing(ident, conventions.as_ref(), &sections);
         // Saved only once the briefing is built, so a failed one leaves the
         // previous cursor and its changes are reported next time.
         if let Some(user) = caller {
@@ -769,11 +882,13 @@ impl LificMcp {
         ident: &str,
     ) -> Result<Option<Section>, String> {
         // Active issues have their own section; this one is what to pick up.
+        // LIF-525: an issue another worker holds is not.
         let (issues, total, total_is_floor) = self.briefing_issues(
             project_id,
             models::ListIssuesQuery {
                 workable: Some(true),
                 exclude_statuses: vec![models::Status::Active],
+                claimant: self.claimant(None),
                 ..Default::default()
             },
         )?;
@@ -810,7 +925,7 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 status: Some(models::Status::Active),
-                updated_since: Some(cutoff.to_string()),
+                touched_since: Some(cutoff.to_string()),
                 ..Default::default()
             },
         )?;
@@ -846,7 +961,7 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 status: Some(models::Status::Active),
-                updated_until: Some(cutoff.to_string()),
+                idle_before: Some(cutoff.to_string()),
                 ..Default::default()
             },
         )?;
@@ -1006,20 +1121,27 @@ impl LificMcp {
                     None,
                     Some("updated"),
                     Some("desc"),
-                    Some(RECENT_PAGES),
+                    Some(RECENT_PAGES + 1),
                     None,
                 )
             })?;
-            if pages.items.is_empty() {
+            // The conventions page is either printed above or turned off.
+            let pages: Vec<_> = pages
+                .items
+                .into_iter()
+                .filter(|page| !page.conventions)
+                .take(RECENT_PAGES as usize)
+                .collect();
+            if pages.is_empty() {
                 return Ok(None);
             }
             return Ok(Some(Section {
                 key: "pages",
-                items: pages.items.iter().map(page_item).collect(),
+                items: pages.iter().map(page_item).collect(),
                 heading: "Recently updated pages".into(),
                 summary: None,
-                lines: pages.items.iter().map(describe).collect(),
-                total: pages.items.len(),
+                lines: pages.iter().map(describe).collect(),
+                total: pages.len(),
                 total_is_floor: false,
                 more: format!("list_resources(resource_type='page', project='{ident}')"),
             }));

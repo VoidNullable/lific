@@ -327,6 +327,7 @@ fn project_for_bind(
                 &CreateProject {
                     name: identifier.to_owned(),
                     identifier: identifier.to_owned(),
+                    conventions: Some(crate::conventions::Template::Empty),
                     ..Default::default()
                 },
             )?;

@@ -13,21 +13,15 @@
 //!
 //! ## Key-minting & authz semantics (investigated, LIF-249)
 //!
-//! An API key with `user_id = NULL` (an "unassigned" key) behaves very
-//! differently under the two authz modes (see `src/authz.rs`):
-//! - **Legacy mode (default, `authz_enforced = false`):** an unassigned key
-//!   resolves to `AuthUser = None`, which `require_role` passes unconditionally
-//!   at Viewer/Maintainer. It can read and write everything — exactly like
-//!   `lific start`'s first-run "default" key. Fine for a local single-user box.
-//! - **Enforced mode (`authz_enforced = true`):** `None` is default-denied at
-//!   every level and `visible_project_ids` returns the empty set — an
-//!   unassigned key would **see nothing**. Shipping one there is a setup bug.
+//! An API key with `user_id = NULL` (an "unassigned" key) acts as the
+//! instance's first admin (operator trust, see `src/authz.rs`), exactly like
+//! `lific start`'s first-run "default" key. Fine for a local single-user box,
+//! but it hands an agent admin rights on a shared one.
 //!
 //! Therefore `connect` prefers a **bot identity owned by a human** (parity with
-//! the web UI's Connected Tools): the bot inherits its owner's role, so it works
-//! under both modes. It only falls back to a plain unassigned key on a truly
-//! fresh install (zero human users) — where enforcement can't be on yet (it
-//! takes an admin to enable). If humans exist but none can be chosen
+//! the web UI's Connected Tools): the bot inherits its owner's role and never
+//! exceeds it. It only falls back to a plain unassigned key on a truly
+//! fresh install (zero human users). If humans exist but none can be chosen
 //! unambiguously and no `--user` was given, we surface guidance rather than mint
 //! a key that might see nothing.
 //!
@@ -151,12 +145,36 @@ pub struct AgentsMdOutcome {
 /// The URL (or db path, for `--stdio`) this run will write into client
 /// configs. Shared by `run` and by the pre-run announcement so they can never
 /// disagree.
-pub fn target_url(args: &ConnectArgs, cfg: &Config) -> String {
+pub fn target_url(args: &ConnectArgs, cfg: &Config) -> Result<String, String> {
     if args.stdio {
-        absolute_db_path(cfg)
+        Ok(absolute_db_path(cfg))
     } else {
-        args.url.clone().unwrap_or_else(|| default_url(cfg))
+        let url = args.url.clone().unwrap_or_else(|| default_url(cfg));
+        if is_path_token_url(&url) {
+            return Err(PATH_TOKEN_GUIDANCE.into());
+        }
+        if !reqwest::Url::parse(url.trim()).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
+        }) {
+            return Err("MCP URL must be an absolute http:// or https:// endpoint URL".into());
+        }
+        Ok(url)
     }
+}
+
+pub(super) const PATH_TOKEN_GUIDANCE: &str = "MCP credentials in URL paths were removed in 3.0. Use /mcp with an \
+     Authorization: Bearer <API_KEY> header, or use OAuth (lific connect --oauth). \
+     The old mcp_path_token is not an API key; create a new API key if needed.";
+
+pub(super) fn is_path_token_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value.trim()) else {
+        return false;
+    };
+    let path = urlencoding::decode(url.path()).unwrap_or_else(|_| url.path().into());
+    path.split('/')
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|parts| parts[0] == "mcp" && !parts[1].is_empty())
 }
 
 /// Guard: refuse to run against an instance that doesn't exist yet.
@@ -627,7 +645,7 @@ pub fn run(
         }
     }
 
-    let target = target_url(&args, cfg);
+    let target = target_url(&args, cfg)?;
     let selected = resolve_clients_inner(&args.clients, stdin_tty, base, args.scope, |d| {
         interactive_picker(d, &target)
     })?;
@@ -1070,11 +1088,87 @@ mod tests {
             dry_run: false,
             skip_agents: true,
         };
-        assert_eq!(target_url(&args, &cfg), "https://example.com/mcp");
+        assert_eq!(target_url(&args, &cfg).unwrap(), "https://example.com/mcp");
         args.url = None;
-        assert_eq!(target_url(&args, &cfg), "http://127.0.0.1:4000/mcp");
+        assert_eq!(
+            target_url(&args, &cfg).unwrap(),
+            "http://127.0.0.1:4000/mcp"
+        );
         args.stdio = true;
-        assert!(target_url(&args, &cfg).ends_with("lific.db"));
+        assert!(target_url(&args, &cfg).unwrap().ends_with("lific.db"));
+    }
+
+    #[test]
+    fn connect_rejects_path_credentials_before_writing_or_minting() {
+        let guard = tmp();
+        let b = base(guard.path());
+        let pool = db::open_memory().unwrap();
+        for oauth in [false, true] {
+            for dry_run in [false, true] {
+                for from_config in [false, true] {
+                    let mut cfg = Config::default();
+                    let mut a = args(&["opencode"], Scope::Project);
+                    a.key = None;
+                    a.oauth = oauth;
+                    a.dry_run = dry_run;
+                    let old_url = "https://example.test/lific/mcp/SECRET";
+                    if from_config {
+                        a.url = None;
+                        cfg.server.public_url = Some(old_url.into());
+                    } else {
+                        a.url = Some(old_url.into());
+                    }
+                    let error = run(&a, &cfg, &pool, &b).unwrap_err();
+                    assert!(error.contains("Authorization"), "{error}");
+                    assert!(!error.contains("SECRET"));
+                    assert!(!b.project.join("opencode.json").exists());
+                    assert_eq!(
+                        pool.read()
+                            .unwrap()
+                            .query_row("SELECT count(*) FROM api_keys", [], |row| row
+                                .get::<_, i64>(0))
+                            .unwrap(),
+                        0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn path_token_detection_respects_url_path_boundaries() {
+        for url in [
+            "https://example.test/mcp/secret",
+            "https://example.test/prefix/mcp/secret/",
+            "https://example.test/%6dcp/secret",
+            "https://example.test/mcp%2fsecret",
+        ] {
+            assert!(is_path_token_url(url), "{url}");
+        }
+        for url in [
+            "https://example.test/mcp",
+            "https://example.test/mcp/",
+            "https://example.test/mcp-tools/guide",
+            "https://example.test/mcp?next=/mcp/secret",
+            "/local/mcp/database.db",
+        ] {
+            assert!(!is_path_token_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn connect_rejects_relative_and_invalid_endpoint_urls() {
+        let cfg = Config::default();
+        for url in [
+            "/mcp/secret",
+            "example.test/mcp/secret",
+            "file:///mcp/secret",
+            "not a URL",
+        ] {
+            let mut a = args(&["opencode"], Scope::Project);
+            a.url = Some(url.into());
+            assert!(target_url(&a, &cfg).is_err(), "{url}");
+        }
     }
 
     fn base(dir: &std::path::Path) -> PathBase {

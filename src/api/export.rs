@@ -10,7 +10,6 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use crate::authz;
 use crate::db::DbPool;
-use crate::db::models::Role;
 use crate::error::LificError;
 
 use super::with_read;
@@ -297,8 +296,8 @@ pub(super) async fn export_issue(
         let id = crate::db::queries::resolve_identifier(conn, &identifier)?;
         crate::db::queries::issue_project_id(conn, id)
     })?;
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    authz::require_read(&db, &identity, project_id)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let slot = db.acquire_export_slot()?;
     let (bundle, slot) = blocking_export(slot, move || {
         with_read(&db, |conn| {
@@ -333,7 +332,7 @@ pub(super) async fn export_page(
         crate::db::queries::page_project_id(conn, id)
     })?;
     match project_id {
-        Some(pid) => authz::require_role(&db, &identity, pid, Role::Viewer)?,
+        Some(pid) => authz::require_read(&db, &identity, pid)?,
         None => authz::require_workspace_admin(&db, &identity)?,
     }
     let slot = db.acquire_export_slot()?;
@@ -366,8 +365,8 @@ pub(super) async fn export_project(
     let project_id = with_read(&db, |conn| {
         crate::db::queries::resolve_project_identifier(conn, &identifier)
     })?;
-    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let visible = authz::visible_project_ids(&db, &identity)?;
+    authz::require_read(&db, &identity, project_id)?;
+    let visible = authz::readable_project_ids(&db, &identity)?;
     let slot = db.acquire_export_slot()?;
     let format = q.format.unwrap_or_else(|| "zip".into());
     let (bundle, slot) = blocking_export(slot, move || {
@@ -542,7 +541,8 @@ mod tests {
         let bundle = parse_json(resp).await;
         assert_eq!(
             bundle["files"][0]["path"],
-            "TST/pages/tst-doc-1-bundle-page.md"
+            // DOC-1 is the conventions page the project starts with.
+            "TST/pages/tst-doc-2-bundle-page.md"
         );
     }
 

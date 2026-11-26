@@ -354,12 +354,90 @@ pub fn list_comments(
     list_comments_exhaustive(conn, parent, author, order, None, None)
 }
 
+pub struct DecisionSummaries {
+    pub items: Vec<(i64, String)>,
+    pub total: i64,
+}
+
+/// Read only the newest candidates. The renderer applies the encoded byte budget.
+pub fn decision_summaries(
+    conn: &Connection,
+    issue_id: i64,
+) -> Result<DecisionSummaries, LificError> {
+    let total = count_comments_by_kind(
+        conn,
+        CommentParent::Issue(issue_id),
+        None,
+        Some(CommentKind::Decision),
+    )?;
+    let mut statement = conn.prepare_cached(
+        "SELECT id, substr(content, 1, 4096)
+         FROM comments WHERE issue_id = ?1 AND kind = 'decision' AND deleted_at IS NULL
+         ORDER BY created_at DESC, id DESC LIMIT 50",
+    )?;
+    let rows = statement.query_map([issue_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, text) = row?;
+        items.push((id, decision_summary(&text)));
+    }
+    Ok(DecisionSummaries { items, total })
+}
+
+fn decision_summary(text: &str) -> String {
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some((marker, width)) = fence {
+            if line.chars().take_while(|c| *c == marker).count() >= width
+                && line.trim_matches(marker).trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker @ ('`' | '~')) = line.chars().next() {
+            let width = line.chars().take_while(|c| *c == marker).count();
+            if width >= 3 {
+                fence = Some((marker, width));
+                continue;
+            }
+        }
+        let heading = line.chars().take_while(|c| *c == '#').count();
+        if line.is_empty()
+            || (1..=6).contains(&heading)
+                && line[heading..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        {
+            continue;
+        }
+        let mut summary: String = line.chars().take(320).collect();
+        if line.chars().count() > 320 {
+            summary.push('…');
+        }
+        return summary;
+    }
+    "No prose in preview; read the full comment.".into()
+}
+
 /// Count comments for an issue or page after applying the same optional
 /// author filter as `list_comments_paginated`.
 pub fn count_comments(
     conn: &Connection,
     parent: CommentParent,
     author: Option<&str>,
+) -> Result<i64, LificError> {
+    count_comments_by_kind(conn, parent, author, None)
+}
+
+pub fn count_comments_by_kind(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    kind: Option<CommentKind>,
 ) -> Result<i64, LificError> {
     let (parent_col, id) = match parent {
         CommentParent::Issue(id) => ("c.issue_id", id),
@@ -371,9 +449,10 @@ pub fn count_comments(
                 "SELECT COUNT(*) FROM comments c
                  LEFT JOIN users u ON u.id = c.user_id
                  WHERE {parent_col} = ?1 AND c.deleted_at IS NULL
-                   AND COALESCE(c.imported_author, u.username) = ?2 COLLATE NOCASE"
+                    AND COALESCE(c.imported_author, u.username) = ?2 COLLATE NOCASE
+                    AND (?3 IS NULL OR c.kind = ?3)"
             ),
-            params![id, username],
+            params![id, username, kind],
             |row| row.get(0),
         )
         .map_err(Into::into)
@@ -381,9 +460,10 @@ pub fn count_comments(
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM comments c
-                 WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
+                  WHERE {parent_col} = ?1 AND c.deleted_at IS NULL
+                    AND (?2 IS NULL OR c.kind = ?2)"
             ),
-            params![id],
+            params![id, kind],
             |row| row.get(0),
         )
         .map_err(Into::into)
@@ -415,6 +495,7 @@ pub fn list_comments_exhaustive(
         conn,
         &CommentScan {
             parent,
+            kind: None,
             author,
             order,
             limit,
@@ -486,6 +567,7 @@ pub struct CommentPage {
 /// tells a reader nothing about which knob is which.
 struct CommentScan<'a> {
     parent: CommentParent,
+    kind: Option<CommentKind>,
     author: Option<&'a str>,
     order: Option<&'a str>,
     limit: Option<i64>,
@@ -529,10 +611,25 @@ pub fn list_comments_keyset(
     offset: Option<i64>,
     before: Option<&CommentCursor>,
 ) -> Result<CommentPage, LificError> {
+    list_comments_by_kind(conn, parent, author, order, limit, offset, before, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_comments_by_kind(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    before: Option<&CommentCursor>,
+    kind: Option<CommentKind>,
+) -> Result<CommentPage, LificError> {
     scan_comments(
         conn,
         &CommentScan {
             parent,
+            kind,
             author,
             order,
             limit,
@@ -564,6 +661,7 @@ pub fn list_comments_page_within(
         conn,
         &CommentScan {
             parent,
+            kind: None,
             author,
             order,
             limit,
@@ -590,8 +688,9 @@ pub fn remaining_budget(spent: usize, subject: &str) -> Result<usize, LificError
         .ok_or_else(|| {
             LificError::PayloadTooLarge(format!(
                 "{subject} is {spent} bytes before any comments, past the \
-             {budget}-byte response budget. Read it in narrower pieces \
-             (get_issue with comments=none, then list_comments)."
+             {budget}-byte response budget. Read the full issue through REST \
+             GET /api/issues/resolve/{subject}, or shorten its description. \
+             Use list_comments identifier={subject} to read its discussion separately."
             ))
         })
 }
@@ -746,6 +845,10 @@ impl CommentQuery {
              WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
         );
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
+        if let Some(kind) = scan.kind {
+            tail.push_str(&format!(" AND c.kind = ?{}", values.len() + 1));
+            values.push(Box::new(kind));
+        }
         if let Some(username) = scan.author {
             tail.push_str(&format!(
                 " AND COALESCE(c.imported_author, u.username) = ?{} COLLATE NOCASE",
@@ -1053,50 +1156,38 @@ pub fn extract_mention_usernames(body: &str) -> Vec<String> {
 
 /// List the users who may be `@`-mentioned in a given project's comments.
 ///
-/// When `member_scoped` is true (the caller passes the live `authz_enforced`
-/// flag), the candidate list is exactly the project's members — nobody who
-/// can't see the project is ever suggested. When false, every user is a
-/// candidate (legacy mode has no concept of project-hidden users). Bots are
+/// The candidates are the people who belong to the project, its members and
+/// the instance admins ([`crate::authz::BELONGS_TO_PROJECT_SQL`]), so nobody
+/// who can't see it is ever suggested. Bots are
 /// excluded: an `@`-mention targets a person, and a connected tool isn't one
 /// a human would address in a thread.
 ///
-/// `project_id = None` (workspace-level page) has no membership list, so the
-/// member-scoped branch returns an empty set — matching the design decision
-/// that workspace pages are admin-only surfaces.
+/// `project_id = None` (workspace-level page) has no membership list, so it
+/// returns an empty set, matching the design decision that workspace pages
+/// are admin-only surfaces.
 pub fn mention_candidates(
     conn: &Connection,
     project_id: Option<i64>,
-    member_scoped: bool,
 ) -> Result<Vec<crate::db::models::MentionCandidate>, LificError> {
-    let map_row = |row: &rusqlite::Row| {
-        Ok(crate::db::models::MentionCandidate {
-            user_id: row.get(0)?,
-            username: row.get(1)?,
-            display_name: row.get(2)?,
-        })
+    let Some(pid) = project_id else {
+        return Ok(Vec::new());
     };
-
-    let rows: Vec<crate::db::models::MentionCandidate> = if member_scoped {
-        let Some(pid) = project_id else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = conn.prepare_cached(
-            "SELECT u.id, u.username, u.display_name
-             FROM project_members m
-             JOIN users u ON u.id = m.user_id
-             WHERE m.project_id = ?1 AND u.is_bot = 0
-             ORDER BY u.username COLLATE NOCASE",
-        )?;
-        stmt.query_map(params![pid], map_row)?
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, username, display_name FROM users
-             WHERE is_bot = 0 ORDER BY username COLLATE NOCASE",
-        )?;
-        stmt.query_map([], map_row)?
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT u.id, u.username, u.display_name
+         FROM users u
+         WHERE u.is_bot = 0 AND {}
+         ORDER BY u.username COLLATE NOCASE",
+        crate::authz::BELONGS_TO_PROJECT_SQL
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::named_params! { ":project_id": pid }, |row| {
+            Ok(crate::db::models::MentionCandidate {
+                user_id: row.get(0)?,
+                username: row.get(1)?,
+                display_name: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -1219,7 +1310,6 @@ pub fn create_comment_with_mentions(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     create_reconciled_comment(
         conn,
@@ -1228,9 +1318,35 @@ pub fn create_comment_with_mentions(
         author,
         attachments,
         content,
-        member_scoped,
         CommentKind::Comment,
     )
+}
+
+/// Caller-selected kinds share the ordinary comment reconciliation path.
+#[allow(clippy::too_many_arguments)]
+pub fn create_typed_comment_with_mentions(
+    conn: &Connection,
+    parent: CommentParent,
+    project_id: Option<i64>,
+    author: CommentActor,
+    attachments: AttachmentActor,
+    content: &str,
+    kind: crate::db::models::CommentWriteKind,
+) -> Result<Comment, LificError> {
+    match kind {
+        crate::db::models::CommentWriteKind::Comment => {
+            create_comment_with_mentions(conn, parent, project_id, author, attachments, content)
+        }
+        crate::db::models::CommentWriteKind::Decision => create_reconciled_comment(
+            conn,
+            parent,
+            project_id,
+            author,
+            attachments,
+            content,
+            kind.into(),
+        ),
+    }
 }
 
 /// Record verification evidence on an issue (LIF-486): a comment of kind
@@ -1243,7 +1359,6 @@ pub fn create_verification_comment(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     create_reconciled_comment(
         conn,
@@ -1252,12 +1367,10 @@ pub fn create_verification_comment(
         author,
         attachments,
         content,
-        member_scoped,
         CommentKind::Verification,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_reconciled_comment(
     conn: &Connection,
     parent: CommentParent,
@@ -1265,11 +1378,10 @@ fn create_reconciled_comment(
     author: CommentActor,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
     kind: CommentKind,
 ) -> Result<Comment, LificError> {
     super::savepoint(conn, "create_comment_with_mentions", || {
-        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let candidates = mention_candidates(conn, project_id)?;
         let comment = insert_comment_row(conn, parent, author.user_id, content, kind)?;
         sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         super::attachments::sync_links(
@@ -1294,10 +1406,9 @@ pub fn update_comment_with_mentions(
     project_id: Option<i64>,
     attachments: AttachmentActor,
     content: &str,
-    member_scoped: bool,
 ) -> Result<Comment, LificError> {
     super::savepoint(conn, "update_comment_with_mentions", || {
-        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let candidates = mention_candidates(conn, project_id)?;
         let comment = write_comment_content(conn, comment_id, content)?;
         sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         super::attachments::sync_links(
@@ -1400,6 +1511,44 @@ mod tests {
 
         drop(conn);
         (pool, issue.id, page.id, user.id)
+    }
+
+    #[test]
+    fn decision_summaries_bound_unicode_lines_and_skip_markdown_scaffolding() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for text in [
+            format!("\n \t{}\nRationale", "界".repeat(320)),
+            "界".repeat(321),
+        ] {
+            insert_comment_row(
+                &conn,
+                CommentParent::Issue(issue_id),
+                user_id,
+                &text,
+                CommentKind::Decision,
+            )
+            .unwrap();
+        }
+        let summaries = decision_summaries(&conn, issue_id).unwrap();
+        assert_eq!(summaries.total, 2);
+        assert_eq!(summaries.items[1].1, "界".repeat(320));
+        assert_eq!(summaries.items[0].1, format!("{}…", "界".repeat(320)));
+        for text in [
+            "## Decision\n\nUse SQLite.\nRationale",
+            "```rust\nlet db = 1;\n```\n\nUse SQLite.",
+            "### Decision\n~~~~text\n```\ncode\n~~~~\nUse SQLite.",
+        ] {
+            assert_eq!(decision_summary(text), "Use SQLite.");
+        }
+        assert_eq!(
+            decision_summary("## Decision\n```sql\nSELECT 1;"),
+            "No prose in preview; read the full comment."
+        );
+        assert_eq!(
+            decision_summary("#123 is a comment reference."),
+            "#123 is a comment reference."
+        );
     }
 
     #[test]
@@ -1542,7 +1691,6 @@ mod tests {
             editor,
             AttachmentActor::Authenticated(editor),
             &content,
-            true,
         )
         .unwrap();
         assert!(
@@ -1564,7 +1712,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(editor),
             &content,
-            true,
         )
         .unwrap();
         assert_eq!(
@@ -2529,10 +2676,11 @@ mod tests {
     }
 
     #[test]
-    fn mention_candidates_all_users_when_not_scoped() {
-        let (pool, _, _, _user_id) = setup();
+    fn mention_candidates_are_the_projects_human_members() {
+        let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
-        queries::users::create_user(
+        let project_id = queries::get_issue(&conn, issue_id).unwrap().project_id;
+        let ada = queries::users::create_user(
             &conn,
             &CreateUser {
                 username: "ada".into(),
@@ -2544,8 +2692,8 @@ mod tests {
             },
         )
         .unwrap();
-        // A bot must never be a candidate.
-        queries::users::create_user(
+        // A bot must never be a candidate, even as a member.
+        let botty = queries::users::create_user(
             &conn,
             &CreateUser {
                 username: "botty".into(),
@@ -2557,8 +2705,11 @@ mod tests {
             },
         )
         .unwrap();
+        for id in [user_id, ada.id, botty.id] {
+            queries::members::upsert_member(&conn, project_id, id, Role::Viewer).unwrap();
+        }
 
-        let cands = mention_candidates(&conn, None, false).unwrap();
+        let cands = mention_candidates(&conn, Some(project_id)).unwrap();
         let names: Vec<&str> = cands.iter().map(|c| c.username.as_str()).collect();
         assert!(names.contains(&"blake"));
         assert!(names.contains(&"ada"));
@@ -2569,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_candidates_member_scoped_excludes_non_members() {
+    fn mention_candidates_exclude_non_members_but_not_admins() {
         let pool = crate::db::open_memory().expect("test db");
         let conn = pool.write().unwrap();
         let project = queries::create_project(
@@ -2606,17 +2757,30 @@ mod tests {
         )
         .unwrap();
         queries::members::upsert_member(&conn, project.id, member.id, Role::Viewer).unwrap();
+        let admin = queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: "boss".into(),
+                email: "boss@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
 
-        let cands = mention_candidates(&conn, Some(project.id), true).unwrap();
+        let cands = mention_candidates(&conn, Some(project.id)).unwrap();
         let ids: Vec<i64> = cands.iter().map(|c| c.user_id).collect();
         assert!(ids.contains(&member.id));
+        assert!(ids.contains(&admin.id), "an admin sees every project");
         assert!(
             !ids.contains(&outsider.id),
             "non-member must not be a candidate"
         );
 
-        // A workspace page (no project) member-scoped yields nothing.
-        assert!(mention_candidates(&conn, None, true).unwrap().is_empty());
+        // A workspace page (no project) yields nothing.
+        assert!(mention_candidates(&conn, None).unwrap().is_empty());
     }
 
     #[test]
@@ -2875,6 +3039,7 @@ mod tests {
         // The planner reads sizes, not bodies: the statement it runs never
         // names `c.content` except inside `length(...)`.
         let query = CommentQuery::build(&CommentScan {
+            kind: None,
             parent: CommentParent::Issue(issue_id),
             author: None,
             order: Some("asc"),
@@ -3115,7 +3280,6 @@ mod tests {
             actor,
             AttachmentActor::Authenticated(actor),
             "before",
-            false,
         )
         .unwrap();
 
@@ -3126,7 +3290,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(actor),
             &over_cap,
-            false,
         )
         .expect_err("reconciling a truncated reference set would unlink live attachments");
         assert!(
@@ -3146,7 +3309,6 @@ mod tests {
             Some(project_id),
             AttachmentActor::Authenticated(actor),
             &at_cap,
-            false,
         )
         .expect("the cap itself is allowed");
     }

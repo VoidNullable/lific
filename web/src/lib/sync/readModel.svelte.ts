@@ -23,7 +23,7 @@
 // gaps are impossible because the cursor only ever moves by applying rows.
 
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
-import { getPublicProject } from "../publicScope";
+import { isSignedOut } from "../signedOut";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
@@ -36,9 +36,10 @@ export type ReadModelStatus = "cold" | "loading" | "ready";
 export class ProjectReadModel {
   readonly projectId: number;
   /** LIF-471: the registry key this model was created under. A pull only
-   *  runs while the client is still in that audience, so a public replica
-   *  is never filled from the authenticated API after a scope change (or the
-   *  reverse), however late the pull was scheduled. */
+   *  runs while the client is still in that audience (signed in or signed
+   *  out, LIF-583), so a signed-out replica is never filled with what a
+   *  session can see after signing in (or the reverse), however late the
+   *  pull was scheduled. */
   readonly key: string;
 
   /** Live issues by id. Reassigned (never mutated in place) on every apply
@@ -74,13 +75,13 @@ export class ProjectReadModel {
    *  write; pull once the bootstrap settles rather than dropping it. */
   private pullAfterBootstrap = false;
 
-  constructor(projectId: number, key: string = `private:${projectId}`) {
+  constructor(projectId: number, key: string = modelKey(projectId)) {
     this.projectId = projectId;
     this.key = key;
   }
 
-  /** False once the client has crossed the public/private boundary since
-   *  this model was created; see `key`. */
+  /** False once the client has signed in or out since this model was
+   *  created; see `key`. */
   private inScope(): boolean {
     return modelKey(this.projectId) === this.key;
   }
@@ -259,15 +260,18 @@ export class ProjectReadModel {
 // single most common navigation in the app, so there is no eviction policy:
 // the whole point is that the second visit costs nothing.
 
-// LIF-471: keyed by audience as well as project. The public view of a
-// project is fed by the anonymous surface and the private view by the
-// authenticated one; the rows happen to match today, but a replica must
-// never be filled from one and served through the other.
+// LIF-471: keyed by audience as well as project. A signed-out reader and a
+// session may be shown different rows (a session can see comments and
+// projects a stranger cannot), so a replica is never filled for one and
+// served to the other (LIF-583).
 const models = new Map<string, ProjectReadModel>();
 
+function audience(): string {
+  return isSignedOut() ? "signed-out" : "session";
+}
+
 function modelKey(projectId: number): string {
-  const audience = getPublicProject();
-  return audience === null ? `private:${projectId}` : `public:${audience}:${projectId}`;
+  return `${audience()}:${projectId}`;
 }
 
 /** The project whose websocket resume frame we send on reconnect. Set by
@@ -350,16 +354,18 @@ export function handleRealtimeEvent(event: SyncEvent): void {
   // A dropped-and-restored connection invalidates every replica's
   // assumption that it saw the intervening events.
   if (event.type === "resync.required") {
+    const current = `${audience()}:`;
     for (const model of models.values()) {
-      if (model.key.startsWith("private:")) model.schedulePull();
+      if (model.key.startsWith(current)) model.schedulePull();
     }
     return;
   }
 
   const projectId = typeof event.project_id === "number" ? event.project_id : null;
   if (projectId == null) return;
-  // Realtime is a private channel; it only ever feeds private replicas.
-  const model = models.get(`private:${projectId}`);
+  // The socket carries what the current audience may see, so it feeds that
+  // audience's replicas only.
+  const model = models.get(modelKey(projectId));
   if (!model) return;
 
   // `sync_required` is the server saying "my replay ring no longer covers
@@ -408,8 +414,7 @@ function installGlobalListeners(): void {
 const projectsByIdentifier = new Map<string, Project>();
 
 function projectKey(identifier: string): string {
-  const audience = getPublicProject() === null ? "private" : "public";
-  return `${audience}:${identifier.toLowerCase()}`;
+  return `${audience()}:${identifier.toLowerCase()}`;
 }
 
 export function cacheProjects(projects: Project[]): void {

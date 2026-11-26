@@ -1,64 +1,72 @@
 ---
-title: Public read API
-description: The anonymous, read-only routes that serve a published project, what they leave out, and the limits that protect the instance from them.
+title: Reading without a credential
+description: Which ordinary API routes answer a request with no credential for a published project, what they leave out, and the limits that protect the instance from them.
 ---
 
-When a lead publishes a project (`PUT /api/projects/{id}` with `"is_public": true`), its current issues, pages, comments and attachments can be read by anyone, with no account and no credential, under `/public/api/projects/{project}`. `{project}` is the project identifier, in any case. [Public projects](/docs/public-projects) covers what publishing exposes and how to review a project first.
+When a lead publishes a project (`PUT /api/projects/{id}` with `"is_public": true`), anyone can read it through the ordinary API, with no account and no credential. There is no separate prefix: the routes, JSON shapes and paging headers are the ones a member uses. [Public projects](/docs/public-projects) covers what publishing exposes and how to review a project first.
 
-Each route mirrors a private one: the same JSON shapes and the same comment paging headers, with `/api` replaced by the public prefix. That lets a client built for the private API read a public project by changing its base path and dropping the token.
-
-## What it leaves out
-
-- The project's `lead_user_id` is null.
-- An issue has no `source` and no `waits`, and its relation arrays list only issues in the same project.
-- A comment keeps `author_display_name` but not `user_id` or the `author` username. The `author` filter on comment lists is ignored, so it cannot be used to test whether a username exists.
-- An attachment has no `uploader_id`.
-- `/changes` contains no comment rows, and its cursor counts only this project's writes.
-- Plans, activity, members, users, saved views, search, the realtime socket and every write are not available at all.
-
-Items in the trash are not served.
-
-## One answer for "no"
-
-A private project, a project that does not exist, a project unpublished a moment ago, an item in the trash, an attachment from another project, a non-numeric id and a path that matches no route all answer the same JSON `404`, `{"error": "not found"}`. Only `GET` is served; other methods are `405`. Unpublishing takes effect on the next request.
-
-Every response, errors included, carries `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`, so nothing public outlives an unpublish in a cache.
+A signed-in account or API key with no role in a published project reads it through the same routes, and every write it sends gets `403`.
 
 ## Routes
 
-All are `GET` and take no credential. Replace `…` with `/public/api/projects/{project}`.
+These answer `GET` with no credential. Every other route, and every other method, still answers `401`.
 
-| Route | Mirrors | Returns |
-| --- | --- | --- |
-| `/public/api/projects/{project}` | `GET /api/projects/{id}` | The `Project`. |
-| `…/index` | `GET /api/projects/{id}/index` | Every live issue and page as summary rows, and a cursor. |
-| `…/changes` | `GET /api/projects/{id}/changes` | Changes above `since`, with `limit`. No comment rows. |
-| `…/modules`, `…/labels`, `…/folders` | `GET /api/modules?project_id=` and the others | The project's structure. |
-| `…/issues/resolve/{identifier}` | `GET /api/issues/resolve/{identifier}` | One issue. An identifier from another project is `404`. |
-| `…/issues/{id}` | `GET /api/issues/{id}` | One issue by id. |
-| `…/issues/{id}/comments` | `GET /api/issues/{issue_id}/comments` | Comments, with the same query parameters and `x-comment-*` headers. |
-| `…/pages/{id}` | `GET /api/pages/{id}` | One page with its content. |
-| `…/pages/{id}/comments` | `GET /api/pages/{page_id}/comments` | Comments on the page. |
-| `…/attachments?entity_type=&entity_id=` | `GET /api/attachments` | Attachments on a live issue, page or comment in the project. An unknown `entity_type` is `404`. |
-| `…/attachments/{id}` | `GET /api/attachments/{id}` | The file, streamed, with the same type, disposition and sandbox headers as the private route. No byte ranges. |
-| `…/attachments/{id}/thumbnail` | `GET /api/attachments/{id}/thumbnail` | The WebP thumbnail. |
-| `…/attachments/{id}/preview` | `GET /api/attachments/{id}/preview` | The archive or database preview. |
+| Route | Returns |
+| --- | --- |
+| `/api/projects` | The published projects. |
+| `/api/projects/{id}` | One published project. |
+| `/api/projects/{id}/index`, `/changes` | [Delta sync](/docs/rest-api/sync). The cursor counts only this project's writes. |
+| `/api/projects/{id}/board`, `/issue-counts`, `/relations`, `/insights` | The board, counts, dependency graph and insights. |
+| `/api/projects/{id}/activity`, `/activity/actors` | The project's activity. |
+| `/api/projects/{id}/my-role` | `{"role": null, "is_admin": false}`. |
+| `/api/projects/{id}/attachments` | The project's files. |
+| `/api/issues`, `/api/issues/{id}`, `/api/issues/resolve/{identifier}` | Issues, limited to published projects when no `project_id` is given. |
+| `/api/issues/{id}/comments`, `/activity`, `/waits` | Comments, history and waits. |
+| `/api/pages`, `/api/pages/{id}`, `/api/pages/resolve/{identifier}` | Pages in published projects. Workspace pages are never included. |
+| `/api/pages/{id}/comments`, `/activity` | Comments and history. |
+| `/api/plans`, `/api/plans/{id}`, `/api/plans/resolve/{identifier}`, `/api/plans/{id}/activity` | Plans and their history. |
+| `/api/modules`, `/api/modules/{id}`, `/api/labels`, `/api/folders` | The project's structure. |
+| `/api/attachments?entity_type=&entity_id=` | Files on an issue, page or comment. |
+| `/api/attachments/{id}`, `/thumbnail`, `/preview`, `/links` | A file, its thumbnail or preview, and where it is used. |
+| `/api/search` | Search across published projects. |
+| `/api/clock` | The server's calendar day and UTC offset. |
 
 ```bash
-curl "$LIFIC/public/api/projects/APP/issues/resolve/APP-12"
+curl "$LIFIC/api/issues/resolve/APP-12"
 ```
+
+The realtime socket at `/api/events/ws` also accepts a connection with no session cookie, or with one whose session has expired or been revoked. It carries events for published projects only.
+
+## What it leaves out
+
+- Email addresses, API keys and session tokens never appear in a response.
+- A plan step or anchor that points to an issue in a project the caller cannot read has no issue identifier or status.
+- A relation to an issue in a project the caller cannot read is left out.
+- Activity feeds leave out rows recorded by a project the caller cannot read, even when they concern a readable issue, and membership and repository-binding rows of a project the caller is not a member of. In what remains, an issue identifier in a project the caller cannot read (a relation target, a moved issue's old identifier, a plan anchor or step link) reads `"a private issue"`, and an `issue_id` or `page_id` in such a project is `null`. The same applies to MCP `get_activity` and to signed-in callers.
+- Member lists, mention candidates, saved views, repository bindings, exports, archives, accounts and instance settings answer `401`.
+
+## One answer for "no"
+
+To a request with no credential, a project that is not published, a project that does not exist, a project unpublished a moment ago, an item in the trash and anything inside a private project all answer the same JSON `404`, `{"error": "not found"}`. Unpublishing takes effect on the next request.
+
+Every response to a request with no credential, errors included, carries `Cache-Control: no-store`, `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`. A file download also carries `Content-Security-Policy: default-src 'none'; sandbox`, is streamed without byte ranges, and opens in the browser only when it is a plain image or media file.
 
 ## Limits
 
-These routes carry no credential, so they are bounded to keep anonymous traffic from crowding out signed-in users:
+These requests carry no credential, so they are bounded to keep anonymous traffic from crowding out signed-in users:
 
 | Limit | Value | When exceeded |
 | --- | --- | --- |
-| Requests per client address | 240 per minute | `429`, `Retry-After: 30` |
+| Requests per client address | 600 per minute | `429`, `Retry-After: 30` |
 | Requests in progress, whole instance | 4 | `503`, `Retry-After: 2` |
 | Attachment downloads in progress | 4 | `503`, `Retry-After: 2` |
 | Thumbnail or preview being generated | 1 at a time | `503`, `Retry-After: 2` |
 | Largest file a thumbnail or preview is generated from | 32 MiB | `404`. A thumbnail made earlier is still served. |
 | Download | Ends after 15 seconds without progress, or 5 minutes in total | The connection is closed. |
+| Realtime connections, whole instance | 64 | `429` |
 
 Behind a reverse proxy, set [`trusted_proxies`](/docs/configuration#server) so the per-address limit sees visitors rather than the proxy. A request from a trusted proxy whose client-identity headers fail to verify is `503`.
+
+## The retired `/public/api`
+
+Lific 2.x served published projects on separate routes under `/public/api/projects/{project}`. They are gone in 3.0 and answer `404`. Point a client at the routes above and look projects up by id, or by identifier through `/api/issues/resolve/{identifier}` and the other `resolve` routes. Old `/public/{project}/...` page links in a browser redirect to `/{project}/...`.

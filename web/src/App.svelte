@@ -24,11 +24,23 @@
   import Inbox from "./routes/Inbox.svelte";
   import Assigned from "./routes/Assigned.svelte";
   import AgentActivity from "./routes/AgentActivity.svelte";
-  import PublicLayout from "./lib/PublicLayout.svelte"; // LIF-471
+  import PublishedProjects from "./routes/PublishedProjects.svelte"; // LIF-583
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
-  import { hasSession, getInstance, autoLogin, saveSession, clearSession, me, probeSession, sessionKey } from "./lib/api";
+  import {
+    hasSession,
+    getInstance,
+    autoLogin,
+    saveSession,
+    clearSession,
+    me,
+    probeSession,
+    sessionKey,
+    listProjects,
+    onSessionChange,
+    type Project,
+  } from "./lib/api";
   import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
   import {
     handleRealtimeEvent,
@@ -49,9 +61,15 @@
     parseActivityBaseline,
   } from "./lib/activityRate";
   import { motionReduced } from "./lib/theme";
-  import { scopedRoute, setPublicProject } from "./lib/publicScope"; // LIF-471
+  import {
+    SIGNED_OUT_PAGES,
+    isSignedOut,
+    onSignedOutChange,
+    rewritePublicRoute,
+    setSignedOut,
+  } from "./lib/signedOut"; // LIF-583
   import { fade } from "svelte/transition";
-  import { onDestroy, setContext } from "svelte";
+  import { onDestroy, onMount, setContext, untrack } from "svelte";
   import { routePageTitle, PAGE_TITLE_CONTEXT } from "./lib/pageTitle";
   import { loginRouteFor, nextRouteFrom } from "./lib/loginRedirect";
 
@@ -81,31 +99,63 @@
     );
   }
 
-  const initialRoute = pathRoute ?? (window.location.hash.slice(1) || "/");
-
-  // LIF-465: is this a public, login-free page? Answered from the URL before
-  // anything else, because it decides whether the private bootstrap runs at
-  // all: no instance probe, no auto-login, no realtime socket, no /login
-  // redirect. A stranger and a signed-in maintainer get the same page, which
-  // is the only way the public view can be trusted to look the same to all.
-  //
-  // LIF-471: `/public/{PROJECT}` followed by any of that project's issue or
-  // page routes, e.g. `/public/LIF/issues/LIF-42` or `/public/LIF/pages/7`.
-  const PUBLIC_ROUTE_RE = /^\/public\/([A-Za-z][A-Za-z0-9_-]*)(?:\/|$)/;
-  function publicProjectOf(input: string): string | null {
-    return input.split("?")[0].match(PUBLIC_ROUTE_RE)?.[1] ?? null;
+  // LIF-583: the old public view's routes (`#/public/LIF/...`) now live at
+  // the project's normal routes. A path-style `/public/...` link is redirected
+  // by the server; a hash route never reaches it, so it is rewritten here.
+  const bootRoute = pathRoute ?? (window.location.hash.slice(1) || "/");
+  const legacyBootRoute = rewritePublicRoute(bootRoute);
+  if (legacyBootRoute) {
+    history.replaceState(null, "", appBasePath + "/#" + legacyBootRoute);
   }
+  const initialRoute = legacyBootRoute ?? bootRoute;
 
-  // Every assignment to `route` goes through here so the public scope the
-  // data layer consults (see lib/publicScope.ts) is set synchronously, before
-  // anything under the new route mounts and starts fetching.
-  setPublicProject(publicProjectOf(initialRoute));
   let route = $state(initialRoute);
   function applyRoute(next: string) {
-    setPublicProject(publicProjectOf(next));
     route = next;
   }
-  let isPublicRoute = $derived(publicProjectOf(route) !== null);
+
+  // LIF-583: mirrors lib/signedOut for this component's reactive reads. Set
+  // once bootstrap (and single-user auto-login) has settled, then on every
+  // session change. Signed out, a published project's pages render in the
+  // normal Layout, read-only; everything else goes to login.
+  let signedOut = $state(isSignedOut());
+  $effect(() => onSignedOutChange((next) => {
+    signedOut = next;
+    published = null;
+    publishedError = null;
+    publishedRetriedFor = null;
+  }));
+  $effect(() => onSessionChange(() => {
+    if (!bootstrapping) setSignedOut(!hasSession());
+  }));
+
+  // The projects a signed-out reader may open: `listProjects()` answers an
+  // anonymous caller with the published ones only. null until loaded.
+  let published = $state<Project[] | null>(null);
+  let publishedError = $state<string | null>(null);
+  let publishedLoading = false;
+  // A route naming a project missing from the list refetches once (it may
+  // have just been published) before going to login.
+  let publishedRetriedFor: string | null = null;
+
+  async function loadPublished() {
+    if (publishedLoading) return;
+    publishedLoading = true;
+    publishedError = null;
+    const res = await listProjects();
+    publishedLoading = false;
+    if (!isSignedOut()) return;
+    if (res.ok) published = res.data;
+    // Nothing published, or nothing this caller may see: login, as before.
+    else if (res.status === 401 || res.status === 404) published = [];
+    // Rate limited, busy or offline: say so rather than bounce to login.
+    else publishedError = res.error;
+  }
+
+  function isPublished(project: string): boolean {
+    const want = project.toLowerCase();
+    return !!published?.some((p) => p.identifier.toLowerCase() === want);
+  }
 
   // LIF-434: a detail view opened as the app's entry point (an issue link
   // tapped in a chat, a new tab, a PWA launch) has no in-app history under
@@ -151,12 +201,12 @@
     }
   }
 
-  // The session is an HttpOnly cookie the page cannot read, so a cold load
-  // asks the server (`/api/auth/me`) whether it is signed in before the
-  // redirect logic runs. LIF-215: when it is not and the instance has web
-  // auto-login on, silently mint an admin session first.
-  // LIF-465: a public page has nothing to bootstrap, so no spinner either.
-  let bootstrapping = $state(publicProjectOf(initialRoute) === null);
+  // The session is an HttpOnly cookie the page cannot read, so every cold load
+  // asks the server (`/api/auth/me`) who it is before the redirect logic runs;
+  // a signed-out reader learns it is anonymous the same way (a 401 there is
+  // the normal answer, not an error). LIF-215: when it is not signed in and
+  // the instance has web auto-login on, silently mint an admin session first.
+  let bootstrapping = $state(true);
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —
@@ -205,33 +255,22 @@
     realtimeActivityRevision += 1;
   }
 
-  // LIF-465: none of the requests below may run for a public page.
-  // `autoLogin()` would mint an admin session for whoever opened the link on a
-  // single-user instance. So the session is learned the first time the tab is
-  // on a private route, at load or on leaving the public view.
-  let sessionBootstrapped = false;
-  $effect(() => {
-    if (isPublicRoute || sessionBootstrapped) return;
-    sessionBootstrapped = true;
-    void bootstrapSession();
-  });
-
-  async function bootstrapSession() {
-    bootstrapping = true;
+  onMount(async () => {
     // Probe the instance once; its auto-login flag decides single-user mode.
     // The session probe runs alongside it.
     const [inst] = await Promise.all([getInstance(), probeSession()]);
 
-    // Single-user mode: no valid session → silently mint a fresh admin session
-    // (covers both a cold load with no cookie and a just-expired one).
+    // Single-user mode: no valid session, so silently mint a fresh admin
+    // session (covers both a cold load with no cookie and an expired one).
     if (!hasSession() && inst.ok && inst.data.web_auto_login) {
       const res = await autoLogin();
       if (res.ok) saveSession();
     }
 
+    setSignedOut(!hasSession());
     bootstrapping = false;
     if (!realtimeDisposed) syncRealtimeSocket();
-  }
+  });
 
   onDestroy(() => {
     realtimeDisposed = true;
@@ -261,14 +300,6 @@
     return target ? routeWithCommentTarget(route, target) : route;
   }
 
-  // LIF-471: the routes handed to components mounted inside the public shell.
-  // Components build ordinary project routes (`/LIF/issues/LIF-42`); this
-  // keeps them inside `/public/...` so a reader never falls out of the public
-  // view into the login wall.
-  function publicNavigate(path: string) {
-    navigate(scopedRoute(path));
-  }
-
   $effect(() => {
     function onHash(event: HashChangeEvent) {
       const hash = new URL(event.newURL).hash;
@@ -282,7 +313,10 @@
           appBasePath + "/#" + routeWithCommentTarget(nextRoute, commentTarget),
         );
       } else if (hash === "" || hash.startsWith("#/")) {
-        applyRoute(hash.slice(1) || "/");
+        const next = hash.slice(1) || "/";
+        const legacy = rewritePublicRoute(next);
+        if (legacy) replaceRoute(legacy);
+        else applyRoute(next);
       }
     }
     window.addEventListener("hashchange", onHash);
@@ -291,13 +325,10 @@
 
   // Redirect logic
   $effect(() => {
-    // LIF-465: the one route reachable without a session. Guarded here, not
-    // in the comparisons below, because this effect's default is to redirect.
-    if (isPublicRoute) return;
     // Hold off until the single-user auto-login probe resolves, so we don't
     // flash /login and then bounce into the app once the session lands.
     if (!bootstrapping) {
-      if (hasSession()) {
+      if (!signedOut) {
         // LIF-237: "/" is now a real route (Home) rather than a redirect
         // target. Only /login and /signup bounce once a session exists,
         // to the page they were opened for (`?next=`) or else Home.
@@ -305,10 +336,62 @@
           replaceRoute(nextRouteFrom(route));
         }
       } else if (parsed.type !== "auth") {
-        replaceRoute(loginRouteFor(routeToResume()));
+        redirectSignedOut();
       }
     }
   });
+
+  // LIF-583: where a signed-out reader may be. A published project's
+  // readable pages stay put; `/` opens the one published project or lists
+  // several; everything else is the login screen, as it always was.
+  function redirectSignedOut() {
+    const page = parsed.type === "app" ? parsed.page : null;
+    const project = parsed.type === "app" && "project" in parsed ? parsed.project : null;
+    if (page !== "home" && (project === null || !SIGNED_OUT_PAGES.has(page ?? ""))) {
+      replaceRoute(loginRouteFor(routeToResume()));
+      return;
+    }
+    if (publishedError !== null) return;
+    if (published === null) {
+      untrack(() => void loadPublished());
+      return;
+    }
+    if (page === "home") {
+      if (published.length === 1) replaceRoute(`/${published[0].identifier}/overview`);
+      else if (published.length === 0) toLogin("/");
+      return;
+    }
+    if (project === null || isPublished(project)) return;
+    if (publishedRetriedFor !== project.toLowerCase()) {
+      publishedRetriedFor = project.toLowerCase();
+      published = null;
+      return;
+    }
+    // Unpublished, missing, or never there: the same answer for all three.
+    toLogin(routeToResume());
+  }
+
+  // The next readable route asks again: the list may change while the
+  // reader is on the login screen (a project published, or unpublished).
+  function toLogin(resume: string) {
+    published = null;
+    publishedRetriedFor = null;
+    replaceRoute(loginRouteFor(resume));
+  }
+
+  // True when the current route may render for this reader. Signed in,
+  // always; signed out, only once the published list confirms it.
+  let signedOutReady = $derived.by(() => {
+    if (!signedOut) return true;
+    if (parsed.type !== "app" || published === null) return false;
+    if (parsed.page === "home") return published.length > 1;
+    return "project" in parsed && SIGNED_OUT_PAGES.has(parsed.page) && isPublished(parsed.project);
+  });
+
+  function retryPublished() {
+    publishedError = null;
+    published = null;
+  }
 
   function socketUrl(): string {
     const url = new URL("/api/events/ws", window.location.origin);
@@ -334,8 +417,17 @@
     realtime.disconnect();
   }
 
+  // A session always gets the socket. LIF-583: a signed-out reader on a
+  // project route gets it too; the server sends anonymous sockets the events
+  // of published projects only.
+  function realtimeWanted(): boolean {
+    if (realtimeDisposed || bootstrapping) return false;
+    if (hasSession()) return true;
+    return isSignedOut() && parsed.type === "app" && "project" in parsed;
+  }
+
   function scheduleRealtimeReconnect() {
-    if (!realtimeDisposed && !realtimeReconnect && hasSession() && !realtime.hasLiveConnection()) {
+    if (!realtimeReconnect && realtimeWanted() && !realtime.hasLiveConnection()) {
       realtimeReconnect = window.setTimeout(() => {
         realtimeReconnect = null;
         syncRealtimeSocket();
@@ -345,12 +437,7 @@
   }
 
   function syncRealtimeSocket() {
-    // LIF-465: no socket on a public page. The realtime endpoint is
-    // cookie-authenticated, and the page must behave the same for a
-    // signed-in reader as for a stranger.
-    const shouldConnect =
-      !realtimeDisposed && hasSession() && !bootstrapping && !isPublicRoute;
-    if (shouldConnect) {
+    if (realtimeWanted()) {
       // Idempotent: joins the existing connection, wins the election, or
       // reopens the leader's socket, whichever applies.
       realtime.connect();
@@ -456,7 +543,9 @@
   // tab holds the lock to reconnect, or for the lock to come to them.
   function handleLeaderDisconnect(opened: boolean) {
     if (realtimeDisposed) return;
-    if (opened) {
+    // LIF-583: signed out there is no session to probe or expire; back off
+    // and retry.
+    if (opened || isSignedOut()) {
       scheduleRealtimeReconnect();
     } else {
       void reconnectAfterFailedRealtimeAttempt(sessionKey());
@@ -486,13 +575,6 @@
 
   type ParsedRoute =
     | { type: "auth"; page: "login" | "signup" }
-    // LIF-465: the anonymous project view. Its own top-level kind, not an
-    // `app` page, because `app` pages render inside `Layout` and behind the
-    // session redirect, the two things this one must not do.
-    | { type: "public"; project: string; inner: PublicPage }
-    // LIF-471: `/public/LIF` and the LIF-465 `/public/LIF/LIF-42` form
-    // redirect onto the canonical routes above.
-    | { type: "public-redirect"; to: string }
     | { type: "app"; page: "home" }
     | { type: "app"; page: "inbox" }
     | { type: "app"; page: "assigned" }
@@ -526,41 +608,6 @@
     | { type: "loading" }
     | { type: "not-found" };
 
-  /** The pages a public shell may show: the issue list (either layout), an
-   *  issue, the page tree, a page. Everything else a project has (overview,
-   *  modules, plans, files, activity, insights, graph) is signed-in only. */
-  type PublicPage = Extract<
-    ParsedRoute,
-    { type: "app"; page: "issues" | "board" | "issue-detail" | "pages" | "page-detail" }
-  >;
-
-  function parsePublicRoute(r: string): ParsedRoute | null {
-    const project = publicProjectOf(r);
-    if (project === null) return null;
-    const rest = r.slice("/public".length);
-    // `/public/LIF` (and a trailing slash) is the issue list.
-    if (/^\/[A-Za-z][A-Za-z0-9_-]*\/?$/.test(rest)) {
-      return { type: "public-redirect", to: `/public/${project}/issues` };
-    }
-    // The LIF-465 detail link, `/public/LIF/LIF-42`, keeps working.
-    const legacy = rest.match(/^\/[A-Za-z][A-Za-z0-9_-]*\/([A-Za-z][A-Za-z0-9_-]*-\d+)$/);
-    if (legacy) {
-      return { type: "public-redirect", to: `/public/${project}/issues/${legacy[1]}` };
-    }
-    const inner = parseRoute(rest);
-    if (
-      inner.type === "app" &&
-      (inner.page === "issues" ||
-        inner.page === "board" ||
-        inner.page === "issue-detail" ||
-        inner.page === "pages" ||
-        inner.page === "page-detail")
-    ) {
-      return { type: "public", project, inner };
-    }
-    return { type: "not-found" };
-  }
-
   function parseRoute(input: string): ParsedRoute {
     // Strip a "?key=value" query string from the route before pattern-
     // matching. The path portion drives the page selection; the query
@@ -573,10 +620,6 @@
       return { type: "auth", page: r.slice(1) as "login" | "signup" };
     }
 
-    // LIF-465 / LIF-471: /public/{PROJECT}/... Matched before the
-    // project-scoped patterns below so no project could shadow it.
-    const publicRoute = parsePublicRoute(r);
-    if (publicRoute) return publicRoute;
     // LIF-237: bare root — the "My Work" home dashboard.
     if (r === "/") {
       return { type: "app", page: "home" };
@@ -772,15 +815,6 @@
     document.title = titleOverride ?? routePageTitle(parsed);
   });
 
-  // LIF-471: canonicalize the two short public forms in place, so the back
-  // button does not land on a route that only ever bounces forward again.
-  $effect(() => {
-    if (parsed.type !== "public-redirect") return;
-    const to = parsed.to;
-    history.replaceState(null, "", appBasePath + "/#" + to);
-    applyRoute(to);
-  });
-
   // LIF-246: route-level fade-in. Keyed on the page *kind*, not the raw
   // route string — "issues" and "board" collapse to the same key so
   // toggling list/board (or navigating between projects on the same page
@@ -794,77 +828,14 @@
       ? parsed.page === "board"
         ? "issues"
         : parsed.page
-      : parsed.type === "public"
-        ? `public:${parsed.inner.page === "board" ? "issues" : parsed.inner.page}`
-        : parsed.type,
+      : parsed.type,
   );
   function routeFadeParams() {
     return motionReduced() ? { duration: 0 } : { duration: 120 };
   }
 </script>
 
-{#if parsed.type === "public-redirect"}
-  <!-- Replaced by the effect above before the next frame. -->
-{:else if parsed.type === "public"}
-  <!-- LIF-465: ahead of `bootstrapping` so a public link never flashes the
-       session spinner, and ahead of every Layout-wrapped branch so no
-       signed-in chrome is mounted on a page a stranger can load.
-       LIF-471: the ordinary components, in the public shell, with a scoped
-       `navigate` and a route the shell reads without its `/public` prefix. -->
-  <PublicLayout
-    navigate={publicNavigate}
-    route={route.slice("/public".length)}
-    projectIdentifier={parsed.project}
-  >
-    <svelte:boundary
-      onerror={(error) => {
-        console.error("[lific] public route render failed:", error);
-      }}
-    >
-      {#key routeTransitionKey}
-        <div class="h-full" in:fade={routeFadeParams()}>
-          {#if parsed.inner.page === "issues" || parsed.inner.page === "board"}
-            <IssueList
-              navigate={publicNavigate}
-              projectIdentifier={parsed.inner.project}
-              layout={parsed.inner.page === "board" ? "board" : "list"}
-            />
-          {:else if parsed.inner.page === "issue-detail"}
-            <IssueDetail
-              navigate={publicNavigate}
-              projectIdentifier={parsed.inner.project}
-              issueIdentifier={parsed.inner.identifier}
-              editable={false}
-            />
-          {:else if parsed.inner.page === "pages"}
-            <PageList navigate={publicNavigate} projectIdentifier={parsed.inner.project} />
-          {:else if parsed.inner.page === "page-detail"}
-            <PageDetail
-              navigate={publicNavigate}
-              projectIdentifier={parsed.inner.project}
-              pageId={parsed.inner.pageId}
-              editable={false}
-            />
-          {/if}
-        </div>
-      {/key}
-      {#snippet failed(_error: unknown, reset: () => void)}
-        <ErrorState
-          title="Something went wrong"
-          message="An unexpected error interrupted this page. Trying again usually clears it."
-        >
-          <button
-            class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                   px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-            onclick={reset}
-          >
-            Try again
-          </button>
-        </ErrorState>
-      {/snippet}
-    </svelte:boundary>
-  </PublicLayout>
-{:else if bootstrapping}
+{#if bootstrapping}
   <div class="min-h-dvh flex items-center justify-center">
     <div
       class="size-6 rounded-full border-2 border-[var(--border)]
@@ -879,7 +850,21 @@
   {:else}
     <Login navigate={replaceRoute} next={nextRouteFrom(route)} />
   {/if}
-{:else if parsed.type === "loading"}
+{:else if signedOut && publishedError !== null}
+  <!-- LIF-583: the published list could not be read (rate limited, busy,
+       offline). Not a reason to send a reader to login. -->
+  <div class="min-h-dvh flex items-center justify-center">
+    <ErrorState title="Couldn't load this page" message={publishedError}>
+      <button
+        class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+               px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+        onclick={retryPublished}
+      >
+        Try again
+      </button>
+    </ErrorState>
+  </div>
+{:else if parsed.type === "loading" || !signedOutReady}
   <div class="min-h-dvh flex items-center justify-center">
     <div
       class="size-6 rounded-full border-2 border-[var(--border)]
@@ -902,6 +887,9 @@
     </ErrorState>
   </Layout>
 {:else}
+  <!-- Keyed so signing in or out rebuilds the shell and the route for the
+       new reader rather than patching the old one. -->
+  {#key signedOut}
   <Layout {navigate} {route} bind:onProjectChange>
     <svelte:boundary
       onerror={(error) => {
@@ -916,7 +904,9 @@
     >
     {#key routeTransitionKey}
     <div class="h-full" in:fade={routeFadeParams()}>
-    {#if parsed.page === "home"}
+    {#if parsed.page === "home" && signedOut}
+      <PublishedProjects {navigate} projects={published ?? []} />
+    {:else if parsed.page === "home"}
       <Home
         {navigate}
         realtimeActivityCounts={realtimeActivity.counts}
@@ -1019,6 +1009,7 @@
       {/snippet}
     </svelte:boundary>
   </Layout>
+  {/key}
 {/if}
 
 <!-- LIF-243: single global toast host, outside the route branches so it

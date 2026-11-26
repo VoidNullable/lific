@@ -1,7 +1,16 @@
 <script lang="ts">
-  import { listUsers, listProjectGroups, type UserSummary, type ProjectGroup } from "./api";
+  import {
+    listUsers,
+    listProjectGroups,
+    listConventionTemplates,
+    type UserSummary,
+    type ProjectGroup,
+    type ConventionTemplate,
+    type ConventionTemplateKey,
+  } from "./api";
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
+  import { FALLBACK_TEMPLATES } from "./pages/conventions";
 
   let {
     name = $bindable(""),
@@ -10,6 +19,7 @@
     emoji = $bindable(""),
     leadUserId = $bindable<number | null>(null),
     groupId = $bindable<number | null>(null),
+    conventions = $bindable<ConventionTemplateKey>("empty"),
     mode = "create",
     identifierLocked = false,
   }: {
@@ -21,6 +31,8 @@
     /** Sidebar group to file the project into. The form only collects it —
      *  persisting it is the caller's job, since it rides a separate endpoint. */
     groupId?: number | null;
+    /** LIF-524: the conventions page's starting template. Create mode only. */
+    conventions?: ConventionTemplateKey;
     mode?: "create" | "edit";
     identifierLocked?: boolean;
   } = $props();
@@ -35,6 +47,16 @@
     });
     listProjectGroups().then((res) => {
       if (res.ok) groups = res.data;
+    });
+  });
+
+  // LIF-524: names and summaries come from the server; without it the four
+  // choices still show, by name only.
+  let templates = $state<ConventionTemplate[]>(FALLBACK_TEMPLATES);
+  $effect(() => {
+    if (mode !== "create") return;
+    listConventionTemplates().then((res) => {
+      if (res.ok && res.data.length > 0) templates = res.data;
     });
   });
 
@@ -213,6 +235,49 @@
       rows="3"
     ></textarea>
   </div>
+
+  {#if mode === "create"}
+    <!-- LIF-524: the template the project's conventions page starts from. -->
+    <fieldset class="mb-8">
+      <legend class="text-body-sm font-medium text-[var(--text)] mb-1">Conventions</legend>
+      <p class="text-caption text-[var(--text-faint)] mb-2.5">
+        The rules for working in this tracker. Agents read them with their
+        briefing at the start of each session. You can edit the page later.
+      </p>
+      <div class="flex flex-col gap-2" role="radiogroup" aria-label="Conventions template">
+        {#each templates as t (t.key)}
+          {@const selected = conventions === t.key}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            data-template={t.key}
+            class="flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors
+                   focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
+                   {selected
+              ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+              : 'border-[var(--border)] bg-[var(--bg-subtle)] hover:border-[var(--text-faint)]'}"
+            onclick={() => (conventions = t.key)}
+          >
+            <span
+              class="mt-0.5 size-4 shrink-0 rounded-full border-2 grid place-items-center
+                     {selected ? 'border-[var(--accent)]' : 'border-[var(--text-faint)]'}"
+            >
+              {#if selected}<span class="size-2 rounded-full bg-[var(--accent)]"></span>{/if}
+            </span>
+            <span class="flex-1 min-w-0">
+              <span class="block text-body-sm font-medium {selected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">
+                {t.name}
+              </span>
+              {#if t.summary}
+                <span class="block text-caption text-[var(--text-muted)] leading-snug mt-0.5">{t.summary}</span>
+              {/if}
+            </span>
+          </button>
+        {/each}
+      </div>
+    </fieldset>
+  {/if}
 </div>
 
 {#snippet selectedUser(opt: { value: string | number | null; label: string; [key: string]: unknown })}

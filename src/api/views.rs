@@ -37,11 +37,8 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 use super::{require_user, with_read, with_write};
 
 // Every handler below applies `require_user` (api/mod.rs) on top of the role
-// gate. An OAuth/legacy-key request with no resolved `AuthUser` can pass the
-// project-role gate in legacy mode (`require_role`'s `Viewer` branch is an
-// unconditional allow when `authz_enforced` is off; see `authz.rs`), but saved
-// views are inherently per-user, so there is no sensible "anonymous owner" to
-// attribute a view to.
+// gate: saved views are inherently per-user, so there is no sensible
+// "anonymous owner" to attribute a view to.
 
 /// GET /api/projects/{id}/views — the caller's own views only.
 pub(super) async fn list_views(
@@ -389,7 +386,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
-    // ── Gating: non-member denied when authz_enforced is on ──────────
+    // ── Gating: non-member denied ──────────
 
     #[tokio::test]
     async fn non_member_denied_on_every_endpoint_when_enforced() {
@@ -447,21 +444,5 @@ mod tests {
             .status(),
             StatusCode::FORBIDDEN
         );
-    }
-
-    // ── Legacy mode (flag off): open to any authenticated user ───────
-
-    #[tokio::test]
-    async fn flag_off_any_authenticated_user_can_manage_their_own_views() {
-        let (db, _admin, _lead, regular, project_id) = setup_lead_test();
-        let app = app_as_user(db, &regular);
-
-        let resp = json_post(
-            &app,
-            &format!("/api/projects/{project_id}/views"),
-            serde_json::json!({ "name": "Legacy view", "config": "{}" }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
