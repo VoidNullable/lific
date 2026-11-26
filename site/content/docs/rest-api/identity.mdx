@@ -64,7 +64,7 @@ Signs in with a username or email and a password. No credential.
 
 Body: `identity` (username or email) and `password`.
 
-Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`), `token` (the session token to send as a bearer token) and `expires_at`. Also sets the `lific_token` cookie, which the REST API uses only in the [few places listed](/docs/rest-api#get-a-credential).
+Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`) and `expires_at`. The session itself is only in the HttpOnly `lific_token` cookie this sets; see [Get a credential](/docs/rest-api#get-a-credential) for how the cookie is used. A script should use an API key instead.
 
 ```json
 {
@@ -75,7 +75,6 @@ Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`), `token` 
     "display_name": "Alex",
     "is_admin": false
   },
-  "token": "lific_sess_9f2c...",
   "expires_at": "2026-08-13 12:00:00"
 }
 ```
@@ -88,7 +87,7 @@ Signs in as the first administrator with no password. No credential. Works only 
 
 ### POST `/api/auth/logout`
 
-Ends the session named in the `Authorization` header and clears the cookie. Any credential is accepted; only a session token is deleted. Returns `{"logged_out": true}`.
+Ends the session that made the request, from the `Authorization` header or, without one, the cookie, and clears the cookie. Any credential is accepted; only a session is deleted. Returns `{"logged_out": true}`.
 
 ### GET `/api/auth/me`
 
@@ -110,7 +109,7 @@ In the same write as the password change, for you **and every connected tool you
 
 Unbound operator API keys, other people's credentials, the bot accounts themselves and registered OAuth clients are untouched.
 
-Returns `ok`, `token` and `expires_at`. `token` is a new session and the only credential that still works afterwards, so store it before the next request. It is also set as the cookie. Reconnect your tools and replace any API keys your scripts used.
+Returns `ok` and `expires_at`, and sets a new session as the cookie. That session is the only credential that still works afterwards. Reconnect your tools and replace any API keys your scripts used.
 
 Rate-limited per account and per source address on a budget of its own. A wrong current password spends from it; a successful change gives the attempt back. Over the limit answers `400` with the seconds to wait.
 

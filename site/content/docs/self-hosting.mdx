@@ -125,7 +125,7 @@ trusted_proxies = ["127.0.0.1"]
 - It is the OAuth issuer that MCP clients discover, and the base of the MCP URL `lific connect` writes.
 - Its host name is added to the hosts the `/mcp` endpoint accepts. Without it, `/mcp` accepts only requests whose `Host` header is `localhost`, `127.0.0.1` or `::1`, and refuses a proxy that forwards your public host name, or a client that reaches the server by its LAN address.
 - It is the base of issue links in CLI and MCP output.
-- Its scheme decides whether the session cookie is marked `Secure`. An `https://` URL, or none, keeps `Secure` on. An explicit `http://` URL turns it off, because browsers drop `Secure` cookies over plain HTTP and the OAuth approval page would stop working.
+- Its scheme decides whether the session cookie is marked `Secure`. An `https://` URL, or none, keeps `Secure` on. An explicit `http://` URL turns it off, because browsers drop `Secure` cookies over plain HTTP and nobody could sign in to the web UI. A plain-HTTP request to `localhost` or another loopback address gets the cookie without `Secure` anyway; an instance reached over plain HTTP on any other address needs `public_url = "http://..."`.
 
 `cors_origins = []` allows every browser origin. List your origins once a browser page on another site needs to call the API.
 
@@ -148,7 +148,7 @@ Lific honors the pair only from a peer in `trusted_proxies`. When a trusted peer
 
 ## Authentication
 
-Keep `[auth] required = true` on any instance other people can reach. Every REST and MCP request then carries `Authorization: Bearer <credential>`, where the credential is an API key, an OAuth access token, or the session token the web UI holds. [Public projects](/docs/public-projects) are the only anonymous exception: a project lead or administrator can publish one project's current issues, pages, comments and linked files for anyone to read.
+Keep `[auth] required = true` on any instance other people can reach. Every MCP request then carries `Authorization: Bearer <credential>`, where the credential is an API key or an OAuth access token. REST requests carry the same header, or come from the web UI with its HttpOnly session cookie. [Public projects](/docs/public-projects) are the only anonymous exception: a project lead or administrator can publish one project's current issues, pages, comments and linked files for anyone to read.
 
 Create API keys on the machine running Lific:
 

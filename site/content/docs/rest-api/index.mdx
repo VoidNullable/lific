@@ -9,17 +9,11 @@ Every Lific server answers JSON over HTTP on the same address as its web UI. The
 
 Paths in this reference are complete: they already start with `/api`, `/public/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
 
-Sign in to get a token, then send it as a bearer token:
+Create an API key under **Settings → API keys** in the web UI, or with `lific key create --user <you>` on the server, then send it as a bearer token:
 
 ```bash
 LIFIC=https://lific.example.com
-
-curl -s -X POST "$LIFIC/api/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"identity":"alex","password":"correct horse battery"}'
-# {"user":{"id":1,"username":"alex",...},"token":"lific_sess_9f2c...","expires_at":"..."}
-
-TOKEN=lific_sess_9f2c...
+TOKEN=lific_sk-live-...
 
 curl -s "$LIFIC/api/projects" -H "Authorization: Bearer $TOKEN"
 
@@ -37,14 +31,16 @@ Every credential goes in the same header: `Authorization: Bearer <token>`.
 
 | Credential | Looks like | How you get one | Lasts |
 | --- | --- | --- | --- |
-| Session token | `lific_sess_...` | The `token` field of [`POST /api/auth/login`](/docs/rest-api/identity#post-apiauthlogin) or signup. | The instance's session lifetime, 30 days unless an administrator changed it. |
+| Session token | `lific_sess_...` | The `lific_token` cookie that [`POST /api/auth/login`](/docs/rest-api/identity#post-apiauthlogin) or signup sets. No response body carries it. | The instance's session lifetime, 30 days unless an administrator changed it. |
 | API key | `lific_sk-live-...` | [`POST /api/auth/keys`](/docs/rest-api/identity#post-apiauthkeys) from a recent session, or `lific key create` on the server. | Until revoked. |
 | Connected-tool key | `lific_sk-live-...` | [`POST /api/auth/bots`](/docs/rest-api/identity#post-apiauthbots). It acts as a bot you own, so the activity log names the tool. | Until disconnected. |
 | OAuth access token | `lific_at_...` | The [OAuth flow](/docs/rest-api/oauth). Normally an MCP client runs it for you. | 30 days. There are no refresh tokens. |
 
-Use a session token for a person at a keyboard and an API key for a script. An agent should normally connect through [MCP](/docs/mcp) rather than calling REST directly.
+A session is for a person in a browser; use an API key for a script. An agent should normally connect through [MCP](/docs/mcp) rather than calling REST directly.
 
-Login also sets an HttpOnly cookie named `lific_token` holding the same session token. The REST API ignores that cookie everywhere except three places: `GET /api/attachments/{id}` (so a browser `<img>` tag can load an attachment, and only when the request has no `Authorization` header), the realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws), which accepts nothing else, and the OAuth consent pages. Every other request needs the header, including requests from a browser.
+The session lives in an HttpOnly, `SameSite=Lax` cookie named `lific_token`, which no script on a page can read. The web UI authenticates with that cookie and nothing else. A request with no `Authorization` header is authenticated by the cookie on every route except `/mcp`; a request that has the header is judged by the header alone. The realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws) accepts only the cookie.
+
+A request the cookie authenticates that can change something (any method but `GET`, `HEAD` and `OPTIONS`) must also carry an `Origin` header naming this server: the address the request was sent to, the origin of `public_url`, or an entry in `cors_origins`. A missing Origin, `null`, or any other origin gets `403 cross-origin request refused`, and nothing is written. An empty `cors_origins` does not widen this. Requests with an `Authorization` header skip the check, since a browser never attaches one on its own.
 
 These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [public read API](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
 
@@ -57,7 +53,7 @@ Two cases act as the instance's first administrator:
 
 Most endpoints accept any valid credential and then check the caller's [role](#roles). Three rules narrow that.
 
-**A recent browser session.** Endpoints that hand out lasting access require a session token in the `Authorization` header that was created in the last 15 minutes. An API key, an OAuth token, an older session and the cookie all get `403 recent authentication required`, and nothing is written. The endpoints are:
+**A recent browser session.** Endpoints that hand out lasting access require a session, from the cookie or the `Authorization` header, that was created in the last 15 minutes. An API key, an OAuth token and an older session all get `403 recent authentication required`, and nothing is written. The endpoints are:
 
 - `POST /api/auth/keys` and `POST /api/auth/bots`
 - `PATCH /api/instance/settings`
@@ -68,7 +64,7 @@ Most endpoints accept any valid credential and then check the caller's [role](#r
 
 Approving an OAuth connection in the browser follows the same rule. A tab that has been open for a while can get a fresh session for the same account from [`POST /api/auth/me/refresh`](/docs/rest-api/identity#post-apiauthmerefresh) without signing out.
 
-**A browser session of any age.** `POST /api/auth/me/refresh` and the three [project archive](/docs/rest-api/export#project-archives) routes accept only a session token. API keys, unbound operator keys and OAuth tokens get `403`.
+**A browser session of any age.** `POST /api/auth/me/refresh` and the three [project archive](/docs/rest-api/export#project-archives) routes accept only a session, from the cookie or the header. API keys, unbound operator keys and OAuth tokens get `403`.
 
 **Not an OAuth token.** An OAuth token belongs to a tool acting for a person, so it cannot manage credentials or accounts. Lific answers these with `403` and a plain-text reason: API key and connected-tool routes (`/api/auth/keys`, `/api/auth/bots` and everything under them), `PATCH /api/auth/me`, `POST /api/auth/me/password`, `POST /api/auth/me/refresh`, `DELETE /api/auth/me/sessions`, `POST /api/users` and everything under `/api/users/`. `GET /api/auth/me` and `GET /api/users` stay open to it.
 
