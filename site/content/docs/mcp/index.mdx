@@ -75,7 +75,7 @@ Approval binds the grant to a per-tool bot owned by the approving human, and the
 
 With `[auth] required = false`, a request that carries no credential runs as the operator. A request that carries an invalid credential is still refused. [Self-hosting](/docs/self-hosting#authentication) explains when Lific refuses to start in that mode.
 
-If `server.mcp_path_token` is set, `/mcp/<token>` accepts MCP requests with no other authentication. The path is the credential. It exists for clients whose OAuth flow is broken.
+The credential-in-path endpoint was removed in 3.0 and returns `404`. Use `/mcp` with an Authorization header or OAuth; see [Upgrading](/docs/upgrading#v30).
 
 ## Local stdio and `LIFIC_TOKEN`
 

@@ -181,6 +181,8 @@ export function resetUploadSession(): void {
 // ── Controller ───────────────────────────────────────────────
 
 export interface UploadControllerOptions {
+  /** Other attachment work (such as a URL import) shares the save gate. */
+  externalPending?: () => boolean;
   /** Entity to link finished uploads to, when the parent id is already known
    *  (detail views). Omitted for not-yet-created entities (the new-issue form,
    *  a new comment) which rely on the server re-scanning the saved body. A
@@ -478,10 +480,10 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
       return items;
     },
     get busy() {
-      return items.some((it) => it.status === "queued" || it.status === "uploading");
+      return !!opts.externalPending?.() || items.some((it) => it.status === "queued" || it.status === "uploading");
     },
     get pending() {
-      return items.some((it) => it.status !== "error" && it.status !== "alt");
+      return !!opts.externalPending?.() || items.some((it) => it.status !== "error" && it.status !== "alt");
     },
     enqueue,
     retry,

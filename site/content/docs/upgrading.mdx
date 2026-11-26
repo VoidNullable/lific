@@ -1,9 +1,9 @@
 ---
-title: Upgrade from 2.0 through 2.10
-description: Back up a Lific 2.x instance, read the notes for each newer version, replace the binary, and check the result, with release notes from 2.10 back to 2.1.
+title: Upgrade from 2.0 through 3.0
+description: Back up a Lific instance, read the notes for each newer version, replace the binary, and check the result.
 ---
 
-This guide covers upgrading an existing installation of Lific 2.0 or later to 2.10. You can go straight to the newest version: the new binary applies every pending database migration when it starts, so you do not need to install the versions in between. Upgrading from before 2.0 is not covered here.
+This guide covers upgrading an existing installation of Lific 2.0 or later to 3.0. You can go straight to the newest version: the new binary applies every pending database migration when it starts, so you do not need to install the versions in between. Upgrading from before 2.0 is not covered here.
 
 ## Upgrade procedure
 
@@ -99,6 +99,21 @@ Other changes that come with it:
 - The rules that only applied with the setting off are gone too. A project's lead can delete or archive it, `maintainer` can change modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only match people who can see the project.
 
 Going back to 2.11 means restoring the backup you took before upgrading: 2.11 refuses a database that 3.0 has migrated.
+
+#### Replace credential-in-path MCP connections
+
+The `/mcp/<token>` endpoint has been removed and returns `404`. Credentials in URLs can appear in proxy logs and browser or shell history.
+
+The `mcp_path_token` and `mcp_path_user` settings in `[server]` are accepted but ignored, so an existing configuration can still start. Startup and `lific doctor` warn for each present key that it no longer has any effect and should be removed. Remove these keys from `lific.toml`; other unknown settings still fail validation.
+
+Change each affected client's URL to `https://your-server.example/mcp` and choose one replacement:
+
+- Send `Authorization: Bearer <API_KEY>` in the request headers. Create a key with `lific key create --name <NAME>` or reconnect with `lific connect --client <CLIENT> --url https://your-server.example/mcp --yes`.
+- Use the client's OAuth login with that same `/mcp` URL. For clients supported by the command, run `lific connect --oauth --client <CLIENT> --url https://your-server.example/mcp --yes`.
+
+The old `mcp_path_token` was a separate server secret, not an API key. Copying it into an Authorization header will not make it work. If the old URL instead contained a valid API key, that key can be sent in the header.
+
+Run `lific doctor` to find old URLs in supported clients' global and current-project configuration files, then restart the affected clients. The check reports the file to edit without printing the secret. Inspect any files doctor could not read or parse manually.
 
 ### v2.11
 

@@ -93,6 +93,8 @@ use serde::Serialize;
 use crate::cli::service::{self, Manager, StatusReport};
 use crate::config::Config;
 
+mod client_configs;
+
 /// How long read-only inspection waits for a competing lock before reporting
 /// the database as busy. Bounded so `doctor` stays a fast command even when the
 /// server is mid-write.
@@ -406,8 +408,14 @@ async fn build_report(
     }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
     checks.extend(check_project_access(&cfg.database.path));
+    checks.extend(
+        cfg.server
+            .removed_setting_warnings()
+            .map(|warning| Check::new("removed_setting", Status::Warn, warning)),
+    );
     checks.extend(check_backups(&cfg));
     checks.push(service_check);
+    checks.extend(client_configs::check(&cfg));
     checks.extend(check_remote(&cfg, key).await);
     Report::new(checks)
 }
@@ -447,6 +455,18 @@ fn unconfigured_checks(
 
 /// Run checks that depend on the configured server or its credentials.
 async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
+    if cfg
+        .server
+        .public_url
+        .as_deref()
+        .is_some_and(super::connect::is_path_token_url)
+    {
+        return vec![Check::new(
+            "public_url",
+            Status::Fail,
+            super::connect::PATH_TOKEN_GUIDANCE,
+        )];
+    }
     let base = connect_base(cfg);
     let credential_base = cfg.server.public_url.as_deref().unwrap_or(&base);
     let mut checks = Vec::new();
@@ -471,6 +491,23 @@ async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
     }
 
     checks
+}
+
+#[cfg(test)]
+mod removed_mcp_url_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn doctor_rejects_path_credentials_before_remote_probes() {
+        let mut cfg = Config::default();
+        cfg.server.public_url = Some("https://example.test/mcp/DO_NOT_PRINT".into());
+        let checks = check_remote(&cfg, Some("header-secret")).await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Fail);
+        assert_eq!(checks[0].name, "public_url");
+        assert!(checks[0].detail.contains("Authorization"));
+        assert!(!checks[0].detail.contains("DO_NOT_PRINT"));
+    }
 }
 
 /// Run the server checks sharing the local configured endpoint.
