@@ -8,13 +8,13 @@
     "url": "https://github.com/VoidNullable/lific",
     "source": "github"
   },
-  "version": "2.11.1",
+  "version": "3.0.0",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "lific",
-      "version": "2.11.1",
+      "version": "3.0.0",
       "transport": {
         "type": "stdio"
       },

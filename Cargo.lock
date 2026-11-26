@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "lific"
-version = "2.11.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "argon2",

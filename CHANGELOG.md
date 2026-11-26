@@ -2,7 +2,7 @@
 
 ## v3.0.0 (2026-11-27)
 
-Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Sixteen migrations run on first start.
+Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Seventeen migrations run on first start.
 
 ### Before you upgrade
 
@@ -221,7 +221,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 
 The full notes, with every command, are at [lific.dev/docs/upgrading](https://lific.dev/docs/upgrading). In short:
 
-- Take a backup with `lific dump` and stop every process that opens the database first. Sixteen migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database; the space it frees only returns to the file system after a `VACUUM`. The roles migration seeds memberships only on an instance that still had enforcement off.
+- Take a backup with `lific dump` and stop every process that opens the database first. Seventeen migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database; the space it frees only returns to the file system after a `VACUUM`. The roles migration seeds memberships only on an instance that still had enforcement off.
 - Work through Before you upgrade: replace `/mcp/<token>` clients, review published projects, move password-login scripts to API keys, and set `public_url` if people use plain HTTP beyond localhost.
 - Afterwards, run `lific doctor` and resolve any `project_access` warning with `lific member add`, remove `mcp_path_token` and `mcp_path_user` from `lific.toml`, and refresh MCP tool discovery in your clients.
 - `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
