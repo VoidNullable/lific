@@ -387,7 +387,12 @@ async function main() {
     localStorage.removeItem("lific_token");
     window.dispatchEvent(new Event("lific:session-change"));
   });
-  await destination.getByText("Sign in to import a project archive.", { exact: true }).waitFor();
+  // Signed out, the import page is not one a reader may stay on: the app
+  // sends them to login, set to come back here afterwards.
+  await destination.waitForURL((url) => {
+    const href = decodeURIComponent(url.href);
+    return href.includes("login") && href.includes("next=/projects/import");
+  });
   assert.equal(await destination.getByText("The import may have completed", { exact: false }).count(), 0);
   assert.equal(await destination.evaluate((key) => sessionStorage.getItem(key), secondKey), "1");
   console.log("ok  pending warnings isolated by user ID, old-account progress/report hidden, own-only reset, session-refresh and logout retention");
