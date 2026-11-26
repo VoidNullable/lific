@@ -1143,21 +1143,25 @@ mod tests {
         ).unwrap();
         let seq = count(&conn, "SELECT seq FROM comments WHERE id=1");
         let audit = count(&conn, "SELECT count(*) FROM audit_log");
-        let triggers = count(
-            &conn,
-            "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
-        );
+        // Later migrations add triggers of their own, so check that every
+        // trigger the rebuild suspended came back rather than the total.
+        let trigger_names = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let triggers = trigger_names(&conn);
         run(&conn).unwrap();
         assert_eq!(count(&conn, "SELECT seq FROM comments WHERE id=1"), seq);
         assert_eq!(count(&conn, "SELECT count(*) FROM audit_log"), audit);
         assert_eq!(count(&conn, "SELECT count(*) FROM comment_mentions"), 1);
-        assert_eq!(
-            count(
-                &conn,
-                "SELECT count(*) FROM sqlite_master WHERE type='trigger'"
-            ),
-            triggers
-        );
+        let after = trigger_names(&conn);
+        let missing: Vec<_> = triggers.iter().filter(|t| !after.contains(t)).collect();
+        assert!(missing.is_empty(), "triggers lost: {missing:?}");
         assert_eq!(
             count(
                 &conn,
