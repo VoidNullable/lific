@@ -45,7 +45,7 @@ The server URL is `--url` or `LIFIC_URL`, then `server.public_url` from the conf
 
 Changes made over HTTP are attributed to the user the credential belongs to, and that user's project permissions apply. That is why `comment add --user` only works with the local backend.
 
-`issue create`, `page create` and `comment add` send an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key) and, when the connection drops or times out before the reply arrives, send the request once more with the same key. If the first attempt had been written, the server returns it instead of creating a second one. An error reply from the server is reported, not resent.
+`issue create`, `page create` and `comment add` send an [`Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key) and, when the connection drops or times out before the reply arrives, send the request once more with the same key, but only when the server's `/api/instance` lists the `idempotency-key` capability (asked once per run). If the first attempt had been written, the server returns it instead of creating a second one. An older server would write it twice, so there the lost connection is reported instead. An error reply from the server is reported, not resent.
 
 Credentials are only sent to a non-loopback host over HTTPS. A credentials file that is malformed or unsafe stops the lookup rather than being treated as empty.
 

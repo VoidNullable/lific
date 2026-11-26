@@ -85,6 +85,9 @@ struct HttpBackend {
     /// comments, the one arm that has an answer leaves it here for the one
     /// renderer that wants it, which then takes it.
     comment_paging: Mutex<Option<CommentPaging>>,
+    /// Whether the server replays a create retried with its key (LIF-526),
+    /// once it has said.
+    replays_creates: Mutex<Option<bool>>,
 }
 
 /// The server's own answer about what lies past a comment page.
@@ -167,6 +170,7 @@ impl HttpBackend {
             link_context,
             api_key: api_key.map(str::to_owned),
             comment_paging: Mutex::new(None),
+            replays_creates: Mutex::new(None),
         })
     }
 
@@ -1390,29 +1394,74 @@ impl HttpBackend {
     /// POST a create with a fresh `Idempotency-Key`, and POST it once more
     /// with the same key when the first attempt is lost in transit (LIF-526).
     /// If that attempt had committed, the server replays its result instead
-    /// of writing twice.
+    /// of writing twice. A server that does not say it replays keys gets no
+    /// second attempt: it would ignore the key and write a duplicate.
     async fn send_create<T: Serialize + Sync + ?Sized>(
         &self,
         path: &str,
         body: &T,
     ) -> Result<Value> {
         let key = format!("lific-cli-{:032x}", rand::random::<u128>());
+        // The error, and whether the server may have acted without our
+        // hearing the answer.
         let post = || async {
-            Ok::<Value, anyhow::Error>(
-                self.send(
+            let response = self
+                .send(
                     self.request_builder(Method::POST, path)
                         .header(crate::api::idempotency::KEY_HEADER, &key)
                         .json(body),
                 )
-                .await?
-                .json()
-                .await?,
-            )
+                .await
+                .map_err(|error| {
+                    let lost = lost_in_transit(&error);
+                    (error, lost)
+                })?;
+            // A body cut short is a lost reply; reqwest calls it a decode
+            // error, so the bytes are read apart from the parse.
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| (anyhow::Error::from(error), true))?;
+            serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+                (
+                    anyhow!("HTTP backend returned a reply that is not JSON: {error}"),
+                    false,
+                )
+            })
         };
         match post().await {
-            Err(error) if lost_in_transit(&error) => post().await,
-            other => other,
+            Err((_, true)) if self.server_replays_creates().await => {
+                post().await.map_err(|(error, _)| error)
+            }
+            other => other.map_err(|(error, _)| error),
         }
+    }
+
+    /// Whether the server advertises [`crate::api::idempotency::CAPABILITY`]
+    /// in `/api/instance`. Asked only after a create is lost, and kept for the
+    /// process once the server answers; a probe that fails is not kept.
+    async fn server_replays_creates(&self) -> bool {
+        if let Some(known) = self.replays_creates.lock().ok().and_then(|slot| *slot) {
+            return known;
+        }
+        let Ok(response) = self
+            .send(self.request_builder(Method::GET, "/api/instance"))
+            .await
+        else {
+            return false;
+        };
+        let Ok(info) = response.json::<Value>().await else {
+            return false;
+        };
+        let supported = info["capabilities"].as_array().is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == crate::api::idempotency::CAPABILITY)
+        });
+        if let Ok(mut slot) = self.replays_creates.lock() {
+            *slot = Some(supported);
+        }
+        supported
     }
 
     /// Delete a resource and answer with the shape the SQL backend prints
@@ -1448,8 +1497,9 @@ impl HttpBackend {
     }
 }
 
-/// Whether a request failed before a whole reply arrived, so the server may
-/// or may not have acted on it. An HTTP error status is an answer, not a loss.
+/// Whether a request failed before a reply's status arrived, so the server
+/// may or may not have acted on it. An HTTP error status is an answer, not a
+/// loss.
 fn lost_in_transit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
         error.is_connect() || error.is_timeout() || error.is_request() || error.is_body()
@@ -3912,9 +3962,9 @@ mod tests {
         assert!(value[0]["owner"].get("web_url").is_none());
     }
 
-    /// Read one HTTP/1.1 request off `socket` and return its
+    /// Read one HTTP/1.1 request off `socket` and return its request line and
     /// `Idempotency-Key`.
-    async fn read_idempotency_key(socket: &mut tokio::net::TcpStream) -> Option<String> {
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Option<String>) {
         use tokio::io::AsyncReadExt;
         let mut raw = Vec::new();
         let mut buffer = [0u8; 4096];
@@ -3934,42 +3984,118 @@ mod tests {
             };
             let length: usize = header("content-length").map_or(0, |v| v.parse().unwrap());
             if body.len() >= length || read == 0 {
-                return header("idempotency-key");
+                let line = head.lines().next().unwrap_or_default();
+                let line = line.rsplit_once(' ').map_or(line, |(line, _)| line);
+                return (line.to_owned(), header("idempotency-key"));
             }
         }
     }
 
-    /// LIF-526: the first POST reaches the server and the connection drops
-    /// before any reply. The backend sends the create again with the same key,
-    /// so a server that committed the first one replays it.
-    #[tokio::test]
-    async fn a_create_lost_in_transit_is_resent_once_with_the_same_idempotency_key() {
+    /// What the scripted server does with one connection.
+    enum Reply {
+        /// Close it without answering: the reply is lost.
+        Drop,
+        /// Answer 200 with this JSON.
+        Json(&'static str),
+        /// Promise 100 bytes of body, send 10 and close.
+        CutShort,
+    }
+
+    /// A server that answers one request per connection from `script`, then
+    /// reports every request it read and whether another one came after.
+    async fn spawn_script(
+        script: Vec<Reply>,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<(Vec<(String, Option<String>)>, bool)>,
+    ) {
         use tokio::io::AsyncWriteExt;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            let mut keys = Vec::new();
-            for attempt in 0..2 {
+            let mut requests = Vec::new();
+            for reply in script {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                keys.push(read_idempotency_key(&mut socket).await);
-                if attempt == 0 {
-                    continue; // dropped: the reply is lost
-                }
-                let body = r#"{"id":1,"identifier":"TST-1"}"#;
-                socket
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .as_bytes(),
+                requests.push(read_request(&mut socket).await);
+                let head = |length: usize| {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {length}\r\nconnection: close\r\n\r\n"
                     )
-                    .await
-                    .unwrap();
+                };
+                let raw = match reply {
+                    Reply::Drop => continue,
+                    Reply::Json(body) => format!("{}{body}", head(body.len())),
+                    Reply::CutShort => format!("{}{{\"id\":1,\"", head(100)),
+                };
+                socket.write_all(raw.as_bytes()).await.unwrap();
             }
-            keys
+            let wait = std::time::Duration::from_millis(200);
+            let another = tokio::time::timeout(wait, listener.accept()).await.is_ok();
+            (requests, another)
         });
+        (url, server)
+    }
+
+    const REPLAYS: &str = r#"{"capabilities":["idempotency-key"]}"#;
+    const CREATED: &str = r#"{"id":1,"identifier":"TST-1"}"#;
+
+    /// LIF-526: the first POST reaches the server and the connection drops
+    /// before any reply. The server says it replays keys, so the backend sends
+    /// the create again with the same key, and a server that committed the
+    /// first one replays it. The server's answer is kept: a second lost
+    /// create is resent without asking again.
+    #[tokio::test]
+    async fn a_create_lost_in_transit_is_resent_once_with_the_same_idempotency_key() {
+        let (url, server) = spawn_script(vec![
+            Reply::Drop,
+            Reply::Json(REPLAYS),
+            Reply::Json(CREATED),
+            Reply::Drop,
+            Reply::Json(CREATED),
+        ])
+        .await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        for _ in 0..2 {
+            let created = backend
+                .send_create("/api/issues", &json!({"title": "Once"}))
+                .await
+                .unwrap();
+            assert_eq!(created["identifier"], "TST-1");
+        }
+
+        let (requests, another) = server.await.unwrap();
+        assert!(!another);
+        let lines: Vec<&str> = requests.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "POST /api/issues",
+                "GET /api/instance",
+                "POST /api/issues",
+                "POST /api/issues",
+                "POST /api/issues"
+            ]
+        );
+        let first = requests[0].1.clone().expect("the create carried a key");
+        assert!(first.starts_with("lific-cli-"), "{first}");
+        assert_eq!(requests[2].1.as_deref(), Some(first.as_str()));
+        let second = requests[3].1.clone().unwrap();
+        assert_ne!(second, first, "each create has its own key");
+        assert_eq!(requests[4].1.as_deref(), Some(second.as_str()));
+    }
+
+    /// A reply whose body stops short of its Content-Length is lost too: the
+    /// server may have committed, so the create is resent with its key.
+    #[tokio::test]
+    async fn a_create_whose_reply_is_cut_short_is_resent_with_the_same_key() {
+        let (url, server) = spawn_script(vec![
+            Reply::CutShort,
+            Reply::Json(REPLAYS),
+            Reply::Json(CREATED),
+        ])
+        .await;
         let backend = HttpBackend::new(&url, None).unwrap();
 
         let created = backend
@@ -3978,10 +4104,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(created["identifier"], "TST-1");
-        let keys = server.await.unwrap();
-        let first = keys[0].clone().expect("the create carried a key");
-        assert!(first.starts_with("lific-cli-"), "{first}");
-        assert_eq!(keys[1].as_deref(), Some(first.as_str()));
+        let (requests, another) = server.await.unwrap();
+        assert!(!another);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].1, requests[2].1);
+    }
+
+    /// A server older than idempotency keys ignores the header, so resending
+    /// a create it may have committed would write it twice. Without the
+    /// capability the loss is reported and nothing is resent.
+    #[tokio::test]
+    async fn a_lost_create_is_not_resent_to_a_server_that_does_not_replay_keys() {
+        let (url, server) =
+            spawn_script(vec![Reply::Drop, Reply::Json(r#"{"instance_name":"Old"}"#)]).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(super::lost_in_transit(&error), "{error:#}");
+        let (requests, another) = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!another, "the create was sent again");
+    }
+
+    /// A reply that arrives whole but is not JSON is an answer, not a loss.
+    #[tokio::test]
+    async fn a_create_answered_with_bad_json_is_not_resent() {
+        let (url, server) = spawn_script(vec![Reply::Json("not json")]).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend
+            .send_create("/api/issues", &json!({"title": "Once"}))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not JSON"), "{error}");
+        let (_, another) = server.await.unwrap();
+        assert!(!another);
+    }
+
+    /// The real router lists the capability the backend looks for.
+    #[tokio::test]
+    async fn the_real_api_advertises_idempotency_keys() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        assert!(backend.server_replays_creates().await);
     }
 
     /// An HTTP error is the server's answer, so it is reported, not resent.
