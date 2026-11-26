@@ -130,7 +130,7 @@ The level applies to `lific start` and `lific mcp`. Setting the `RUST_LOG` envir
 | --- | --- | --- | --- |
 | `trash_days` | integer | `30` | Days a deleted issue, page or comment stays in the trash, where it can still be restored, before it is removed for good. `0` never empties the trash. |
 
-The server empties the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving, and a changed value takes effect at the next restart. The same sweep deletes create retry keys (`op_key` and `Idempotency-Key`) older than 24 hours, whatever `trash_days` says.
+The server empties the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving, and a changed value takes effect at the next restart. The same sweep deletes create retry keys (`op_key` and `Idempotency-Key`) older than 24 hours, whatever `trash_days` says. A stdio `lific mcp` session deletes them too, when it starts and every six hours, but leaves the trash to the server.
 
 ## `[auth]`
 
