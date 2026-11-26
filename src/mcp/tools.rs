@@ -448,6 +448,17 @@ fn reference_with_context<'a>(
     Reference { context, kind }
 }
 
+/// LIF-524: the line `get_page` prints under a conventions page's header.
+fn conventions_label(page: &models::Page) -> &'static str {
+    if !page.conventions_enabled {
+        "This project's conventions page: the rules for working with its issues, pages and plans. Turned off, so briefings leave it out."
+    } else if page.content.trim().is_empty() {
+        "This project's conventions page: the rules for working with its issues, pages and plans. Empty, so briefings leave it out."
+    } else {
+        "This project's conventions page: the rules for working with its issues, pages and plans. Briefings open with it; follow it when working in this tracker."
+    }
+}
+
 /// One `search` hit's structured row, linked as its text line links it.
 fn search_hit(result: &models::SearchResult, url: Option<String>) -> outputs::SearchHit {
     outputs::SearchHit {
@@ -4167,6 +4178,9 @@ No issues found."
                 page.created_at,
                 page.updated_at
             )?;
+            if page.conventions {
+                writeln!(output, "{}", conventions_label(&page))?;
+            }
             page.labels.split_first().map_or(Ok(()), |_| {
                 writeln!(
                     output,
@@ -4229,6 +4243,7 @@ No issues found."
                         )?,
                         None => input.labels.clone().unwrap_or_default(),
                     },
+                    conventions: input.conventions.unwrap_or(false),
                     attachments,
                 },
             )
@@ -4246,6 +4261,11 @@ No issues found."
                 page_reference(context.as_deref(), &page),
                 page.title
             )?;
+            if page.conventions {
+                output.push_str(
+                    "\nIt is this project's conventions page; briefings now open with it.",
+                );
+            }
             output.push_str(warning.as_deref().unwrap_or_default());
             Ok(())
         }))
@@ -4863,6 +4883,7 @@ No issues found."
                         title: Some(page.title.clone()),
                         status: Some(page.status.clone()),
                         url: page_reference(context.as_deref(), page).url(),
+                        conventions: page.conventions.then_some(true),
                         ..Default::default()
                     })
                     .collect();
@@ -4885,6 +4906,13 @@ No issues found."
                             page.status,
                             page.title
                         )?;
+                        if page.conventions {
+                            output.push_str(if page.conventions_enabled {
+                                " (this project's conventions page)"
+                            } else {
+                                " (this project's conventions page, turned off)"
+                            });
+                        }
                         page.labels.split_first().map_or(Ok(()), |_| {
                             write!(
                                 output,
@@ -4996,7 +5024,7 @@ No issues found."
             idempotent_hint = false,
             open_world_hint = false
         ),
-        description = "Create or update a project, module, label, or folder. Project: name and identifier to create, project to update. Others: project, plus name to create or current_name to update."
+        description = "Create or update a project, module, label, or folder. Project: name and identifier to create, project to update; before creating one, ask the user how it will work with agents to choose conventions. Others: project, plus name to create or current_name to update."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
         self.manage_resource_inner(input.normalize_quotes())
@@ -5012,6 +5040,11 @@ No issues found."
                 };
                 let Some(ref ident) = input.identifier else {
                     return Err("identifier required".into());
+                };
+                let conventions = match input.conventions.as_deref() {
+                    None => crate::conventions::Template::Empty,
+                    Some(value) => crate::conventions::Template::parse(value)
+                        .map_err(|error| error.to_string())?,
                 };
                 let caller = super::current_auth_user();
                 let p = self.write(|conn| {
@@ -5032,9 +5065,11 @@ No issues found."
                             description: input.description.clone().unwrap_or_default(),
                             emoji: emoji_for_create(&input.emoji),
                             lead_user_id,
+                            conventions: Some(conventions),
                         },
                     )
                 })?;
+                let page = self.read(|conn| queries::conventions_page(conn, p.id))?;
                 self.emit(crate::realtime::RealtimeEvent::ProjectCreated { project_id: p.id });
                 Ok(render_response(|output| {
                     write!(
@@ -5042,7 +5077,16 @@ No issues found."
                         "Created project {} | {}",
                         project_reference(context.as_deref(), &p.identifier),
                         p.name
-                    )
+                    )?;
+                    if let Some(page) = &page {
+                        write!(
+                            output,
+                            "\nConventions page {} ({})",
+                            page_reference(context.as_deref(), page),
+                            conventions.key()
+                        )?;
+                    }
+                    Ok(())
                 }))
             }
             ("project", "update") => {
@@ -5054,8 +5098,18 @@ No issues found."
                 };
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Lead)?;
-                let p = self.write(|conn| {
-                    queries::update_project(
+                // LIF-524: `none` dismisses the briefing's suggestion; a
+                // template creates the conventions page a project lacks.
+                let conventions = match input.conventions.as_deref() {
+                    None => None,
+                    Some("none") => Some(None),
+                    Some(value) => Some(Some(
+                        crate::conventions::Template::parse(value)
+                            .map_err(|error| error.to_string())?,
+                    )),
+                };
+                let (p, created) = self.transaction(|conn| {
+                    let p = queries::update_project(
                         conn,
                         pid,
                         &models::UpdateProject {
@@ -5065,7 +5119,36 @@ No issues found."
                             emoji: emoji_for_update(&input.emoji),
                             ..Default::default()
                         },
-                    )
+                    )?;
+                    let created = match conventions {
+                        None => None,
+                        Some(choice) => {
+                            if let Some(existing) = queries::conventions_page(conn, pid)? {
+                                return Err(crate::error::LificError::Conflict(format!(
+                                    "{} is already this project's conventions page. Edit it with edit_page or update_page; empty or delete it to turn it off.",
+                                    existing.identifier
+                                )));
+                            }
+                            match choice {
+                                None => {
+                                    queries::dismiss_conventions_hint(conn, pid)?;
+                                    None
+                                }
+                                Some(template) => Some(queries::create_page(
+                                    conn,
+                                    &models::CreatePage {
+                                        project_id: Some(pid),
+                                        title: crate::conventions::PAGE_TITLE.into(),
+                                        content: template.content().into(),
+                                        status: "active".into(),
+                                        conventions: true,
+                                        ..Default::default()
+                                    },
+                                )?),
+                            }
+                        }
+                    };
+                    Ok((p, created))
                 })?;
                 self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id: p.id });
                 Ok(render_response(|output| {
@@ -5074,7 +5157,17 @@ No issues found."
                         "Updated project {} | {}",
                         project_reference(context.as_deref(), &p.identifier),
                         p.name
-                    )
+                    )?;
+                    match (&created, conventions) {
+                        (Some(page), _) => write!(
+                            output,
+                            "\nCreated conventions page {}",
+                            page_reference(context.as_deref(), page)
+                        ),
+                        (None, Some(None)) => output
+                            .write_str("\nBriefings will no longer suggest a conventions page."),
+                        _ => Ok(()),
+                    }
                 }))
             }
             ("module", "create") => {
@@ -7027,6 +7120,9 @@ mod tests_structured;
 mod tests_agent_reads;
 
 #[cfg(test)]
+mod tests_conventions;
+
+#[cfg(test)]
 #[path = "tests_search_filing.rs"]
 mod tests_search_filing;
 
@@ -7159,6 +7255,7 @@ mod tests {
     /// Seed a project via manage_resource, return identifier.
     pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "create".into(),
             name: Some(name.into()),
@@ -7171,7 +7268,29 @@ mod tests {
             emoji: None,
         }));
         assert!(result.starts_with("Created project"), "got: {result}");
+        purge_conventions_page(mcp, ident);
         ident.to_string()
+    }
+
+    /// LIF-524: a project starts with an empty conventions page. Most tests
+    /// number their own pages from DOC-1, so the seeds purge it; the
+    /// conventions tests create projects without them. Its audit rows go
+    /// too, so activity counts stay what those tests expect.
+    pub(super) fn purge_conventions_page(mcp: &LificMcp, ident: &str) {
+        mcp.write(|conn| {
+            conn.execute(
+                "DELETE FROM pages WHERE project_id =
+                    (SELECT id FROM projects WHERE identifier = ?1)",
+                [ident],
+            )?;
+            conn.execute(
+                "DELETE FROM audit_log WHERE entity_type = 'page' AND project_id =
+                    (SELECT id FROM projects WHERE identifier = ?1)",
+                [ident],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     }
 
     pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
@@ -7434,6 +7553,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Old", "UPD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: Some("UPD".into()),
@@ -7456,6 +7576,7 @@ mod tests {
         let project_id = project_id_for(&m, "DSC");
 
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: Some("DSC".into()),
@@ -7483,6 +7604,7 @@ mod tests {
         let project_id = project_id_for(&m, "OLD");
 
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: Some("OLD".into()),
@@ -7511,6 +7633,7 @@ mod tests {
         let project_id = project_id_for(&m, "ORG");
 
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: None,
@@ -7541,6 +7664,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "MOD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "module".into(),
             action: "create".into(),
             project: Some("MOD".into()),
@@ -7561,6 +7685,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "LBL");
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "label".into(),
             action: "create".into(),
             project: Some("LBL".into()),
@@ -7582,6 +7707,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "FLD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("FLD".into()),
@@ -7600,6 +7726,7 @@ mod tests {
     fn manage_missing_name_errors() {
         let (m, _guard) = mcp();
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "create".into(),
             name: None,
@@ -7618,6 +7745,7 @@ mod tests {
     fn manage_unknown_type() {
         let (m, _guard) = mcp();
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "widget".into(),
             action: "create".into(),
             name: None,
@@ -7655,6 +7783,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "OPT");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "label".into(),
             action: "create".into(),
             project: Some("OPT".into()),
@@ -7818,6 +7947,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Test", "OCP");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("OCP".into()),
             title: "Contended doc".into(),
             content: Some("original".into()),
@@ -7858,6 +7988,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Test", "OPF");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("OPF".into()),
             title: "Uncontended doc".into(),
             content: None,
@@ -8979,6 +9110,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "SFP");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("SFP".into()),
             title: "Quenelle architecture".into(),
             content: Some("body".into()),
@@ -9024,6 +9156,7 @@ mod tests {
         seed_project(&m, "Test", "PG");
 
         let created = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PG".into()),
             title: "Design Doc".into(),
             content: Some("# Overview\nSome content".into()),
@@ -9058,6 +9191,7 @@ mod tests {
         let (m, _guard) = mcp();
         let _ag = first_admin_guard();
         let created = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: None,
             title: "Global Note".into(),
             content: None,
@@ -9074,6 +9208,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "PGD");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PGD".into()),
             title: "Temp".into(),
             content: None,
@@ -9114,6 +9249,7 @@ mod tests {
         seed_project(&m, "Formatting", "FMT");
         seed_issue(&m, "FMT", "Issue mixedformatneedle");
         let page = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("FMT".into()),
             title: "Page mixedformatneedle".into(),
             content: None,
@@ -9378,6 +9514,7 @@ mod tests {
             ..Default::default()
         }));
         assert!(result.starts_with("Created project"), "got: {result}");
+        purge_conventions_page(m, ident);
     }
 
     fn project_row(listing: &str, ident: &str) -> String {
@@ -9641,6 +9778,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "UPL");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "label".into(),
             action: "create".into(),
             project: Some("UPL".into()),
@@ -9653,6 +9791,7 @@ mod tests {
             emoji: None,
         }));
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "label".into(),
             action: "update".into(),
             project: Some("UPL".into()),
@@ -9674,6 +9813,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "UPF");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("UPF".into()),
@@ -9686,6 +9826,7 @@ mod tests {
             emoji: None,
         }));
         let result = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "update".into(),
             project: Some("UPF".into()),
@@ -10972,6 +11113,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Pages", "PGC");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PGC".into()),
             title: "Design".into(),
             content: None,
@@ -11006,6 +11148,7 @@ mod tests {
         seed_project(&m, "Page Comments", "PCO");
         let project_id = project_id_for(&m, "PCO");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PCO".into()),
             title: "Design".into(),
             content: None,
@@ -11051,6 +11194,7 @@ mod tests {
         seed_project(&m, "Mix", "MIX");
         seed_issue(&m, "MIX", "An issue");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("MIX".into()),
             title: "A page".into(),
             content: None,
@@ -11098,6 +11242,7 @@ mod tests {
         let (m, _guard) = mcp();
         // Workspace pages have no project prefix: identifier is DOC-N.
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: None,
             title: "Workspace note".into(),
             content: None,
@@ -11548,6 +11693,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPC");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("EPC".into()),
             title: "Doc".into(),
             content: Some("# Heading\nold body".into()),
@@ -11582,6 +11728,7 @@ mod tests {
         drain_realtime(&mut rx);
 
         let created = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PGE".into()),
             title: "Design".into(),
             content: Some("draft".into()),
@@ -11626,6 +11773,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPT");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("EPT".into()),
             title: "Draft Spec".into(),
             content: Some("body".into()),
@@ -11652,6 +11800,7 @@ mod tests {
         seed_project(&m, "Test", "EPP");
         // Folder so we can verify it's preserved.
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("EPP".into()),
@@ -11664,6 +11813,7 @@ mod tests {
             emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("EPP".into()),
             title: "Original Title".into(),
             content: Some("change me".into()),
@@ -11713,6 +11863,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPN");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("EPN".into()),
             title: "Doc".into(),
             content: Some("hello".into()),
@@ -11738,6 +11889,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPX");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("EPX".into()),
             title: "Doc".into(),
             content: Some("body".into()),
@@ -11764,6 +11916,7 @@ mod tests {
         seed_project(m, project_name, project_ident);
         for (name, color) in [("design", "#22C55E"), ("draft", "#F59E0B")] {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "label".into(),
                 action: "create".into(),
                 project: Some(project_ident.into()),
@@ -11785,6 +11938,7 @@ mod tests {
         seed_labels_for_pages(&m, "PGL", "Pages with Labels");
 
         let created = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PGL".into()),
             title: "Spec".into(),
             content: None,
@@ -11808,6 +11962,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PUL", "Page Update Labels");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PUL".into()),
             title: "Spec".into(),
             content: None,
@@ -11841,6 +11996,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Clear Module", "CLM");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "module".into(),
             action: "create".into(),
             project: Some("CLM".into()),
@@ -11904,6 +12060,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Clear Folder", "CLF");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("CLF".into()),
@@ -11916,6 +12073,7 @@ mod tests {
             emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("CLF".into()),
             title: "Spec".into(),
             content: None,
@@ -11969,6 +12127,7 @@ mod tests {
 
         // Set emoji.
         let set = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: Some("EMP".into()),
@@ -11992,6 +12151,7 @@ mod tests {
 
         // Clear via empty-string sentinel.
         let cleared = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "project".into(),
             action: "update".into(),
             project: Some("EMP".into()),
@@ -12015,6 +12175,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Module Emoji", "MEM");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "module".into(),
             action: "create".into(),
             project: Some("MEM".into()),
@@ -12028,6 +12189,7 @@ mod tests {
         }));
 
         let set = m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "module".into(),
             action: "update".into(),
             project: Some("MEM".into()),
@@ -12060,6 +12222,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PLI", "Page List");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PLI".into()),
             title: "Tagged".into(),
             content: None,
@@ -12068,6 +12231,7 @@ mod tests {
             labels: Some(vec!["design".into()]),
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PLI".into()),
             title: "Bare".into(),
             content: None,
@@ -12098,6 +12262,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PLF", "Page Label Filter");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PLF".into()),
             title: "Designy".into(),
             content: None,
@@ -12106,6 +12271,7 @@ mod tests {
             labels: Some(vec!["design".into()]),
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PLF".into()),
             title: "Plain".into(),
             content: None,
@@ -12135,6 +12301,7 @@ mod tests {
         // labels list is silently ignored (project-scoped labels can't
         // attach without a project).
         let created = m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: None,
             title: "Floating".into(),
             content: None,
@@ -12160,6 +12327,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Meta", "MET");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("MET".into()),
@@ -12172,6 +12340,7 @@ mod tests {
             emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("MET".into()),
             title: "Spec doc".into(),
             content: Some("Body text".into()),
@@ -12205,6 +12374,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Meta", "MET");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("MET".into()),
             title: "Loose doc".into(),
             content: None,
@@ -12229,6 +12399,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Stat", "STA");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("STA".into()),
             title: "Live".into(),
             content: None,
@@ -12237,6 +12408,7 @@ mod tests {
             labels: None,
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("STA".into()),
             title: "Old".into(),
             content: None,
@@ -12264,6 +12436,7 @@ mod tests {
         seed_project(&m, "Ord", "ORD");
         for title in ["Alpha", "Zulu", "Mike"] {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("ORD".into()),
                 title: title.into(),
                 content: None,
@@ -12292,6 +12465,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Fold", "FOL");
         m.manage_resource(Parameters(ManageResourceInput {
+            conventions: None,
             resource_type: "folder".into(),
             action: "create".into(),
             project: Some("FOL".into()),
@@ -12304,6 +12478,7 @@ mod tests {
             emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("FOL".into()),
             title: "Foldered".into(),
             content: None,
@@ -12329,6 +12504,7 @@ mod tests {
         seed_project(&m, "Pag", "PAG");
         for title in ["P1", "P2", "P3", "P4", "P5"] {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("PAG".into()),
                 title: title.into(),
                 content: None,
@@ -12367,6 +12543,7 @@ mod tests {
         // on which offset.
         for title in ["A", "B", "C", "D"] {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("OFF".into()),
                 title: title.into(),
                 content: None,
@@ -12399,6 +12576,7 @@ mod tests {
         seed_project(&m, "Last", "LST");
         for title in ["X", "Y", "Z"] {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("LST".into()),
                 title: title.into(),
                 content: None,
@@ -12997,6 +13175,7 @@ mod tests {
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "findable widget issue");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("PRJ".into()),
             title: "findable widget page".into(),
             content: None,
@@ -13161,6 +13340,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Audit", "TST");
         m.create_page(Parameters(CreatePageInput {
+            conventions: None,
             project: Some("TST".into()),
             title: "Doc".into(),
             content: Some("# Heading\nold body\ntail".into()),
@@ -13220,6 +13400,7 @@ mod tests {
             seed_project(&m, "Audit", "TST");
             seed_issue(&m, "TST", "Audit issue");
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("TST".into()),
                 title: "Audit Page".into(),
                 content: None,
@@ -13279,11 +13460,12 @@ mod tests {
             "got: {project}"
         );
         assert!(
-            page.contains("activity entries for [TST-DOC-1](https://tracker.example/TST/pages/1):"),
+            // Page id 1 was the conventions page `seed_project` purges.
+            page.contains("activity entries for [TST-DOC-1](https://tracker.example/TST/pages/2):"),
             "got: {page}"
         );
         for expected in [
-            "[TST-DOC-1](https://tracker.example/TST/pages/1)",
+            "[TST-DOC-1](https://tracker.example/TST/pages/2)",
             "[TST-PLAN-1](https://tracker.example/TST/plans/1)",
             "[Backend](https://tracker.example/TST/modules/1)",
         ] {
@@ -16062,6 +16244,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let page = as_user(&lead, || {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: Some("MEM".into()),
                 title: "Doc".into(),
                 content: None,
@@ -16530,6 +16713,7 @@ mod authz_gating_tests {
 
         let denied = as_user(&viewer, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "module".into(),
                 action: "create".into(),
                 project: Some("MEM".into()),
@@ -16545,6 +16729,7 @@ mod authz_gating_tests {
         assert!(is_forbidden(&denied), "got: {denied}");
         let denied2 = as_user(&non_member, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "label".into(),
                 action: "create".into(),
                 project: Some("MEM".into()),
@@ -16561,6 +16746,7 @@ mod authz_gating_tests {
 
         let allowed = as_user(&maintainer, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "module".into(),
                 action: "create".into(),
                 project: Some("MEM".into()),
@@ -16579,6 +16765,7 @@ mod authz_gating_tests {
         );
         let allowed2 = as_user(&maintainer, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "folder".into(),
                 action: "create".into(),
                 project: Some("MEM".into()),
@@ -16596,6 +16783,7 @@ mod authz_gating_tests {
         // Maintainer cannot manage project settings or delete the project.
         let denied_settings = as_user(&maintainer, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "project".into(),
                 action: "update".into(),
                 project: Some("MEM".into()),
@@ -16628,6 +16816,7 @@ mod authz_gating_tests {
 
         let denied = as_user(&maintainer, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "project".into(),
                 action: "update".into(),
                 project: Some("MEM".into()),
@@ -16644,6 +16833,7 @@ mod authz_gating_tests {
 
         let allowed = as_user(&lead, || {
             m.manage_resource(Parameters(ManageResourceInput {
+                conventions: None,
                 resource_type: "project".into(),
                 action: "update".into(),
                 project: Some("MEM".into()),
@@ -16708,6 +16898,7 @@ mod authz_gating_tests {
             crate::db::queries::create_project(
                 &conn,
                 &models::CreateProject {
+                    conventions: None,
                     name: "Other".into(),
                     identifier: "OTH".into(),
                     description: String::new(),
@@ -16802,6 +16993,7 @@ mod authz_gating_tests {
             crate::db::queries::create_project(
                 &conn,
                 &models::CreateProject {
+                    conventions: None,
                     name: "Other".into(),
                     identifier: "OT2".into(),
                     description: String::new(),
@@ -16869,6 +17061,7 @@ mod authz_gating_tests {
 
         let denied = as_user(&maintainer, || {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: None,
                 title: "Workspace doc".into(),
                 content: None,
@@ -16881,6 +17074,7 @@ mod authz_gating_tests {
 
         let allowed = as_user(&admin, || {
             m.create_page(Parameters(CreatePageInput {
+                conventions: None,
                 project: None,
                 title: "Workspace doc".into(),
                 content: None,
@@ -17279,6 +17473,7 @@ mod authz_gating_tests {
             crate::db::queries::create_project(
                 &conn,
                 &models::CreateProject {
+                    conventions: None,
                     name: "Legacy".into(),
                     identifier: "LEG".into(),
                     description: String::new(),

@@ -938,6 +938,15 @@ pub enum ProjectAction {
         /// Description
         #[arg(short, long, default_value = "")]
         description: String,
+
+        /// The conventions page it starts with: the rules agents and people
+        /// follow in this project's tracker
+        #[arg(
+            long,
+            default_value = "empty",
+            value_parser = ["empty", "ai_managed", "human_managed", "human_owned"]
+        )]
+        conventions: String,
     },
 
     /// Update an existing project
@@ -2781,11 +2790,13 @@ mod tests {
                         name,
                         identifier,
                         description,
+                        conventions,
                     },
             } => {
                 assert_eq!(name, "My Project");
                 assert_eq!(identifier, "MP");
                 assert_eq!(description, "");
+                assert_eq!(conventions, "empty");
             }
             _ => panic!("expected Project Create"),
         }

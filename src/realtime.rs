@@ -1969,6 +1969,7 @@ mod tests {
             let project = crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "Visible".into(),
                     identifier: "VIS".into(),
                     description: String::new(),

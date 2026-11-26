@@ -326,6 +326,7 @@ mod tests {
             let first = queries::create_project(
                 &conn,
                 &CreateProject {
+                    conventions: None,
                     name: "First".into(),
                     identifier: "FIRST".into(),
                     description: String::new(),
@@ -337,6 +338,7 @@ mod tests {
             let second = queries::create_project(
                 &conn,
                 &CreateProject {
+                    conventions: None,
                     name: "Second".into(),
                     identifier: "SECND".into(),
                     description: String::new(),

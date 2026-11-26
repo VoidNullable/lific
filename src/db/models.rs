@@ -38,6 +38,10 @@ pub struct CreateProject {
     pub description: String,
     pub emoji: Option<String>,
     pub lead_user_id: Option<i64>,
+    /// LIF-524: start the project with a conventions page holding this
+    /// template. `None` creates no page; the transports default to `Empty`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventions: Option<crate::conventions::Template>,
 }
 
 /// LIF-374: `Serialize` is what the HTTP CLI backend sends as the request
@@ -684,6 +688,17 @@ pub struct Page {
     /// workspace-level pages — labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// LIF-524: this is its project's conventions page.
+    #[serde(default)]
+    pub conventions: bool,
+    /// LIF-524: the conventions page's on/off toggle. Off keeps the text but
+    /// leaves it out of the briefing. Always true on other pages.
+    #[serde(default = "default_true")]
+    pub conventions_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -700,6 +715,10 @@ pub struct CreatePage {
     /// project_id), since labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// LIF-524: make this the project's conventions page. Refused when the
+    /// project already has a live one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conventions: bool,
     /// LIF-409: see [`CreateIssue::attachments`].
     #[serde(skip)]
     pub attachments: AttachmentActor,
@@ -716,6 +735,7 @@ impl Default for CreatePage {
             content: String::new(),
             status: default_page_status(),
             labels: Vec::new(),
+            conventions: false,
             attachments: AttachmentActor::default(),
         }
     }
@@ -748,6 +768,9 @@ pub struct UpdatePage {
     /// no-ops for workspace pages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    /// LIF-524: turn the conventions page on or off. Refused on other pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventions_enabled: Option<bool>,
     /// LIF-441: optimistic-concurrency precondition, exactly as on
     /// [`UpdateIssue`]. `None` keeps last-writer-wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1335,6 +1358,10 @@ pub struct PageChange {
     /// Label names (LIF-105, project-scoped), resolved in one grouped query
     /// per response page.
     pub labels: Vec<String>,
+    /// LIF-524: see [`Page::conventions`].
+    pub conventions: bool,
+    /// LIF-524: see [`Page::conventions_enabled`].
+    pub conventions_enabled: bool,
 }
 
 /// A live comment in the sync stream. The body is omitted on purpose:

@@ -431,7 +431,7 @@ fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
         more: format!("more_{heading}()"),
     };
     let mut sections = vec![make("short", 2), make("long", 40), make("middle", 20)];
-    let out = fit_to_budget("header\n", &mut sections).unwrap();
+    let out = fit_to_budget("header\n", "", &mut sections).unwrap();
 
     assert!(
         out.chars().count() <= BUDGET_CHARS,

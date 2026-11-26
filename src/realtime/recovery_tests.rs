@@ -120,6 +120,7 @@ fn fixture() -> Recovery {
         let project = crate::db::queries::create_project(
             &conn,
             &crate::db::models::CreateProject {
+                conventions: None,
                 name: "Realtime".into(),
                 identifier: "RT".into(),
                 description: String::new(),

@@ -400,6 +400,10 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             ("GET", "/api/clock"),
             Exempt("server calendar day and UTC offset for any signed-in caller; no project data"),
         ),
+        (
+            ("GET", "/api/conventions/templates"),
+            Exempt("fixed conventions page templates for any signed-in caller; no project data"),
+        ),
         (("POST", "/api/issues/{id}/waits"), Gated(Maintainer)),
         (
             ("DELETE", "/api/issues/{id}/waits/{wait_id}"),

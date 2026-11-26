@@ -221,6 +221,11 @@ fn router_impl(
         .route("/api/issues/reverse", post(issues::reverse_relation))
         // User and date blockers (LIF-484)
         .route("/api/clock", get(waits::server_clock))
+        // Conventions page templates (LIF-524)
+        .route(
+            "/api/conventions/templates",
+            get(pages::conventions_templates),
+        )
         .route(
             "/api/issues/{id}/waits",
             get(waits::list_waits).post(waits::add_wait),

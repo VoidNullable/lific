@@ -178,11 +178,14 @@ pub(crate) struct ResourceRow {
     pub(crate) status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
+    // Set on the project's conventions page only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) conventions: Option<bool>,
 }
 
 // `get_briefing`: the sections in text order, each keyed by a stable name
-// (human_queue, changes, plans, due, blocked, workable, pages, active, stale,
-// triage) with its full count and the items its lines show.
+// (conventions, human_queue, changes, plans, due, blocked, workable, pages,
+// active, stale, triage) with its full count and the items its lines show.
 #[derive(Debug, Default, Serialize, JsonSchema)]
 pub(crate) struct Briefing {
     #[serde(skip_serializing_if = "Option::is_none")]

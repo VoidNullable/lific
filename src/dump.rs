@@ -2372,6 +2372,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "DumpTest".into(),
                     identifier: "DMP".into(),
                     description: String::new(),
@@ -2982,6 +2983,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "OldData".into(),
                     identifier: "OLD".into(),
                     description: String::new(),
@@ -3245,6 +3247,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "Original".into(),
                     identifier: "ORG".into(),
                     description: String::new(),
@@ -3571,6 +3574,7 @@ mod tests {
             crate::db::queries::create_project(
                 &conn,
                 &crate::db::models::CreateProject {
+                    conventions: None,
                     name: "LiveData".into(),
                     identifier: "LIV".into(),
                     description: String::new(),

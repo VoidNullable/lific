@@ -108,6 +108,10 @@ pub(super) async fn create_project(
     Json(mut input): Json<CreateProject>,
 ) -> Result<Json<Project>, LificError> {
     let caller = super::require_user(&identity)?;
+    // LIF-524: every project made here starts with a conventions page.
+    input
+        .conventions
+        .get_or_insert(crate::conventions::Template::Empty);
     // Only parsed when the body asks for a lead that might not be the caller;
     // resolving "might not be" needs the effective user, which needs the
     // transaction, so the token is captured here and judged there.

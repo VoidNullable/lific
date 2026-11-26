@@ -349,6 +349,10 @@ pub struct CreatePageInput {
     pub status: Option<String>,
     #[schemars(description = "Label names (project pages only)")]
     pub labels: Option<Vec<String>>,
+    #[schemars(
+        description = "Make it the project's conventions page; only when the project has none"
+    )]
+    pub conventions: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -486,6 +490,10 @@ pub struct ManageResourceInput {
     pub color: Option<String>,
     #[schemars(description = "Project or module icon: 'lucide:<Name>' or an emoji; \"\" clears")]
     pub emoji: Option<String>,
+    #[schemars(
+        description = "Project conventions page, the rules for working in its tracker: empty (default), ai_managed (agents file, edit and close issues), human_managed (people write issues, agents close them) or human_owned (people write and close issues). On update, a template creates the missing page and none stops the briefing suggesting one"
+    )]
+    pub conventions: Option<String>,
 }
 
 impl ManageResourceInput {
@@ -504,6 +512,7 @@ impl ManageResourceInput {
             status: self.status.map(unquote),
             color: self.color.map(unquote),
             emoji: self.emoji.map(unquote),
+            conventions: self.conventions.map(unquote),
             ..self
         }
     }
