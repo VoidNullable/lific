@@ -481,7 +481,10 @@ in
     };
     "lific:web:check" = {
       cwd = "${repoRoot}/web";
-      exec = "bun run check && bun test";
+      # Each file gets its own globals and module registry. The session and
+      # read-model modules keep state, so without this the result depends on
+      # the order the files happen to run in, which differs between machines.
+      exec = "bun run check && bun test --isolate";
       after = [ "lific:install:web" ] ++ lib.optionals config.devenv.isTesting [ "devenv:treefmt:run" ];
     };
     "lific:community-proxy:check" = {
