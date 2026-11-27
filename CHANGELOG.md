@@ -1,44 +1,8 @@
 # Changelog
 
-## Unreleased
-
-### New project form
-
-- The form is laid out as the project's overview header: pick the icon, type the name as a title and the description under it, then the setup rows and a conventions template below. On wide screens a preview shows the project's sidebar row and its issue and page links as you type.
-- The suggested identifier never starts with a digit and steps around ones already in use (`LIF` taken suggests `LIF2`). Typing keeps only letters and digits, and an identifier the server would refuse is named before you submit, with Create disabled until it is fixed. A changed identifier can go back to the suggestion in one click.
-- `Ctrl+Enter` (`Cmd+Enter` on a Mac) creates the project. A failed create shows its reason in the form, not only in the top bar.
-- Deactivated accounts are no longer offered as the project lead.
-
-### Account settings
-
-- The page is split into Profile, Appearance, Agents and Security, with a section index that follows the scroll. Each setting is a row with a one-line explanation beside its control.
-- Connected tools become Agents: a list of the agent accounts you own, each with its username, whether it has a live key or an OAuth sign-in, when the key was issued, when it was last active and how many changes it has made. The grid of every supported tool, connected or not, is gone.
-- New agent account asks which tool will use it (which only picks the setup steps), a name, and an account ID, and shows the username it will get before creating the account and its key. A tool's mark now also shows for named variants such as `codex-laptop`.
-- Revoking a key and deleting an agent account each ask first. Deleting names the comments that go with the account.
-- `GET /api/auth/bots` returns `key_created_at`, `oauth`, `last_active`, `changes` and `comments` for each agent account.
-
-### Pages
-
-- The Pages tab is rebuilt around three panes: folders on the left, the page list in the middle, and on wide screens a reading pane that shows the selected page rendered. While no page is selected, that pane lists recent edits and who made them, drafts that are waiting, active pages nobody has touched in 60 days, the most linked pages, and how many pages nothing links to.
-- Folders show how many pages they hold. Pick one to see only its pages and its subfolders' pages. Folders can be renamed in place, and dropping a page on one moves it. Below 1024px the folders open from the top bar.
-- Each row is one line: title, status (Draft or Complete; Active shows nothing), labels, how many issues, pages and comments link to it, who last edited it (an agent shows its tool's mark), the identifier and the date. The line under it is the page's first real sentence, not its first heading. Excerpts can be turned off.
-- The top bar matches the issue list: a search field and New page (`C`), then what the list shows, Filter (status, label, who last edited it, only pages nothing links to) with the active filters shown as chips, and Display (group by folder, day edited, label or status; sort by edit time, creation, title or status).
-- Keyboard: `J`/`K` move, `Enter` opens, `Space` peeks when the reading pane is off, `P` pins, `X` selects, `F` filters, `/` searches. Selected pages can be moved, given a status or a label, pinned, or exported as one Markdown file.
-- Pages edited since your last visit are marked, with an "N updated" chip that steps through them. Your own edits are not marked.
-- Right-click a page (or press and hold on a touch screen) to open, peek, copy its link or identifier, pin, move, change its status or archive it.
-- Pinned pages sit in one row above the list instead of appearing as cards and again in the tree.
-- The folder pane links to the Conventions tab and says when the conventions are not written yet or switched off. Archived pages are kept under Archived at the bottom of the folder pane, each with Restore, and the entry appears once something is archived.
-- Creating a page asks for its title and whether it starts as a draft or active, in the folder you are looking at.
-- `GET /api/projects/{id}/pages/meta` returns each page's excerpt, word count, who created and last edited it, and which issues and pages link to it.
-- Dates older than a week show the year when it is not the current one.
-
-### Fixes
-
-- Creating or renaming a project to an identifier already in use answers `409` naming the identifier, instead of `500`.
-
 ## v3.0.0 (2026-11-27)
 
-Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Eighteen migrations run on first start.
+Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the Pages tab, account settings and the issue and page views, and bodies are edited in place. Eighteen migrations run on first start.
 
 ### Before you upgrade
 
@@ -190,6 +154,21 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - Both share one comment thread with a Saved indicator, a comment count that jumps to it, and C to write a comment. Copy link and Export sit in the overflow menu for everyone, and the command palette can copy, export, set a due date or pin.
 - Issue, plan and module views use the full content width, with the metadata docked to the right.
 
+### Pages
+
+- The Pages tab is rebuilt around three panes: folders on the left, the page list in the middle, and on wide screens a reading pane that shows the selected page rendered. While no page is selected, that pane lists recent edits and who made them, drafts that are waiting, active pages nobody has touched in 60 days, the most linked pages, and how many pages nothing links to.
+- Folders show how many pages they hold. Pick one to see only its pages and its subfolders' pages. Folders can be renamed in place, and dropping a page on one moves it. Below 1024px the folders open from the top bar.
+- Each row is one line: title, status (Draft or Complete; Active shows nothing), labels, how many issues, pages and comments link to it, who last edited it (an agent shows its tool's mark), the identifier and the date. The line under it is the page's first real sentence, not its first heading. Excerpts can be turned off.
+- The top bar matches the issue list: a search field and New page (`C`), then what the list shows, Filter (status, label, who last edited it, only pages nothing links to) with the active filters shown as chips, and Display (group by folder, day edited, label or status; sort by edit time, creation, title or status).
+- Keyboard: `J`/`K` move, `Enter` opens, `Space` peeks when the reading pane is off, `P` pins, `X` selects, `F` filters, `/` searches. Selected pages can be moved, given a status or a label, pinned, or exported as one Markdown file.
+- Pages edited since your last visit are marked, with an "N updated" chip that steps through them. Your own edits are not marked.
+- Right-click a page (or press and hold on a touch screen) to open, peek, copy its link or identifier, pin, move, change its status or archive it.
+- Pinned pages sit in one row above the list instead of appearing as cards and again in the tree.
+- The folder pane links to the Conventions tab and says when the conventions are not written yet or switched off. Archived pages are kept under Archived at the bottom of the folder pane, each with Restore, and the entry appears once something is archived.
+- Creating a page asks for its title and whether it starts as a draft or active, in the folder you are looking at.
+- `GET /api/projects/{id}/pages/meta` returns each page's excerpt, word count, who created and last edited it, and which issues and pages link to it.
+- Dates older than a week show the year when it is not the current one.
+
 ### Web app
 
 - Browser tabs, bookmarks and history name the page you are on, such as `Issues · APP · Lific`, and an issue or page title once it loads (PR #107 by [@zorro432](https://github.com/zorro432)).
@@ -223,6 +202,21 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - `GET /api/home/overview` accepts `project_id` to narrow every aggregate to one project.
 - A project with no issues, modules, plans or pages shows only its first steps, without empty sections under them.
 
+### New project form
+
+- The form is laid out as the project's overview header: pick the icon, type the name as a title and the description under it, then the setup rows and a conventions template below. On wide screens a preview shows the project's sidebar row and its issue and page links as you type.
+- The suggested identifier never starts with a digit and steps around ones already in use (`LIF` taken suggests `LIF2`). Typing keeps only letters and digits, and an identifier the server would refuse is named before you submit, with Create disabled until it is fixed. A changed identifier can go back to the suggestion in one click.
+- `Ctrl+Enter` (`Cmd+Enter` on a Mac) creates the project. A failed create shows its reason in the form, not only in the top bar.
+- Deactivated accounts are no longer offered as the project lead.
+
+### Account settings
+
+- The page is split into Profile, Appearance, Agents and Security, with a section index that follows the scroll. Each setting is a row with a one-line explanation beside its control.
+- Connected tools become Agents: a list of the agent accounts you own, each with its username, whether it has a live key or an OAuth sign-in, when the key was issued, when it was last active and how many changes it has made. The grid of every supported tool, connected or not, is gone.
+- New agent account asks which tool will use it (which only picks the setup steps), a name, and an account ID, and shows the username it will get before creating the account and its key. A tool's mark now also shows for named variants such as `codex-laptop`.
+- Revoking a key and deleting an agent account each ask first. Deleting names the comments that go with the account.
+- `GET /api/auth/bots` returns `key_created_at`, `oauth`, `last_active`, `changes` and `comments` for each agent account.
+
 ### Storage
 
 - Page edits are recorded in the activity log as line diffs instead of two full copies of the page. An upgrade migration converts existing history; on a real 290 MB database it brought the file to 76 MB after `VACUUM`.
@@ -254,6 +248,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - A project created by a connected tool through `manage_resource` makes the tool's owner its lead. Before, nobody was a member, so only administrators could see it ([#108](https://github.com/VoidNullable/lific/issues/108), reported by [@lardissone](https://github.com/lardissone)).
 - Backups and `lific dump` work when the data directory is reached through a symlink, which on macOS includes every temporary directory.
 - Icons in the collapsed sidebar rail keep their full size when the project list overflows.
+- Creating or renaming a project to an identifier already in use answers `409` naming the identifier, instead of `500`.
 
 ### Upgrading
 
