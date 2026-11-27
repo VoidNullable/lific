@@ -78,27 +78,69 @@ pub struct UpdateProject {
     pub is_public: Option<bool>,
 }
 
-/// A user's named group of projects in the sidebar. `project_ids` is derived,
-/// populated by `queries::project_groups::list_groups`; it is not a column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One entry in the sidebar tree: a folder or a project, by id.
+/// Serialized as `{"kind": "folder", "id": 3}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SidebarItem {
+    Folder { id: i64 },
+    Project { id: i64 },
+}
+
+/// A user's sidebar folder (stored as a project group). `project_ids`,
+/// `items` and `depth` are derived by `queries::project_groups`, not columns:
+/// `items` lists the folder's subfolders and visible projects in sidebar
+/// order, `project_ids` the projects among them in the same order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectGroup {
     pub id: i64,
     pub user_id: i64,
     pub name: String,
+    pub parent_id: Option<i64>,
     pub sort_order: i64,
     pub project_ids: Vec<i64>,
+    pub items: Vec<SidebarItem>,
+    /// 1 for a top-level folder.
+    pub depth: usize,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// The caller's whole sidebar tree: the top level in order, and every folder
+/// (depth-first) with its own ordered contents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidebarLayout {
+    pub root: Vec<SidebarItem>,
+    pub groups: Vec<ProjectGroup>,
+    pub max_depth: usize,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateProjectGroup {
     pub name: String,
+    /// The folder to create it in; absent or null for the top level.
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    /// Move this project or folder into the new folder in the same write.
+    #[serde(default)]
+    pub contains: Option<SidebarItem>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateProjectGroup {
     pub name: Option<String>,
+}
+
+/// `PUT /api/project-groups/move` body: put `item` inside `parent_id` (null
+/// for the top level), directly before `before`, or last when `before` is
+/// absent.
+#[derive(Debug, Deserialize)]
+pub struct MoveSidebarItem {
+    pub item: SidebarItem,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub before: Option<SidebarItem>,
 }
 
 /// `PUT /api/project-groups/assign` body. `group_id: None` takes the project

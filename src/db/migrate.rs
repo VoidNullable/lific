@@ -376,6 +376,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "database identity",
         include_str!("../../migrations/077_database_identity.sql"),
     ),
+    (
+        78,
+        "project folders",
+        include_str!("../../migrations/078_project_folders.sql"),
+    ),
 ];
 
 /// The migration whose data step runs in Rust: it rewrites stored page
@@ -963,6 +968,59 @@ mod tests {
             !indexed_revoked,
             "indexed keys remain eligible for migration"
         );
+    }
+
+    #[test]
+    fn project_folders_upgrade_keeps_folders_above_loose_projects() {
+        let conn = migrated_up_to(77);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES
+                (1,'alice','alice@test','hash'), (2,'bob','bob@test','hash');
+             INSERT INTO projects(id,name,identifier,sort_order) VALUES
+                (1,'One','ONE',0), (2,'Two','TWO',1), (3,'Three','THREE',2);
+             INSERT INTO project_groups(id,user_id,name,sort_order) VALUES
+                (10,1,'Work',0), (11,1,'Side',1), (12,2,'Bobs',3);
+             INSERT INTO project_group_items(group_id,project_id) VALUES (10,3), (10,2);
+             INSERT INTO user_project_order(user_id,project_id,sort_order) VALUES
+                (1,3,0), (1,2,1), (1,1,2);",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        use crate::db::models::SidebarItem::{Folder, Project};
+        use crate::db::queries::project_groups::layout;
+        let alice = layout(&conn, 1, &None).unwrap();
+        assert_eq!(
+            alice.root,
+            [Folder { id: 10 }, Folder { id: 11 }, Project { id: 1 }]
+        );
+        assert_eq!(
+            alice.groups[0].items,
+            [Project { id: 3 }, Project { id: 2 }]
+        );
+        assert!(alice.groups.iter().all(|g| g.parent_id.is_none()));
+        let bob = layout(&conn, 2, &None).unwrap();
+        assert_eq!(
+            bob.root,
+            [
+                Folder { id: 12 },
+                Project { id: 1 },
+                Project { id: 2 },
+                Project { id: 3 }
+            ]
+        );
+        // A deleted parent drops its children to the top level, never with it.
+        conn.execute("UPDATE project_groups SET parent_id = 10 WHERE id = 11", [])
+            .unwrap();
+        conn.execute("DELETE FROM project_groups WHERE id = 10", [])
+            .unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM project_groups WHERE id = 11 AND parent_id IS NULL"
+            ),
+            1
+        );
+        assert!(!has_fk_violations(&conn).unwrap());
     }
 
     #[test]

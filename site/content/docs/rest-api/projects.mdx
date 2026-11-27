@@ -62,35 +62,45 @@ Brings the project back from its file. **Administrator** only, in both modes. Re
 
 Sets your own sidebar order. Other people's order is unaffected. Body: `ids`, the project ids in the order you want. Ids you leave out keep their relative order after the ones you list. A duplicate or an id you cannot see is `400`. Returns the reordered `Project` array.
 
-## Sidebar groups
+## Sidebar folders
 
-Groups are private to the person who made them. Every route here works only on your own groups; another person's group answers `404`. Filing a project in a group changes nothing about the project.
+Folders (the routes still say groups) are private to the person who made them. Every route here works only on your own folders; another person's folder answers `404`. Filing a project in a folder changes nothing about the project.
 
-A group has `id`, `user_id`, `name`, `sort_order`, `project_ids`, `created_at` and `updated_at`. `project_ids` lists only projects you can still read, so a project you lose access to drops out of the group without being unfiled.
+Folders nest up to four levels deep, and each level orders its folders and projects together. A folder has `id`, `user_id`, `name`, `parent_id` (null at the top level), `depth` (1 at the top level), `sort_order`, `items`, `project_ids`, `created_at` and `updated_at`. `items` lists what the folder holds in order, each as `{"kind": "folder", "id": 3}` or `{"kind": "project", "id": 7}`; `project_ids` lists just the projects. Both leave out projects you can no longer read, so a project you lose access to drops out of the folder without being unfiled.
+
+Folder names are unique across all your folders, not just within one. A name you already use is `409`. Names are at most 80 characters, and you can have at most 200 folders.
 
 ### GET `/api/project-groups`
 
-Your groups, in order.
+Your folders, depth-first.
+
+### GET `/api/project-groups/layout`
+
+Your whole sidebar tree: `root` (the top level, as items), `groups` (every folder, depth-first) and `max_depth`.
 
 ### POST `/api/project-groups`
 
-Creates a group. Body: `name`. A name you already use is `409`. Returns the group with an empty `project_ids`.
+Creates a folder after the folders already at its level. Body: `name`, optional `parent_id`, and optional `contains`, an item to move into the new folder in the same write. Creating past the depth limit, or a `contains` move that is refused, is `400` and creates nothing. Returns the folder.
+
+### PUT `/api/project-groups/move`
+
+Moves a project or folder. Body: `item`, `parent_id` (null or absent for the top level) and optional `before`, an item already in that folder to place it in front of; without it the item goes last. Moving a folder into itself or one of its subfolders, past four levels, or before an item that is not in the target folder is `400` with a message that says why, and changes nothing. Moving a project you cannot read is `403`. Returns the layout.
 
 ### PATCH `/api/project-groups/{id}`
 
-Renames a group. Body: `name`. Returns the group.
+Renames a folder. Body: `name`. Returns the folder.
 
 ### DELETE `/api/project-groups/{id}`
 
-Deletes a group. Its projects are not touched. Returns `{"deleted": true}`.
+Deletes a folder. What it held moves to its parent, in its place. No project is deleted. Returns `{"deleted": true}`.
 
 ### PUT `/api/project-groups/assign`
 
-Files a project into one of your groups, or out of all of them. Body: `project_id` and `group_id` (null takes the project out of every group). A project sits in at most one of your groups. Filing a project you cannot read is `403`. Returns `{"ok": true}`.
+Moves a project to the end of one of your folders, or to the end of the top level. Body: `project_id` and `group_id` (null for the top level). A project sits in at most one of your folders. Filing a project you cannot read is `403`. Returns `{"ok": true}`.
 
 ### PUT `/api/project-groups/reorder`
 
-Sets the order of your groups. Body: `ids`, group ids in the order you want; groups you leave out follow in their current order. Returns your groups.
+Sets the order of folders among their siblings. Body: `ids`, folder ids in the order you want; within each level, listed folders take the folder positions first and the rest follow in their current order. Projects stay where they are. Returns your folders.
 
 ## Members and roles
 

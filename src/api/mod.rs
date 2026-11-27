@@ -164,6 +164,8 @@ fn router_impl(
             "/api/project-groups/reorder",
             put(project_groups::reorder_groups),
         )
+        .route("/api/project-groups/layout", get(project_groups::layout))
+        .route("/api/project-groups/move", put(project_groups::move_item))
         .route(
             "/api/project-groups/{id}",
             patch(project_groups::update_group).delete(project_groups::delete_group),

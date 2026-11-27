@@ -317,16 +317,24 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Sidebar project groups (per-user) ──
         // CRUD is identity-scoped, not project-scoped: every query filters on
         // the caller's user_id and an id belonging to someone else 404s, so
-        // there is no project role to gate on. `assign` is the exception —
-        // its body names a project, so it takes the Viewer gate.
+        // there is no project role to gate on. `assign`, `move` and a create
+        // with `contains` name a project in the body, so they take the Read
+        // gate: published projects can be filed like any other readable one.
         (
             ("GET", "/api/project-groups"),
             Exempt("per-user groups; ownership enforced in the query layer by user_id"),
         ),
         (
             ("POST", "/api/project-groups"),
-            Exempt("per-user groups; creates only for the caller"),
+            Exempt(
+                "per-user groups; creates only for the caller, and a `contains` project takes the Read gate",
+            ),
         ),
+        (
+            ("GET", "/api/project-groups/layout"),
+            Exempt("per-user tree; projects filtered by fresh visibility in one transaction"),
+        ),
+        (("PUT", "/api/project-groups/move"), Gated(Read)),
         (
             ("PATCH", "/api/project-groups/{id}"),
             Exempt("per-user groups; another user's id is NotFound, never Forbidden"),
@@ -335,7 +343,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             ("DELETE", "/api/project-groups/{id}"),
             Exempt("per-user groups; another user's id is NotFound, never Forbidden"),
         ),
-        (("PUT", "/api/project-groups/assign"), Gated(Viewer)),
+        (("PUT", "/api/project-groups/assign"), Gated(Read)),
         (
             ("PUT", "/api/project-groups/reorder"),
             Exempt(
