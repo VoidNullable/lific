@@ -27,7 +27,7 @@
 - Pages edited since your last visit are marked, with an "N updated" chip that steps through them. Your own edits are not marked.
 - Right-click a page (or press and hold on a touch screen) to open, peek, copy its link or identifier, pin, move, change its status or archive it.
 - Pinned pages sit in one row above the list instead of appearing as cards and again in the tree.
-- The conventions block moves out of the page list into its own entry in the folder pane, which says when the conventions are not written yet or switched off. Archived pages are kept under Archived at the bottom of the folder pane, each with Restore, and the entry appears once something is archived.
+- The folder pane links to the Conventions tab and says when the conventions are not written yet or switched off. Archived pages are kept under Archived at the bottom of the folder pane, each with Restore, and the entry appears once something is archived.
 - Creating a page asks for its title and whether it starts as a draft or active, in the folder you are looking at.
 - `GET /api/projects/{id}/pages/meta` returns each page's excerpt, word count, who created and last edited it, and which issues and pages link to it.
 - Dates older than a week show the year when it is not the current one.
@@ -38,7 +38,7 @@
 
 ## v3.0.0 (2026-11-27)
 
-Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Seventeen migrations run on first start.
+Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Eighteen migrations run on first start.
 
 ### Before you upgrade
 
@@ -80,7 +80,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - `get_briefing` opens with the conventions page, up to 4,000 characters, outside its usual budget, and does not list it again among recently updated pages. Projects created before 3.0 get a one-line reminder in the briefing until they get a conventions page or turn the reminder off.
 - Turning the page off keeps its text. Deleting or emptying it also takes it out of briefings. `get_page` and page listings mark it, and search ranks it higher when it covers the query.
 - `manage_resource`, `create_page`, `POST /api/projects`, `POST /api/pages`, `PUT /api/pages/{id}` and `lific project create` take the new conventions options, and `GET /api/conventions/templates` lists the templates.
-- In the web UI the conventions page leads the Pages list, with an on/off switch, and creating a project offers the template picker.
+- In the web UI the conventions page has its own project tab, listed after Pages in the sidebar, the collapsed rail, the mobile menu and the command palette. Without text, the tab shows the four templates at full length with one button to use the one you picked. With text, it is the page itself, with the usual editor, history and comments. Changing the template and leaving the page out of briefings are in the page's menu, each behind a confirmation. Creating a project offers the same picker. The Pages list leaves the conventions page out, and its old page link opens the tab.
 
 ### Briefing
 
@@ -162,6 +162,8 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - The sidebar opens with a Workspace section (Home, Inbox, Assigned to me, Agent activity) that stays in place with live counts while only the project tree scrolls. A search launcher with your platform's keycaps and an account card sit beside it, and each project's views are split into daily and reference groups.
 - Collapsing the sidebar folds it into an icon rail instead of hiding it: workspace links, one button per project that opens a menu of its views, theme and account, all with tooltips. Icons sit on the same line in both states, so folding and unfolding does not move them.
 - Project groups show as folders with a project count, and one New project row replaces the Projects heading's create menu.
+- Folders nest up to four levels, and folders and projects share one order that is yours alone: arranging your sidebar never changes what anyone else sees, and `GET /api/projects` follows it. Drag a project or folder before, after or into another; closed folders spring open, and a refused drop says why. Folder and project menus can move things in and out of folders and create subfolders. Deleting a folder moves its contents up a level. On a phone the same tree moves through menus.
+- `GET /api/project-groups/layout` returns your whole tree and `PUT /api/project-groups/move` moves one item. Creating a folder takes `parent_id` and an item to put in it.
 - Assigned to me lists open issues that name you across projects, grouped by status and sorted by priority, then recency.
 - Home is redrawn in the style of the Agent activity page: sections divided by hairlines, the age chart and 90-day trend drawn with real count axes, and a freshness bar per project colored by its last change.
 
@@ -257,7 +259,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 
 The full notes, with every command, are at [lific.dev/docs/upgrading](https://lific.dev/docs/upgrading). In short:
 
-- Take a backup with `lific dump` and stop every process that opens the database first. Seventeen migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database; the space it frees only returns to the file system after a `VACUUM`. The roles migration seeds memberships only on an instance that still had enforcement off.
+- Take a backup with `lific dump` and stop every process that opens the database first. Eighteen migrations run on first start. The page history conversion rewrites every stored page edit and can take tens of seconds on a large database; the space it frees only returns to the file system after a `VACUUM`. The roles migration seeds memberships only on an instance that still had enforcement off.
 - Work through Before you upgrade: replace `/mcp/<token>` clients, review published projects, move password-login scripts to API keys, and set `public_url` if people use plain HTTP beyond localhost.
 - Afterwards, run `lific doctor` and resolve any `project_access` warning with `lific member add`, remove `mcp_path_token` and `mcp_path_user` from `lific.toml`, and refresh MCP tool discovery in your clients.
 - `lific start` runs its first stale-issue pass shortly after starting. Turn it off first with `lific instance set --stale-active-reset-days 0` if you do not want active issues idle for 14 days moved back to `todo`.
