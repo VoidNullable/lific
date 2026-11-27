@@ -239,6 +239,7 @@ impl Deployed {
             "/api/projects".into(),
             format!("/api/projects/{p}"),
             format!("/api/projects/{p}/index"),
+            format!("/api/projects/{p}/pages/meta"),
             format!("/api/projects/{p}/changes"),
             format!("/api/projects/{p}/board"),
             format!("/api/projects/{p}/issue-counts"),
@@ -370,6 +371,10 @@ async fn an_unpublished_project_reads_like_a_missing_one() {
             "/api/projects/987654/index".to_string(),
         ),
         (
+            format!("/api/projects/{}/pages/meta", d.private),
+            "/api/projects/987654/pages/meta".to_string(),
+        ),
+        (
             format!("/api/issues/{}", d.private_issue),
             "/api/issues/987654".to_string(),
         ),
@@ -498,6 +503,36 @@ async fn a_signed_in_non_member_reads_but_cannot_write() {
         hidden.status(),
         StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
     ));
+}
+
+/// A visitor gets a published project's page metadata, and a private
+/// project's answer matches the index route's.
+#[tokio::test]
+async fn a_visitor_reads_page_meta_like_the_index() {
+    let d = deploy();
+    let response = anonymous(
+        &d.app,
+        "GET",
+        &format!("/api/projects/{}/pages/meta", d.published),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let pages = body["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0]["id"], d.page);
+    assert_eq!(pages[0]["excerpt"], "Readable notes");
+    assert_eq!(pages[0]["words"], 2);
+
+    let meta = anonymous(
+        &d.app,
+        "GET",
+        &format!("/api/projects/{}/pages/meta", d.private),
+    )
+    .await;
+    let index = anonymous(&d.app, "GET", &format!("/api/projects/{}/index", d.private)).await;
+    assert_eq!(meta.status(), index.status());
+    assert_eq!(meta.status(), StatusCode::NOT_FOUND);
 }
 
 /// Nothing a visitor can fetch carries an email address, a session token or
