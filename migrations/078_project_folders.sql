@@ -17,8 +17,16 @@ CREATE INDEX IF NOT EXISTS idx_project_groups_parent
 -- Writes renumber both in depth-first order of the whole tree. Until then,
 -- keep today's layout, where every folder sat above the loose projects:
 -- shift each user's folder ranks below zero, under every project rank.
+-- The offsets are fixed first: a correlated MAX inside the UPDATE would see
+-- rows already shifted and reorder the folders.
+CREATE TEMP TABLE migrate_078_offsets AS
+    SELECT user_id, MAX(sort_order) + 1 AS shift_by
+    FROM project_groups GROUP BY user_id;
+
 UPDATE project_groups
 SET sort_order = sort_order - (
-    SELECT MAX(g.sort_order) + 1 FROM project_groups g
-    WHERE g.user_id = project_groups.user_id
+    SELECT o.shift_by FROM migrate_078_offsets o
+    WHERE o.user_id = project_groups.user_id
 );
+
+DROP TABLE migrate_078_offsets;

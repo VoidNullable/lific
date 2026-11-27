@@ -979,7 +979,8 @@ mod tests {
              INSERT INTO projects(id,name,identifier,sort_order) VALUES
                 (1,'One','ONE',0), (2,'Two','TWO',1), (3,'Three','THREE',2);
              INSERT INTO project_groups(id,user_id,name,sort_order) VALUES
-                (10,1,'Work',0), (11,1,'Side',1), (12,2,'Bobs',3);
+                (10,1,'Work',0), (11,1,'Side',1), (12,2,'Bobs',3),
+                (20,2,'Late',2), (21,2,'Early',0), (22,2,'Middle',1);
              INSERT INTO project_group_items(group_id,project_id) VALUES (10,3), (10,2);
              INSERT INTO user_project_order(user_id,project_id,sort_order) VALUES
                 (1,3,0), (1,2,1), (1,1,2);",
@@ -999,9 +1000,13 @@ mod tests {
         );
         assert!(alice.groups.iter().all(|g| g.parent_id.is_none()));
         let bob = layout(&conn, 2, &None).unwrap();
+        // Rank order differs from id order: the shift must keep rank order.
         assert_eq!(
             bob.root,
             [
+                Folder { id: 21 },
+                Folder { id: 22 },
+                Folder { id: 20 },
                 Folder { id: 12 },
                 Project { id: 1 },
                 Project { id: 2 },
