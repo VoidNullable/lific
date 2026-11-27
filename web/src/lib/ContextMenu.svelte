@@ -117,8 +117,10 @@
     {#each contextMenuState.items as item, i}
       {#snippet content()}
         {@const Icon = item.icon}
+        {#if item.indent}<span aria-hidden="true" class="shrink-0" style="width: {item.indent * 0.75}rem"></span>{/if}
         {#if Icon}<Icon size={14} class="shrink-0 text-[var(--text-faint)]" />{/if}
         <span class="flex-1 truncate">{item.label}</span>
+        {#if item.hint}<span class="shrink-0 text-caption text-[var(--text-faint)]">{item.hint}</span>{/if}
       {/snippet}
       {#if item.href && !item.disabled}
         <a

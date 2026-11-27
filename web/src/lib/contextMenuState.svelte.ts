@@ -22,6 +22,10 @@ export interface ContextMenuItem {
   /** Render navigation as a real link. Modified clicks retain browser behavior. */
   href?: string;
   disabled?: boolean;
+  /** Nesting level in a tree-shaped list, such as folder destinations. */
+  indent?: number;
+  /** Short trailing note, such as why a disabled item can't be chosen. */
+  hint?: string;
 }
 
 class ContextMenuState {
