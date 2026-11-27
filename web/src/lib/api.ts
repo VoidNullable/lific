@@ -537,6 +537,16 @@ export interface Bot {
   created_at: string;
   connected: boolean;
   tool_id: string | null;
+  /** When its newest live API key was issued. Absent from older servers. */
+  key_created_at?: string | null;
+  /** Whether a live OAuth token connects it. */
+  oauth?: boolean;
+  /** Its latest write or MCP read, UTC without a zone. */
+  last_active?: string | null;
+  /** Writes it has made. */
+  changes?: number;
+  /** Comments it wrote; deleting the account deletes them. */
+  comments?: number;
 }
 
 export interface CreateBotResponse {

@@ -9,6 +9,14 @@
 - `Ctrl+Enter` (`Cmd+Enter` on a Mac) creates the project. A failed create shows its reason in the form, not only in the top bar.
 - Deactivated accounts are no longer offered as the project lead.
 
+### Account settings
+
+- The page is split into Profile, Appearance, Agents and Security, with a section index that follows the scroll. Each setting is a row with a one-line explanation beside its control.
+- Connected tools become Agents: a list of the agent accounts you own, each with its username, whether it has a live key or an OAuth sign-in, when the key was issued, when it was last active and how many changes it has made. The grid of every supported tool, connected or not, is gone.
+- New agent account asks which tool will use it (which only picks the setup steps), a name, and an account ID, and shows the username it will get before creating the account and its key. A tool's mark now also shows for named variants such as `codex-laptop`.
+- Revoking a key and deleting an agent account each ask first. Deleting names the comments that go with the account.
+- `GET /api/auth/bots` returns `key_created_at`, `oauth`, `last_active`, `changes` and `comments` for each agent account.
+
 ### Fixes
 
 - Creating or renaming a project to an identifier already in use answers `409` naming the identifier, instead of `500`.

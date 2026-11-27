@@ -59,7 +59,17 @@
     "import-github": "github",
   };
 
-  const icon = $derived(tool ? ICONS[ALIASES[tool] ?? tool] : undefined);
+  // A named variant (`codex-laptop`) wears its tool's mark.
+  function lookup(id: string): Icon | undefined {
+    const key = ALIASES[id] ?? id;
+    if (ICONS[key]) return ICONS[key];
+    const base = Object.keys(ICONS)
+      .sort((a, b) => b.length - a.length)
+      .find((k) => id.startsWith(`${k}-`));
+    return base ? ICONS[base] : undefined;
+  }
+
+  const icon = $derived(tool ? lookup(tool) : undefined);
   const Fallback = $derived(fallback);
 </script>
 

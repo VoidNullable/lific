@@ -2,29 +2,17 @@
   import {
     me,
     listBots,
-    createBot,
-    disconnectBot,
-    deleteBot,
     updateProfile,
     changePassword,
     revokeAllSessions,
     logout,
     sessionKey,
     getInstance,
-    TOOL_TEMPLATES,
     type Bot,
-    type ToolTemplate,
   } from "../lib/api";
-  import {
-    RECENT_AUTH_ERROR,
-    needsReauth,
-    reauthenticateWithoutPassword,
-    reauthenticateWithPassword,
-    retryOnceAfterReauth,
-  } from "../lib/reauth";
-  import ToolIcon from "../lib/ToolIcon.svelte";
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
+  import AgentAccounts from "../lib/settings/AgentAccounts.svelte";
   import {
     themePreference, setPreference, type ThemePreference,
     getAccent, setAccent, type AccentPreset,
@@ -33,13 +21,8 @@
     getMotionPreference, setMotionPreference, type MotionPreference,
   } from "../lib/theme";
   import { ACCENT_PRESETS } from "../lib/appearance/presets";
-  import {
-    Plug, Check, Copy, X, AlertTriangle, Sun, Moon, Monitor,
-    Palette, Lock, LogOut, Eye, EyeOff, KeyRound, FileCode2, Terminal,
-    Rows3, Rows2, Type, Zap, ZapOff,
-  } from "lucide-svelte";
+  import { Check, AlertTriangle, Sun, Moon, Monitor, LogOut, Rows3, Rows2, Zap, ZapOff } from "lucide-svelte";
   import { getContext } from "svelte";
-  import { copyToClipboard } from "../lib/clipboard";
   import { currentUser, getUserRevision, publishUser } from "../lib/userState";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -55,144 +38,10 @@
   let user = $derived($currentUser);
   let bots = $state<Bot[]>([]);
   let loading = $state(true);
-  let customOpen = $state(false);
-  let customId = $state("");
-  let customName = $state("");
-  let customTemplate = $state("");
-  let toolsError = $state("");
+  let webAutoLogin = $state(false);
 
-  function connectionId(bot: Bot): string {
-    // Older bots can lack tool_id until their next connection backfills it.
-    return bot.tool_id ?? TOOL_TEMPLATES.find((t) => bot.username.startsWith(`${t.id}-`))?.id ?? bot.username;
-  }
-
-  function genericTemplate(id: string, name: string): ToolTemplate {
-    return {
-      id, name, description: "Custom MCP connection",
-      configPath: { linux: null, mac: null, windows: null },
-      configNote: [{ text: "Use this URL and Authorization header in your client's HTTP MCP settings. The exact config format depends on your client." }],
-      generateConfig: (url, key) => JSON.stringify({ url, headers: { Authorization: `Bearer ${key}` } }, null, 2),
-    };
-  }
-
-  let connectionTemplates = $derived([
-    ...TOOL_TEMPLATES,
-    ...bots.filter((b) => !TOOL_TEMPLATES.some((t) => t.id === connectionId(b)))
-      .map((b) => genericTemplate(connectionId(b), b.display_name)),
-  ]);
-
-  function connectCustom() {
-    const id = customId.trim().toLowerCase();
-    const name = customName.trim() || id;
-    toolsError = "";
-    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/.test(id)) {
-      toolsError = "Use 1-48 letters, numbers, hyphens or underscores for the connection ID, starting with a letter or number.";
-      return;
-    }
-    if (getToolBot(id)?.connected) {
-      toolsError = "That connection already exists. Choose a different ID for another agent.";
-      return;
-    }
-    const template = TOOL_TEMPLATES.find((t) => t.id === customTemplate) ?? genericTemplate(id, name);
-    customOpen = false;
-    openConnect({ ...template, id, name });
-  }
-
-  // Connect modal
-  let connectTool = $state<ToolTemplate | null>(null);
-  let connectKey = $state<string | null>(null);
-  let connecting = $state(false);
-  let connectError = $state("");
-  let copied = $state(false);
-  let keyCopied = $state(false);
-  let exportCopied = $state(false);
-  // Which note-step command chip was just copied (by index), so only that
-  // chip flashes "copied".
-  let noteCopiedIdx = $state<number | null>(null);
-  // The minted key is sensitive — hidden by default, revealed on demand.
-  let keyRevealed = $state(false);
-
-  // Masked rendering: keep the non-secret prefix (e.g. "lific_sk-live-")
-  // legible so the user can sanity-check the key shape, dot out the rest.
-  let maskedKey = $derived.by(() => {
-    if (!connectKey) return "";
-    const m = connectKey.match(/^(lific_sk-live-|lific_sk-test-|lific_sk-|sk-live-|sk-)/);
-    const prefix = m ? m[0] : connectKey.slice(0, 6);
-    const hiddenLen = Math.max(connectKey.length - prefix.length, 0);
-    return prefix + "•".repeat(Math.min(hiddenLen, 40));
-  });
-  let displayKey = $derived(keyRevealed ? (connectKey ?? "") : maskedKey);
-
-  // OS selector for the config-path display. Best-effort default from the
-  // browser; the user can override since they may be configuring a tool on a
-  // different machine than the one viewing this page.
-  type Os = "linux" | "mac" | "windows";
-  const OS_LABELS: Record<Os, string> = { linux: "Linux", mac: "macOS", windows: "Windows" };
-  function detectOs(): Os {
-    const p = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
-    if (p.includes("win")) return "windows";
-    if (p.includes("mac")) return "mac";
-    return "linux";
-  }
-  let selectedOs = $state<Os>(detectOs());
-
-  // Group OSes that share an identical config path so the selector merges
-  // them into one button (e.g. "Linux / macOS" when only Windows differs).
-  // Order is stable: Linux, macOS, Windows.
-  type OsGroup = { oses: Os[]; label: string };
-  let osGroups = $derived.by<OsGroup[]>(() => {
-    if (!connectTool) return [];
-    const order: Os[] = ["linux", "mac", "windows"];
-    const groups: OsGroup[] = [];
-    for (const os of order) {
-      const path = connectTool.configPath[os];
-      // Skip OSes the tool doesn't support (null path) — e.g. Claude
-      // Desktop on Linux, which Anthropic doesn't ship.
-      if (!path) continue;
-      const existing = groups.find(
-        (g) => connectTool!.configPath[g.oses[0]] === path,
-      );
-      if (existing) existing.oses.push(os);
-      else groups.push({ oses: [os], label: "" });
-    }
-    return groups.map((g) => ({
-      oses: g.oses,
-      label: g.oses.map((o) => OS_LABELS[o]).join(" / "),
-    }));
-  });
-  // True when the tool has more than one distinct path across OSes.
-  let pathsDiffer = $derived(osGroups.length > 1);
-  let activePath = $derived(connectTool ? connectTool.configPath[selectedOs] : "");
-
-  // The command that sets the env var. macOS and Linux share the same POSIX
-  // `export` syntax (both use POSIX shells; the only difference is which
-  // rc-file persists it). Windows uses `setx`, which differs meaningfully:
-  // it writes to the registry for FUTURE shells and does NOT affect the
-  // current one.
-  let exportLine = $derived.by(() => {
-    if (!connectTool?.usesEnvKey || !connectKey) return "";
-    const v = connectTool.envVar ?? "LIFIC_API_KEY";
-    return selectedOs === "windows"
-      ? `setx ${v} "${connectKey}"`
-      : `export ${v}="${connectKey}"`;
-  });
-
-  // Where to put the line so it survives new terminals (OS/shell-specific).
-  let persistHint = $derived.by(() => {
-    switch (selectedOs) {
-      case "mac":
-        return "Runs in the current shell. To persist it, add the line to ~/.zshrc (the default macOS shell).";
-      case "linux":
-        return "Runs in the current shell. To persist it, add the line to ~/.bashrc or ~/.profile.";
-      case "windows":
-        return "setx applies to new terminals, not the current one. Reopen your terminal (or Pi) after running it.";
-    }
-  });
-
-  let busyId = $state<number | null>(null);
-
-  // Profile edit (a proper labeled form, separate from the read-only
-  // identity header — name/email aren't casual click-to-edit fields).
+  // Profile: a labeled form, saved together, separate from the read-only
+  // identity header above it.
   let profileName = $state("");
   let profileEmail = $state("");
   let profileSaving = $state(false);
@@ -212,9 +61,8 @@
   let pwSaving = $state(false);
   let pwSuccess = $state(false);
   let signingOut = $state(false);
-  // Two-step inline confirm for the destructive sign-out. It revokes every
-  // credential the account owns, not just this browser's session, so it does
-  // not belong behind a single click.
+  // Two-step inline confirm for signing out everywhere. It revokes every
+  // credential the account owns, not just this browser's session.
   let confirmingSignOutAll = $state(false);
   let signOutAllError = $state("");
   let loggingOut = $state(false);
@@ -261,22 +109,18 @@
   function pickTheme(p: ThemePreference) {
     setPreference(p);
   }
-
   function pickAccent(p: AccentPreset) {
     accentPref = p;
     setAccent(p);
   }
-
   function pickDensity(p: Density) {
     densityPref = p;
     setDensity(p);
   }
-
   function pickFontScale(p: FontScale) {
     fontScalePref = p;
     setFontScale(p);
   }
-
   function pickMotion(p: MotionPreference) {
     motionPref = p;
     setMotionPreference(p);
@@ -285,18 +129,17 @@
   async function submitPassword() {
     if (pwSaving) return;
     pwError = ""; pwSuccess = false;
-    if (newPw.length < 8) { pwError = "New password must be at least 8 characters."; return; }
+    if (newPw.length < 8) { pwError = "The new password needs at least 8 characters."; return; }
     pwSaving = true;
-    // `changePassword` adopts the replacement session token the server
-    // returns. Everything after this point depends on that: the old token is
-    // dead the moment the request succeeds.
+    // `changePassword` adopts the replacement session the server returns;
+    // the old one is dead the moment the request succeeds.
     const res = await changePassword({ current_password: curPw, new_password: newPw });
     pwSaving = false;
     if (res.ok) {
       pwSuccess = true;
       curPw = ""; newPw = "";
-      // Connected tools were revoked along with everything else, so re-read
-      // them rather than leaving the page claiming they are still connected.
+      // Agent keys were revoked with everything else, so re-read them rather
+      // than leaving the list claiming they still work.
       await loadBots();
       window.setTimeout(() => { pwSuccess = false; }, 6000);
     } else {
@@ -341,7 +184,7 @@
     const revision = getUserRevision();
     const session = sessionKey();
     // Whether this instance signs in without a password decides how a stale
-    // session is recovered below, so it is read once with the profile.
+    // session is recovered when an agent key is created.
     const instance = await getInstance();
     if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     const result = await me();
@@ -359,201 +202,52 @@
     if (result.ok) bots = result.data;
   }
 
-  function getToolBot(toolId: string): Bot | undefined {
-    if (!user) return undefined;
-    return bots.find((b) => connectionId(b) === toolId);
-  }
-  function toolState(toolId: string): "connected" | "disconnected" | "none" {
-    const bot = getToolBot(toolId);
-    if (!bot) return "none";
-    return bot.connected ? "connected" : "disconnected";
-  }
-
-  // ── Re-authentication for connecting a tool ──────────────
-  //
-  // Connecting a tool mints a credential that outlives the browser session, so
-  // the server requires a sign-in from the last 15 minutes. A tab left open
-  // over lunch hits that, and "recent authentication required" on its own is a
-  // dead end: nothing on screen says what to do about it.
-  //
-  // Passwordless instances have no password to ask for, so we mint a fresh
-  // session and retry without bothering anyone. Everywhere else the modal
-  // grows one password field, and the retry happens exactly once.
-  // Snapshot of which tool was being connected, and who was connecting it.
-  // `connectTool` is cleared by closing the modal and `user` can be replaced
-  // by a reload, so the retry must not read either back.
-  let reauthNeeded = $state<{ toolId: string; userId: number } | null>(null);
-  let reauthPassword = $state("");
-  let reauthBusy = $state(false);
-  let webAutoLogin = $state(false);
-  /** Why the automatic sign-in did not work, when one was attempted. */
-  let autoReauthNote = $state("");
-
-  /** Mint the bot, and report whether staleness is what stopped us.
-   *
-   *  `recover` is the automatic route out of a staleness refusal, used only
-   *  where one exists: a passwordless instance can mint a fresh session on its
-   *  own. Everywhere else it declines, which surfaces as "stale" and puts the
-   *  password prompt on screen. */
-  async function attemptConnect(
-    template: ToolTemplate,
-    recover: boolean,
-  ): Promise<"ok" | "stale" | "failed"> {
-    const res = await retryOnceAfterReauth(
-      () => createBot(template.id, template.name),
-      async () => {
-        if (!recover || !webAutoLogin || !user) {
-          // `recover` false means the password prompt already refreshed the
-          // session, so there is nothing left to fall back to.
-          return { ok: false, error: RECENT_AUTH_ERROR, recoverable: recover };
-        }
-        const auto = await reauthenticateWithoutPassword(user.id);
-        // A failed or wrong-account auto-login is not the end of the road:
-        // note why, and fall through to the password prompt. The stored token
-        // is untouched either way.
-        if (!auto.ok) autoReauthNote = auto.error;
-        return auto;
-      },
-    );
-    if (res.ok) {
-      connectKey = res.data.key;
-      await loadBots();
-      return "ok";
-    }
-    if (needsReauth(res)) return "stale";
-    connectError = res.error;
-    return "failed";
-  }
-
-  // Open the modal and mint credentials in one step (no extra confirm).
-  async function openConnect(template: ToolTemplate) {
-    connectTool = template;
-    connectKey = null;
-    connectError = "";
-    copied = false;
-    keyCopied = false;
-    exportCopied = false;
-    noteCopiedIdx = null;
-    keyRevealed = false;
-    reauthNeeded = null;
-    reauthPassword = "";
-    autoReauthNote = "";
-    // Default to the viewer's OS, but if the tool has no config for it
-    // (e.g. Claude Desktop on Linux), fall back to the first OS it does
-    // support so the modal never opens on an empty path.
-    {
-      const detected = detectOs();
-      selectedOs = template.configPath[detected]
-        ? detected
-        : ((["linux", "mac", "windows"] as Os[]).find(
-            (o) => template.configPath[o],
-          ) ?? "mac");
-    }
-    connecting = true;
-    if ((await attemptConnect(template, true)) === "stale" && user) {
-      reauthNeeded = { toolId: template.id, userId: user.id };
-    }
-    connecting = false;
-  }
-
-  /** The password path: verify, then retry the connect exactly once. */
-  async function submitReauthAndConnect() {
-    const pending = reauthNeeded;
-    if (reauthBusy || !pending || !user || !reauthPassword) return;
-    if (pending.userId !== user.id || connectTool?.id !== pending.toolId) {
-      // The signed-in account or the open tool changed under the prompt.
-      // Retrying would connect something nobody asked for.
-      connectError = "That connection was interrupted. Close this and try again.";
-      reauthNeeded = null;
-      reauthPassword = "";
-      return;
-    }
-    reauthBusy = true;
-    connectError = "";
-    const refreshed = await reauthenticateWithPassword(reauthPassword, pending.userId);
-    // Clear the field whatever happens, so a wrong password is retyped rather
-    // than resubmitted by a stray Enter.
-    reauthPassword = "";
-    if (!refreshed.ok) {
-      connectError = refreshed.error;
-      reauthBusy = false;
-      return;
-    }
-    autoReauthNote = "";
-    // The session is fresh now, so this is the one retry. No recovery route
-    // is offered to it: a refusal here is a real failure, not staleness.
-    const outcome = await attemptConnect(connectTool, false);
-    if (outcome === "ok") reauthNeeded = null;
-    else if (outcome === "stale" && !connectError) {
-      connectError =
-        "That still was not accepted. Sign out and sign back in, then try connecting again.";
-    }
-    reauthBusy = false;
-  }
-
-  function closeConnect() {
-    if (connecting || reauthBusy) return;
-    connectTool = null;
-    connectKey = null;
-    connectError = "";
-    connecting = false;
-    reauthNeeded = null;
-    reauthPassword = "";
-    reauthBusy = false;
-    autoReauthNote = "";
-  }
-
-  function configText(): string {
-    if (!connectTool || !connectKey) return "";
-    return connectTool.generateConfig(window.location.origin + "/mcp", connectKey);
-  }
-  // What's rendered in the config block. Masks the embedded key to match
-  // Step 1's hide-by-default behavior; copy always uses the real configText().
-  let displayConfig = $derived.by(() => {
-    const text = configText();
-    if (keyRevealed || !connectKey) return text;
-    return text.split(connectKey).join(maskedKey);
-  });
-  // Each copy button keeps its own inline "Copied" flip, so the shared helper
-  // runs with silentSuccess (no success toast) but still fires the error toast
-  // on failure — the old catch swallowed blocked-clipboard failures silently.
-  async function copyWithFlag(text: string, flag: (v: boolean) => void) {
-    const ok = await copyToClipboard(text, { silentSuccess: true });
-    if (ok) {
-      flag(true);
-      window.setTimeout(() => flag(false), 1500);
-    }
-  }
-  const copyConfig = () => copyWithFlag(configText(), (v) => (copied = v));
-  const copyKey = () => connectKey && copyWithFlag(connectKey, (v) => (keyCopied = v));
-  const copyExport = () => copyWithFlag(exportLine, (v) => (exportCopied = v));
-  async function copyNote(idx: number, command: string) {
-    await copyWithFlag(command, (v) => (noteCopiedIdx = v ? idx : null));
-  }
-
-  async function handleDisconnect(id: number) {
-    busyId = id;
-    toolsError = "";
-    const result = await disconnectBot(id);
-    if (!result.ok) toolsError = result.error;
-    await loadBots();
-    busyId = null;
-  }
-  async function handleRemove(id: number) {
-    busyId = id;
-    toolsError = "";
-    const result = await deleteBot(id);
-    if (!result.ok) toolsError = result.error;
-    await loadBots();
-    busyId = null;
-  }
-
   function initials(name: string): string {
     return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
   }
-</script>
 
-<svelte:window onkeydown={(e) => { if (e.key === "Escape" && connectTool) closeConnect(); }} />
+  // ── Section index with scroll-spy ────────────────────────
+  const sections = [
+    { id: "profile", label: "Profile" },
+    { id: "appearance", label: "Appearance" },
+    { id: "agents", label: "Agents" },
+    { id: "security", label: "Security" },
+  ];
+  let activeSection = $state("profile");
+  let scroller = $state<HTMLElement | null>(null);
+
+  $effect(() => {
+    if (loading || !scroller) return;
+    const root = scroller;
+    const update = () => {
+      const line = root.getBoundingClientRect().top + 96;
+      let current = sections[0].id;
+      for (const s of sections) {
+        const el = document.getElementById(`settings-${s.id}`);
+        if (el && el.getBoundingClientRect().top <= line) current = s.id;
+      }
+      if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) current = sections[sections.length - 1].id;
+      activeSection = current;
+    };
+    update();
+    root.addEventListener("scroll", update, { passive: true });
+    return () => root.removeEventListener("scroll", update);
+  });
+
+  function jump(id: string) {
+    activeSection = id;
+    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const inputClass =
+    "w-full text-body-sm rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] " +
+    "px-2.5 py-1.5 outline-none transition-colors placeholder:text-[var(--text-faint)] " +
+    "focus:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent-subtle)]";
+  const segTrack = "inline-flex flex-wrap p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]";
+  const segButton = "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-body-sm font-medium transition-all";
+  const segOn = "bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]";
+  const segOff = "text-[var(--text-muted)] hover:text-[var(--text)]";
+</script>
 
 {#snippet topbarContent()}
   <div class="flex items-center gap-3 px-6 py-2 w-full">
@@ -561,702 +255,322 @@
   </div>
 {/snippet}
 
-<div class="flex-1 overflow-y-auto">
-  <div class="w-full max-w-[1000px] mx-auto px-6 py-10 md:py-12">
+{#snippet row(label: string, help: string, control: import("svelte").Snippet)}
+  <div class="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-8 px-4 py-4 border-t border-[var(--border)] first:border-t-0">
+    <div class="sm:w-48 shrink-0">
+      <p class="text-body-sm font-medium text-[var(--text)]">{label}</p>
+      {#if help}<p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">{help}</p>{/if}
+    </div>
+    <div class="flex-1 min-w-0">{@render control()}</div>
+  </div>
+{/snippet}
+
+{#snippet sectionHead(id: string, title: string, note?: string)}
+  <div class="mb-3">
+    <h2 id="settings-{id}-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--text)]">{title}</h2>
+    {#if note}<p class="text-body-sm text-[var(--text-muted)] mt-0.5">{note}</p>{/if}
+  </div>
+{/snippet}
+
+<div class="flex-1 h-full overflow-y-auto" bind:this={scroller}>
+  <div class="w-full max-w-[1100px] mx-auto px-4 md:px-10 pt-8 md:pt-10 pb-24">
     {#if loading}
-      <!-- LIF-281: structural skeleton replacing the bare centered spinner.
-           Mirrors the loaded account page's default-visible frame inside the
-           same max-w-[1000px] wrapper — the tab bar (border-b + mb-8), the
-           identity hero (size-14 avatar + name/meta, mb-8), and the
-           Appearance card (rounded-xl surface + p-5 with its header +
-           first control row) — so the first heading lands at the same
-           y-position and the layout doesn't snap when data arrives. -->
-      <!-- Tab bar stand-in (SettingsTabs: border-b + mb-8) -->
       <div class="flex items-center gap-6 border-b border-[var(--border)] mb-8">
         <Skeleton variant="bar" class="h-4 w-16 mb-2.5 mt-1" />
         <Skeleton variant="bar" class="h-4 w-16 mb-2.5 mt-1" />
       </div>
-
-      <!-- Identity hero -->
-      <section class="flex items-center gap-4 mb-8">
+      <section class="flex items-center gap-4 mb-10">
         <Skeleton variant="circle" class="size-14 shrink-0" />
         <div class="min-w-0 flex flex-col gap-2">
           <Skeleton variant="bar" class="h-6 w-48" />
           <Skeleton variant="bar" class="h-3.5 w-64" />
         </div>
       </section>
-
-      <!-- Appearance card -->
-      <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5">
-        <div class="flex items-center gap-2 mb-1">
-          <Skeleton variant="circle" class="size-[15px] rounded" />
-          <Skeleton variant="bar" class="h-4 w-32" />
-        </div>
-        <Skeleton variant="bar" class="h-3 w-40 mb-3.5" />
-        <Skeleton variant="block" class="h-9 w-[280px] rounded-lg" />
-      </section>
+      <div class="lg:pl-56 flex flex-col gap-3">
+        <Skeleton variant="bar" class="h-5 w-28" />
+        <Skeleton variant="block" class="h-[220px] w-full max-w-[780px] rounded-xl" />
+      </div>
     {:else if user}
       <SettingsTabs active="account" isAdmin={user.is_admin} {navigate} />
 
-      <!-- ── IDENTITY HERO (read-only) ────────────────── -->
-      <section class="flex items-center gap-4 mb-8 animate-reveal delay-100">
+      <!-- ── IDENTITY ───────────────────────────────────────── -->
+      <header class="flex items-center gap-4 mb-10">
         <div class="size-14 shrink-0 rounded-full bg-[var(--accent)] text-[var(--accent-text)] grid place-items-center font-display text-title tracking-tight">
           {initials(user.display_name || user.username)}
         </div>
         <div class="min-w-0">
-          <h1 class="font-display text-title tracking-tight text-[var(--text)] leading-none truncate">
+          <h1 class="text-[1.6rem] font-semibold tracking-tight text-[var(--text)] leading-tight truncate">
             {user.display_name || user.username}
           </h1>
-          <div class="flex items-center gap-2 mt-1.5 flex-wrap text-body-sm">
+          <div class="flex items-center gap-x-2 gap-y-1 mt-1 flex-wrap text-body-sm">
             <span class="font-mono text-[var(--text-muted)]">@{user.username}</span>
-            <span class="text-[var(--text-faint)]">·</span>
-            <span class="text-[var(--text-muted)]">{user.email}</span>
-            <span class="text-micro font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full
-                         {user.is_admin ? 'text-[var(--accent)] bg-[var(--accent-subtle)]' : 'text-[var(--text-muted)] bg-[var(--bg-subtle)]'}">
+            <span class="text-[var(--text-faint)]" aria-hidden="true">·</span>
+            <span class="text-[var(--text-muted)] break-all">{user.email}</span>
+            <span class="text-caption px-2 py-px rounded-full {user.is_admin ? 'text-[var(--accent)] bg-[var(--accent-subtle)]' : 'text-[var(--text-muted)] bg-[var(--bg-subtle)]'}">
               {user.is_admin ? "Admin" : "Member"}
             </span>
           </div>
         </div>
-      </section>
+      </header>
 
-      <!-- ── APPEARANCE ───────────────────────────────── -->
-      <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5 animate-reveal delay-250">
-        <div class="flex items-center gap-2 mb-1">
-          <Palette size={15} class="text-[var(--text-muted)]" />
-          <h2 class="text-body-lg font-semibold text-[var(--text)]">Appearance</h2>
-        </div>
-        <p class="text-body-sm text-[var(--text-muted)] mb-3.5">System follows your OS.</p>
-        <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-          {#each [["light", "Light", Sun], ["dark", "Dark", Moon], ["system", "System", Monitor]] as [val, label, Icon]}
-            {@const IconComp = Icon as typeof Sun}
-            <button
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-body-sm font-medium transition-all
-                     {$themePreference === val
-                ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-              onclick={() => pickTheme(val as ThemePreference)}
-            >
-              <IconComp size={14} />
-              {label}
-            </button>
-          {/each}
-        </div>
+      <div class="lg:flex lg:gap-12">
+        <nav aria-label="Settings sections" class="lg:w-44 lg:shrink-0">
+          <ul class="flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible pb-3 lg:pb-0 -mx-1 px-1 lg:sticky lg:top-6
+                     [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {#each sections as s (s.id)}
+              <li class="shrink-0">
+                <button
+                  class="w-full text-left whitespace-nowrap px-2.5 py-1.5 rounded-md text-body-sm transition-colors
+                         {activeSection === s.id
+                    ? 'bg-[var(--bg-subtle)] text-[var(--text)] font-medium'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                  aria-current={activeSection === s.id ? "true" : undefined}
+                  onclick={() => jump(s.id)}
+                >
+                  {s.label}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </nav>
 
-        <!-- Accent color -->
-        <div class="mt-5 pt-5 border-t border-[var(--border)]">
-          <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2.5">Accent color</span>
-          <div class="flex items-center gap-2.5 flex-wrap">
-            {#each ACCENT_PRESETS as preset (preset.id)}
-              <button
-                type="button"
-                class="size-8 shrink-0 rounded-full transition-transform motion-safe:active:scale-90
-                       {accentPref === preset.id ? 'ring-2 ring-offset-2 ring-offset-[var(--surface)] ring-[var(--text)]' : 'hover:scale-110'}"
-                style:background-color={preset.swatch}
-                onclick={() => pickAccent(preset.id)}
-                title={preset.label}
-                aria-label="Accent: {preset.label}"
-                aria-pressed={accentPref === preset.id}
-              >
-                {#if accentPref === preset.id}
-                  <Check size={14} class="mx-auto text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]" />
+        <div class="flex-1 min-w-0 max-w-[780px] flex flex-col gap-12 pt-2 lg:pt-0">
+          <!-- ── PROFILE ─────────────────────────────────────── -->
+          <section id="settings-profile" class="scroll-mt-6" aria-labelledby="settings-profile-heading">
+            {@render sectionHead("profile", "Profile")}
+            <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+              {#snippet nameControl()}
+                <label class="block max-w-[36ch]">
+                  <span class="sr-only">Display name</span>
+                  <input bind:value={profileName} class={inputClass} autocomplete="name" />
+                </label>
+              {/snippet}
+              {@render row("Display name", "Shown on your issues and comments.", nameControl)}
+
+              {#snippet emailControl()}
+                <label class="block max-w-[36ch]">
+                  <span class="sr-only">Email</span>
+                  <input bind:value={profileEmail} type="email" class={inputClass} autocomplete="email" />
+                </label>
+              {/snippet}
+              {@render row("Email", "You can sign in with it instead of your username.", emailControl)}
+
+              {#snippet usernameControl()}
+                <p class="text-body-sm font-mono text-[var(--text)] py-1.5">@{user!.username}</p>
+              {/snippet}
+              {@render row("Username", "Fixed. Your agent accounts are named after it.", usernameControl)}
+
+              <div class="flex flex-wrap items-center justify-end gap-3 px-4 py-3 border-t border-[var(--border)]">
+                {#if profileError}
+                  <p class="mr-auto text-caption text-[var(--error)] flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {profileError}</p>
                 {/if}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Density -->
-        <div class="mt-5 pt-5 border-t border-[var(--border)]">
-          <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2.5">Density</span>
-          <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-            {#each [["comfortable", "Comfortable", Rows3], ["compact", "Compact", Rows2]] as [val, label, Icon]}
-              {@const IconComp = Icon as typeof Rows3}
-              <button
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-body-sm font-medium transition-all
-                       {densityPref === val
-                  ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                onclick={() => pickDensity(val as Density)}
-              >
-                <IconComp size={14} />
-                {label}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Text size -->
-        <div class="mt-5 pt-5 border-t border-[var(--border)]">
-          <span class="flex items-center gap-1.5 text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2.5">
-            <Type size={12} /> Text size
-          </span>
-          <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-            {#each [["sm", "S"], ["md", "M"], ["lg", "L"]] as [val, label]}
-              <button
-                class="px-3.5 py-1.5 rounded-md text-body-sm font-medium transition-all
-                       {fontScalePref === val
-                  ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                onclick={() => pickFontScale(val as FontScale)}
-              >
-                {label}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Motion -->
-        <div class="mt-5 pt-5 border-t border-[var(--border)]">
-          <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2.5">Motion</span>
-          <div class="inline-flex p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]">
-            {#each [["system", "System", Monitor], ["reduced", "Reduced", ZapOff], ["full", "Full", Zap]] as [val, label, Icon]}
-              {@const IconComp = Icon as typeof Monitor}
-              <button
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-body-sm font-medium transition-all
-                       {motionPref === val
-                  ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                onclick={() => pickMotion(val as MotionPreference)}
-              >
-                <IconComp size={14} />
-                {label}
-              </button>
-            {/each}
-          </div>
-          <p class="text-caption text-[var(--text-muted)] mt-2">
-            System honors your OS's reduce-motion setting.
-          </p>
-        </div>
-      </section>
-
-      <!-- ── CONNECTED TOOLS (full width) ─────────────── -->
-      <section class="mt-10 animate-reveal delay-250">
-        <div class="flex items-center gap-2 mb-1">
-          <Plug size={16} class="text-[var(--text-muted)]" />
-          <h2 class="text-[1rem] font-semibold text-[var(--text)]">Connected tools</h2>
-        </div>
-        <p class="text-body text-[var(--text-muted)] mb-5 leading-relaxed">
-          Link an AI coding tool to Lific over MCP. Each connection mints a bot identity that acts on your behalf; disconnect any time.
-        </p>
-
-        <div class="grid sm:grid-cols-2 gap-2.5">
-          {#each connectionTemplates as template (template.id)}
-            {@const st = toolState(template.id)}
-            {@const bot = getToolBot(template.id)}
-            <div data-connection-id={template.id} class="flex flex-wrap items-center gap-3.5 p-3.5 rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
-              <div class="size-10 shrink-0 rounded-lg bg-[var(--bg-subtle)] grid place-items-center text-[var(--text)]">
-                <ToolIcon tool={template.id} size={20} />
+                {#if profileSavedAt}
+                  <span class="inline-flex items-center gap-1 text-body-sm text-[var(--success)]" aria-live="polite"><Check size={13} /> Saved</span>
+                {/if}
+                <button
+                  class="text-body-sm font-medium text-[var(--accent-text)] bg-[var(--accent)] px-3 py-1.5 rounded-md
+                         hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  disabled={!hasProfileChanges || profileSaving}
+                  onclick={saveProfile}
+                >
+                  {profileSaving ? "Saving…" : "Save changes"}
+                </button>
               </div>
-              <div class="flex-1 min-w-0">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-body font-medium text-[var(--text)] break-all">{bot?.display_name ?? template.name}</span>
-                  {#if st === "connected"}
-                    <span class="inline-flex items-center gap-1 text-micro font-semibold uppercase tracking-wide
-                                 text-[var(--success)] bg-[var(--success-bg)] px-1.5 py-0.5 rounded-full">
-                      <span class="size-1.5 rounded-full bg-[var(--success)]"></span> Connected
-                    </span>
-                  {:else if st === "disconnected"}
-                    <span class="text-micro font-semibold uppercase tracking-wide text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] px-1.5 py-0.5 rounded-full">
-                      Disconnected
-                    </span>
+            </div>
+          </section>
+
+          <!-- ── APPEARANCE ──────────────────────────────────── -->
+          <section id="settings-appearance" class="scroll-mt-6" aria-labelledby="settings-appearance-heading">
+            {@render sectionHead("appearance", "Appearance", "Kept in this browser.")}
+            <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+              {#snippet themeControl()}
+                <div class={segTrack}>
+                  {#each [["light", "Light", Sun], ["dark", "Dark", Moon], ["system", "System", Monitor]] as [val, label, Icon]}
+                    {@const IconComp = Icon as typeof Sun}
+                    <button class="{segButton} {$themePreference === val ? segOn : segOff}" aria-pressed={$themePreference === val} onclick={() => pickTheme(val as ThemePreference)}>
+                      <IconComp size={14} />
+                      {label}
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {@render row("Theme", "System follows your OS.", themeControl)}
+
+              {#snippet accentControl()}
+                <div class="flex items-center gap-2.5 flex-wrap py-0.5">
+                  {#each ACCENT_PRESETS as preset (preset.id)}
+                    <button
+                      type="button"
+                      class="size-7 shrink-0 rounded-full transition-transform motion-safe:active:scale-90
+                             {accentPref === preset.id ? 'ring-2 ring-offset-2 ring-offset-[var(--surface)] ring-[var(--text)]' : 'hover:scale-110'}"
+                      style:background-color={preset.swatch}
+                      onclick={() => pickAccent(preset.id)}
+                      title={preset.label}
+                      aria-label="Accent: {preset.label}"
+                      aria-pressed={accentPref === preset.id}
+                    >
+                      {#if accentPref === preset.id}
+                        <Check size={13} class="mx-auto text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]" />
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {@render row("Accent", "Buttons, links and the current selection.", accentControl)}
+
+              {#snippet densityControl()}
+                <div class={segTrack}>
+                  {#each [["comfortable", "Comfortable", Rows3], ["compact", "Compact", Rows2]] as [val, label, Icon]}
+                    {@const IconComp = Icon as typeof Rows3}
+                    <button class="{segButton} {densityPref === val ? segOn : segOff}" aria-pressed={densityPref === val} onclick={() => pickDensity(val as Density)}>
+                      <IconComp size={14} />
+                      {label}
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {@render row("Density", "How tightly lists and boards are packed.", densityControl)}
+
+              {#snippet sizeControl()}
+                <div class={segTrack}>
+                  {#each [["sm", "S"], ["md", "M"], ["lg", "L"]] as [val, label]}
+                    <button class="px-3.5 py-1.5 rounded-md text-body-sm font-medium transition-all {fontScalePref === val ? segOn : segOff}" aria-pressed={fontScalePref === val} onclick={() => pickFontScale(val as FontScale)}>
+                      {label}
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {@render row("Text size", "Scales the whole interface.", sizeControl)}
+
+              {#snippet motionControl()}
+                <div class={segTrack}>
+                  {#each [["system", "System", Monitor], ["reduced", "Reduced", ZapOff], ["full", "Full", Zap]] as [val, label, Icon]}
+                    {@const IconComp = Icon as typeof Monitor}
+                    <button class="{segButton} {motionPref === val ? segOn : segOff}" aria-pressed={motionPref === val} onclick={() => pickMotion(val as MotionPreference)}>
+                      <IconComp size={14} />
+                      {label}
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {@render row("Motion", "System follows your OS's reduced-motion setting.", motionControl)}
+            </div>
+          </section>
+
+          <!-- ── AGENTS ──────────────────────────────────────── -->
+          <section id="settings-agents" class="scroll-mt-6" aria-labelledby="settings-agents-heading">
+            <AgentAccounts
+              {bots}
+              userId={user.id}
+              username={user.username}
+              {webAutoLogin}
+              reload={loadBots}
+              {navigate}
+            />
+          </section>
+
+          <!-- ── SECURITY ────────────────────────────────────── -->
+          <section id="settings-security" class="scroll-mt-6" aria-labelledby="settings-security-heading">
+            {@render sectionHead("security", "Security")}
+            <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+              {#snippet passwordControl()}
+                <div class="max-w-[36ch] flex flex-col gap-2">
+                  <label class="block">
+                    <span class="sr-only">Current password</span>
+                    <input type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password" class={inputClass} />
+                  </label>
+                  <label class="block">
+                    <span class="sr-only">New password</span>
+                    <input
+                      type="password" bind:value={newPw} placeholder="New password, 8 characters or more" autocomplete="new-password" class={inputClass}
+                      onkeydown={(e) => { if (e.key === "Enter") submitPassword(); }}
+                    />
+                  </label>
+                  {#if pwError}
+                    <p class="text-caption text-[var(--error)] flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {pwError}</p>
+                  {/if}
+                  <div class="flex flex-wrap items-center gap-3 mt-1">
+                    <button
+                      class="text-body-sm font-medium text-[var(--text)] border border-[var(--border)] px-3 py-1.5 rounded-md
+                             hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={pwSaving || !curPw || !newPw}
+                      onclick={submitPassword}
+                    >
+                      {pwSaving ? "Changing…" : "Change password"}
+                    </button>
+                  </div>
+                  {#if pwSuccess}
+                    <p class="text-caption text-[var(--success)] flex items-start gap-1" role="status">
+                      <Check size={13} class="shrink-0 mt-px" /> Password changed. Your agents need new keys.
+                    </p>
                   {/if}
                 </div>
-                <p class="text-caption text-[var(--text-muted)] truncate mt-0.5">{bot ? connectionId(bot) : template.description}</p>
-              </div>
-              <div class="shrink-0 flex items-center gap-1.5">
-                {#if st === "connected" && bot}
-                  <button
-                    class="text-body-sm text-[var(--text-muted)] hover:text-[var(--error)] px-2.5 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
-                    disabled={busyId === bot.id}
-                    onclick={() => handleDisconnect(bot.id)}
-                  >
-                    {busyId === bot.id ? "…" : "Disconnect"}
-                  </button>
-                {:else if st === "disconnected" && bot}
-                  <button
-                    class="text-body-sm text-[var(--text-faint)] hover:text-[var(--error)] px-2 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
-                    disabled={busyId === bot.id}
-                    onclick={() => handleRemove(bot.id)}
-                  >
-                    Remove
-                  </button>
-                  <button
-                    class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)]
-                           bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-                    onclick={() => openConnect(template)}
-                  >
-                    Reconnect
-                  </button>
-                {:else}
-                  <button
-                    class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)]
-                           bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
-                           motion-safe:active:scale-[0.97]"
-                    onclick={() => openConnect(template)}
-                  >
-                    Connect
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-        <button class="mt-4 toolbar-pill" onclick={() => { customOpen = !customOpen; toolsError = ""; }} aria-expanded={customOpen}>
-          Add custom or named connection
-        </button>
-        {#if toolsError}<p role="alert" class="mt-3 text-body-sm text-[var(--error)]">{toolsError}</p>{/if}
-        {#if customOpen}
-          <form class="mt-4 max-w-lg flex flex-col gap-3" onsubmit={(e) => { e.preventDefault(); connectCustom(); }}>
-            <p class="text-body-sm text-[var(--text-muted)]">Give each agent or machine its own connection ID. Disconnecting one leaves the others connected.</p>
-            <label class="text-body-sm">Config template
-              <select class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customTemplate}>
-                <option value="">Custom HTTP MCP client</option>
-                {#each TOOL_TEMPLATES as template}<option value={template.id}>{template.name}</option>{/each}
-              </select>
-            </label>
-            <label class="text-body-sm">Connection ID
-              <input required maxlength="48" pattern={"[a-zA-Z0-9][a-zA-Z0-9_\\-]{0,47}"} placeholder="codex-laptop" class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customId} />
-            </label>
-            <label class="text-body-sm">Display name (optional)
-              <input maxlength="80" placeholder="Codex on my laptop" class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customName} />
-            </label>
-            <button type="submit" class="self-start text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-2 rounded-md">Connect agent</button>
-          </form>
-        {/if}
-      </section>
+              {/snippet}
+              {@render row(
+                "Password",
+                "Changing it signs you out on other devices and revokes every API key and OAuth sign-in on your account, your agents' included. This browser stays signed in.",
+                passwordControl,
+              )}
 
-      <!-- ── ACCOUNT (profile + security, bottom of page) ─── -->
-      <section class="mt-10 pt-8 border-t border-[var(--border)] animate-reveal delay-250">
-        <h2 class="text-[1rem] font-semibold text-[var(--text)] mb-1">Account</h2>
-        <p class="text-body text-[var(--text-muted)] mb-6 leading-relaxed">
-          Manage your profile, password, and sessions.
-        </p>
-
-        <!-- Profile (proper labeled form) -->
-        <div class="max-w-[480px] flex flex-col gap-3.5">
-          <label class="block">
-            <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Display name</span>
-            <input
-              bind:value={profileName}
-              class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            />
-          </label>
-          <label class="block">
-            <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Email</span>
-            <input
-              bind:value={profileEmail}
-              type="email"
-              class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            />
-          </label>
-          <div>
-            <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Username</span>
-            <p class="text-body font-mono text-[var(--text-muted)]">@{user.username}</p>
-          </div>
-        </div>
-        {#if profileError}
-          <p class="text-caption text-[var(--error)] mt-2.5 flex items-center gap-1"><AlertTriangle size={12} /> {profileError}</p>
-        {/if}
-        <div class="flex items-center gap-3 mt-4">
-          <button
-            class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
-                   hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            disabled={!hasProfileChanges || profileSaving}
-            onclick={saveProfile}
-          >
-            {profileSaving ? "Saving…" : "Save changes"}
-          </button>
-          {#if profileSavedAt}
-            <span class="inline-flex items-center gap-1 text-body-sm text-[var(--success)]" aria-live="polite"><Check size={13} /> Saved</span>
-          {/if}
-        </div>
-
-        <!-- Password -->
-        <div class="mt-8 pt-6 border-t border-[var(--border)]">
-          <div class="flex items-center gap-2 mb-3.5">
-            <Lock size={15} class="text-[var(--text-muted)]" />
-            <h3 class="text-body-lg font-semibold text-[var(--text)]">Password</h3>
-          </div>
-          <div class="max-w-[480px] flex flex-col gap-2.5">
-            <input
-              type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password"
-              class="px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            />
-            <input
-              type="password" bind:value={newPw} placeholder="New password (min 8 chars)" autocomplete="new-password"
-              class="px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                     outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-              onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
-            />
-          </div>
-          <p class="text-caption text-[var(--text-muted)] mt-2.5 max-w-[480px] leading-relaxed">
-            Changing your password signs you out on every other device and revokes this account's
-            API keys, OAuth sessions and connected tools. You stay signed in here. Every tool you
-            use with Lific has to be reconnected afterwards.
-          </p>
-          {#if pwError}
-            <p class="text-caption text-[var(--error)] mt-2 flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {pwError}</p>
-          {/if}
-          <div class="flex items-center gap-3 mt-3">
-            <button
-              class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
-                     hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              disabled={pwSaving || !curPw || !newPw}
-              onclick={submitPassword}
-            >
-              {pwSaving ? "Updating…" : "Change password"}
-            </button>
-            {#if pwSuccess}
-              <span class="inline-flex items-center gap-1 text-body-sm text-[var(--success)]" role="status">
-                <Check size={13} /> Password changed. Connected tools were revoked; reconnect them below.
-              </span>
-            {/if}
-          </div>
-        </div>
-
-        <!-- Sessions (sign out) — the very bottom of the page -->
-        <div class="mt-8 pt-6 border-t border-[var(--border)]">
-          <h3 class="text-body-lg font-semibold text-[var(--text)] mb-1">Sessions</h3>
-          <p class="text-body-sm text-[var(--text-muted)] mb-3.5 leading-relaxed">
-            Sign out of this device, or revoke access everywhere at once.
-          </p>
-          <div class="flex flex-wrap items-center gap-2">
-            <button
-              class="inline-flex items-center gap-1.5 text-body-sm font-medium text-[var(--text)]
-                     border border-[var(--border)] px-3 py-1.5 rounded-md
-                     hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
-              disabled={loggingOut}
-              onclick={logoutNow}
-            >
-              <LogOut size={14} />
-              {loggingOut ? "Signing out" : "Sign out"}
-            </button>
-            <button
-              class="inline-flex items-center gap-1.5 text-body-sm text-[var(--error)] border border-[var(--error)]
-                     px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
-              disabled={signingOut}
-              aria-expanded={confirmingSignOutAll}
-              onclick={() => { confirmingSignOutAll = !confirmingSignOutAll; signOutAllError = ""; }}
-            >
-              Sign out everywhere and revoke access
-            </button>
-          </div>
-          {#if logoutError}
-            <p class="mt-2 text-caption text-[var(--error)] flex items-center gap-1" role="alert">
-              <AlertTriangle size={12} /> {logoutError}
-            </p>
-          {/if}
-          <!-- Inline confirm (never a browser confirm()), matching the
-               attachment-delete pattern: the consequence is spelled out where
-               the second click happens. -->
-          {#if confirmingSignOutAll}
-            <div
-              class="mt-3 max-w-[480px] flex flex-col gap-2 rounded-md border border-[var(--error)]
-                     bg-[var(--error-bg)] px-3 py-2.5"
-              role="alert"
-            >
-              <p class="text-caption text-[var(--text)] leading-relaxed">
-                This signs out every device, including this one, and revokes this account's API
-                keys, OAuth sessions and connected tools. Every tool you use with Lific has to be
-                reconnected afterwards. This cannot be undone.
-              </p>
-              {#if signOutAllError}
-                <p class="text-caption text-[var(--error)] flex items-center gap-1">
-                  <AlertTriangle size={12} /> {signOutAllError}
-                </p>
-              {/if}
-              <div class="flex items-center gap-2">
+              {#snippet signOutControl()}
                 <button
-                  class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
-                         transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={signingOut}
-                  onclick={signOutAll}
-                >
-                  {signingOut ? "Revoking…" : "Yes, revoke everything"}
-                </button>
-                <button
-                  class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md
+                  class="inline-flex items-center gap-1.5 text-body-sm font-medium text-[var(--text)] border border-[var(--border)] px-3 py-1.5 rounded-md
                          hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
-                  disabled={signingOut}
-                  onclick={() => { confirmingSignOutAll = false; signOutAllError = ""; }}
+                  disabled={loggingOut}
+                  onclick={logoutNow}
                 >
-                  Cancel
+                  <LogOut size={14} />
+                  {loggingOut ? "Signing out" : "Sign out"}
                 </button>
-              </div>
+                {#if logoutError}
+                  <p class="mt-2 text-caption text-[var(--error)] flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {logoutError}</p>
+                {/if}
+              {/snippet}
+              {@render row("This browser", "Ends the session here. Everything else keeps working.", signOutControl)}
+
+              {#snippet everywhereControl()}
+                <button
+                  class="text-body-sm text-[var(--error)] border border-[color-mix(in_oklab,var(--error)_45%,transparent)] px-3 py-1.5 rounded-md
+                         hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
+                  disabled={signingOut}
+                  aria-expanded={confirmingSignOutAll}
+                  onclick={() => { confirmingSignOutAll = !confirmingSignOutAll; signOutAllError = ""; }}
+                >
+                  Sign out everywhere
+                </button>
+                {#if confirmingSignOutAll}
+                  <div class="mt-3 flex flex-col gap-2.5 rounded-lg bg-[var(--error-bg)] px-3.5 py-3" role="alert">
+                    <p class="text-body-sm text-[var(--text)] leading-relaxed">
+                      Every device signs out, this one included, and every API key and OAuth sign-in on
+                      your account and your agents stops working. Agents need new keys afterwards.
+                    </p>
+                    {#if signOutAllError}
+                      <p class="text-caption text-[var(--error)] flex items-center gap-1"><AlertTriangle size={12} /> {signOutAllError}</p>
+                    {/if}
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={signingOut}
+                        onclick={signOutAll}
+                      >
+                        {signingOut ? "Revoking…" : "Yes, revoke everything"}
+                      </button>
+                      <button
+                        class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                        disabled={signingOut}
+                        onclick={() => { confirmingSignOutAll = false; signOutAllError = ""; }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              {/snippet}
+              {@render row("Everywhere", "For a lost device or a leaked key.", everywhereControl)}
             </div>
-          {/if}
+          </section>
         </div>
-      </section>
+      </div>
     {/if}
   </div>
 </div>
-
-<!-- ── CONNECT MODAL ──────────────────────────────────── -->
-{#if connectTool}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" onclick={closeConnect}>
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div
-      class="w-full max-w-[620px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl
-             max-h-[85dvh] overflow-y-auto"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Connect ${connectTool.name}`}
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-    >
-      <!-- Header -->
-      <div class="flex items-center gap-3 px-5 py-4 border-b border-[var(--border)]">
-        <div class="size-9 shrink-0 rounded-lg bg-[var(--bg-subtle)] grid place-items-center text-[var(--text)]">
-          <ToolIcon tool={connectTool.id} size={18} />
-        </div>
-        <div class="flex-1 min-w-0">
-          <h3 class="text-body-lg font-semibold text-[var(--text)] leading-tight">Connect {connectTool.name}</h3>
-          <p class="text-caption text-[var(--text-muted)] truncate">{connectTool.description}</p>
-        </div>
-        <button class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50" onclick={closeConnect} disabled={connecting || reauthBusy} aria-label="Close">
-          <X size={16} />
-        </button>
-      </div>
-
-      <div class="p-5">
-        {#if connecting}
-          <div class="flex items-center gap-3 py-8 justify-center text-[var(--text-muted)]">
-            <div class="size-5 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
-            <span class="text-body">Minting credentials…</span>
-          </div>
-        {:else if reauthNeeded}
-          <!-- The session is fine; it is just older than the window a durable
-               credential needs. Say that, and give them the one field that
-               fixes it, rather than an error with nowhere to go. -->
-          <div class="flex flex-col gap-3">
-            <div class="flex items-start gap-2.5 text-body text-[var(--text)] bg-[var(--bg-subtle)] px-3.5 py-3 rounded-md">
-              <Lock size={16} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
-              <p class="leading-relaxed">
-                Connecting {connectTool.name} gives it lasting access to your account, so confirm
-                your password to continue. You have been signed in for a while.
-              </p>
-            </div>
-            {#if autoReauthNote}
-              <p class="text-caption text-[var(--text-muted)]" role="status">
-                Signing you in automatically did not work ({autoReauthNote}), so please confirm
-                your password.
-              </p>
-            {/if}
-            {#if connectError}
-              <p class="text-caption text-[var(--error)] flex items-center gap-1" role="alert">
-                <AlertTriangle size={12} /> {connectError}
-              </p>
-            {/if}
-            <label class="block">
-              <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">
-                Current password
-              </span>
-              <input
-                type="password"
-                bind:value={reauthPassword}
-                autocomplete="current-password"
-                disabled={reauthBusy}
-                class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
-                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
-                onkeydown={(e) => { if (e.key === 'Enter') submitReauthAndConnect(); }}
-              />
-            </label>
-            <div class="flex items-center gap-2">
-              <button
-                class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
-                       hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={reauthBusy || !reauthPassword}
-                onclick={submitReauthAndConnect}
-              >
-                {reauthBusy ? "Verifying…" : `Confirm and connect ${connectTool.name}`}
-              </button>
-              <button
-                class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
-                disabled={reauthBusy}
-                onclick={closeConnect}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        {:else if connectError}
-          <div class="flex items-start gap-2.5 text-body text-[var(--error)] bg-[var(--error-bg)] px-3.5 py-3 rounded-md" role="alert">
-            <AlertTriangle size={16} class="shrink-0 mt-0.5" />
-            <span>{connectError}</span>
-          </div>
-        {:else if connectKey}
-          {@const stepCount = connectTool.usesEnvKey ? 3 : 2}
-
-          <!-- ── STEP 1 · API KEY ───────────────────────────────
-               Shown once; hidden behind a mask by default. Surfaced as its
-               own first-class step so env-var tools (Pi, Codex) never bury
-               the secret inside a config the user might not read. -->
-          <section class="mb-5">
-            <div class="flex items-center gap-2.5 mb-2">
-              <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">1</span>
-              <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
-                <KeyRound size={14} class="text-[var(--text-muted)]" /> Copy your API key
-              </h4>
-            </div>
-
-            <div class="rounded-lg border border-[var(--btn-success)] bg-[color-mix(in_oklab,var(--btn-success)_8%,var(--bg))] overflow-hidden">
-              <div class="flex items-center gap-2 px-3 py-2.5">
-                <code
-                  class="flex-1 min-w-0 text-body-sm font-mono text-[var(--text)] overflow-x-auto whitespace-nowrap leading-none py-0.5
-                         {keyRevealed ? '' : 'select-none cursor-default'}"
-                >{displayKey}</code>
-                <button
-                  class="shrink-0 size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-                  onclick={() => (keyRevealed = !keyRevealed)}
-                  title={keyRevealed ? "Hide key" : "Reveal key"}
-                  aria-label={keyRevealed ? "Hide key" : "Reveal key"}
-                >
-                  {#if keyRevealed}<EyeOff size={15} />{:else}<Eye size={15} />{/if}
-                </button>
-              </div>
-              <button
-                class="w-full flex items-center justify-center gap-1.5 py-2 text-body-sm font-semibold border-t border-[color-mix(in_oklab,var(--btn-success)_35%,transparent)] transition-colors
-                       {keyCopied
-                  ? 'bg-[var(--success-bg)] text-[var(--success)]'
-                  : 'bg-[var(--btn-success)] text-[var(--btn-success-text)] hover:bg-[var(--btn-success-hover)]'}"
-                onclick={copyKey}
-              >
-                {#if keyCopied}<Check size={14} /> Copied to clipboard{:else}<Copy size={14} /> Copy key{/if}
-              </button>
-            </div>
-          </section>
-
-          <!-- ── STEP 2 · CONFIG ────────────────────────────────── -->
-          <section class="mb-5">
-            <div class="flex items-center gap-2.5 mb-2">
-              <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">2</span>
-              <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
-                <FileCode2 size={14} class="text-[var(--text-muted)]" /> Add to your config
-              </h4>
-            </div>
-
-            <!-- OS selector: its own full-width segmented row. OSes that share
-                 an identical path are merged into one button (e.g. Linux / macOS).
-                 A single group means the path is the same everywhere. -->
-            {#if osGroups.length > 0}
-            <div class="flex items-center gap-2 mb-2.5">
-              <div class="inline-flex flex-1 p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]">
-                {#each osGroups as group (group.label)}
-                  {@const active = group.oses.includes(selectedOs)}
-                  <button
-                    class="flex-1 px-2 py-1.5 rounded-md text-caption font-medium transition-all
-                           {active
-                      ? 'bg-[var(--btn-success)] text-[var(--btn-success-text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                      : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-                    onclick={() => (selectedOs = group.oses[0])}
-                  >
-                    {group.label}
-                  </button>
-                {/each}
-              </div>
-              {#if !pathsDiffer}
-                <span class="text-micro text-[var(--text-muted)] shrink-0">same everywhere</span>
-              {/if}
-            </div>
-
-            <div class="flex items-center gap-2 mb-2.5">
-              <span class="text-micro font-semibold uppercase tracking-wide text-[var(--text-muted)] shrink-0">File</span>
-              <code class="flex-1 min-w-0 font-mono text-caption bg-[var(--bg-subtle)] px-2 py-1 rounded text-[var(--text)] overflow-x-auto whitespace-nowrap">{activePath}</code>
-            </div>
-            {/if}
-
-            {#if connectTool.configNote}
-              <div class="flex flex-col gap-1.5 mb-2.5">
-                {#each connectTool.configNote as step, i (i)}
-                  {#if step.text}
-                    <p class="text-body-sm text-[var(--text)] leading-snug">{step.text}</p>
-                  {/if}
-                  {#if step.command}
-                    <!-- Same shape as the API-key card: content row on top,
-                         full-width copy bar underneath. No floating button
-                         overlapping a single line of scrolling text. -->
-                    <div class="rounded-lg bg-[var(--bg)] overflow-hidden ring-1 ring-[var(--border)]">
-                      <pre class="px-3 py-2.5 text-caption font-mono text-[var(--text)] overflow-x-auto whitespace-pre">{step.command}</pre>
-                      <!-- Separator matches the bar's own bg so no seam fights
-                           the rounded container. Green-tinted bar + green text:
-                           lively and on-brand without a loud solid button. -->
-                      <button
-                        class="w-full flex items-center justify-center gap-1.5 py-2 text-caption font-semibold transition-colors
-                               {noteCopiedIdx === i
-                          ? 'bg-[var(--success-bg)] text-[var(--success)]'
-                          : 'bg-[color-mix(in_oklab,var(--btn-success)_14%,var(--bg))] text-[var(--success)] hover:bg-[color-mix(in_oklab,var(--btn-success)_22%,var(--bg))]'}"
-                        onclick={() => copyNote(i, step.command!)}
-                      >
-                        {#if noteCopiedIdx === i}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy command{/if}
-                      </button>
-                    </div>
-                  {/if}
-                {/each}
-              </div>
-            {/if}
-
-            <div class="relative">
-              <pre
-                class="bg-[var(--bg)] border border-[var(--border)] rounded-lg p-3.5 pr-12 text-caption font-mono text-[var(--text)] overflow-x-auto leading-relaxed
-                       {keyRevealed ? '' : 'select-none'}"
-              >{displayConfig}</pre>
-              <button
-                class="absolute top-2 right-2 inline-flex items-center gap-1 text-micro font-semibold
-                       px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--border)]
-                       {copied ? 'text-[var(--success)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'} transition-colors"
-                onclick={copyConfig}
-              >
-                {#if copied}<Check size={12} /> Copied{:else}<Copy size={12} /> Copy{/if}
-              </button>
-            </div>
-          </section>
-
-          <!-- ── STEP 3 · ENV VAR (env-key tools only) ──────────── -->
-          {#if connectTool.usesEnvKey}
-            <section class="mb-5">
-              <div class="flex items-center gap-2.5 mb-2">
-                <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">3</span>
-                <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
-                  <Terminal size={14} class="text-[var(--text-muted)]" /> Set the env var
-                  <span class="font-normal text-[var(--text-muted)]">· {OS_LABELS[selectedOs]}</span>
-                </h4>
-              </div>
-              <div class="relative">
-                <pre
-                  class="bg-[var(--bg)] border border-[var(--border)] rounded-lg p-3 pr-12 text-caption font-mono text-[var(--text)] overflow-x-auto
-                         {keyRevealed ? '' : 'select-none'}"
-                >{keyRevealed ? exportLine : exportLine.split(connectKey).join(maskedKey)}</pre>
-                <button
-                  class="absolute top-2 right-2 inline-flex items-center gap-1 text-micro font-semibold
-                         px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--border)]
-                         {exportCopied ? 'text-[var(--success)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'} transition-colors"
-                  onclick={copyExport}
-                >
-                  {#if exportCopied}<Check size={12} /> Copied{:else}<Copy size={12} /> Copy{/if}
-                </button>
-              </div>
-              <p class="text-micro text-[var(--text-muted)] mt-1.5 leading-relaxed">{persistHint}</p>
-            </section>
-          {/if}
-
-          <p class="text-micro text-[var(--text-muted)] text-center leading-relaxed">
-            The key is shown only this once, so copy it now. You can reconnect any time to mint a fresh one.
-          </p>
-        {/if}
-      </div>
-
-      <div class="flex justify-end px-5 py-3.5 border-t border-[var(--border)]">
-        <button
-          class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-4 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-          onclick={closeConnect}
-        >
-          Done
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
