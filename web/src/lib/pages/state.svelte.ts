@@ -42,7 +42,10 @@ export function parseView(raw: string | null): PageViewSnapshot {
     const f = (v.filters ?? {}) as Partial<PageFilters>;
     const editor = typeof f.editor === "string" && /^(|people|agents|u:\d+)$/.test(f.editor) ? f.editor : "";
     return {
-      scope: v.scope === "all" || v.scope === "unfiled" || typeof v.scope === "number" ? v.scope : "all",
+      scope:
+        v.scope === "all" || v.scope === "archived" || v.scope === "conventions" || typeof v.scope === "number"
+          ? v.scope
+          : "all",
       filters: {
         statuses: Array.isArray(f.statuses)
           ? f.statuses.filter((s): s is string => s === "draft" || s === "active" || s === "complete")
@@ -77,7 +80,6 @@ export class PageListView {
 
   filterOpen = $state(false);
   displayOpen = $state(false);
-  newMenuOpen = $state(false);
 
   hydrated = false;
 
@@ -125,7 +127,6 @@ export class PageListView {
   closePopovers() {
     this.filterOpen = false;
     this.displayOpen = false;
-    this.newMenuOpen = false;
   }
 
   toggleStatus(status: string) {

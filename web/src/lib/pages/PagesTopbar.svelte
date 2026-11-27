@@ -1,16 +1,17 @@
 <script lang="ts">
-  // The Pages topbar, in the issue list's two tiers. The first says where you
-  // are and holds search and New page; the second holds the tabs and the
-  // tools that shape the list (Filter, Display). A third tier spells out the
-  // active filters as removable chips.
+  // The Pages topbar, in the issue list's two tiers. The first holds search
+  // and New page; the second says what the list shows (the folder pane's
+  // pick, a drawer button below lg) and holds the tools that shape it
+  // (Filter, Display). A third tier spells out the active filters as
+  // removable chips.
   import {
+    Archive,
     ChevronDown,
-    ClipboardPaste,
-    FolderPlus,
-    FolderTree as FolderTreeIcon,
+    Files,
+    FolderOpen,
     HelpCircle,
-    NotebookPen,
     PanelRight,
+    ScrollText,
     Plus,
     Search,
     SlidersHorizontal,
@@ -19,65 +20,63 @@
     Check,
   } from "lucide-svelte";
   import type { Label, PageMetaPerson } from "../api";
-  import SubTabs, { type SubTab } from "../SubTabs.svelte";
   import Tooltip from "../Tooltip.svelte";
   import SignInButton from "../SignInButton.svelte";
   import { isSignedOut } from "../signedOut";
   import { safeLabelColor } from "../labelColors";
   import { toggleShortcutHelp } from "../shortcutHelpState.svelte";
   import EditorMark from "./EditorMark.svelte";
-  import { filterCount, LIVE_STATUSES, personLabel, STATUS_LABEL, type PageGroup, type PageSort } from "./list";
+  import {
+    filterCount,
+    LIVE_STATUSES,
+    personLabel,
+    STATUS_LABEL,
+    type FolderScope,
+    type PageGroup,
+    type PageSort,
+  } from "./list";
   import type { PageListView } from "./state.svelte";
 
   let {
     view,
     projectIdentifier,
     count,
-    tabs,
-    activeTab,
-    onTab,
+    scope,
     labels,
     editors,
     changedCount = 0,
     onCycleChanged,
     canEdit,
     scopeLabel,
-    shapeable,
     onNewPage,
-    onPaste,
-    onQuickNote,
-    onNewFolder,
     onOpenFolders,
     onOpenPulse,
     searchInputEl = $bindable(),
   }: {
     view: PageListView;
     projectIdentifier: string;
-    /** Pages the current tab and filters show. */
+    /** Pages the list shows with the current filters. */
     count: number | null;
-    tabs: SubTab[];
-    activeTab: string;
-    onTab: (id: string) => void;
+    scope: FolderScope;
     labels: Label[];
     /** Accounts that last edited a page here, for the filter. */
     editors: PageMetaPerson[];
     changedCount?: number;
     onCycleChanged: () => void;
     canEdit: boolean;
-    /** The folder the list is scoped to, for the phone's folder button. */
+    /** What the list shows: All pages, a folder's path, Archived. */
     scopeLabel: string;
-    /** The tab has a list to filter and arrange. */
-    shapeable: boolean;
     onNewPage: () => void;
-    onPaste: () => void;
-    onQuickNote: () => void;
-    onNewFolder: () => void;
     onOpenFolders: () => void;
     onOpenPulse: () => void;
     searchInputEl?: HTMLInputElement | null;
   } = $props();
 
-  const nFilters = $derived(filterCount(view.filters));
+  // Conventions is one page, not a list: nothing to filter or arrange.
+  const shapeable = $derived(scope !== "conventions");
+  const archived = $derived(scope === "archived");
+  // Archived pages all share one status, so the status filter has no say.
+  const nFilters = $derived(filterCount(archived ? { ...view.filters, statuses: [] } : view.filters));
   const SORT_LABEL: Record<PageSort, string> = {
     updated: "Last edited",
     created: "Created",
@@ -86,6 +85,7 @@
   };
   const GROUP_LABEL: Record<PageGroup, string> = {
     folder: "Folder",
+    edited: "Day edited",
     label: "Label",
     status: "Status",
     none: "No grouping",
@@ -99,8 +99,6 @@
     return p ? personLabel(p) : "Someone";
   }
 
-  const menuItem =
-    "w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-left text-body-sm text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors";
   const toolBtn =
     "h-7 flex items-center gap-1.5 px-2 rounded-md text-caption font-medium transition-colors hover:bg-[var(--bg-subtle)]";
   const option = (on: boolean) =>
@@ -147,18 +145,7 @@
       </span>
     </div>
 
-    <!-- Below lg the folder pane is a drawer; this opens it and says which
-         folder is showing. -->
-    <button
-      class="lg:hidden min-w-0 max-w-[45vw] h-8 flex items-center gap-1.5 px-2 rounded-md
-             text-body-sm font-medium text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-      aria-label="Folders: {scopeLabel}"
-      onclick={(e) => { e.stopPropagation(); onOpenFolders(); }}
-    >
-      <FolderTreeIcon size={15} class="shrink-0 text-[var(--text-muted)]" />
-      <span class="truncate">{scopeLabel}</span>
-      <ChevronDown size={13} class="shrink-0 text-[var(--text-faint)]" />
-    </button>
+    <h1 class="md:hidden font-display text-heading font-medium tracking-tight text-[var(--text)] leading-none">Pages</h1>
 
     <div class="flex-1"></div>
 
@@ -268,66 +255,19 @@
     </div>
 
     {#if canEdit}
-      <div class="relative">
-        <div
-          class="flex items-stretch h-8 rounded-lg overflow-hidden
-                 shadow-[0_1px_2px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.18)]
-                 focus-within:ring-2 focus-within:ring-[var(--btn-success)] focus-within:ring-offset-1
-                 focus-within:ring-offset-[var(--chrome)]"
-        >
-          <button
-            class="group flex items-center gap-1.5 px-2.5 md:pl-3 md:pr-2.5 text-body-sm font-medium
-                   text-[var(--btn-success-text)] bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
-                   transition-colors focus:outline-none motion-safe:active:scale-[0.97]"
-            aria-label="New page"
-            onclick={(e) => { e.stopPropagation(); view.closePopovers(); onNewPage(); }}
-          >
-            <Plus size={15} class="motion-safe:transition-transform motion-safe:duration-300 motion-safe:group-hover:rotate-90" />
-            <span class="hidden md:inline">New page</span>
-            <kbd class="hidden md:grid ml-0.5 place-items-center min-w-[1.1rem] h-[1.1rem] rounded bg-black/10 font-mono text-micro leading-none">C</kbd>
-          </button>
-          <div class="w-px bg-black/15"></div>
-          <button
-            class="flex items-center justify-center px-1.5 text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                   hover:bg-[var(--btn-success-hover)] transition-colors focus:outline-none motion-safe:active:scale-[0.97]"
-            aria-label="More ways to add"
-            aria-haspopup="menu"
-            aria-expanded={view.newMenuOpen}
-            onclick={(e) => {
-              e.stopPropagation();
-              const open = !view.newMenuOpen;
-              view.closePopovers();
-              view.newMenuOpen = open;
-            }}
-          >
-            <ChevronDown size={14} class="motion-safe:transition-transform {view.newMenuOpen ? 'rotate-180' : ''}" />
-          </button>
-        </div>
-        {#if view.newMenuOpen}
-          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-          <div
-            role="menu"
-            tabindex="-1"
-            class="popover-in origin-top-right absolute right-0 top-full mt-1.5 z-30 w-[220px]
-                   bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-lg p-1"
-            onclick={(e) => e.stopPropagation()}
-          >
-            <button role="menuitem" class={menuItem} onclick={() => { view.newMenuOpen = false; onPaste(); }}>
-              <ClipboardPaste size={14} class="text-[var(--text-muted)]" />
-              <span class="flex-1">Paste as new page</span>
-            </button>
-            <button role="menuitem" class={menuItem} onclick={() => { view.newMenuOpen = false; onQuickNote(); }}>
-              <NotebookPen size={14} class="text-[var(--text-muted)]" />
-              <span class="flex-1">Dated note</span>
-            </button>
-            <div class="my-1 mx-1 h-px bg-[var(--border)]"></div>
-            <button role="menuitem" class={menuItem} onclick={() => { view.newMenuOpen = false; onNewFolder(); }}>
-              <FolderPlus size={14} class="text-[var(--text-muted)]" />
-              <span class="flex-1">New folder</span>
-            </button>
-          </div>
-        {/if}
-      </div>
+      <button
+        class="group h-8 flex items-center gap-1.5 px-2.5 md:pl-3 md:pr-2.5 rounded-lg text-body-sm font-medium
+               text-[var(--btn-success-text)] bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
+               shadow-[0_1px_2px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.18)] transition-colors
+               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--btn-success)] focus-visible:ring-offset-1
+               focus-visible:ring-offset-[var(--chrome)] motion-safe:active:scale-[0.97]"
+        aria-label="New page"
+        onclick={(e) => { e.stopPropagation(); view.closePopovers(); onNewPage(); }}
+      >
+        <Plus size={15} class="motion-safe:transition-transform motion-safe:duration-300 motion-safe:group-hover:rotate-90" />
+        <span class="hidden md:inline">New page</span>
+        <kbd class="hidden md:grid ml-0.5 place-items-center min-w-[1.1rem] h-[1.1rem] rounded bg-black/10 font-mono text-micro leading-none">C</kbd>
+      </button>
     {:else if isSignedOut()}
       <SignInButton />
     {/if}
@@ -335,8 +275,34 @@
 
   <!-- ── Tier 2 ── -->
   <div class="flex items-stretch gap-3 px-3 md:px-6 h-11 border-b border-[var(--border)]">
-    <div class="min-w-0 flex-1 flex items-end">
-      <SubTabs {tabs} active={activeTab} onselect={onTab} border={false} />
+    <!-- What the list shows. Below lg the folder pane is a drawer and this
+         opens it. -->
+    {#snippet scopeIcon()}
+      {#if scope === "conventions"}
+        <ScrollText size={15} class="shrink-0 text-[var(--text-muted)]" />
+      {:else if scope === "archived"}
+        <Archive size={15} class="shrink-0 text-[var(--text-muted)]" />
+      {:else if typeof scope === "number"}
+        <FolderOpen size={15} class="shrink-0 text-[var(--accent)]" />
+      {:else}
+        <Files size={15} class="shrink-0 text-[var(--text-muted)]" />
+      {/if}
+    {/snippet}
+    <div class="min-w-0 flex-1 flex items-center" data-testid="pages-scope">
+      <button
+        class="lg:hidden min-w-0 h-8 -ml-2 flex items-center gap-1.5 px-2 rounded-md
+               text-body-sm font-medium text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+        aria-label="Folders: {scopeLabel}"
+        onclick={(e) => { e.stopPropagation(); onOpenFolders(); }}
+      >
+        {@render scopeIcon()}
+        <span class="truncate">{scopeLabel}</span>
+        <ChevronDown size={13} class="shrink-0 text-[var(--text-faint)]" />
+      </button>
+      <h2 class="max-lg:hidden min-w-0 flex items-center gap-2 text-body-sm font-medium text-[var(--text)]">
+        {@render scopeIcon()}
+        <span class="truncate">{scopeLabel}</span>
+      </h2>
     </div>
 
     {#if shapeable}
@@ -375,16 +341,18 @@
               onclick={(e) => e.stopPropagation()}
               data-testid="pages-filter"
             >
-              <section>
-                <h3 class="pop-label">Status</h3>
-                <div class="mt-1.5 flex flex-wrap gap-1.5">
-                  {#each LIVE_STATUSES as s (s)}
-                    <button class={option(view.filters.statuses.includes(s))} aria-pressed={view.filters.statuses.includes(s)} onclick={() => view.toggleStatus(s)}>
-                      {STATUS_LABEL[s]}
-                    </button>
-                  {/each}
-                </div>
-              </section>
+              {#if !archived}
+                <section>
+                  <h3 class="pop-label">Status</h3>
+                  <div class="mt-1.5 flex flex-wrap gap-1.5">
+                    {#each LIVE_STATUSES as s (s)}
+                      <button class={option(view.filters.statuses.includes(s))} aria-pressed={view.filters.statuses.includes(s)} onclick={() => view.toggleStatus(s)}>
+                        {STATUS_LABEL[s]}
+                      </button>
+                    {/each}
+                  </div>
+                </section>
+              {/if}
               {#if labels.length > 0}
                 <section>
                   <h3 class="pop-label">Label</h3>
@@ -468,19 +436,17 @@
               onclick={(e) => e.stopPropagation()}
               data-testid="pages-display"
             >
-              {#if activeTab === "browse"}
-                <section>
-                  <h3 class="pop-label">Group by</h3>
-                  <div class="mt-1.5 flex flex-wrap gap-1.5">
-                    {#each ["folder", "label", "status", "none"] as const as g (g)}
-                      <button class={option(view.group === g)} aria-pressed={view.group === g} onclick={() => (view.group = g)}>
-                        {GROUP_LABEL[g]}
-                      </button>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
-              {#if activeTab !== "recent"}
+              <section>
+                <h3 class="pop-label">Group by</h3>
+                <div class="mt-1.5 flex flex-wrap gap-1.5">
+                  {#each ["folder", "edited", "label", "status", "none"] as const as g (g)}
+                    <button class={option(view.group === g)} aria-pressed={view.group === g} onclick={() => (view.group = g)}>
+                      {GROUP_LABEL[g]}
+                    </button>
+                  {/each}
+                </div>
+              </section>
+              {#if view.group !== "edited"}
                 <section>
                   <h3 class="pop-label">Sort by</h3>
                   <div class="mt-1.5 flex flex-wrap gap-1.5">
@@ -526,7 +492,7 @@
           </button>
         </span>
       {/snippet}
-      {#if view.filters.statuses.length > 0}
+      {#if view.filters.statuses.length > 0 && !archived}
         {@render chip(view.filters.statuses.map((s) => STATUS_LABEL[s]).join(" or "), () => (view.filters = { ...view.filters, statuses: [] }))}
       {/if}
       {#if view.filters.label}

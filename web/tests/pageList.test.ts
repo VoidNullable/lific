@@ -14,7 +14,6 @@ import {
   groupPages,
   inScope,
   orderedFolders,
-  pageFromPaste,
   quietPages,
   sortPages,
   type ListPage,
@@ -97,12 +96,11 @@ describe("folders", () => {
     expect(s.get(3)).toEqual({ direct: 0, total: 0, updated: null });
   });
 
-  test("scope: a folder includes its subfolders, unfiled includes pages of deleted folders", () => {
-    const ids = new Set(folders.map((f) => f.id));
-    expect(inScope(page({ folder_id: 2 }), 1, folders, ids)).toBe(true);
-    expect(inScope(page({ folder_id: 3 }), 1, folders, ids)).toBe(false);
-    expect(inScope(page({ folder_id: 77 }), "unfiled", folders, ids)).toBe(true);
-    expect(inScope(page({ folder_id: 3 }), "all", folders, ids)).toBe(true);
+  test("scope: a folder includes its subfolders", () => {
+    expect(inScope(page({ folder_id: 2 }), 1, folders)).toBe(true);
+    expect(inScope(page({ folder_id: 3 }), 1, folders)).toBe(false);
+    expect(inScope(page({ folder_id: null }), 1, folders)).toBe(false);
+    expect(inScope(page({ folder_id: 3 }), "all", folders)).toBe(true);
   });
 });
 
@@ -153,6 +151,17 @@ describe("sort and group", () => {
     expect(groups.map((g) => [g.label, g.pages.length, g.depth])).toEqual([
       ["Architecture", 0, 0],
       ["Architecture / MCP", 1, 1],
+    ]);
+  });
+
+  test("edited groups bucket by day, newest first", () => {
+    const now = new Date(2026, 10, 26, 15, 0);
+    const today = page({ updated_at: new Date(2026, 10, 26, 9).toISOString().replace("Z", "") });
+    const old = page({ updated_at: "2026-01-01T00:00:00" });
+    const groups = groupPages([old, today], "edited", { folders, now });
+    expect(groups.map((g) => [g.label, g.pages.map((p) => p.id)])).toEqual([
+      ["Today", [today.id]],
+      ["Older", [old.id]],
     ]);
   });
 
@@ -218,10 +227,6 @@ describe("text", () => {
     expect(describeLength(0)).toBe("");
   });
 
-  test("pasted text: first line is the title", () => {
-    expect(pageFromPaste("\n# Plan *A*\nbody\nmore")).toEqual({ title: "Plan A", content: "body\nmore" });
-    expect(pageFromPaste("   ")).toBeNull();
-  });
 });
 
 describe("stored view", () => {
@@ -243,6 +248,12 @@ describe("stored view", () => {
       excerpts: false,
       pane: true,
     });
+  });
+
+  test("archived and conventions scopes survive; the old unfiled scope does not", () => {
+    expect(parseView(JSON.stringify({ scope: "archived" })).scope).toBe("archived");
+    expect(parseView(JSON.stringify({ scope: "conventions" })).scope).toBe("conventions");
+    expect(parseView(JSON.stringify({ scope: "unfiled" })).scope).toBe("all");
   });
 
   test("garbage falls back to the defaults", () => {

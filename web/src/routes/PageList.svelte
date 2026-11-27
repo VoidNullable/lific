@@ -39,14 +39,12 @@
     Link as LinkIcon,
     Pin,
     Plus,
-    ScrollText,
     X,
     Archive,
     CircleDot,
     CheckCircle2,
     PenLine,
     RotateCcw,
-    ChevronRight,
   } from "lucide-svelte";
   import { getContext, untrack } from "svelte";
   import Select from "../lib/Select.svelte";
@@ -56,7 +54,6 @@
   import TimeAgo from "../lib/TimeAgo.svelte";
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
-  import { loadSubTab, saveSubTab } from "../lib/subtab";
   import { toast } from "../lib/toast/toast.svelte";
   import { copyToClipboard } from "../lib/clipboard";
   import { openContextMenu, type ContextMenuItem } from "../lib/contextMenuState.svelte";
@@ -76,25 +73,19 @@
   import PageBulkBar from "../lib/pages/PageBulkBar.svelte";
   import { PageListView } from "../lib/pages/state.svelte";
   import {
-    PAGE_TABS,
     applyFilters,
-    bucketByDay,
     descendantIds,
-    draftAge,
     filterCount,
     folderPathLabel,
     folderStats,
     groupPages,
     inScope,
-    isUnfiled,
-    pageFromPaste,
     personLabel,
     sortPages,
     STATUS_LABEL,
     type FolderScope,
     type ListPage,
     type PageGroupBlock,
-    type PageTab,
   } from "../lib/pages/list";
 
   let {
@@ -134,14 +125,13 @@
   let error = $state("");
   let mutationsInFlight = $state(0);
   let dragId = $state<number | null>(null);
-  let dropTarget = $state<FolderScope | null>(null);
+  /** A folder, or null for Unfiled (the list's group header). */
+  let dropTarget = $state<number | null | undefined>(undefined);
 
   const view = new PageListView();
-  let activeTab = $state<PageTab>("browse");
 
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
-  let folderTree = $state<FolderTree | null>(null);
   let foldersOpen = $state(false);
   let pulseOpen = $state(false);
 
@@ -218,7 +208,6 @@
       return;
     }
     loadProjectRole(resolved.id);
-    activeTab = (loadSubTab("pages", String(resolved.id), PAGE_TABS) ?? "browse") as PageTab;
 
     const [fRes, lRes] = await Promise.all([listFolders(resolved.id), listLabels(resolved.id)]);
     if (ident !== projectIdentifier) return;
@@ -232,15 +221,6 @@
     setActiveProject(found.id);
     metaMap = metaCache.get(found.id) ?? new Map();
     metaLoaded = metaCache.has(found.id);
-  }
-
-  function selectTab(id: string) {
-    if (!PAGE_TABS.includes(id as PageTab)) return;
-    activeTab = id as PageTab;
-    view.closePopovers();
-    view.selected = new Set();
-    if (project) saveSubTab("pages", String(project.id), activeTab);
-    listEl?.scrollTo({ top: 0 });
   }
 
   // ── Page metadata ────────────────────────────────────
@@ -277,58 +257,55 @@
   // ── Derived lists ────────────────────────────────────
 
   let conventions = $derived(conventionsState(pages));
-  /** Every page but the conventions page, which has its own tab. */
+  /** Every page but the conventions page, which has its own place. */
   let treePages = $derived(conventions.kind === "none" ? pages : pages.filter((p) => p.id !== conventions.page.id));
   let livePages = $derived(treePages.filter((p) => p.status !== "archived"));
   let archivedPages = $derived(treePages.filter((p) => p.status === "archived"));
   let folderIds = $derived(new Set(folders.map((f) => f.id)));
   let stats = $derived(folderStats(livePages, folders));
-  let unfiledCount = $derived(livePages.filter((p) => isUnfiled(p, folderIds)).length);
   let scope = $derived<FolderScope>(
     typeof view.scope === "number" && !folderIds.has(view.scope) && !projectLoading ? "all" : view.scope,
   );
   let scopeIds = $derived(typeof scope === "number" ? descendantIds(folders, scope) : null);
   let scopeLabel = $derived(
-    scope === "all" ? "All pages" : scope === "unfiled" ? "Unfiled" : (folders.find((f) => f.id === scope)?.name ?? "Folder"),
+    scope === "all"
+      ? "All pages"
+      : scope === "archived"
+        ? "Archived"
+        : scope === "conventions"
+          ? "Conventions"
+          : folderPathLabel(folders, scope) || "Folder",
+  );
+  let isList = $derived(scope !== "conventions");
+  let conventionsEntry = $derived<"on" | "off" | "missing" | "hidden">(
+    conventions.kind === "page"
+      ? conventions.page.conventions_enabled !== false
+        ? "on"
+        : "off"
+      : canEdit
+        ? "missing"
+        : "hidden",
   );
   let labelColors = $derived(new Map(labels.map((l) => [l.name, safeLabelColor(l.color)])));
 
-  let browseFiltered = $derived(
-    applyFilters(
-      livePages.filter((p) => inScope(p, scope, folders, folderIds, scopeIds)),
-      view.filters,
-      metaMap,
-    ),
+  // Archived pages all share one status, so the status filter stands aside.
+  let activeFilters = $derived(scope === "archived" ? { ...view.filters, statuses: [] } : view.filters);
+  let scopedPages = $derived(
+    scope === "archived" ? archivedPages : livePages.filter((p) => inScope(p, scope, folders, scopeIds)),
   );
-  let showPinnedStrip = $derived(scope === "all" && filterCount(view.filters) === 0);
+  let filtered = $derived(isList ? applyFilters(scopedPages, activeFilters, metaMap) : []);
+  let showPinnedStrip = $derived(scope === "all" && filterCount(activeFilters) === 0);
   let pinnedPages = $derived(
-    showPinnedStrip ? browseFiltered.filter((p) => p.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) : [],
+    showPinnedStrip ? filtered.filter((p) => p.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) : [],
   );
-  let browseGroups = $derived.by<PageGroupBlock[]>(() => {
-    const rows = showPinnedStrip ? browseFiltered.filter((p) => !p.pinned) : browseFiltered;
+  let groups = $derived.by<PageGroupBlock[]>(() => {
+    const rows = showPinnedStrip ? filtered.filter((p) => !p.pinned) : filtered;
     return groupPages(sortPages(rows, view.sort), view.group, {
       folders,
       labelColors,
       scopeFolder: typeof scope === "number" ? scope : undefined,
     });
   });
-
-  let recentGroups = $derived(
-    bucketByDay(sortPages(applyFilters(livePages, view.filters, metaMap), "updated")),
-  );
-  let draftPages = $derived(
-    sortPages(
-      applyFilters(
-        livePages.filter((p) => p.status === "draft"),
-        { ...view.filters, statuses: [] },
-        metaMap,
-      ),
-      view.sort,
-    ),
-  );
-  let archivedList = $derived(
-    sortPages(applyFilters(archivedPages, { ...view.filters, statuses: [] }, metaMap), view.sort),
-  );
 
   interface SearchHit {
     page: SyncPageRow;
@@ -360,40 +337,18 @@
     return hits.slice(0, RESULT_CAP);
   });
 
-  let searching = $derived(view.search.trim() !== "" && activeTab !== "conventions");
+  let searching = $derived(view.search.trim() !== "" && isList);
 
   /** The rows on screen, in order: what J/K walks and Ctrl+A selects. */
   let flatRows = $derived.by<ListPage[]>(() => {
     if (searching) return searchHits.map((h) => h.page);
-    switch (activeTab) {
-      case "browse":
-        return [...pinnedPages, ...browseGroups.flatMap((g) => g.pages)];
-      case "recent":
-        return recentGroups.flatMap((g) => g.rows);
-      case "drafts":
-        return draftPages;
-      case "archived":
-        return archivedList;
-      default:
-        return [];
-    }
+    return [...pinnedPages, ...groups.flatMap((g) => g.pages)];
   });
 
+  // Label groups can list a page twice; count it once.
   let shownCount = $derived(
-    loading || activeTab === "conventions"
-      ? null
-      : activeTab === "browse" && !searching
-        ? new Set(flatRows.map((p) => p.id)).size
-        : flatRows.length,
+    loading || !isList ? null : searching ? flatRows.length : new Set(flatRows.map((p) => p.id)).size,
   );
-
-  let tabs = $derived([
-    { id: "browse", label: "Browse" },
-    { id: "recent", label: "Recent" },
-    { id: "drafts", label: "Drafts", count: livePages.filter((p) => p.status === "draft").length },
-    { id: "archived", label: "Archived", count: archivedPages.length },
-    { id: "conventions", label: "Conventions" },
-  ]);
 
   let editors = $derived.by<PageMetaPerson[]>(() => {
     const seen = new Map<number, PageMetaPerson>();
@@ -412,7 +367,7 @@
     return () => mq.removeEventListener("change", on);
   });
 
-  let paneMode = $derived(wide && view.pane && activeTab !== "conventions");
+  let paneMode = $derived(wide && view.pane && isList);
   let paneRow = $derived(paneMode && view.focusedId != null ? (pages.find((p) => p.id === view.focusedId) ?? null) : null);
 
   const pagePath = (id: number) => `/${projectIdentifier}/pages/${id}`;
@@ -607,7 +562,7 @@
       }
       case "c":
       case "C":
-        if (canEdit && activeTab !== "conventions") { e.preventDefault(); startCreate(); }
+        if (canEdit) { e.preventDefault(); startCreate(); }
         return;
       case "/":
         e.preventDefault();
@@ -616,7 +571,7 @@
         return;
       case "f":
       case "F":
-        if (activeTab !== "conventions") {
+        if (isList) {
           e.preventDefault();
           const openNow = !view.filterOpen;
           view.closePopovers();
@@ -624,7 +579,7 @@
         }
         return;
       case "Escape":
-        if (view.filterOpen || view.displayOpen || view.newMenuOpen) view.closePopovers();
+        if (view.filterOpen || view.displayOpen) view.closePopovers();
         else if (foldersOpen || pulseOpen) { foldersOpen = false; pulseOpen = false; }
         else if (view.selected.size) view.selected = new Set();
         else if (view.focusedId != null) view.focusedId = null;
@@ -749,13 +704,11 @@
   let composerTitle = $state("");
   let composerBusy = $state(false);
 
-  function scopeFolderId(): number | null {
-    return activeTab === "browse" && typeof scope === "number" ? scope : null;
-  }
-
-  function startCreate(folderId: number | null = scopeFolderId()) {
+  function startCreate(folderId: number | null = typeof scope === "number" ? scope : null) {
     if (!canEdit) return;
-    if (activeTab !== "browse") selectTab("browse");
+    // The composer lives in the list; from Conventions or the archive,
+    // go back to every page.
+    if (typeof scope !== "number" && scope !== "all") setScope("all");
     view.closePopovers();
     view.search = "";
     composer = { status: "draft", folderId };
@@ -779,44 +732,6 @@
     }
     composer = null;
     navigate(pagePath(res.data.id));
-  }
-
-  async function pasteAsNewPage() {
-    if (!project) return;
-    let text = "";
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      // Clipboard blocked: fall back to a blank composer.
-    }
-    const made = pageFromPaste(text);
-    if (!made) {
-      startCreate();
-      return;
-    }
-    const folderId = scopeFolderId();
-    const res = await createPage({
-      project_id: project.id,
-      title: made.title,
-      ...(folderId != null ? { folder_id: folderId } : {}),
-      ...(made.content ? { content: made.content } : {}),
-    });
-    if (res.ok) navigate(pagePath(res.data.id));
-    else toast(`Couldn't create the page: ${res.error}`, { kind: "error" });
-  }
-
-  async function quickNote() {
-    if (!project) return;
-    const stamp = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-    const folderId = scopeFolderId();
-    const res = await createPage({
-      project_id: project.id,
-      title: `Note, ${stamp}`,
-      status: "draft",
-      ...(folderId != null ? { folder_id: folderId } : {}),
-    });
-    if (res.ok) navigate(pagePath(res.data.id));
-    else toast(`Couldn't create the note: ${res.error}`, { kind: "error" });
   }
 
   // ── Folders ──────────────────────────────────────────
@@ -859,8 +774,13 @@
   }
 
   function setScope(next: FolderScope) {
+    if (next !== view.scope) {
+      view.selected = new Set();
+      composer = null;
+    }
     view.scope = next;
     view.search = "";
+    view.closePopovers();
     foldersOpen = false;
     listEl?.scrollTo({ top: 0 });
   }
@@ -868,7 +788,7 @@
   async function dropOn(target: number | null) {
     const id = dragId;
     dragId = null;
-    dropTarget = null;
+    dropTarget = undefined;
     const page = pages.find((p) => p.id === id);
     if (page) await moveToFolder(page, target);
   }
@@ -945,28 +865,15 @@
     {view}
     {projectIdentifier}
     count={shownCount}
-    {tabs}
-    {activeTab}
-    onTab={selectTab}
+    {scope}
     {labels}
     {editors}
     {changedCount}
     onCycleChanged={cycleChanged}
     {canEdit}
-    scopeLabel={activeTab === "browse" ? scopeLabel : ""}
-    shapeable={activeTab !== "conventions"}
+    {scopeLabel}
     onNewPage={() => startCreate()}
-    onPaste={pasteAsNewPage}
-    onQuickNote={quickNote}
-    onNewFolder={() => {
-      if (activeTab !== "browse") selectTab("browse");
-      if (!wide && window.innerWidth < 1024) foldersOpen = true;
-      requestAnimationFrame(() => folderTree?.startNew(typeof scope === "number" ? scope : null));
-    }}
-    onOpenFolders={() => {
-      if (activeTab !== "browse") selectTab("browse");
-      foldersOpen = true;
-    }}
+    onOpenFolders={() => (foldersOpen = true)}
     onOpenPulse={() => (pulseOpen = true)}
     bind:searchInputEl
   />
@@ -1006,7 +913,7 @@
     }}
     onDragEnd={() => {
       dragId = null;
-      dropTarget = null;
+      dropTarget = undefined;
     }}
   />
 {/snippet}
@@ -1040,7 +947,7 @@
 
 <div class="h-full flex min-h-0 relative">
   <!-- Folder pane: docked from lg, a drawer below it. -->
-  {#if activeTab === "browse" && !error}
+  {#if !error}
     {#if foldersOpen}
       <button class="lg:hidden fixed inset-0 z-40 bg-black/40" aria-label="Close folders" onclick={() => (foldersOpen = false)}></button>
     {/if}
@@ -1056,11 +963,11 @@
         </div>
       {:else}
         <FolderTree
-          bind:this={folderTree}
           {folders}
           {stats}
           allCount={livePages.length}
-          {unfiledCount}
+          archivedCount={archivedPages.length}
+          conventions={conventionsEntry}
           {scope}
           {canEdit}
           {dropTarget}
@@ -1069,7 +976,7 @@
           onCreate={createFolderIn}
           onRename={renameFolderTo}
           onDelete={removeFolder}
-          onNewPage={(id) => { foldersOpen = false; view.scope = id; startCreate(id); }}
+          onNewPage={(id) => { setScope(id); startCreate(id); }}
           onDragOver={(t) => (dropTarget = t)}
           onDrop={dropOn}
         />
@@ -1101,7 +1008,7 @@
             Try again
           </button>
         </ErrorState>
-      {:else if activeTab === "conventions"}
+      {:else if scope === "conventions"}
         <div class="max-w-[880px] mx-auto px-4 sm:px-6 py-6">
           {#if project}
             <ConventionsSection state={conventions} projectId={project.id} {projectIdentifier} {canEdit} {navigate} />
@@ -1122,37 +1029,14 @@
             {@render row(hit.page, { folder: true, snippet: hit.snippet })}
           {/each}
         {/if}
-      {:else if activeTab === "browse"}
-        {#if livePages.length === 0 && folders.length === 0 && !composer}
+      {:else}
+        {#if scope === "all" && treePages.length === 0 && folders.length === 0 && !composer}
           {@render emptyState(
             "No pages yet",
             "Pages hold the project's docs: specs, notes, decisions. Agents can read and write them too.",
             canEdit ? { label: "New page", run: () => startCreate() } : null,
           )}
         {:else}
-          {#if scope === "all" && filterCount(view.filters) === 0}
-            <button
-              class="w-full max-sm:hidden flex items-center gap-2.5 px-3 sm:px-5 h-10 border-b border-[var(--border)] text-left text-caption
-                     text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] transition-colors"
-              data-testid="conventions-line"
-              data-state={conventions.kind}
-              onclick={(e) => { e.stopPropagation(); selectTab("conventions"); }}
-            >
-              <ScrollText size={14} class="shrink-0 {conventions.kind === 'page' && conventions.page.conventions_enabled !== false ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'}" />
-              <span class="font-medium text-[var(--text)]">Conventions</span>
-              <span class="truncate">
-                {#if conventions.kind === "page"}
-                  {conventions.page.conventions_enabled !== false
-                    ? "Agents read this page with their briefing."
-                    : "Written, but left out of agents' briefings."}
-                {:else}
-                  {canEdit ? "Not written yet. Start from a template." : "None yet."}
-                {/if}
-              </span>
-              <ChevronRight size={13} class="ml-auto shrink-0 text-[var(--text-faint)]" />
-            </button>
-          {/if}
-
           {#if pinnedPages.length > 0}
             <div class="flex items-center gap-2 px-3 sm:px-5 py-2 border-b border-[var(--border)] overflow-x-auto [scrollbar-width:none]" data-testid="pinned-strip">
               <Pin size={12} class="shrink-0 text-[var(--text-faint)]" aria-label="Pinned" />
@@ -1231,8 +1115,8 @@
             </div>
           {/if}
 
-          {#if browseGroups.every((g) => g.pages.length === 0) && pinnedPages.length === 0}
-            {#if filterCount(view.filters) > 0}
+          {#if groups.every((g) => g.pages.length === 0) && pinnedPages.length === 0}
+            {#if filterCount(activeFilters) > 0}
               {@render emptyState("No pages match these filters", "", { label: "Clear filters", run: () => view.clearFilters() })}
             {:else if typeof scope === "number"}
               {@render emptyState(
@@ -1240,24 +1124,24 @@
                 "",
                 canEdit ? { label: "New page here", run: () => startCreate(scope as number) } : null,
               )}
-            {:else if scope === "unfiled"}
-              {@render emptyState("Every page is in a folder", "Pages without a folder show here.")}
+            {:else if scope === "archived"}
+              {@render emptyState("Nothing archived", "Archived pages are kept here, out of the way of the rest.")}
             {:else if !composer}
               {@render emptyState("No pages yet", "", canEdit ? { label: "New page", run: () => startCreate() } : null)}
             {/if}
           {:else}
-            {#each browseGroups as group (group.key)}
-              {#if group.label && (view.group !== "folder" || browseGroups.length > 1 || scope === "all")}
+            {#each groups as group (group.key)}
+              {#if group.label && (view.group !== "folder" || groups.length > 1 || typeof scope !== "number")}
                 <div
                   class="group group-head sticky top-0 z-10 flex items-center gap-2 h-9 px-3 sm:px-5 border-b border-[var(--border)]
                          text-caption text-[var(--text-muted)]
-                         {dragId !== null && group.folderId !== undefined && dropTarget === (group.folderId ?? 'unfiled') ? 'outline outline-1 outline-dashed outline-[var(--accent)]' : ''}"
+                         {dragId !== null && group.folderId !== undefined && dropTarget === group.folderId ? 'outline outline-1 outline-dashed outline-[var(--accent)]' : ''}"
                   role="presentation"
                   data-group={group.key}
                   ondragover={(e) => {
                     if (dragId === null || group.folderId === undefined) return;
                     e.preventDefault();
-                    dropTarget = group.folderId ?? "unfiled";
+                    dropTarget = group.folderId;
                   }}
                   ondrop={(e) => {
                     if (group.folderId === undefined) return;
@@ -1278,7 +1162,7 @@
                     <span class="font-medium text-[var(--text)] truncate">{group.label}</span>
                   {/if}
                   <span class="tabular-nums text-[var(--text-faint)]">{group.pages.length}</span>
-                  {#if group.pages.length > 0}
+                  {#if group.pages.length > 0 && view.group !== "edited"}
                     <span class="hidden sm:inline text-[var(--text-faint)]">
                       · updated <TimeAgo date={group.pages.reduce((m, p) => (p.updated_at > m ? p.updated_at : m), "")} />
                     </span>
@@ -1300,65 +1184,30 @@
                 </p>
               {/if}
               {#each group.pages as page (page.id)}
-                {@render row(page, { folder: view.group !== "folder" })}
+                {#if scope === "archived"}
+                  {#snippet restore()}
+                    {#if canEdit}
+                      <button
+                        class="shrink-0 h-6 px-2 rounded-md text-caption font-medium text-[var(--text-muted)] ring-1 ring-[var(--border)]
+                               hover:text-[var(--text)] hover:ring-[var(--accent)] transition-shadow"
+                        onclick={(e) => { e.stopPropagation(); void setStatus(page, "active"); }}
+                      >
+                        Restore
+                      </button>
+                    {/if}
+                  {/snippet}
+                  {@render row(page, { folder: view.group !== "folder", status: false, note: restore })}
+                {:else}
+                  {@render row(page, { folder: view.group !== "folder" })}
+                {/if}
               {/each}
             {/each}
           {/if}
         {/if}
-      {:else if activeTab === "recent"}
-        {#if recentGroups.length === 0}
-          {@render emptyState(filterCount(view.filters) ? "No pages match these filters" : "Nothing edited yet", "")}
-        {:else}
-          {#each recentGroups as g (g.bucket)}
-            {@render sectionHead(g.bucket)}
-            {#each g.rows as page (page.id)}
-              {@render row(page, { folder: true })}
-            {/each}
-          {/each}
-        {/if}
-      {:else if activeTab === "drafts"}
-        {#if draftPages.length === 0}
-          {@render emptyState("No drafts", "Pages start as drafts until someone marks them active.")}
-        {:else}
-          {#each draftPages as page (page.id)}
-            {#snippet draftNote()}
-              <span class="hidden @md:block shrink-0 text-caption text-[var(--text-faint)]">{draftAge(page.created_at)}</span>
-              {#if canEdit}
-                <button
-                  class="shrink-0 h-6 px-2 rounded-md text-caption font-medium text-[var(--text-muted)] ring-1 ring-[var(--border)]
-                         hover:text-[var(--text)] hover:ring-[var(--accent)] transition-shadow"
-                  onclick={(e) => { e.stopPropagation(); void setStatus(page, "active"); }}
-                >
-                  Mark active
-                </button>
-              {/if}
-            {/snippet}
-            {@render row(page, { folder: true, status: false, note: draftNote })}
-          {/each}
-        {/if}
-      {:else if activeTab === "archived"}
-        {#if archivedList.length === 0}
-          {@render emptyState("No archived pages", "Archive a page to keep it without it showing in Browse.")}
-        {:else}
-          {#each archivedList as page (page.id)}
-            {#snippet restore()}
-              {#if canEdit}
-                <button
-                  class="shrink-0 h-6 px-2 rounded-md text-caption font-medium text-[var(--text-muted)] ring-1 ring-[var(--border)]
-                         hover:text-[var(--text)] hover:ring-[var(--accent)] transition-shadow"
-                  onclick={(e) => { e.stopPropagation(); void setStatus(page, "active"); }}
-                >
-                  Restore
-                </button>
-              {/if}
-            {/snippet}
-            {@render row(page, { folder: true, status: false, note: restore })}
-          {/each}
-        {/if}
       {/if}
     </div>
 
-    {#if !loading && !error && activeTab !== "conventions" && view.selected.size === 0}
+    {#if !loading && !error && isList && view.selected.size === 0}
       {@const focused = focusedRow() !== null}
       <div
         class="hint-bar hidden md:[@media(hover:hover)]:flex shrink-0 items-center gap-4 px-6 h-8 overflow-hidden whitespace-nowrap
@@ -1411,7 +1260,7 @@
   </div>
 
   <!-- Reading pane, or the page activity while nothing is open. -->
-  {#if !error && activeTab !== "conventions"}
+  {#if !error && isList}
     {#if pulseOpen}
       <button class="xl:hidden fixed inset-0 z-40 bg-black/40" aria-label="Close activity" onclick={() => (pulseOpen = false)}></button>
     {/if}
@@ -1449,11 +1298,14 @@
           meta={metaMap}
           {metaLoaded}
           onPick={(p) => { pulseOpen = false; activate(p); }}
-          onShowDrafts={() => { pulseOpen = false; selectTab("drafts"); }}
+          onShowDrafts={() => {
+            pulseOpen = false;
+            setScope("all");
+            view.filters = { ...view.filters, statuses: ["draft"] };
+          }}
           onShowUnlinked={() => {
             pulseOpen = false;
-            selectTab("browse");
-            view.scope = "all";
+            setScope("all");
             view.filters = { ...view.filters, unlinked: true };
           }}
         />

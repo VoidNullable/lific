@@ -5,19 +5,21 @@
  * Spawns the debug binary against a scratch config + DB, signs in, and at a
  * desktop viewport (1440x900) and a phone viewport (390x844) checks that:
  *
- *   - a project without a conventions page shows the Conventions block at
- *     the top of Pages, with the three templates and a blank start;
+ *   - a project without a conventions page marks the folder pane's
+ *     Conventions entry as missing, and the entry shows the three templates
+ *     and a blank start;
  *   - picking a template creates the page and lands on it, labelled as the
  *     project's conventions;
  *   - the page view's switch turns it off, the off state survives a reload,
- *     and the text is unchanged; the Pages block then shows "Off" and the
- *     page stays out of the ordinary tree;
+ *     and the text is unchanged; the entry and the block then show "Off"
+ *     and the page stays out of the ordinary list;
  *   - a project whose conventions page is empty offers the templates (no
  *     blank start), and a template fills in that same page;
  *   - the create-project picker sends the chosen template, and the new
  *     project's Pages block shows the page.
  *
- * Also checks once that a viewer sees the block without the templates.
+ * Also checks once that a viewer gets no Conventions entry when none is
+ * written.
  *
  * Run:  cd e2e && bun conventions.ts
  * Binary: $LIFIC_BIN, else target/debug/lific (debug rust-embed reads
@@ -138,15 +140,28 @@ async function conventionsPage(page: Page, projectId: number): Promise<any | nul
   return pages.find((p: { conventions?: boolean }) => p.conventions === true) ?? null;
 }
 
-/** The page's width must not overflow the viewport (no sideways scroll). */
-/** The Pages tab's Conventions tab, which holds the conventions block. */
-async function openConventions(page: Page, base: string, ident: string) {
-  if (!page.url().endsWith(`/${ident}/pages`)) await page.goto(`${base}/${ident}/pages`);
-  const tab = page.getByRole("tab", { name: /^Conventions/ });
-  await tab.waitFor({ state: "visible", timeout: 15_000 });
-  await tab.click();
+/** Pick an entry in the Pages folder pane, opening the drawer below lg. */
+async function pickInFolderPane(page: Page, testid: string) {
+  const entry = page.getByTestId("folder-tree").getByTestId(testid);
+  await entry.waitFor({ state: "attached", timeout: 15_000 });
+  if ((page.viewportSize()?.width ?? 1440) < 1024) await page.getByRole("button", { name: /^Folders:/ }).click();
+  await entry.click();
 }
 
+/** The Pages folder pane's Conventions entry, which holds the conventions block. */
+async function openConventions(page: Page, base: string, ident: string) {
+  if (!page.url().endsWith(`/${ident}/pages`)) await page.goto(`${base}/${ident}/pages`);
+  await pickInFolderPane(page, "conventions-entry");
+}
+
+async function openAllPages(page: Page) {
+  const entry = page.getByTestId("folder-tree").getByRole("button", { name: /^All pages/ });
+  await entry.waitFor({ state: "attached", timeout: 15_000 });
+  if ((page.viewportSize()?.width ?? 1440) < 1024) await page.getByRole("button", { name: /^Folders:/ }).click();
+  await entry.click();
+}
+
+/** The page's width must not overflow the viewport (no sideways scroll). */
 async function assertNoOverflow(page: Page, what: string) {
   const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(over <= 1, `${what}: the page scrolls sideways by ${over}px`);
@@ -189,17 +204,12 @@ async function scenario(
   });
 
   await page.goto(`${base}/${ids.bare}/pages`);
-  // Browse names the conventions in one line (hidden on a phone) that
-  // leads to the Conventions tab.
-  const line = page.getByTestId("conventions-line");
-  await page.getByRole("tab", { name: /^Browse/ }).click();
-  if (vp.width >= 640) {
-    await line.waitFor({ state: "visible", timeout: 15_000 });
-    assert.equal(await line.getAttribute("data-state"), "none", "the Browse line says there are none");
-    await line.click();
-  } else {
-    await openConventions(page, base, ids.bare);
-  }
+  // The folder pane lists Conventions above the folders and says when it
+  // is missing or off.
+  const entry = page.getByTestId("conventions-entry");
+  await entry.waitFor({ state: "attached", timeout: 15_000 });
+  assert.equal(await entry.getAttribute("data-state"), "missing", "the entry says there is none");
+  await openConventions(page, base, ids.bare);
   const section = page.getByTestId("conventions-section");
   await section.waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await section.getAttribute("data-state"), "none", "no page: the empty state shows");
@@ -260,18 +270,15 @@ async function scenario(
   assert.ok((await section.innerText()).includes(created.title), "the block names the page");
   await assertNoOverflow(page, `${vp.name} pages, with conventions`);
   await shot(page, vp, "04-pages-conventions-off");
-  await page.getByRole("tab", { name: /^Browse/ }).click();
+  await openAllPages(page);
   await page.getByTestId("page-row").filter({ hasText: "Release checklist" }).waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(
     await page.locator(`[data-testid="page-row"][data-page-id="${createdId}"]`).count(),
     0,
     "the conventions page is not repeated in the list",
   );
-  if (vp.width >= 640) {
-    assert.equal(await line.getAttribute("data-state"), "page", "the Browse line names the page");
-    assert.ok((await line.innerText()).includes("left out"), "and says it is off");
-  }
-  await page.getByRole("tab", { name: /^Conventions/ }).click();
+  assert.equal(await entry.getAttribute("data-state"), "off", "the entry says it is off");
+  await pickInFolderPane(page, "conventions-entry");
   await section.locator("button").first().click();
   await page.waitForURL(new RegExp(`/pages/${createdId}$`));
   console.log(`ok   ${vp.name}: the Pages block shows the page with Off, and the tree leaves it out`);
@@ -334,19 +341,17 @@ async function scenario(
   await context.close();
 }
 
-/** A viewer sees the block and what it is for, but no templates. */
+/** A viewer can't write conventions, so with none written there is no entry. */
 async function viewerScenario(browser: Browser, base: string, ident: string, errors: string[]) {
   const context = await newContext(browser, VIEWPORTS[0]);
   const page = await signIn(context, base, "mia", PASSWORD);
   page.on("pageerror", (err) => errors.push(`viewer: ${err}`));
-  await openConventions(page, base, ident);
-  const section = page.getByTestId("conventions-section");
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await section.getAttribute("data-state"), "none");
-  assert.equal(await section.locator("[data-template]").count(), 0, "a viewer gets no templates");
-  assert.ok((await section.innerText()).includes("no conventions yet"), "a viewer is told there are none");
+  await page.goto(`${base}/${ident}/pages`);
+  const tree = page.getByTestId("folder-tree");
+  await tree.getByRole("button", { name: /^All pages/ }).waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(await tree.getByTestId("conventions-entry").count(), 0, "a viewer gets no Conventions entry");
   await shot(page, VIEWPORTS[0], "08-viewer-no-conventions");
-  console.log("ok   viewer: the block shows without templates");
+  console.log("ok   viewer: no Conventions entry when none is written");
   await context.close();
 }
 

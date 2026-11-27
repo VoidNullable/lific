@@ -1,17 +1,19 @@
 <script lang="ts">
-  // The Pages folder pane: All pages, Unfiled, then the folder tree with
-  // counts. Picking an entry scopes the list; dropping a page on one moves
-  // it there. Folders are created, renamed and deleted in place.
+  // The Pages folder pane: All pages and Conventions, the folder tree with
+  // counts, then Archived. Picking an entry scopes the list; dropping a page
+  // on a folder moves it there. Folders are created, renamed and deleted in
+  // place.
   import {
+    Archive,
     ChevronRight,
     FilePlus2,
     Files,
     FolderClosed,
     FolderOpen,
     FolderPlus,
-    Inbox as InboxIcon,
     MoreHorizontal,
     PenLine,
+    ScrollText,
     Trash2,
   } from "lucide-svelte";
   import type { Folder } from "../api";
@@ -22,7 +24,8 @@
     folders,
     stats,
     allCount,
-    unfiledCount,
+    archivedCount,
+    conventions,
     scope,
     canEdit,
     dropTarget,
@@ -38,17 +41,21 @@
     folders: Folder[];
     stats: Map<number, FolderStats>;
     allCount: number;
-    unfiledCount: number;
+    archivedCount: number;
+    /** The conventions page: switched on, written but off, not written
+     *  yet, or hidden (a viewer, and nothing written). */
+    conventions: "on" | "off" | "missing" | "hidden";
     scope: FolderScope;
     canEdit: boolean;
-    dropTarget: FolderScope | null;
+    /** The folder a dragged page is over; null is Unfiled in the list. */
+    dropTarget: number | null | undefined;
     dragging: boolean;
     onScope: (scope: FolderScope) => void;
     onCreate: (parentId: number | null, name: string) => Promise<boolean>;
     onRename: (id: number, name: string) => Promise<boolean>;
     onDelete: (id: number) => Promise<boolean>;
     onNewPage: (folderId: number) => void;
-    onDragOver: (target: FolderScope | null) => void;
+    onDragOver: (target: number | undefined) => void;
     onDrop: (target: number | null) => void;
   } = $props();
 
@@ -159,18 +166,21 @@
     <span class="tabular-nums text-caption text-[var(--text-faint)]">{allCount}</span>
   </button>
 
-  {#if unfiledCount > 0 || folders.length > 0}
+  {#if conventions !== "hidden"}
     <button
-      class="{rowBase} pl-2 {rowTone(scope === 'unfiled', dragging && dropTarget === 'unfiled')}"
-      aria-current={scope === "unfiled" ? "true" : undefined}
-      onclick={() => onScope("unfiled")}
-      ondragover={(e) => { if (!dragging) return; e.preventDefault(); onDragOver("unfiled"); }}
-      ondragleave={() => onDragOver(null)}
-      ondrop={(e) => { e.preventDefault(); onDrop(null); }}
+      class="{rowBase} pl-2 {rowTone(scope === 'conventions', false)}"
+      aria-current={scope === "conventions" ? "true" : undefined}
+      data-testid="conventions-entry"
+      data-state={conventions}
+      onclick={() => onScope("conventions")}
     >
-      <InboxIcon size={14} class="shrink-0 text-[var(--text-faint)]" />
-      <span class="flex-1 truncate">Unfiled</span>
-      <span class="tabular-nums text-caption text-[var(--text-faint)]">{unfiledCount}</span>
+      <ScrollText size={14} class="shrink-0 {conventions === 'on' ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'}" />
+      <span class="flex-1 truncate">Conventions</span>
+      {#if conventions === "missing"}
+        <span class="text-caption text-[var(--text-faint)]">Not written</span>
+      {:else if conventions === "off"}
+        <span class="text-caption text-[var(--text-faint)]">Off</span>
+      {/if}
     </button>
   {/if}
 
@@ -214,7 +224,7 @@
           style="padding-left: {depth * 14 + 2}px"
           data-folder-id={folder.id}
           ondragover={(e) => { if (!dragging) return; e.preventDefault(); onDragOver(folder.id); }}
-          ondragleave={() => onDragOver(null)}
+          ondragleave={() => onDragOver(undefined)}
           ondrop={(e) => { e.preventDefault(); onDrop(folder.id); }}
         >
           <button
@@ -338,4 +348,17 @@
       {/if}
     {/if}
   {/each}
+
+  {#if archivedCount > 0 || scope === "archived"}
+    <button
+      class="{rowBase} pl-2 mt-4 {rowTone(scope === 'archived', false)}"
+      aria-current={scope === "archived" ? "true" : undefined}
+      data-testid="archived-entry"
+      onclick={() => onScope("archived")}
+    >
+      <Archive size={14} class="shrink-0 text-[var(--text-faint)]" />
+      <span class="flex-1 truncate">Archived</span>
+      <span class="tabular-nums text-caption text-[var(--text-faint)]">{archivedCount}</span>
+    </button>
+  {/if}
 </nav>

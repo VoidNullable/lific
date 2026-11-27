@@ -19,17 +19,14 @@ export interface ListPage {
   conventions?: boolean;
 }
 
-export const PAGE_TABS = ["browse", "recent", "drafts", "archived", "conventions"] as const;
-export type PageTab = (typeof PAGE_TABS)[number];
-
 export const PAGE_SORTS = ["updated", "created", "title", "status"] as const;
 export type PageSort = (typeof PAGE_SORTS)[number];
 
-export const PAGE_GROUPS = ["folder", "label", "status", "none"] as const;
+export const PAGE_GROUPS = ["folder", "edited", "label", "status", "none"] as const;
 export type PageGroup = (typeof PAGE_GROUPS)[number];
 
-/** Statuses a page can be filtered by in Browse. Archived pages have their
- *  own tab and never show in Browse. */
+/** Statuses a page can be filtered by. Archived pages live in their own
+ *  place in the folder pane and never mix into the others. */
 export const LIVE_STATUSES = ["draft", "active", "complete"] as const;
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -41,8 +38,9 @@ export const STATUS_LABEL: Record<string, string> = {
 
 const STATUS_ORDER: Record<string, number> = { draft: 0, active: 1, complete: 2, archived: 3 };
 
-/** Which folder the list is scoped to. */
-export type FolderScope = "all" | "unfiled" | number;
+/** What the list shows: every live page, one folder, the archive, or the
+ *  conventions page. */
+export type FolderScope = "all" | "archived" | "conventions" | number;
 
 /** Who last edited a page: anyone, people only, agents only, or one account. */
 export type EditorFilter = "" | "people" | "agents" | `u:${number}`;
@@ -161,15 +159,15 @@ export function isUnfiled(page: ListPage, folderIds: ReadonlySet<number>): boole
   return page.folder_id == null || !folderIds.has(page.folder_id);
 }
 
+/** Whether a page belongs in a folder scope; the other scopes don't narrow
+ *  by folder. */
 export function inScope(
   page: ListPage,
   scope: FolderScope,
   folders: readonly Folder[],
-  folderIds: ReadonlySet<number>,
   scopeIds: ReadonlySet<number> | null = null,
 ): boolean {
-  if (scope === "all") return true;
-  if (scope === "unfiled") return isUnfiled(page, folderIds);
+  if (typeof scope !== "number") return true;
   const ids = scopeIds ?? descendantIds(folders, scope);
   return page.folder_id != null && ids.has(page.folder_id);
 }
@@ -264,9 +262,16 @@ export function groupPages(
     labelColors?: ReadonlyMap<string, string>;
     /** Folder groups: the scope's own folder, shown even when empty. */
     scopeFolder?: number | null;
+    /** Day groups: the clock to bucket against. */
+    now?: Date;
   },
 ): PageGroupBlock[] {
   if (group === "none") return [{ key: "all", label: "", pages: pages.slice() }];
+
+  if (group === "edited") {
+    const sorted = pages.slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    return bucketByDay(sorted, ctx.now).map((b) => ({ key: `d:${b.bucket}`, label: b.bucket, pages: b.rows }));
+  }
 
   if (group === "status") {
     const out: PageGroupBlock[] = [];
@@ -330,7 +335,7 @@ function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-/** Which Recent section a timestamp falls in, by local calendar day. */
+/** Which day group a timestamp falls in, by local calendar day. */
 export function dayBucket(iso: string, now: Date = new Date()): DayBucket {
   const days = Math.round((startOfDay(now) - startOfDay(parseStamp(iso))) / 86_400_000);
   if (days <= 0) return "Today";
@@ -396,17 +401,3 @@ export function excerptOf(page: Pick<ListPage, "preview">, meta: PageMeta | unde
   return line.replace(/^([-*+]|\d+\.)\s+(\[[ xX]\]\s+)?/, "").replace(/^>\s*/, "").replace(/[*_`[\]]/g, "").slice(0, 220);
 }
 
-/** Title and body for a page made from pasted text: the first non-empty
- *  line, stripped of Markdown marks, becomes the title. */
-export function pageFromPaste(text: string): { title: string; content: string } | null {
-  if (!text.trim()) return null;
-  const lines = text.split("\n");
-  const first = lines.findIndex((l) => l.trim());
-  const title =
-    (lines[first] ?? "")
-      .replace(/^#+\s*/, "")
-      .replace(/[*_`>[\]]/g, "")
-      .trim()
-      .slice(0, 120) || "Pasted page";
-  return { title, content: lines.slice(first + 1).join("\n").trim() };
-}

@@ -8,9 +8,9 @@
  * labels, and an issue that links one page), signs in, and checks at
  * 1440x900 that:
  *
- *   1. Browse lists every live page once, leaves out archived pages and
+ *   1. All pages lists every live page once, leaves out archived pages and
  *      shows the pinned page in the strip instead of as a row, with a group
- *      header per folder;
+ *      header per folder, and the folder pane offers Conventions;
  *   2. scoping to a folder shows its pages and its subfolder's, and an empty
  *      folder shows the empty state;
  *   3. clicking a row previews it, J moves the preview, Enter opens it;
@@ -19,8 +19,10 @@
  *   6. F opens the filter, Draft narrows the list and shows a chip, and
  *      removing the chip restores the list;
  *   7. X and the checkbox select two rows, and the bulk bar moves them;
- *   8. the context menu archives a row, which moves it to Archived;
- *   9. Drafts' Mark active makes the page active;
+ *   8. the context menu archives a row, which moves it to Archived in the
+ *      folder pane;
+ *   9. Archived's Restore brings the page back, and Group by Day edited
+ *      puts every page under a day header;
  *  10. the linked page's row shows a link count of 1;
  *
  * and at 390x844 (touch) that the tab does not scroll sideways and the
@@ -163,17 +165,14 @@ async function projectPages(page: Page, projectId: number): Promise<ApiPage[]> {
   return all.filter((p) => !p.conventions);
 }
 
-/** What Browse at All pages with no filters should list as rows. */
+/** What All pages with no filters should list as rows. */
 async function expectedBrowse(page: Page, projectId: number): Promise<number[]> {
   return (await projectPages(page, projectId)).filter((p) => p.status !== "archived" && !p.pinned).map((p) => p.id);
 }
 
-/** The Pages tab on Browse, scoped to All pages. */
+/** The Pages tab, scoped to All pages. */
 async function openBrowse(page: Page, base: string, desktop = true) {
   await page.goto(`${base}/#/${PROJ}/pages`);
-  const tab = page.getByRole("tab", { name: /^Browse/ });
-  await tab.waitFor({ state: "visible", timeout: 15_000 });
-  await tab.click();
   const tree = page.getByTestId("folder-tree");
   await tree.waitFor({ state: desktop ? "visible" : "attached", timeout: 15_000 });
   if (desktop) await tree.getByRole("button", { name: /^All pages/ }).click();
@@ -260,7 +259,7 @@ async function desktop(browser: Browser, base: string, errors: string[]): Promis
   const P = s.pages;
   const F = s.folders;
 
-  // ── 1. Browse ────────────────────────────────────────────────────────
+  // ── 1. All pages ─────────────────────────────────────────────────────
   await openBrowse(page, base);
   const live = await expectedBrowse(page, s.projectId);
   assert.ok(!live.includes(P.old.id) && !live.includes(P.handbook.id), "the expectation leaves out archived and pinned");
@@ -275,9 +274,10 @@ async function desktop(browser: Browser, base: string, errors: string[]): Promis
   }
   assert.equal(await page.locator(`[data-group="f:${F.later}"]`).count(), 0, "an empty folder gets no group outside its scope");
   await page.getByTestId("pages-pulse").waitFor({ state: "visible" });
-  await page.getByTestId("conventions-line").waitFor({ state: "visible" });
+  await page.getByTestId("conventions-entry").waitFor({ state: "visible" });
+  assert.equal(await page.getByRole("tab").count(), 0, "there are no sub-tabs");
   await shot(page, "01-browse");
-  console.log("ok   Browse lists each live page once, pins in the strip, a header per folder");
+  console.log("ok   All pages lists each live page once, pins in the strip, a header per folder");
 
   // ── 10. Link count (checked here, while every page is in place) ──────
   const links = row(page, P.linked.id).getByTestId("page-links");
@@ -410,27 +410,33 @@ async function desktop(browser: Browser, base: string, errors: string[]): Promis
   await menu.getByRole("menuitem", { name: /^Move to folder/ }).waitFor({ state: "visible" });
   await shot(page, "09-context-menu");
   await menu.getByRole("menuitem", { name: "Archive", exact: true }).click();
-  await waitFor(page, () => row(page, P.release.id).count(), (n) => n === 0, "the archived page leaves Browse");
+  await waitFor(page, () => row(page, P.release.id).count(), (n) => n === 0, "the archived page leaves All pages");
   assert.equal((await api(page, "GET", `/pages/${P.release.id}`)).status, "archived", "the API has it archived");
-  await page.getByRole("tab", { name: /^Archived/ }).click();
-  await row(page, P.release.id).waitFor({ state: "visible" });
-  await row(page, P.old.id).waitFor({ state: "visible" });
-  console.log("ok   the context menu archives a row and it shows in Archived");
+  const archived = page.getByTestId("archived-entry");
+  await waitFor(page, async () => (await archived.innerText()).replace(/\s+/g, " ").trim(), (t) => t === "Archived 2", "the pane counts two archived pages");
+  await archived.click();
+  await waitForRows(page, [P.release.id, P.old.id], "Archived lists the archived pages only");
+  await shot(page, "10-archived");
+  console.log("ok   the context menu archives a row and it shows under Archived");
 
-  // ── 9. Drafts: Mark active ───────────────────────────────────────────
-  await page.getByRole("tab", { name: /^Drafts/ }).click();
-  await row(page, P.scratch.id).waitFor({ state: "visible" });
-  await shot(page, "10-drafts");
-  await row(page, P.scratch.id).getByRole("button", { name: "Mark active", exact: true }).click();
+  // ── 9. Restore, and Group by Day edited ──────────────────────────────
+  await row(page, P.release.id).getByRole("button", { name: "Restore", exact: true }).click();
   await waitFor(
     page,
-    async () => (await api(page, "GET", `/pages/${P.scratch.id}`)).status,
+    async () => (await api(page, "GET", `/pages/${P.release.id}`)).status,
     (v) => v === "active",
-    "Mark active stored status=active",
+    "Restore stored status=active",
   );
-  await waitFor(page, () => row(page, P.scratch.id).count(), (n) => n === 0, "the page leaves Drafts");
-  await page.getByRole("tab", { name: /^Browse/ }).click();
-  console.log("ok   Drafts' Mark active makes the page active");
+  await waitForRows(page, [P.old.id], "the restored page leaves Archived");
+  await page.getByTestId("folder-tree").getByRole("button", { name: /^All pages/ }).click();
+  await row(page, P.release.id).waitFor({ state: "visible" });
+  await page.getByRole("button", { name: /^Display/ }).click();
+  await page.getByTestId("pages-display").getByRole("button", { name: "Day edited", exact: true }).click();
+  await page.locator('[data-testid="pages-list"] [data-group="d:Today"]').waitFor({ state: "visible" });
+  assert.equal(await page.locator('[data-testid="pages-list"] [data-group^="f:"]').count(), 0, "no folder headers remain");
+  await waitForRows(page, await expectedBrowse(page, s.projectId), "day groups list the same pages");
+  await page.getByTestId("pages-display").getByRole("button", { name: "Folder", exact: true }).click();
+  console.log("ok   Restore brings the page back; Group by Day edited puts pages under day headers");
 
   await context.close();
   return s;
