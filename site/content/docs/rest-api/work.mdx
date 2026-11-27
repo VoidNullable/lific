@@ -265,6 +265,10 @@ Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `
 
 The starting texts a conventions page can be created from, in order. Any signed-in caller. Returns an array of `key` (`empty`, `ai_managed`, `human_managed`, `human_owned`), `name`, `summary` (one line on when to use it) and `content` (the Markdown the page starts with).
 
+### GET `/api/projects/{id}/pages/meta`
+
+What a page list shows beyond the [sync rows](/docs/rest-api/sync), for every page in the project, archived and conventions pages included. **Viewer.** Returns `{"pages": [...]}`, each with `id`, `excerpt` (the first prose of the body as plain text, skipping headings and code, at most 220 characters), `words`, `created_by` and `updated_by` (`id`, `username`, `display_name`, `is_bot`, `tool_id`, or null when the history does not say), `links` (how many issues, other pages and comments in the project mention the page's identifier or link to it) and `linked_from` (the identifiers of those issues and pages, most recently updated first, at most 20).
+
 ### GET `/api/pages/{id}`
 
 One page with its content. **Viewer.**

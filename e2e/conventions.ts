@@ -139,6 +139,14 @@ async function conventionsPage(page: Page, projectId: number): Promise<any | nul
 }
 
 /** The page's width must not overflow the viewport (no sideways scroll). */
+/** The Pages tab's Conventions tab, which holds the conventions block. */
+async function openConventions(page: Page, base: string, ident: string) {
+  if (!page.url().endsWith(`/${ident}/pages`)) await page.goto(`${base}/${ident}/pages`);
+  const tab = page.getByRole("tab", { name: /^Conventions/ });
+  await tab.waitFor({ state: "visible", timeout: 15_000 });
+  await tab.click();
+}
+
 async function assertNoOverflow(page: Page, what: string) {
   const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(over <= 1, `${what}: the page scrolls sideways by ${over}px`);
@@ -181,6 +189,17 @@ async function scenario(
   });
 
   await page.goto(`${base}/${ids.bare}/pages`);
+  // Browse names the conventions in one line (hidden on a phone) that
+  // leads to the Conventions tab.
+  const line = page.getByTestId("conventions-line");
+  await page.getByRole("tab", { name: /^Browse/ }).click();
+  if (vp.width >= 640) {
+    await line.waitFor({ state: "visible", timeout: 15_000 });
+    assert.equal(await line.getAttribute("data-state"), "none", "the Browse line says there are none");
+    await line.click();
+  } else {
+    await openConventions(page, base, ids.bare);
+  }
   const section = page.getByTestId("conventions-section");
   await section.waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await section.getAttribute("data-state"), "none", "no page: the empty state shows");
@@ -234,22 +253,25 @@ async function scenario(
   console.log(`ok   ${vp.name}: the switch turns it off, it survives a reload, the text stays`);
 
   // ── The Pages block shows it, off, and the tree leaves it out ───────
-  await page.goto(`${base}/${ids.bare}/pages`);
+  await openConventions(page, base, ids.bare);
   await section.waitFor({ state: "visible", timeout: 15_000 });
   await waitFor(page, () => section.getAttribute("data-state"), (v) => v === "page", "the block shows the page");
   await section.getByTestId("conventions-off").waitFor({ state: "visible" });
   assert.ok((await section.innerText()).includes(created.title), "the block names the page");
-  // The sidebar's recents also hold the title, hidden on a phone.
-  await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
-  const treeCopies = await page.evaluate((ident) => {
-    const sectionEl = document.querySelector('[data-testid="conventions-section"]');
-    return [...document.querySelectorAll("button")].filter(
-      (b) => !sectionEl?.contains(b) && b.textContent?.includes(ident),
-    ).length;
-  }, created.identifier);
-  assert.equal(treeCopies, 0, "the conventions page is not repeated in the tree");
   await assertNoOverflow(page, `${vp.name} pages, with conventions`);
   await shot(page, vp, "04-pages-conventions-off");
+  await page.getByRole("tab", { name: /^Browse/ }).click();
+  await page.getByTestId("page-row").filter({ hasText: "Release checklist" }).waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(
+    await page.locator(`[data-testid="page-row"][data-page-id="${createdId}"]`).count(),
+    0,
+    "the conventions page is not repeated in the list",
+  );
+  if (vp.width >= 640) {
+    assert.equal(await line.getAttribute("data-state"), "page", "the Browse line names the page");
+    assert.ok((await line.innerText()).includes("left out"), "and says it is off");
+  }
+  await page.getByRole("tab", { name: /^Conventions/ }).click();
   await section.locator("button").first().click();
   await page.waitForURL(new RegExp(`/pages/${createdId}$`));
   console.log(`ok   ${vp.name}: the Pages block shows the page with Off, and the tree leaves it out`);
@@ -259,7 +281,7 @@ async function scenario(
   const emptyPage = await conventionsPage(page, emptyProject.id);
   assert.ok(emptyPage, "an API-created project has a conventions page");
   assert.equal(emptyPage.content.trim(), "", "and the empty template leaves it blank");
-  await page.goto(`${base}/${ids.emptyPage}/pages`);
+  await openConventions(page, base, ids.emptyPage);
   await section.waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await section.getAttribute("data-state"), "empty", "an empty page offers the templates");
   await section.locator('[data-template="ai_managed"]').waitFor({ state: "visible" });
@@ -301,7 +323,7 @@ async function scenario(
   const pickedPage = await conventionsPage(page, picked.id);
   assert.ok(pickedPage, "the new project has a conventions page");
   assert.equal(pickedPage.content, byKey("human_owned").content, "it holds the chosen template");
-  await page.goto(`${base}/${ids.created}/pages`);
+  await openConventions(page, base, ids.created);
   await section.waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await section.getAttribute("data-state"), "page", "the new project's Pages block shows the page");
   assert.equal(await section.getByTestId("conventions-off").count(), 0, "and it is on");
@@ -317,7 +339,7 @@ async function viewerScenario(browser: Browser, base: string, ident: string, err
   const context = await newContext(browser, VIEWPORTS[0]);
   const page = await signIn(context, base, "mia", PASSWORD);
   page.on("pageerror", (err) => errors.push(`viewer: ${err}`));
-  await page.goto(`${base}/${ident}/pages`);
+  await openConventions(page, base, ident);
   const section = page.getByTestId("conventions-section");
   await section.waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await section.getAttribute("data-state"), "none");

@@ -17,6 +17,20 @@
 - Revoking a key and deleting an agent account each ask first. Deleting names the comments that go with the account.
 - `GET /api/auth/bots` returns `key_created_at`, `oauth`, `last_active`, `changes` and `comments` for each agent account.
 
+### Pages
+
+- The Pages tab is rebuilt around three panes: folders on the left, the page list in the middle, and on wide screens a reading pane that shows the selected page rendered. While no page is selected, that pane lists recent edits and who made them, drafts that are waiting, active pages nobody has touched in 60 days, the most linked pages, and how many pages nothing links to.
+- Folders show how many pages they hold. Pick one to see only its pages and its subfolders' pages. Folders can be renamed in place, and dropping a page on one moves it. Below 1024px the folders open from the top bar.
+- Each row is one line: title, status (Draft or Complete; Active shows nothing), labels, how many issues, pages and comments link to it, who last edited it (an agent shows its tool's mark), the identifier and the date. The line under it is the page's first real sentence, not its first heading. Excerpts can be turned off.
+- The top bar matches the issue list: a search field, New page (`C`), tabs, then Filter (status, label, who last edited it, only pages nothing links to) with the active filters shown as chips, and Display (group by folder, label or status; sort by edit time, creation, title or status).
+- Keyboard: `J`/`K` move, `Enter` opens, `Space` peeks when the reading pane is off, `P` pins, `X` selects, `F` filters, `/` searches. Selected pages can be moved, given a status or a label, pinned, or exported as one Markdown file.
+- Pages edited since your last visit are marked, with an "N updated" chip that steps through them. Your own edits are not marked.
+- Right-click a page (or press and hold on a touch screen) to open, peek, copy its link or identifier, pin, move, change its status or archive it.
+- Pinned pages sit in one row above the list instead of appearing as cards and again in the tree. The conventions page has its own tab; Browse keeps one line saying whether agents read it. Recent is grouped by day, Drafts shows how long each page has been a draft with a Mark active button, and Archived has Restore.
+- Creating a page asks for its title and whether it starts as a draft or active, in the folder you are looking at. Paste as new page, dated notes and New folder are in the New page menu.
+- `GET /api/projects/{id}/pages/meta` returns each page's excerpt, word count, who created and last edited it, and which issues and pages link to it.
+- Dates older than a week show the year when it is not the current one.
+
 ### Fixes
 
 - Creating or renaming a project to an identifier already in use answers `409` naming the identifier, instead of `500`.
