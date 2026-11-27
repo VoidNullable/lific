@@ -6,7 +6,7 @@ export async function checkDecisionComments(context: BrowserContext, base: strin
   page.on("pageerror", (error) => errors.push(String(error)));
   try {
     await page.goto(`${base}/DEMO/issues/DEMO-1`);
-    const issue = await page.evaluate(async () => {
+    const { issue, pageId } = await page.evaluate(async () => {
       const headers = {
         "Content-Type": "application/json",
       };
@@ -26,7 +26,10 @@ export async function checkDecisionComments(context: BrowserContext, base: strin
       for (let i = 0; i < 52; i++) {
         await request(`/issues/${issue.id}/comments`, { content: `Discussion note ${i}` });
       }
-      return issue;
+      // A page of its own: the project's first page is its conventions page,
+      // which opens on the Conventions tab.
+      const doc = await request("/pages", { project_id: project.id, title: "Decision page smoke" });
+      return { issue, pageId: doc.id as number };
     });
     await page.goto(`${base}/DEMO/issues/${issue.identifier}`);
     const thread = page.locator("section.cmt");
@@ -59,7 +62,7 @@ export async function checkDecisionComments(context: BrowserContext, base: strin
     await thread.getByText("Discussion note 51", { exact: true }).waitFor();
     console.log("ok   browser composer saves a decision and filter toggles back to discussion");
 
-    await page.goto(`${base}/DEMO/pages/1`);
+    await page.goto(`${base}/DEMO/pages/${pageId}`);
     await thread.getByLabel("Record as decision", { exact: true }).check();
     await thread.locator("textarea").fill("Page decision: document the protocol");
     await thread.getByRole("button", { name: "Comment", exact: true }).click();
