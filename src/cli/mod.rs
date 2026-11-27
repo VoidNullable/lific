@@ -269,8 +269,8 @@ pub enum Command {
     ///
     /// One command, whole story: writes lific.toml (kept if already present),
     /// creates the database and your administrator account, installs a
-    /// background service (systemd user unit on Linux, LaunchAgent on macOS)
-    /// and starts it, then waits until the server answers. It creates no API
+    /// background service (systemd user unit on Linux, LaunchAgent on macOS,
+    /// per-user startup entry on Windows) and starts it, then waits until the server answers. It creates no API
     /// key; `lific connect` mints one per AI tool. Re-running is safe
     /// and repairs whatever is missing. Use `--no-service` if you'd rather run
     /// `lific start` in the foreground yourself.
@@ -408,7 +408,7 @@ pub enum Command {
         key: Option<String>,
 
         /// User who should own the minted connection key (it inherits their
-        /// project access under authorization enforcement).
+        /// project access).
         #[arg(long)]
         user: Option<String>,
 
@@ -518,9 +518,9 @@ pub enum Command {
 
     /// Manage project membership (who can see and edit which project).
     ///
-    /// Users only see projects they are members of: a freshly created user
-    /// sees nothing until granted access here (or via the web UI's project
-    /// members page).
+    /// Users only see private projects they are members of: a freshly created
+    /// user sees none until granted access here (or via the web UI's project
+    /// members page). Published projects are readable by everyone.
     Member {
         #[command(subcommand)]
         action: MemberAction,
@@ -1327,8 +1327,8 @@ pub enum InstanceAction {
         #[arg(long = "stale-active-days")]
         stale_active_days: Option<i64>,
 
-        /// Days an active issue may go untouched before the server's nightly
-        /// job moves it back to todo with a comment (0-365, default 14; 0 is off)
+        /// Days an active issue may go untouched before the server's daily
+        /// pass moves it back to todo with a comment (0-365, default 14; 0 is off)
         #[arg(long = "stale-active-reset-days")]
         stale_active_reset_days: Option<i64>,
     },

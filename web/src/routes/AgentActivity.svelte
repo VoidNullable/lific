@@ -202,7 +202,7 @@
         <h2 class="text-[1.35rem] font-semibold text-[var(--aa-text)]">No agents yet</h2>
         <p class="text-[0.95rem] text-[var(--aa-text-2)] max-w-[46ch] leading-relaxed">
           Agents show up here once a connected tool reads or changes something in Lific.
-          Connect one in Settings, under Connected tools.
+          Connect one in Settings, under Agents.
         </p>
         <a
           href="#/settings"
