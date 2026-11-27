@@ -33,7 +33,11 @@
   import { isSignedOut } from "../lib/signedOut"; // LIF-583
   import { CommentThread } from "../lib/detail/commentThread.svelte";
   import { readingMinutes, wordCount } from "../lib/detail/outline";
-  import { PenLine, CircleDot, CheckCircle2, Archive, Pin, ScrollText } from "lucide-svelte";
+  import { PenLine, CircleDot, CheckCircle2, Archive, Pin, ScrollText, Replace, EyeOff, Eye } from "lucide-svelte";
+  import ConventionsDialog, { type ConventionsDialogMode } from "../lib/pages/ConventionsDialog.svelte";
+  import { conventionsRoute } from "../lib/pages/conventions";
+  import type { ConventionTemplate } from "../lib/api";
+  import type { MenuItem } from "../lib/DeleteMenu.svelte";
 
   // LIF-112: page lifecycle statuses.
   const PAGE_STATUSES = [
@@ -54,11 +58,15 @@
     projectIdentifier,
     pageId,
     editable: editableProp,
+    conventionsTab = false,
   }: {
     navigate: (path: string) => void;
     projectIdentifier: string;
     pageId: number;
     editable?: boolean;
+    /** LIF-524: shown as the project's Conventions tab. Anywhere else the
+     *  conventions page sends the reader to that tab. */
+    conventionsTab?: boolean;
   } = $props();
 
   let page = $state<Page | null>(null);
@@ -164,6 +172,13 @@
       loading = false;
       return;
     }
+    // LIF-524: the conventions page lives on its own tab. Replace, so Back
+    // skips the old address; a comment target rides along.
+    if (res.data.conventions && !conventionsTab) {
+      const comment = location.hash.match(/#comment-\d+$/)?.[0] ?? "";
+      location.replace(`#${conventionsRoute(projectIdentifier)}${comment}`);
+      return;
+    }
     page = res.data;
     if (page.project_id !== null) loadProjectRole(page.project_id);
     else ensureMeAdmin();
@@ -250,11 +265,47 @@
   }
 
   // LIF-524: off keeps the text and only takes the page out of briefings.
+  // Both that and a new template are deliberate: menu, then a confirmation.
   const conventionsOn = $derived(page?.conventions_enabled !== false);
+  let conventionsDialog = $state<ConventionsDialogMode | null>(null);
 
-  function toggleConventions() {
-    if (page?.conventions) void saveField({ conventions_enabled: !conventionsOn });
+  async function patchConventions(patch: Record<string, unknown>, failure: string): Promise<boolean> {
+    if (!page?.conventions) return false;
+    const id = page.id;
+    saving = true;
+    const res = await updatePage(id, patch);
+    saving = false;
+    if (!res.ok) {
+      toast(`${failure}: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    if (page?.id === id) {
+      page = res.data;
+      markSaved(id);
+    }
+    return true;
   }
+
+  async function replaceWithTemplate(t: ConventionTemplate): Promise<boolean> {
+    const ok = await patchConventions({ content: t.content }, "Couldn't replace the text");
+    if (ok) toast("Replaced the text. The old text is in the page history.", { kind: "success" });
+    return ok;
+  }
+
+  function setConventionsEnabled(enabled: boolean): Promise<boolean> {
+    return patchConventions({ conventions_enabled: enabled }, "Couldn't save the change");
+  }
+
+  const conventionsMenu = $derived<MenuItem[]>(
+    page?.conventions
+      ? [
+          { label: "Change template…", icon: Replace, run: () => (conventionsDialog = "template") },
+          conventionsOn
+            ? { label: "Leave out of briefings…", icon: EyeOff, run: () => (conventionsDialog = "off") }
+            : { label: "Put back in briefings…", icon: Eye, run: () => (conventionsDialog = "on") },
+        ]
+      : [],
+  );
 
   // LIF-105: the backend replaces the whole set, so send all of it.
   async function toggleLabel(name: string) {
@@ -281,7 +332,7 @@
       toast(`Couldn't delete ${identifier}: ${res.error}`, { kind: "error" });
       return false;
     }
-    navigate(`/${projectIdentifier}/pages`);
+    navigate(page?.conventions ? conventionsRoute(projectIdentifier) : `/${projectIdentifier}/pages`);
     toast(`Deleted ${identifier}`, {
       kind: "success",
       action: {
@@ -303,7 +354,9 @@
   const breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
     const crumbs: import("../lib/Breadcrumbs.svelte").Crumb[] = [
       { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
-      { label: "Pages", href: `#/${projectIdentifier}/pages`, hideBelowSm: true },
+      conventionsTab
+        ? { label: "Conventions", href: `#${conventionsRoute(projectIdentifier)}`, hideBelowSm: true }
+        : { label: "Pages", href: `#/${projectIdentifier}/pages`, hideBelowSm: true },
     ];
     if (page?.folder_id != null) {
       const name = folders.find((f) => f.id === page!.folder_id)?.name;
@@ -332,14 +385,7 @@
             run: () => setStatus(s.value),
           })),
       },
-      { id: "toggle-pin", title: p.pinned ? "Unpin page" : "Pin page", run: togglePin },
-      ...(p.conventions
-        ? [{
-            id: "toggle-conventions",
-            title: conventionsOn ? "Leave conventions out of briefings" : "Put conventions back in briefings",
-            run: toggleConventions,
-          }]
-        : []),
+      ...(p.conventions ? [] : [{ id: "toggle-pin", title: p.pinned ? "Unpin page" : "Pin page", run: togglePin }]),
       ...(p.project_id !== null && labels.length > 0
         ? [
             {
@@ -378,8 +424,8 @@
   onRetry={() => loadPage(pageId)}
   identifier={page?.identifier ?? ""}
   attachEntity={page ? { entity_type: "page", entity_id: page.id } : null}
-  backRoute={`/${projectIdentifier}/pages`}
-  backLabel="Pages"
+  backRoute={conventionsTab ? `/${projectIdentifier}/overview` : `/${projectIdentifier}/pages`}
+  backLabel={conventionsTab ? "Overview" : "Pages"}
   {breadcrumbSegments}
   {editable}
   {canComment}
@@ -403,6 +449,7 @@
   deleteLabel={page?.identifier ?? ""}
   deleteUndoable
   onDelete={handleDelete}
+  menuItems={conventionsMenu}
   comments={thread.comments}
   onNewComment={(c, kind) => thread.create(c, kind)}
   decisionsOnly={thread.decisionsOnly}
@@ -426,57 +473,23 @@
     {#if page}
       <div class="mb-7 flex flex-col gap-2.5">
         {#if page.conventions}
-          <!-- LIF-524: the project's conventions page, and its switch for
-               agents' briefings. -->
-          <div
-            class="mb-1.5 flex items-start gap-3 rounded-lg border border-[var(--border)]
-                   bg-[var(--surface)] px-3 py-2.5"
-            data-testid="conventions-banner"
+          <!-- LIF-524: whether agents get the page. A statement, not a
+               control: changing it is in the ⋯ menu, behind a confirmation. -->
+          <p
+            class="m-0 flex items-start gap-2 text-body-sm text-[var(--text-muted)] leading-snug"
+            data-testid="conventions-status"
+            data-enabled={conventionsOn}
           >
             <ScrollText
-              size={16}
+              size={15}
               class="shrink-0 mt-0.5 {conventionsOn ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'}"
             />
-            <div class="flex-1 min-w-0">
-              <p class="text-body-sm font-medium text-[var(--text)]">This project's conventions</p>
-              <p class="text-caption text-[var(--text-muted)] leading-snug mt-0.5">
-                {conventionsOn
-                  ? "Agents get this page at the top of their briefing when a session starts."
-                  : "Agents' briefings leave it out. The text stays here."}
-              </p>
-            </div>
-            {#if editable}
-              <button
-                type="button"
-                role="switch"
-                aria-checked={conventionsOn}
-                aria-label="Include in agents' briefings"
-                title={conventionsOn ? "Leave it out of briefings" : "Put it back in briefings"}
-                class="shrink-0 flex items-center gap-2 rounded-md px-1 py-1 -my-0.5
-                       text-caption font-medium text-[var(--text-muted)]
-                       focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
-                       disabled:opacity-50"
-                disabled={saving}
-                onclick={toggleConventions}
-              >
-                <span class="w-6 text-right">{conventionsOn ? "On" : "Off"}</span>
-                <span
-                  class="relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors
-                         {conventionsOn ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}"
-                >
-                  <span
-                    class="absolute top-0.5 left-0.5 size-4 rounded-full bg-[var(--surface)] shadow
-                           motion-safe:transition-transform
-                           {conventionsOn ? 'translate-x-4' : 'translate-x-0'}"
-                  ></span>
-                </span>
-              </button>
+            {#if conventionsOn}
+              <span><span class="font-medium text-[var(--text)]">In agents' briefings.</span> Agents read this page when a session starts.</span>
             {:else}
-              <span class="shrink-0 text-caption font-medium text-[var(--text-muted)]">
-                {conventionsOn ? "On" : "Off"}
-              </span>
+              <span><span class="font-medium text-[var(--text)]">Left out of agents' briefings.</span> The page stays here for people to read.</span>
             {/if}
-          </div>
+          </p>
         {/if}
         <div class="flex flex-wrap items-center gap-2">
           {#if editable}
@@ -496,6 +509,9 @@
                 </span>
               {/snippet}
             </Select>
+            <!-- Pinning places a page in the Pages list, which the
+                 conventions page is not part of. -->
+            {#if !page.conventions}
             <button
               class="size-8 grid place-items-center rounded-md border transition-colors
                      {page.pinned
@@ -509,13 +525,14 @@
             >
               <Pin size={14} class={page.pinned ? "fill-current" : ""} />
             </button>
+            {/if}
           {:else}
             {@const meta = statusMeta(page.status)}
             <span class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]">
               <meta.icon size={13} class="shrink-0" />
               {meta.label}
             </span>
-            {#if page.pinned}
+            {#if page.pinned && !page.conventions}
               <span class="flex items-center gap-1 text-caption text-[var(--accent)]"><Pin size={12} class="fill-current" /> Pinned</span>
             {/if}
           {/if}
@@ -546,6 +563,15 @@
     {/if}
   {/snippet}
 </DocumentDetail>
+
+{#if page?.conventions}
+  <ConventionsDialog
+    bind:mode={conventionsDialog}
+    pageIdentifier={page.identifier}
+    onReplace={replaceWithTemplate}
+    onSetEnabled={setConventionsEnabled}
+  />
+{/if}
 
 <style>
   .page-meta > span + span::before {

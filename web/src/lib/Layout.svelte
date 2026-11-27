@@ -37,6 +37,7 @@
   import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
   import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot, Settings2, LogIn } from "lucide-svelte";
+  import { ScrollText } from "lucide-svelte"; // LIF-524: the Conventions tab
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
@@ -490,6 +491,7 @@
     ["board", "Board", LayoutGrid],
     ["modules", "Modules", Layers],
     ["pages", "Pages", FileText],
+    ["conventions", "Conventions", ScrollText],
     ["plans", "Plans", ListChecks],
     ["graph", "Graph", Waypoints],
     ["files", "Files", Paperclip],
@@ -871,6 +873,7 @@
       recentPages = results.every((res) => res.ok)
         ? results
             .flatMap((res) => (res.ok ? res.data : []))
+            .filter((page) => !page.conventions)
             .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id)
             .slice(0, 5)
         : recentPages;
@@ -960,6 +963,7 @@
       board: "Board",
       modules: "Modules",
       pages: "Pages",
+      conventions: "Conventions",
       files: "Files",
       plans: "Plans",
       activity: "Activity",
@@ -1190,6 +1194,7 @@
                 {@render subItem(`/${project.identifier}/board`, "Board", LayoutGrid)}
                 {@render subItem(`/${project.identifier}/modules`, "Modules", Layers)}
                 {@render subItem(`/${project.identifier}/pages`, "Pages", FileText)}
+                {@render subItem(`/${project.identifier}/conventions`, "Conventions", ScrollText)}
                 {@render subItem(`/${project.identifier}/plans`, "Plans", ListChecks)}
                 <!-- Daily views above the rule, reference views below it. -->
                 <hr class="sidebar-subnav-rule" />

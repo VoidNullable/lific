@@ -11,6 +11,7 @@
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
   import { FALLBACK_TEMPLATES } from "./pages/conventions";
+  import ConventionsTemplatePicker from "./pages/ConventionsTemplatePicker.svelte";
 
   let {
     name = $bindable(""),
@@ -242,40 +243,10 @@
       <legend class="text-body-sm font-medium text-[var(--text)] mb-1">Conventions</legend>
       <p class="text-caption text-[var(--text-faint)] mb-2.5">
         The rules for working in this tracker. Agents read them with their
-        briefing at the start of each session. You can edit the page later.
+        briefing at the start of each session. You can edit them or switch
+        templates later on the project's Conventions tab.
       </p>
-      <div class="flex flex-col gap-2" role="radiogroup" aria-label="Conventions template">
-        {#each templates as t (t.key)}
-          {@const selected = conventions === t.key}
-          <button
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            data-template={t.key}
-            class="flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors
-                   focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
-                   {selected
-              ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
-              : 'border-[var(--border)] bg-[var(--bg-subtle)] hover:border-[var(--text-faint)]'}"
-            onclick={() => (conventions = t.key)}
-          >
-            <span
-              class="mt-0.5 size-4 shrink-0 rounded-full border-2 grid place-items-center
-                     {selected ? 'border-[var(--accent)]' : 'border-[var(--text-faint)]'}"
-            >
-              {#if selected}<span class="size-2 rounded-full bg-[var(--accent)]"></span>{/if}
-            </span>
-            <span class="flex-1 min-w-0">
-              <span class="block text-body-sm font-medium {selected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">
-                {t.name}
-              </span>
-              {#if t.summary}
-                <span class="block text-caption text-[var(--text-muted)] leading-snug mt-0.5">{t.summary}</span>
-              {/if}
-            </span>
-          </button>
-        {/each}
-      </div>
+      <ConventionsTemplatePicker {templates} bind:selected={conventions} previewHeight="16rem" />
     </fieldset>
   {/if}
 </div>

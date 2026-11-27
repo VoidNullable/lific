@@ -1,10 +1,10 @@
-// LIF-524: what the Pages list shows for a project's conventions page.
+// LIF-524: a project's conventions page in the web UI.
 //
-// A project has at most one conventions page. Until it holds any text the
-// list offers the templates instead of the page; a blank start is only on
-// offer while no page exists, since an empty page already is one.
+// A project has at most one conventions page, and it lives on the project's
+// Conventions tab rather than in the Pages list. Until it holds any text the
+// tab offers the templates instead of the page.
 
-import type { ConventionTemplate } from "../api";
+import type { ConventionTemplate, ConventionTemplateKey } from "../api";
 
 /** The fields of a page row this decision reads. */
 export interface ConventionsCandidate {
@@ -14,9 +14,9 @@ export interface ConventionsCandidate {
 }
 
 export type ConventionsState<T extends ConventionsCandidate> =
-  /** No conventions page: templates plus a blank start. */
+  /** No conventions page: the templates, Blank among them. */
   | { kind: "none" }
-  /** A conventions page with no text yet: templates fill it in. */
+  /** A conventions page with no text yet: the templates fill it in. */
   | { kind: "empty"; page: T }
   /** A conventions page with text: show it. */
   | { kind: "page"; page: T };
@@ -29,20 +29,39 @@ export function conventionsState<T extends ConventionsCandidate>(rows: readonly 
   return page.preview.trim() === "" ? { kind: "empty", page } : { kind: "page", page };
 }
 
-/** Templates to offer as starting points: everything with a body. The
- *  empty template is the blank start, which the list shows on its own. */
-export function startingTemplates(templates: readonly ConventionTemplate[]): ConventionTemplate[] {
-  return templates.filter((t) => t.key !== "empty" && t.content.trim() !== "");
-}
-
 /** The page title a conventions page is created with. */
 export const CONVENTIONS_TITLE = "Conventions";
 
-/** The create-project choices when the templates endpoint does not answer:
- *  the same keys and names, without the summaries only the server has. */
+/** The project's Conventions tab. */
+export function conventionsRoute(projectIdentifier: string): string {
+  return `/${projectIdentifier}/conventions`;
+}
+
+/** Where a page opens: the conventions page on its tab, any other page in
+ *  Pages. */
+export function pageRoute(projectIdentifier: string, page: { id: number; conventions?: boolean }): string {
+  return page.conventions === true
+    ? conventionsRoute(projectIdentifier)
+    : `/${projectIdentifier}/pages/${page.id}`;
+}
+
+/** The server calls the empty template "Empty"; the web UI offers it as
+ *  Blank, the start you write yourself. */
+export function templateName(t: Pick<ConventionTemplate, "key" | "name">): string {
+  return t.key === "empty" ? "Blank" : t.name;
+}
+
+/** The choices when the templates endpoint does not answer: the same keys
+ *  and names, without the summaries and text only the server has. */
 export const FALLBACK_TEMPLATES: ConventionTemplate[] = [
   { key: "empty", name: "Empty", summary: "", content: "" },
   { key: "ai_managed", name: "Heavily AI managed", summary: "", content: "" },
   { key: "human_managed", name: "Human managed", summary: "", content: "" },
   { key: "human_owned", name: "Human owned", summary: "", content: "" },
 ];
+
+/** The template a chooser starts on: the first one with text, so the
+ *  preview has something to show, else the first one. */
+export function defaultTemplateKey(templates: readonly ConventionTemplate[]): ConventionTemplateKey {
+  return (templates.find((t) => t.content.trim() !== "") ?? templates[0])?.key ?? "empty";
+}

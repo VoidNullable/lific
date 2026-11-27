@@ -70,6 +70,8 @@
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { shortcutHelpState } from "./shortcutHelpState.svelte";
   import ProjectIcon from "./ProjectIcon.svelte";
+  import { ScrollText } from "lucide-svelte";
+  import { conventionsRoute, pageRoute } from "./pages/conventions"; // LIF-524
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box,
     Zap, ChevronRight, X, ListChecks, SquarePen, FilePlus, ArrowLeftRight, FolderPlus, ChevronsUpDown,
@@ -517,6 +519,18 @@
         title: "New project",
         run: () => navigate("/projects/new"),
       },
+      here
+        ? {
+            id: "open-conventions",
+            title: "Open conventions",
+            hint: here.name,
+            run: () => navigate(conventionsRoute(here.identifier)),
+          }
+        : {
+            id: "open-conventions",
+            title: "Open conventions…",
+            children: projectChildren((p) => navigate(conventionsRoute(p.identifier))),
+          },
     ];
   });
 
@@ -535,6 +549,7 @@
     "new-page": FilePlus,
     "switch-project": ArrowLeftRight,
     "new-project": FolderPlus,
+    "open-conventions": ScrollText,
     "item-open": CornerDownLeft,
     "item-new-tab": ExternalLink,
     "item-copy-link": Link,
@@ -695,7 +710,7 @@
           title: page.title,
           identifier: page.identifier,
           project: project.name,
-          route: `/${project.identifier}/pages/${page.id}`,
+          route: pageRoute(project.identifier, page),
           score,
         }
       : null;
@@ -729,7 +744,7 @@
             title: page.title,
             identifier: page.identifier,
             project: project.name,
-            route: `/${project.identifier}/pages/${page.id}`,
+            route: pageRoute(project.identifier, page),
             score: refScore(ref, project),
           }]
         : [];
@@ -867,7 +882,7 @@
       priority: doc.kind === "issue" ? doc.priority : undefined,
       route:
         doc.kind === "page"
-          ? `/${project.identifier}/pages/${doc.id}`
+          ? pageRoute(project.identifier, doc)
           : `/${project.identifier}/issues/${doc.identifier}`,
       score: localScoreToPaletteScore(score),
     }));
@@ -965,7 +980,7 @@
         status: row.kind === "issue" ? row.status : undefined,
         priority: row.kind === "issue" ? row.priority : undefined,
         route: row.kind === "page"
-          ? `/${here.identifier}/pages/${row.id}`
+          ? pageRoute(here.identifier, row)
           : `/${here.identifier}/issues/${row.identifier}`,
         score: 1,
       }));

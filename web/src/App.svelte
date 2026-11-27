@@ -14,6 +14,7 @@
   import PageList from "./routes/PageList.svelte";
   import Files from "./routes/Files.svelte";
   import PageDetail from "./routes/PageDetail.svelte";
+  import Conventions from "./routes/Conventions.svelte";
   import ModuleList from "./routes/ModuleList.svelte";
   import ModuleDetail from "./routes/ModuleDetail.svelte";
   import PlanList from "./routes/PlanList.svelte";
@@ -617,6 +618,7 @@
     | { type: "app"; page: "issue-detail"; project: string; identifier: string }
     | { type: "app"; page: "pages"; project: string }
     | { type: "app"; page: "files"; project: string }
+    | { type: "app"; page: "conventions"; project: string }
     | { type: "app"; page: "page-detail"; project: string; pageId: number }
     | { type: "app"; page: "modules"; project: string }
     | { type: "app"; page: "module-detail"; project: string; moduleId: number }
@@ -748,6 +750,12 @@
     const filesMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/files$/i);
     if (filesMatch) {
       return { type: "app", page: "files", project: filesMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/conventions (LIF-524)
+    const conventionsMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/conventions$/i);
+    if (conventionsMatch) {
+      return { type: "app", page: "conventions", project: conventionsMatch[1] };
     }
 
     // Project-scoped: /{IDENTIFIER}/pages/{ID}
@@ -988,6 +996,8 @@
       <PageList {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "files"}
       <Files {navigate} projectIdentifier={parsed.project} />
+    {:else if parsed.page === "conventions"}
+      <Conventions {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "page-detail"}
       <PageDetail {navigate} projectIdentifier={parsed.project} pageId={parsed.pageId} />
     {:else if parsed.page === "modules"}
