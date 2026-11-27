@@ -2,6 +2,8 @@
 
 ## v3.0.0 (2026-11-27)
 
+![Lific 3.0](https://raw.githubusercontent.com/VoidNullable/lific/v3.0.0/docs/assets/lific-3.0.png)
+
 Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the Pages tab, account settings and the issue and page views, and bodies are edited in place. Eighteen migrations run on first start.
 
 ### Before you upgrade
@@ -10,9 +12,9 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - Everyone who lost access that way is logged once at startup, and `lific doctor` lists them in a `project_access` warning until each has a role again. `lific member add --project <PROJECT> --user <name> --role maintainer` gives access back.
 - `PATCH /api/instance/settings` refuses `"authz_enforced": false` with `400` and ignores `true`. The settings response no longer has the field, and `GET /api/projects/{id}/my-role` no longer returns `enforced`. The rules that only applied with enforcement off are gone too: a project's lead can delete or archive it, maintainers manage modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only suggest people who can see the project.
 - The `/mcp/<token>` route is removed and answers `404`, since a credential in a URL ends up in proxy logs and shell history. Point clients at `/mcp` and send `Authorization: Bearer <API_KEY>`, or use the client's OAuth login; `lific connect` sets up either and refuses old URLs. The old `mcp_path_token` was a server secret, not an API key, so it does not work in the header. `mcp_path_token` and `mcp_path_user` in `[server]` still parse, so the server starts, but they do nothing, and startup and `lific doctor` warn until you remove them. `lific doctor` also finds old URLs in supported clients' configuration files without printing the secret.
-- A published project is read at its ordinary links and API routes, by visitors with no account, every signed-in account and every API key or MCP connection. Changing anything still needs a role. Plans and their steps, activity and edit history, insights, assignees, waits with their notes, comment authors' usernames and live updates become readable, so review those in each published project, or unpublish it, before upgrading.
+- A published project is read at its ordinary links and API routes, by visitors with no account, every signed-in account and every API key or MCP connection. Changing anything still needs a role. Plans and their steps, activity and edit history, insights, assignees, waits with their notes, claims with the holder's username, comment authors' usernames and live updates become readable, so review those in each published project, or unpublish it, before upgrading.
 - Every route under `/public/api` now answers `404`; use the ordinary routes with no credential, such as `GET /api/issues/resolve/APP-12`. Old `/public/APP/...` links answer `301` to `/APP/...`. If a proxy or CDN special-cased `/public/`, apply those rules to requests that carry neither an `Authorization: Bearer` header nor a `lific_token` cookie, and do not cache responses to requests that carry the cookie.
-- The web UI's session lives only in the HttpOnly `lific_token` cookie. Sign-in, sign-up, auto-login, session refresh and password change responses no longer include the token, so a script that signed in with a password and sent the returned token must use an API key instead (Settings, API keys, or `lific key create --user <name>`). MCP clients and `lific login` use OAuth and are not affected.
+- The web UI's session lives only in the HttpOnly `lific_token` cookie. Sign-in, sign-up, auto-login, session refresh and password change responses no longer include the token, so a script that signed in with a password and sent the returned token must use an API key instead (Settings, Agents, or `lific key create --user <name>`). MCP clients and `lific login` use OAuth and are not affected.
 - Writes authenticated by the cookie must come from the server's own origin, `public_url` or a `cors_origins` entry, or they get `403`. If people reach the instance over plain HTTP at any address other than localhost, set `public_url = "http://..."` to that address, or nobody can sign in. Behind a reverse proxy, set `public_url` to the address people open, or pass the original `Host` (and `X-Forwarded-Proto` when the proxy terminates TLS).
 - Project archives are written in format 3. Upgrade the destination to 3.0 before importing an archive exported by 3.0; format 1 and 2 archives still import.
 - The server now returns active issues untouched for 14 days to `todo` once a day, starting shortly after the first start. Run `lific instance set --stale-active-reset-days 0` first if you do not want that.
@@ -70,7 +72,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - `list_issues` and `get_board` rows show `due:YYYY-MM-DD` when an issue has a target date.
 - Project listings show the first line of each description, up to 100 characters. Pass `verbose: true` for the full text.
 - Module, label and folder names match regardless of case, and an exact spelling still wins. A name that matches nothing lists the project's valid names, closest first.
-- The MCP server runs on rmcp 3, which implements MCP 2026-07-28. Newer clients can start with `server/discover` and send their version with each request instead of initializing, over stdio and HTTP alike; older clients keep the `initialize` handshake and get the protocol version they ask for, rather than a fixed `2025-03-26`. `lific mcp --remote` passes the newer revision's required HTTP headers through for stdio clients.
+- The MCP server runs on rmcp 3, which implements MCP 2026-07-28. Newer clients can start with `server/discover` and send their version with each request instead of initializing, over stdio and HTTP alike (the multi-instance proxy still expects `initialize`); older clients keep the `initialize` handshake and get the protocol version they ask for, rather than a fixed `2025-03-26`. `lific mcp --remote` passes the newer revision's required HTTP headers through for stdio clients.
 - A misspelled or missing tool parameter now comes back as a failed tool result (`isError: true`) instead of a JSON-RPC `-32602` error, so clients show the "Did you mean" hint to the model rather than treating it as a broken server.
 - A tool that fails now flags its result `isError: true`, so hosts show it as a failed call and count it in their retry logic. The `Error: ` text is unchanged.
 - Browser clients may send the MCP 2026-07-28 `Mcp-Method` and `Mcp-Name` headers through CORS.
@@ -136,7 +138,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - The Inbox is a triage feed: one row per issue with every reason it is there, and tabs with counts for All, Unread, Assigned, For anyone, Waiting and Later. Read state is kept per device.
 - A reading pane shows the issue's description and latest comments, with a reply box.
 - Later puts an issue off with a date wait noted "Put off from the inbox", and the sidebar's Inbox count leaves put-off issues out.
-- Rows have quick actions (read, later, done, start). Select several for bulk actions, search, filter by project, sort and group, and drive it all from the keyboard with a hint bar showing the keys.
+- Rows have quick actions (read, later, done), and the reading pane can start the issue. Select several for bulk actions, search, filter by project, sort and group, and drive it all from the keyboard with a hint bar showing the keys.
 
 ### Issue list
 
@@ -151,7 +153,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 
 - Issues show start and due dates with overdue marks, and relations show the linked issue's status and title. S, P, M, L and D open the status, priority, module, label and due date pickers, and phones get a strip of the issue's properties.
 - Pages get an outline beside the body that follows your scroll (folded above it on narrower screens), a 760 px reading column, a line with length and reading time, and a pin toggle. Status saves as soon as you change it, and Delete offers Undo instead of a confirmation.
-- Both share one comment thread with a Saved indicator, a comment count that jumps to it, and C to write a comment. Copy link and Export sit in the overflow menu for everyone, and the command palette can copy, export, set a due date or pin.
+- Both share one comment thread with a Saved indicator, a comment count that jumps to it, and C to write a comment. Copy link sits in the overflow menu for everyone and Export for anyone signed in, and the command palette can copy, export, set a due date or pin.
 - Issue, plan and module views use the full content width, with the metadata docked to the right.
 
 ### Pages
@@ -198,7 +200,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 - A Work list ranks open issues with tabs for Needs attention, In progress, Ready for agents, For a person and Blocked. Blocked issues name their blocker.
 - The overview also shows the open count over 90 days, opened against closed for the last four weeks, each module's progress, active plans, pinned and recent pages, who has been working, and open issues per label. It refreshes as changes arrive, and says what agents and people opened and closed since your last visit.
 - Recent activity reads as sentences: "closed APP-12", "moved APP-4 to Active", "checked off a step in APP-PLAN-2", with the issue's title and a comment's first words. A burst of edits by one person to one thing is folded into one line.
-- Settings move to their own tab at `/{PROJECT}/settings`, with a section index that follows the scroll: General (icon, name, description, identifier, lead, sidebar group), Labels, Members, Public view, Import and export, and an always-open Danger zone. The project lead is no longer under the danger zone. Projects' sidebar menus gain a Project settings item, and `?section=labels` opens the page at a section.
+- Settings move to their own tab at `/{PROJECT}/settings`, with a section index that follows the scroll: General (icon, name, description, identifier, lead, sidebar group), Labels, Members, Public access, Import and export, and an always-open Danger zone. The project lead is no longer under the danger zone. Projects' sidebar menus gain a Project settings item, and `?section=labels` opens the page at a section.
 - `GET /api/home/overview` accepts `project_id` to narrow every aggregate to one project.
 - A project with no issues, modules, plans or pages shows only its first steps, without empty sections under them.
 
@@ -230,7 +232,7 @@ Lific 3.0 is a major release, and several changes can break an existing setup: p
 
 ### CLI and doctor
 
-- `lific doctor` diagnoses the instance that actually runs. Without `--config`, it reads the running server's own `--config`, then the one the installed service names, before the usual search. It names where the configuration came from, warns when that differs from the one the search would find, and fails when a service points at a file that no longer exists (PR #104 by [@zorro432](https://github.com/zorro432)).
+- `lific doctor` diagnoses the instance that actually runs. When the usual search finds no configuration file, it uses the running server's own `--config`, then the one the installed service names, and says where the configuration came from. It warns when the running server or the service uses a different file from the one the search found, and fails when a service points at a file that no longer exists (PR #104 by [@zorro432](https://github.com/zorro432)).
 - `lific doctor` no longer warns that no per-user service is installed on an instance that something else supervises, such as a system-level systemd unit or a container.
 - When no service manager is found, the message now says what each platform needs, so Windows users are no longer told Lific only supports systemd and launchd. `lific init`, `lific service install` and `lific service` tell you how to remove the service with `lific service uninstall` (PR #103 by [@zorro432](https://github.com/zorro432)).
 - New `lific doctor` checks report anyone the roles upgrade left without access, obsolete MCP settings, and old `/mcp/<token>` URLs in client configurations (see Before you upgrade).
