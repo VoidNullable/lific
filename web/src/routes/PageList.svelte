@@ -1,19 +1,25 @@
 <script lang="ts">
+  // The Pages tab: a folder pane, the page list, and a reading pane (or the
+  // project's page activity when nothing is open). Rows come from the
+  // project's read model (LIF-442); excerpts, editors and link counts come
+  // from `/pages/meta`, which reloads when the rows move.
   import {
-    listFolders,
     listProjects,
+    listFolders,
     listLabels,
     createPage,
     createFolder,
     deleteFolder,
+    renameFolder,
     updatePage,
+    getPagesMeta,
+    saveArchiveDownload,
     type Folder,
-    type Project,
     type Label,
+    type PageMeta,
+    type PageMetaPerson,
+    type Project,
   } from "../lib/api";
-  // LIF-442: page rows come from the project's delta read model, not from a
-  // per-navigation `listPages` fetch plus a poll. The rows are skinny: the
-  // body is a 200-char `preview`, which is all this tree ever rendered.
   import {
     cacheProjects,
     cachedProject,
@@ -22,87 +28,64 @@
     setActiveProject,
     type ProjectReadModel,
   } from "../lib/sync/readModel.svelte";
-  import type { PageRow } from "../lib/sync/types";
+  import type { PageRow as SyncPageRow } from "../lib/sync/types";
   import {
+    ArrowUpRight,
+    Copy,
+    Eye,
     FileText,
-    FolderOpen,
     FolderClosed,
+    FolderInput,
+    Link as LinkIcon,
+    Pin,
     Plus,
-    ChevronRight,
-    ChevronDown,
-    Trash2,
     X,
-    Search,
-    PenLine,
+    Archive,
     CircleDot,
     CheckCircle2,
-    Archive,
-    Pin,
-    PinOff,
-    FolderPlus,
-    ClipboardPaste,
-    NotebookPen,
-    PanelRight,
+    PenLine,
+    RotateCcw,
   } from "lucide-svelte";
+  import { getContext, untrack } from "svelte";
   import Select from "../lib/Select.svelte";
-  import SubTabs from "../lib/SubTabs.svelte";
-  import Tooltip from "../lib/Tooltip.svelte";
-  import TimeAgo from "../lib/TimeAgo.svelte";
-  import { longpress } from "../lib/actions/longpress"; // press-and-hold page peek on touch
-  import { openPagePeek } from "../lib/pages/pagePeek.svelte";
   import Mascot from "../lib/Mascot.svelte";
-  import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
-  import { getContext } from "svelte";
-  import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
-  import { loadSubTab, saveSubTab } from "../lib/subtab";
+  import TimeAgo from "../lib/TimeAgo.svelte";
+  import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
+  import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
+  import { copyToClipboard } from "../lib/clipboard";
+  import { openContextMenu, type ContextMenuItem } from "../lib/contextMenuState.svelte";
+  import { openPagePeek, pagePeekState } from "../lib/pages/pagePeek.svelte";
+  import { shortcutsSuppressed } from "../lib/shortcuts";
+  import { currentUser } from "../lib/userState";
+  import { loadSeen, saveSeen, snapshotOf, isSeen, withSeen, pruneSeen, type SeenMap } from "../lib/seenStore";
+  import { selectedIssueExport } from "../lib/issues/export";
   import { safeLabelColor } from "../lib/labelColors";
-
-  // LIF-234: pages are content — create/edit/delete + folder management are
-  // maintainer-gated. A viewer browses the tree read-only.
-  const canEdit = $derived(projectRole.canEdit);
-
-  // Register the toolbar with Layout's chrome topbar slot so it sits in
-  // the same --chrome zone as the sidebar instead of as a banded strip
-  // inside the recessed content panel.
-  const topbarCtx = getContext<{
-    set: (s: import("svelte").Snippet | undefined) => void;
-  } | undefined>("lific:topbar");
-
-  $effect(() => {
-    topbarCtx?.set(topbarContent);
-    return () => topbarCtx?.set(undefined);
-  });
-
-  // LIF-118: fuzzy search tuning constants.
-  //
-  //   SCORE_THRESHOLD  — minimum match score to surface. The scorer caps
-  //                      fuzzy (non-substring) matches at 0.7; 0.25 keeps
-  //                      reasonable subsequence hits but trims the long
-  //                      tail of "technically matched" noise.
-  //   RESULT_CAP       — hard cap so a generic 1-char query doesn't blow
-  //                      up the DOM. Sorted by score desc, so the user
-  //                      always sees the strongest matches.
-  //   CONTENT_WEIGHT   — preview matches discount relative to title.
-  //                      Body false positives are more common than title
-  //                      ones, so we want title/identifier hits to win
-  //                      ties.
-  //   LABEL_WEIGHT     — a label match is a real signal but a coarse one
-  //                      (labels are shared by many pages), so it sits
-  //                      below the identifier.
-  //
-  // LIF-442: the old CONTENT_SCAN_MAX is gone with the full body. The
-  // haystack is now the row's 200-char `preview`, which is bounded by
-  // construction, so there is nothing left to cap. The trade is honest and
-  // narrow: a match buried past the first line of a page no longer
-  // surfaces. Full-text search across bodies is the search endpoint's job.
-  const SCORE_THRESHOLD = 0.25;
-  const RESULT_CAP = 50;
-  const CONTENT_WEIGHT = 0.6;
-  const IDENTIFIER_WEIGHT = 0.9;
-  const LABEL_WEIGHT = 0.55;
+  import { conventionsState } from "../lib/pages/conventions";
+  import FolderTree from "../lib/pages/FolderTree.svelte";
+  import PageRowView from "../lib/pages/PageRow.svelte";
+  import ReadingPane from "../lib/pages/ReadingPane.svelte";
+  import PagesPulse from "../lib/pages/PagesPulse.svelte";
+  import PagesTopbar from "../lib/pages/PagesTopbar.svelte";
+  import PageBulkBar from "../lib/pages/PageBulkBar.svelte";
+  import { PageListView } from "../lib/pages/state.svelte";
+  import {
+    applyFilters,
+    descendantIds,
+    filterCount,
+    folderPathLabel,
+    folderStats,
+    groupPages,
+    inScope,
+    personLabel,
+    sortPages,
+    STATUS_LABEL,
+    type FolderScope,
+    type ListPage,
+    type PageGroupBlock,
+  } from "../lib/pages/list";
 
   let {
     navigate,
@@ -112,284 +95,82 @@
     projectIdentifier: string;
   } = $props();
 
+  // LIF-234: pages are content; viewers browse read-only.
+  const canEdit = $derived(projectRole.canEdit);
+
+  const topbarCtx = getContext<{ set: (s: import("svelte").Snippet | undefined) => void } | undefined>("lific:topbar");
+  $effect(() => {
+    topbarCtx?.set(topbarContent);
+    return () => topbarCtx?.set(undefined);
+  });
+
+  // LIF-118: search tuning. Title hits beat identifier hits beat label and
+  // first-line hits.
+  const SCORE_THRESHOLD = 0.25;
+  const RESULT_CAP = 50;
+  const CONTENT_WEIGHT = 0.6;
+  const IDENTIFIER_WEIGHT = 0.9;
+  const LABEL_WEIGHT = 0.55;
+
   let project = $state<Project | null>(null);
-  /** LIF-442: this project's read model. Warm from the first frame on a
-   *  revisit, bootstrapped from `/index` on a genuine cold start. */
   let model = $state<ProjectReadModel | null>(null);
-  // The tree's rows. A local `$state` array rather than a `$derived` of the
-  // model because every mutation path here (pin, move, folder delete) stamps
-  // its result on optimistically. The sync effect below re-seeds it from the
-  // model whenever no local write is in flight, so server truth wins in the
-  // end without rewriting the optimistic paths.
-  let pages = $state<PageRow[]>([]);
+  // Local rows, re-seeded from the model whenever no write is in flight, so
+  // optimistic changes survive until the server answers.
+  let pages = $state<SyncPageRow[]>([]);
   let folders = $state<Folder[]>([]);
-  // LIF-105: project labels powering the filter dropdown and chip color
-  // lookups in the tree. Empty until the project resolves.
   let labels = $state<Label[]>([]);
-  /** True while the project itself (and its folders/labels) resolves.
-   *  Distinct from the read model's own cold start — see `loading`. */
   let projectLoading = $state(true);
-  /** Cold start = nothing to show and nothing shown before, so returning
-   *  from a page (or another list surface) never flashes a skeleton over
-   *  rows we already hold. */
   let loading = $derived(model === null ? projectLoading : model.coldStart);
   let error = $state("");
-
-  // LIF-305: the selected Pages slice persists independently per project.
-  const PAGE_SUB_TAB_IDS = ["browse", "recent", "drafts", "archived"] as const;
-  type PageSubTab = (typeof PAGE_SUB_TAB_IDS)[number];
-  let activeSubTab = $state<PageSubTab>("browse");
-
-  let expandedFolders = $state<Set<number>>(new Set());
-
-  // Drag and drop. Pages only: the API has no endpoint for re-parenting
-  // a folder yet, and the old folder-drag path moved the folder
-  // optimistically, looked successful, then silently reverted on
-  // reload. Until persistence exists, folders aren't draggable.
-  let draggedId = $state<{ type: "page"; id: number } | null>(null);
-  let dropTarget = $state<number | "root" | null>(null);
-
-  // LIF-280: touch-friendly alternative to native HTML drag-and-drop for
-  // moving a page between folders. The picker starts at the page's current
-  // location, which Select marks with a check.
-  let movePage = $state<PageRow | null>(null);
-  let moveFolderId = $state<number | null>(null);
-  let movingPageIds = $state<Set<number>>(new Set());
-  let movingPage = $derived(movePage !== null && movingPageIds.has(movePage.id));
-
-  // LIF-442: what survives from the auto-refresh era's `isBusy` veto. A
-  // delta must not land on top of an optimistic change the PUT has not
-  // acknowledged yet, and a re-seed mid-drag would yank the row out from
-  // under the pointer. Both are `$state`, so the sync effect below re-runs
-  // and applies the latest rows the moment they settle.
   let mutationsInFlight = $state(0);
+  let dragId = $state<number | null>(null);
+  /** A folder, or null for Unfiled (the list's group header). */
+  let dropTarget = $state<number | null | undefined>(undefined);
 
-  /** Run `write` with the model→`pages` sync paused, so its optimistic
-   *  update survives until the server has answered. */
+  const view = new PageListView();
+
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  let listEl = $state<HTMLDivElement | null>(null);
+  let foldersOpen = $state(false);
+  let pulseOpen = $state(false);
+
+  // ── Data ─────────────────────────────────────────────
+
+  $effect(() => {
+    const m = model;
+    if (!m) return;
+    const rows = m.pageList;
+    if (dragId !== null || mutationsInFlight > 0) return;
+    pages = rows;
+  });
+
+  $effect(() => {
+    const id = projectIdentifier;
+    untrack(() => {
+      view.hydrate(id);
+      loadData(id);
+    });
+  });
+
+  $effect(() => {
+    void view.snapshot();
+    view.save(projectIdentifier);
+  });
+
   async function withMutation<T>(write: () => Promise<T>): Promise<T> {
     mutationsInFlight += 1;
     try {
       return await write();
     } finally {
-      // Releasing the pause re-seeds from the model; catch it up first so
-      // the write is not undone on screen while no realtime event arrives.
       await model?.pull().catch(() => {});
       mutationsInFlight -= 1;
     }
   }
 
-  // Inline create. `status` (pages only) lets the "New page as …" menu
-  // presets seed the lifecycle status the inline row will commit with.
-  let createTarget = $state<{
-    type: "page" | "folder";
-    parentId: number | null;
-    status?: string;
-  } | null>(null);
-  let createName = $state("");
-
-  // Split "New" button caret menu (folder / paste / quick note / status).
-  let newMenuOpen = $state(false);
-
-  // LIF-185: folder focus. When set (via the right sidebar), the main tree
-  // shows only that folder's subtree. null = show everything.
-  let focusedFolderId = $state<number | null>(null);
-
-  // LIF-105: label filter. Empty string = no filter (mirrors the issue
-  // list's filterLabel convention).
-  let filterLabel = $state("");
-
-  // LIF-112: lifecycle status. Picker icon + label per value, plus the
-  // status filter. The filter's default ("__active") hides archived
-  // pages; "" means show All (including archived).
-  const PAGE_STATUSES = [
-    { value: "draft", label: "Draft", icon: PenLine },
-    { value: "active", label: "Active", icon: CircleDot },
-    { value: "complete", label: "Complete", icon: CheckCircle2 },
-    { value: "archived", label: "Archived", icon: Archive },
-  ] as const;
-
-  function statusMeta(value: string) {
-    return PAGE_STATUSES.find((s) => s.value === value) ?? PAGE_STATUSES[0];
-  }
-
-  // Status → leading-icon color so the page icon actually carries meaning
-  // (it used to be an identical FileText on every row).
-  function statusColor(status: string): string {
-    switch (status) {
-      case "active":
-        return "var(--accent)";
-      case "complete":
-        return "var(--success)";
-      case "archived":
-        return "var(--text-faint)";
-      default: // draft
-        return "var(--text-muted)";
-    }
-  }
-
-  // Filter dropdown options. The leading entry is the default "hide
-  // archived" view (sentinel "__active"), then explicit "All", then one
-  // per concrete status.
-  const HIDE_ARCHIVED = "__active";
-  const statusFilterOptions = [
-    { value: HIDE_ARCHIVED, label: "Active" },
-    { value: "", label: "All" },
-    ...PAGE_STATUSES.map((s) => ({ value: s.value, label: s.label })),
-  ];
-
-  // Default to hiding archived pages.
-  let filterStatus = $state(HIDE_ARCHIVED);
-
-
-  // Browse filters are applied locally so the same complete collection can
-  // also power the zero-config LIF-305 flat tabs.
-  let visiblePages = $derived(
-    pages.filter((p) => {
-      if (filterLabel && !p.labels.includes(filterLabel)) return false;
-      if (filterStatus === HIDE_ARCHIVED) return p.status !== "archived";
-      return !filterStatus || p.status === filterStatus;
-    }),
-  );
-
-  let recentPages = $derived(
-    pages
-      .filter((p) => p.status !== "archived")
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-      .slice(0, 20),
-  );
-
-  let draftPages = $derived(
-    pages
-      .filter((p) => p.status === "draft")
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
-  );
-
-  let archivedPages = $derived(
-    pages
-      .filter((p) => p.status === "archived")
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
-  );
-
-  let pageSubTabs = $derived([
-    { id: "browse", label: "Browse" },
-    { id: "recent", label: "Recent" },
-    { id: "drafts", label: "Drafts", count: draftPages.length },
-    { id: "archived", label: "Archived", count: archivedPages.length },
-  ]);
-
-  // Search keeps the Browse filter semantics it had when filters were
-  // server-backed: "Active" and "All" search every loaded page, while a
-  // concrete status or label narrows its candidate set.
-  let searchablePages = $derived(
-    pages.filter(
-      (p) =>
-        (!filterLabel || p.labels.includes(filterLabel)) &&
-        (filterStatus === HIDE_ARCHIVED || filterStatus === "" || p.status === filterStatus),
-    ),
-  );
-
-  // LIF-117/118: client-side search. A collapsed icon in the toolbar
-  // expands to an input on click, and fuzzy-scores the already-loaded
-  // pages across title, identifier, and content. When active, the tree
-  // is replaced by a flat ranked result list (folders become irrelevant
-  // in a search context).
-  let searchQuery = $state("");
-  let searchExpanded = $state(false);
-
-  // LIF-231: the overview/folder-navigator sidebar is an off-canvas panel
-  // below lg, toggled from the topbar; statically docked at lg+.
-  let overviewOpen = $state(false);
-  let searchInputEl = $state<HTMLInputElement | null>(null);
-
-  // A search hit carries enough info to render the row: which page, the
-  // composite score (for sorting), and an optional snippet pulled from
-  // the content body when content was the *reason* the page matched.
-  interface SearchHit {
-    page: PageRow;
-    score: number;
-    snippet: string | null;
-  }
-
-  let filteredPages = $derived.by<SearchHit[]>(() => {
-    const q = searchQuery.trim();
-    if (!q) return [];
-
-    const hits: SearchHit[] = [];
-    for (const page of searchablePages) {
-      const titleHit = fuzzyMatch(q, page.title);
-      const idHit = fuzzyMatch(q, page.identifier);
-      // LIF-442: the body haystack is the row's 200-char preview. Bounded
-      // by construction, so the old scan cap is unnecessary.
-      const body = page.preview;
-      const contentHit = fuzzyMatch(q, body);
-      const labelHit = page.labels.length > 0 ? fuzzyMatch(q, page.labels.join(" ")) : null;
-
-      const titleScore = titleHit?.score ?? 0;
-      const idScore = (idHit?.score ?? 0) * IDENTIFIER_WEIGHT;
-      const contentScore = (contentHit?.score ?? 0) * CONTENT_WEIGHT;
-      const labelScore = (labelHit?.score ?? 0) * LABEL_WEIGHT;
-
-      const best = Math.max(titleScore, idScore, contentScore, labelScore);
-      if (best < SCORE_THRESHOLD) continue;
-
-      // Snippet only when content was the winning signal — otherwise the
-      // title/identifier already explains the match.
-      const snippet =
-        contentHit && contentScore === best && best > 0
-          ? buildSnippet(body, contentHit.matchStart, contentHit.matchEnd)
-          : null;
-
-      hits.push({ page, score: best, snippet });
-    }
-
-    hits.sort((a, b) => b.score - a.score);
-    return hits.slice(0, RESULT_CAP);
-  });
-
-  function openSearch() {
-    searchExpanded = true;
-    requestAnimationFrame(() => searchInputEl?.focus());
-  }
-
-  function maybeCollapseSearch() {
-    if (!searchQuery) searchExpanded = false;
-  }
-
-  let labelOptions = $derived([
-    { value: "", label: "Label" },
-    ...labels.map((l) => ({ value: l.name, label: l.name, color: l.color })),
-  ]);
-
-  let moveFolderOptions = $derived([
-    { value: null, label: "No folder / root" },
-    ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
-  ]);
-
-  // LIF-442: the model → local array sync. `draggedId` / `mutationsInFlight`
-  // are read here on purpose: while either is set the effect bails without
-  // writing, and because both are `$state` it re-runs (and applies the
-  // latest rows) the moment they settle.
-  $effect(() => {
-    const m = model;
-    if (!m) return;
-    const rows = m.pageList;
-    if (draggedId !== null || mutationsInFlight > 0) return;
-    // LIF-524: the conventions page lives on the project's Conventions tab.
-    pages = rows.filter((row) => !row.conventions);
-  });
-
-  $effect(() => {
-    const id = projectIdentifier;
-    loadData(id);
-  });
-
   async function loadData(ident: string) {
     projectLoading = true;
     error = "";
-
-    // LIF-442: attach to the read model synchronously on a revisit, so the
-    // tree paints on the first frame instead of waiting a round trip for
-    // `listProjects` just to learn an id we already knew.
+    seenFor = null;
     const cached = cachedProject(ident);
     if (cached) {
       project = cached;
@@ -402,1409 +183,1192 @@
 
     const projRes = await listProjects();
     if (!projRes.ok) {
-      if (!cached) { error = projRes.error; projectLoading = false; return; }
+      if (!cached) {
+        error = projRes.error;
+        projectLoading = false;
+        return;
+      }
     } else {
       cacheProjects(projRes.data);
       const found = projRes.data.find((p: Project) => p.identifier === ident);
-      if (!found) { error = `Project ${ident} not found`; projectLoading = false; return; }
-      // A slow response for a project the user has already navigated away
-      // from must not re-point this component at it.
+      if (!found) {
+        error = `Project ${ident} not found`;
+        projectLoading = false;
+        return;
+      }
       if (ident !== projectIdentifier) return;
       project = found;
       attachModel(found);
     }
 
     const resolved = project;
-    if (!resolved) { projectLoading = false; return; }
-    loadProjectRole(resolved.id); // LIF-234
-    activeSubTab = (loadSubTab("pages", String(resolved.id), PAGE_SUB_TAB_IDS) ?? "browse") as PageSubTab;
-
-    // Folders and labels are project structure, not part of the sync
-    // stream, so they stay ordinary fetches — one per navigation, no poll.
-    const [fRes, lRes] = await Promise.all([
-      listFolders(resolved.id),
-      listLabels(resolved.id),
-    ]);
-    if (fRes.ok) {
-      const previousFolderIds = new Set(folders.map((folder) => folder.id));
-      const nextFolderIds = new Set(fRes.data.map((folder) => folder.id));
-      folders = fRes.data;
-      expandedFolders = new Set(
-        [...expandedFolders].filter((id) => nextFolderIds.has(id)),
-      );
-      for (const folder of fRes.data) {
-        if (!previousFolderIds.has(folder.id)) expandedFolders.add(folder.id);
-      }
+    if (!resolved) {
+      projectLoading = false;
+      return;
     }
+    loadProjectRole(resolved.id);
+
+    const [fRes, lRes] = await Promise.all([listFolders(resolved.id), listLabels(resolved.id)]);
+    if (ident !== projectIdentifier) return;
+    if (fRes.ok) folders = fRes.data;
     if (lRes.ok) labels = lRes.data;
     projectLoading = false;
   }
 
-  /** Point this component at a project's read model: bootstrap or catch up,
-   *  and make it the project the websocket resumes for. */
   function attachModel(found: Project) {
     model = ensureProjectModel(found.id);
     setActiveProject(found.id);
+    metaMap = metaCache.get(found.id) ?? new Map();
+    metaLoaded = metaCache.has(found.id);
   }
 
-  function selectSubTab(id: string) {
-    if (!PAGE_SUB_TAB_IDS.includes(id as PageSubTab)) return;
-    activeSubTab = id as PageSubTab;
-    if (project) saveSubTab("pages", String(project.id), activeSubTab);
-  }
+  // ── Page metadata ────────────────────────────────────
+  // Reloaded a moment after any row moves; cached per project so a revisit
+  // paints excerpts and editors on the first frame.
+  const metaCache = new Map<number, Map<number, PageMeta>>();
+  let metaMap = $state<Map<number, PageMeta>>(new Map());
+  let metaLoaded = $state(false);
+  let metaTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Tree helpers
-  function childFolders(parentId: number | null): Folder[] {
-    return folders.filter((f) => f.parent_id === parentId);
-  }
+  const pagesStamp = $derived(pages.reduce((n, p) => Math.max(n, p.seq), 0) + ":" + pages.length);
 
-  function pagesInFolder(folderId: number | null): PageRow[] {
-    // Newest first so a freshly created page lands at the top of its level
-    // instead of the bottom (pages share a default sort_order, so the old
-    // id-ASC tiebreak buried new docs under everything else).
-    return visiblePages
-      .filter((p) => (p.folder_id ?? null) === folderId)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
-  }
+  $effect(() => {
+    const pid = project?.id;
+    void pagesStamp;
+    if (pid == null || loading) return;
+    if (metaTimer) clearTimeout(metaTimer);
+    const delay = metaCache.has(pid) ? 700 : 0;
+    metaTimer = setTimeout(async () => {
+      const res = await getPagesMeta(pid);
+      if (!res.ok || project?.id !== pid) return;
+      const next = new Map(res.data.pages.map((m) => [m.id, m]));
+      metaCache.set(pid, next);
+      metaMap = next;
+      metaLoaded = true;
+    }, delay);
+    return () => {
+      if (metaTimer) clearTimeout(metaTimer);
+    };
+  });
 
-  function toggleFolder(id: number) {
-    const next = new Set(expandedFolders);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    expandedFolders = next;
-  }
+  const myId = $derived($currentUser?.id ?? null);
 
-  // LIF-442: `preview` arrives from the server already reduced to the first
-  // non-empty line of the body and capped at 200 characters, so all that is
-  // left here is presentation: drop a leading markdown heading marker and
-  // the inline emphasis characters, then fit the row.
-  function contentPreview(preview: string): string {
-    return preview.replace(/^#+\s*/, "").replace(/[*_`\[\]]/g, "").slice(0, 140);
-  }
+  // ── Derived lists ────────────────────────────────────
 
-  // LIF-183: pinned pages, surfaced in a section above the folder tree.
-  // Pins cut across folders, so this is a flat list (most-recent first).
+  let conventions = $derived(conventionsState(pages));
+  /** Every page but the conventions page, which has the project's
+   *  Conventions tab. Nothing in this view lists, previews or edits it. */
+  let treePages = $derived(pages.filter((p) => !p.conventions));
+  let livePages = $derived(treePages.filter((p) => p.status !== "archived"));
+  let archivedPages = $derived(treePages.filter((p) => p.status === "archived"));
+  let folderIds = $derived(new Set(folders.map((f) => f.id)));
+  let stats = $derived(folderStats(livePages, folders));
+  let scope = $derived<FolderScope>(
+    typeof view.scope === "number" && !folderIds.has(view.scope) && !projectLoading ? "all" : view.scope,
+  );
+  let scopeIds = $derived(typeof scope === "number" ? descendantIds(folders, scope) : null);
+  let scopeLabel = $derived(
+    scope === "all"
+      ? "All pages"
+      : scope === "archived"
+        ? "Archived"
+        : folderPathLabel(folders, scope) || "Folder",
+  );
+  let conventionsEntry = $derived<"on" | "off" | "missing">(
+    conventions.kind === "page" ? (conventions.page.conventions_enabled !== false ? "on" : "off") : "missing",
+  );
+  let labelColors = $derived(new Map(labels.map((l) => [l.name, safeLabelColor(l.color)])));
+
+  // Archived pages all share one status, so the status filter stands aside.
+  let activeFilters = $derived(scope === "archived" ? { ...view.filters, statuses: [] } : view.filters);
+  let scopedPages = $derived(
+    scope === "archived" ? archivedPages : livePages.filter((p) => inScope(p, scope, folders, scopeIds)),
+  );
+  let filtered = $derived(applyFilters(scopedPages, activeFilters, metaMap));
+  let showPinnedStrip = $derived(scope === "all" && filterCount(activeFilters) === 0);
   let pinnedPages = $derived(
-    visiblePages
-      .filter((p) => p.pinned)
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+    showPinnedStrip ? filtered.filter((p) => p.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at)) : [],
+  );
+  let groups = $derived.by<PageGroupBlock[]>(() => {
+    const rows = showPinnedStrip ? filtered.filter((p) => !p.pinned) : filtered;
+    return groupPages(sortPages(rows, view.sort), view.group, {
+      folders,
+      labelColors,
+      scopeFolder: typeof scope === "number" ? scope : undefined,
+    });
+  });
+
+  interface SearchHit {
+    page: SyncPageRow;
+    score: number;
+    snippet: string | null;
+  }
+
+  let searchHits = $derived.by<SearchHit[]>(() => {
+    const q = view.search.trim();
+    if (!q) return [];
+    const hits: SearchHit[] = [];
+    for (const page of treePages) {
+      const body = metaMap.get(page.id)?.excerpt || page.preview;
+      const titleHit = fuzzyMatch(q, page.title);
+      const idHit = fuzzyMatch(q, page.identifier);
+      const contentHit = fuzzyMatch(q, body);
+      const labelHit = page.labels.length > 0 ? fuzzyMatch(q, page.labels.join(" ")) : null;
+      const titleScore = titleHit?.score ?? 0;
+      const idScore = (idHit?.score ?? 0) * IDENTIFIER_WEIGHT;
+      const contentScore = (contentHit?.score ?? 0) * CONTENT_WEIGHT;
+      const labelScore = (labelHit?.score ?? 0) * LABEL_WEIGHT;
+      const best = Math.max(titleScore, idScore, contentScore, labelScore);
+      if (best < SCORE_THRESHOLD) continue;
+      const snippet =
+        contentHit && contentScore === best && best > 0 ? buildSnippet(body, contentHit.matchStart, contentHit.matchEnd) : null;
+      hits.push({ page, score: best, snippet });
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, RESULT_CAP);
+  });
+
+  let searching = $derived(view.search.trim() !== "");
+
+  /** The rows on screen, in order: what J/K walks and Ctrl+A selects. */
+  let flatRows = $derived.by<ListPage[]>(() => {
+    if (searching) return searchHits.map((h) => h.page);
+    return [...pinnedPages, ...groups.flatMap((g) => g.pages)];
+  });
+
+  // Label groups can list a page twice; count it once.
+  let shownCount = $derived(
+    loading ? null : searching ? flatRows.length : new Set(flatRows.map((p) => p.id)).size,
   );
 
-  function folderName(folderId: number | null): string | null {
-    if (folderId == null) return null;
-    return folders.find((f) => f.id === folderId)?.name ?? null;
+  let editors = $derived.by<PageMetaPerson[]>(() => {
+    const seen = new Map<number, PageMetaPerson>();
+    for (const m of metaMap.values()) if (m.updated_by) seen.set(m.updated_by.id, m.updated_by);
+    return [...seen.values()].sort((a, b) => Number(a.is_bot) - Number(b.is_bot) || personLabel(a).localeCompare(personLabel(b)));
+  });
+
+  // ── Reading pane ─────────────────────────────────────
+
+  let wide = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    wide = mq.matches;
+    const on = () => (wide = mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  });
+
+  let paneMode = $derived(wide && view.pane);
+  let paneRow = $derived(paneMode && view.focusedId != null ? (treePages.find((p) => p.id === view.focusedId) ?? null) : null);
+
+  const pagePath = (id: number) => `/${projectIdentifier}/pages/${id}`;
+
+  function resolveRef(identifier: string): string | null {
+    const page = pages.find((p) => p.identifier.toLowerCase() === identifier.toLowerCase());
+    if (page) return pagePath(page.id);
+    if (/-DOC-\d+$/i.test(identifier) || /-PLAN-\d+$/i.test(identifier)) return null;
+    return `/${identifier.split("-")[0]}/issues/${identifier}`;
   }
 
-  // Depth of a folder in the hierarchy (for sidebar indentation).
-  function folderDepth(folder: Folder): number {
-    let d = 0;
-    let cur: Folder | undefined = folder;
-    while (cur && cur.parent_id != null) {
-      cur = folders.find((f) => f.id === cur!.parent_id);
-      d++;
-      if (d > 20) break; // cycle guard
+  function open(page: ListPage) {
+    markSeen(page);
+    navigate(pagePath(page.id));
+  }
+
+  function activate(page: ListPage) {
+    if (paneMode) {
+      view.focusedId = page.id;
+      markSeen(page);
+    } else {
+      open(page);
     }
-    return d;
   }
 
-  // Folders sorted for the sidebar: a stable depth-first ordering so nested
-  // folders sit under their parent, each shown with a small indent.
-  let sidebarFolders = $derived.by(() => {
-    const out: Folder[] = [];
-    const walk = (parentId: number | null) => {
-      const kids = folders
-        .filter((f) => f.parent_id === parentId)
-        .sort((a, b) => a.name.localeCompare(b.name));
-      for (const f of kids) {
-        out.push(f);
-        walk(f.id);
-      }
+  function peek(page: ListPage) {
+    markSeen(page);
+    openPagePeek(page.id, pagePath(page.id));
+  }
+
+  // ── Changed since the last visit ─────────────────────
+
+  let seenMap = $state<SeenMap>({});
+  let seenFor = $state<string | null>(null);
+  const seenKey = (ident: string) => `pages:${ident}`;
+
+  $effect(() => {
+    const ident = projectIdentifier;
+    if (loading || model?.status !== "ready" || seenFor === ident) return;
+    untrack(() => {
+      const stored = loadSeen(seenKey(ident));
+      seenMap = stored ?? snapshotOf(pages);
+      if (!stored) saveSeen(seenKey(ident), seenMap);
+      seenFor = ident;
+    });
+  });
+
+  $effect(() => {
+    const ident = projectIdentifier;
+    return () => {
+      if (seenFor !== ident) return;
+      saveSeen(seenKey(ident), model?.status === "ready" ? pruneSeen(seenMap, pages) : seenMap);
     };
-    walk(null);
+  });
+
+  function markSeen(page: ListPage) {
+    if (seenFor !== projectIdentifier) return;
+    const next = withSeen(seenMap, page);
+    if (next === seenMap) return;
+    seenMap = next;
+    saveSeen(seenKey(projectIdentifier), next);
+  }
+
+  let changedIds = $derived.by(() => {
+    const out = new Set<number>();
+    if (seenFor !== projectIdentifier) return out;
+    for (const p of livePages) {
+      if (isSeen(seenMap, p)) continue;
+      // Your own edits are not news.
+      const by = metaMap.get(p.id)?.updated_by;
+      if (by && myId != null && by.id === myId) continue;
+      out.add(p.id);
+    }
     return out;
   });
 
-  // Direct (non-recursive) page count per folder, for the sidebar.
-  function folderPageCount(folderId: number | null): number {
-    return visiblePages.filter((p) => (p.folder_id ?? null) === folderId).length;
+  let changedCount = $derived(flatRows.reduce((n, p) => n + (changedIds.has(p.id) ? 1 : 0), 0));
+
+  function cycleChanged() {
+    const n = flatRows.length;
+    if (!n) return;
+    const start = flatRows.findIndex((p) => p.id === view.focusedId);
+    for (let step = 1; step <= n; step++) {
+      const row = flatRows[(start + step + n) % n];
+      if (!changedIds.has(row.id)) continue;
+      focusRow(row.id);
+      markSeen(row);
+      return;
+    }
   }
 
-  // Per-status tallies across visible pages, for the sidebar summary.
-  let statusTally = $derived.by(() => {
-    const counts: Record<string, number> = { draft: 0, active: 0, complete: 0, archived: 0 };
-    for (const p of visiblePages) counts[p.status] = (counts[p.status] ?? 0) + 1;
-    return counts;
+  // ── Rows that just changed glow once ─────────────────
+  let flashIds = $state<Set<number>>(new Set());
+  let prevStamps: Map<number, string> | null = null;
+  let stampProject: string | null = null;
+  $effect(() => {
+    const list = pages;
+    const proj = projectIdentifier;
+    if (loading) return;
+    const next = new Map(list.map((p) => [p.id, p.updated_at]));
+    const prev = prevStamps;
+    const same = stampProject === proj;
+    prevStamps = next;
+    stampProject = proj;
+    if (!prev || !same) return;
+    const changed: number[] = [];
+    for (const [id, stamp] of next) if (prev.get(id) !== stamp) changed.push(id);
+    if (changed.length === 0 || changed.length > 8) return;
+    untrack(() => {
+      flashIds = new Set([...flashIds, ...changed]);
+      setTimeout(() => {
+        const keep = new Set(flashIds);
+        for (const id of changed) keep.delete(id);
+        flashIds = keep;
+      }, 1400);
+    });
   });
 
-  function focusFolder(id: number | null) {
-    focusedFolderId = id;
-    searchQuery = "";
-    searchExpanded = false;
-    // On mobile, dismiss the off-canvas overview so the filtered list shows.
-    overviewOpen = false;
+  // ── Focus and keyboard ───────────────────────────────
+
+  function focusRow(id: number | null) {
+    view.focusedId = id;
+    if (id == null) return;
+    requestAnimationFrame(() => {
+      listEl?.querySelector<HTMLElement>(`[data-page-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+    });
   }
 
-  // Optimistic pin toggle. Flip locally so the row reacts instantly, then
-  // persist; on failure, revert.
-  async function togglePin(page: PageRow, e: Event) {
-    e.stopPropagation();
+  function move(delta: number) {
+    const n = flatRows.length;
+    if (!n) return;
+    const i = flatRows.findIndex((p) => p.id === view.focusedId);
+    const next = i < 0 ? (delta > 0 ? 0 : n - 1) : Math.min(n - 1, Math.max(0, i + delta));
+    focusRow(flatRows[next].id);
+    if (paneMode) markSeen(flatRows[next]);
+  }
+
+  function focusedRow(): ListPage | null {
+    return flatRows.find((p) => p.id === view.focusedId) ?? null;
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (shortcutsSuppressed() || pagePeekState.open) return;
+    if (e.altKey) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === "a" && canEdit && flatRows.length) {
+      e.preventDefault();
+      view.selected = new Set(flatRows.map((p) => p.id));
+      return;
+    }
+    if (mod) return;
+    switch (e.key) {
+      case "j":
+      case "J":
+      case "ArrowDown":
+        e.preventDefault();
+        move(1);
+        return;
+      case "k":
+      case "K":
+      case "ArrowUp":
+        e.preventDefault();
+        move(-1);
+        return;
+      case "Home":
+        if (flatRows.length) { e.preventDefault(); focusRow(flatRows[0].id); }
+        return;
+      case "End":
+        if (flatRows.length) { e.preventDefault(); focusRow(flatRows[flatRows.length - 1].id); }
+        return;
+      case "Enter": {
+        const row = focusedRow();
+        if (row) { e.preventDefault(); open(row); }
+        return;
+      }
+      case " ": {
+        const row = focusedRow();
+        if (row && !paneMode) { e.preventDefault(); peek(row); }
+        return;
+      }
+      case "x":
+      case "X": {
+        const row = focusedRow();
+        if (row && canEdit) { e.preventDefault(); view.toggleSelected(row.id); }
+        return;
+      }
+      case "p":
+      case "P": {
+        const row = focusedRow();
+        if (row && canEdit) { e.preventDefault(); void togglePin(row); }
+        return;
+      }
+      case "c":
+      case "C":
+        if (canEdit) { e.preventDefault(); startCreate(); }
+        return;
+      case "/":
+        e.preventDefault();
+        view.searchOpen = true;
+        requestAnimationFrame(() => searchInputEl?.focus());
+        return;
+      case "f":
+      case "F": {
+        e.preventDefault();
+        const openNow = !view.filterOpen;
+        view.closePopovers();
+        view.filterOpen = openNow;
+        return;
+      }
+      case "Escape":
+        if (view.filterOpen || view.displayOpen) view.closePopovers();
+        else if (foldersOpen || pulseOpen) { foldersOpen = false; pulseOpen = false; }
+        else if (view.selected.size) view.selected = new Set();
+        else if (view.focusedId != null) view.focusedId = null;
+        else return;
+        e.preventDefault();
+        return;
+    }
+  }
+
+  function autofocus(node: HTMLInputElement) {
+    requestAnimationFrame(() => node.focus());
+  }
+
+  $effect(() => {
+    window.addEventListener("lific:pages-search-done", onSearchDone);
+    return () => window.removeEventListener("lific:pages-search-done", onSearchDone);
+  });
+
+  function onSearchDone(e: Event) {
+    const key = (e as CustomEvent<string>).detail;
+    const first = flatRows[0];
+    if (!first) return;
+    if (key === "Enter" && searching) open(first);
+    else focusRow(first.id);
+  }
+
+  // ── Writes ───────────────────────────────────────────
+
+  function patchLocal(ids: Iterable<number>, patch: Partial<SyncPageRow>) {
+    const set = new Set(ids);
+    pages = pages.map((p) => (set.has(p.id) ? { ...p, ...patch } : p));
+  }
+
+  async function togglePin(page: ListPage) {
     const next = !page.pinned;
-    pages = pages.map((p) => (p.id === page.id ? { ...p, pinned: next } : p));
+    patchLocal([page.id], { pinned: next });
     const res = await withMutation(() => updatePage(page.id, { pinned: next }));
     if (!res.ok) {
-      pages = pages.map((p) => (p.id === page.id ? { ...p, pinned: !next } : p));
+      patchLocal([page.id], { pinned: !next });
+      toast(`Couldn't ${next ? "pin" : "unpin"} ${page.identifier}: ${res.error}`, { kind: "error" });
     }
-    // Let the replica converge on what actually landed either way.
     refreshProjectModel(project?.id);
   }
 
-  // ── Drag and drop ────────────────────────────────────
-
-  function onDragStartPage(e: DragEvent, pageId: number) {
-    draggedId = { type: "page", id: pageId };
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", `page:${pageId}`);
+  async function setStatus(page: ListPage, status: string) {
+    const before = page.status;
+    patchLocal([page.id], { status });
+    const res = await withMutation(() => updatePage(page.id, { status }));
+    if (!res.ok) {
+      patchLocal([page.id], { status: before });
+      toast(`Couldn't change ${page.identifier}: ${res.error}`, { kind: "error" });
+    } else if (status === "archived" || before === "archived") {
+      toast(`${page.identifier} ${status === "archived" ? "archived" : "restored"}`, {
+        kind: "success",
+        duration: 2500,
+      });
     }
+    refreshProjectModel(project?.id);
   }
 
-  function onDragEnd() {
-    draggedId = null;
-    dropTarget = null;
+  async function moveToFolder(page: ListPage, folderId: number | null): Promise<boolean> {
+    const before = page.folder_id ?? null;
+    if (before === folderId) return true;
+    patchLocal([page.id], { folder_id: folderId });
+    const res = await withMutation(() => updatePage(page.id, { folder_id: folderId }));
+    refreshProjectModel(project?.id);
+    if (!res.ok) {
+      patchLocal([page.id], { folder_id: before });
+      toast(`Couldn't move ${page.identifier}: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    const where = folderId == null ? "Unfiled" : (folders.find((f) => f.id === folderId)?.name ?? "the folder");
+    toast(`Moved ${page.identifier} to ${where}`, { kind: "success", duration: 2500 });
+    return true;
   }
 
-  function onDragOver(e: DragEvent, target: number | "root") {
-    if (!draggedId) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    // Only update if actually changing target — prevents child element
-    // dragleave/dragenter flicker from clearing the highlight
-    if (dropTarget !== target) dropTarget = target;
+  // Bulk: one request per page, applied optimistically, reported once.
+  let bulkBusy = $state(false);
+  async function bulk(
+    patch: (p: SyncPageRow) => Partial<SyncPageRow> | null,
+    write: (p: SyncPageRow) => Parameters<typeof updatePage>[1],
+    done: string,
+  ) {
+    const targets = treePages.filter((p) => view.selected.has(p.id));
+    const work = targets.map((p) => ({ p, change: patch(p) })).filter((x) => x.change);
+    if (!work.length) return;
+    bulkBusy = true;
+    const before = new Map(work.map(({ p }) => [p.id, p]));
+    pages = pages.map((p) => {
+      const w = work.find((x) => x.p.id === p.id);
+      return w ? { ...p, ...w.change } : p;
+    });
+    const results = await withMutation(() => Promise.all(work.map(({ p }) => updatePage(p.id, write(p)))));
+    const failed = work.filter((_, i) => !results[i].ok);
+    if (failed.length) {
+      pages = pages.map((p) => (failed.some((f) => f.p.id === p.id) ? before.get(p.id)! : p));
+      toast(`${failed.length} of ${work.length} pages didn't change`, { kind: "error" });
+    } else {
+      toast(`${done} ${work.length} ${work.length === 1 ? "page" : "pages"}`, { kind: "success", duration: 2500 });
+      view.selected = new Set();
+    }
+    bulkBusy = false;
+    refreshProjectModel(project?.id);
   }
 
-  async function movePageToFolder(page: PageRow, targetFolderId: number | null): Promise<boolean> {
-    if (movingPageIds.has(page.id)) return false;
-
-    const previousFolderId = page.folder_id ?? null;
-    if (previousFolderId === targetFolderId) return true;
-
-    movingPageIds = new Set([...movingPageIds, page.id]);
-    mutationsInFlight += 1;
-    pages = pages.map((p) =>
-      p.id === page.id ? { ...p, folder_id: targetFolderId } : p
-    );
+  async function bulkExport() {
+    const ids = treePages.filter((p) => view.selected.has(p.id)).map((p) => p.identifier);
+    bulkBusy = true;
     try {
-      const res = await updatePage(page.id, { folder_id: targetFolderId });
-      if (!res.ok) {
-        pages = pages.map((p) =>
-          p.id === page.id ? { ...p, folder_id: previousFolderId } : p
-        );
-        toast(`Couldn't move ${page.identifier}: ${res.error}`, { kind: "error" });
-        return false;
-      }
-
-      // The server agreed; the moved row comes back through the delta. No
-      // need to graft the REST response in — it is a different (fat) shape.
-      if (targetFolderId && !expandedFolders.has(targetFolderId)) {
-        expandedFolders = new Set([...expandedFolders, targetFolderId]);
-      }
-      return true;
+      const blob = await selectedIssueExport(ids, "pages");
+      saveArchiveDownload(blob, `${projectIdentifier}-pages-${ids.length}.md`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Export failed", { kind: "error" });
     } finally {
-      const next = new Set(movingPageIds);
-      next.delete(page.id);
-      movingPageIds = next;
-      mutationsInFlight -= 1;
-      refreshProjectModel(project?.id);
+      bulkBusy = false;
     }
-  }
-
-  async function onDrop(e: DragEvent, targetFolderId: number | null) {
-    e.preventDefault();
-    if (!draggedId) return;
-    const dragged = draggedId;
-    draggedId = null;
-    dropTarget = null;
-
-    const page = pages.find((p) => p.id === dragged.id);
-    if (!page) return;
-    await movePageToFolder(page, targetFolderId);
-  }
-
-  function openMovePicker(page: PageRow, e: Event) {
-    e.stopPropagation();
-    movePage = page;
-    moveFolderId = page.folder_id ?? null;
-  }
-
-  async function chooseMoveFolder(folderId: number | null) {
-    if (!movePage) return;
-    if (await movePageToFolder(movePage, folderId)) movePage = null;
   }
 
   // ── Create ───────────────────────────────────────────
 
-  function startCreate(
-    type: "page" | "folder",
-    parentId: number | null = null,
-    status?: string,
-  ) {
-    if (!canEdit) return; // LIF-234: page/folder creation is maintainer-gated
-    newMenuOpen = false;
-    createTarget = { type, parentId, status };
-    createName = "";
+  let composer = $state<{ status: "draft" | "active"; folderId: number | null } | null>(null);
+  let composerTitle = $state("");
+  let composerBusy = $state(false);
+
+  function startCreate(folderId: number | null = typeof scope === "number" ? scope : null) {
+    if (!canEdit) return;
+    // The composer lives in the list; from the archive, go back to every
+    // page.
+    if (typeof scope !== "number" && scope !== "all") setScope("all");
+    view.closePopovers();
+    view.search = "";
+    composer = { status: "draft", folderId };
+    composerTitle = "";
+    listEl?.scrollTo({ top: 0 });
   }
 
   async function commitCreate() {
-    if (!project || !createTarget || !createName.trim()) return;
-    const { type, parentId, status } = createTarget;
-    createTarget = null;
-
-    if (type === "page") {
-      const res = await createPage({
-        project_id: project.id,
-        title: createName.trim(),
-        folder_id: parentId ?? undefined,
-        ...(status ? { status } : {}),
-      });
-      if (res.ok) {
-        navigate(`/${projectIdentifier}/pages/${res.data.id}`);
-      }
-    } else {
-      const res = await createFolder({
-        project_id: project.id,
-        name: createName.trim(),
-        parent_id: parentId ?? undefined,
-      });
-      if (res.ok) {
-        folders = [...folders, res.data];
-        expandedFolders = new Set([...expandedFolders, res.data.id]);
-      }
-    }
-    createName = "";
-  }
-
-  // ── Page-specific quick actions (split-button menu) ──────
-
-  // Enhancement: create a page straight from the clipboard. The first
-  // non-empty line becomes the title (stripped of markdown heading/marks),
-  // the rest becomes the body — turning a copied block into a doc in one
-  // click. Falls back to the normal inline create when the clipboard is
-  // empty or unreadable (e.g. permission denied) so the action is never a
-  // dead end.
-  async function pasteAsNewPage() {
-    newMenuOpen = false;
-    if (!project) return;
-    let text = "";
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      // Clipboard blocked/unavailable — degrade to a blank create row.
-    }
-    if (!text.trim()) {
-      startCreate("page");
+    if (!project || !composer || !composerTitle.trim() || composerBusy) return;
+    composerBusy = true;
+    const res = await createPage({
+      project_id: project.id,
+      title: composerTitle.trim(),
+      status: composer.status,
+      ...(composer.folderId != null ? { folder_id: composer.folderId } : {}),
+    });
+    composerBusy = false;
+    if (!res.ok) {
+      toast(`Couldn't create the page: ${res.error}`, { kind: "error" });
       return;
     }
-    const lines = text.split("\n");
-    const firstIdx = lines.findIndex((l) => l.trim());
-    const rawTitle = lines[firstIdx] ?? "Pasted page";
-    const title =
-      rawTitle
-        .replace(/^#+\s*/, "")
-        .replace(/[*_`>\[\]]/g, "")
-        .trim()
-        .slice(0, 120) || "Pasted page";
-    const body = lines.slice(firstIdx + 1).join("\n").trim();
-    const res = await createPage({
-      project_id: project.id,
-      title,
-      ...(focusedFolderId != null ? { folder_id: focusedFolderId } : {}),
-      ...(body ? { content: body } : {}),
-    });
-    if (res.ok) navigate(`/${projectIdentifier}/pages/${res.data.id}`);
+    composer = null;
+    navigate(pagePath(res.data.id));
   }
 
-  // Enhancement: one-click dated scratch note. Creates an empty draft
-  // titled with today's date and drops you straight into the editor — for
-  // capturing a thought without naming ceremony.
-  async function quickNote() {
-    newMenuOpen = false;
-    if (!project) return;
-    const now = new Date();
-    const stamp = now.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-    const res = await createPage({
-      project_id: project.id,
-      title: `Note · ${stamp}`,
-      status: "draft",
-      ...(focusedFolderId != null ? { folder_id: focusedFolderId } : {}),
-    });
-    if (res.ok) navigate(`/${projectIdentifier}/pages/${res.data.id}`);
+  // ── Folders ──────────────────────────────────────────
+
+  async function createFolderIn(parentId: number | null, name: string): Promise<boolean> {
+    if (!project) return false;
+    const res = await createFolder({ project_id: project.id, name, ...(parentId != null ? { parent_id: parentId } : {}) });
+    if (!res.ok) {
+      toast(`Couldn't create the folder: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    folders = [...folders, res.data];
+    return true;
   }
 
-  // LIF-413: the local tree only moves once the server has agreed. This used
-  // to drop the folder and reparent its pages regardless of the response, so
-  // a failed delete left the sidebar showing a folder that still existed.
-  async function handleDeleteFolder(id: number, e: Event) {
-    e.stopPropagation();
+  async function renameFolderTo(id: number, name: string): Promise<boolean> {
+    const res = await renameFolder(id, name);
+    if (!res.ok) {
+      toast(`Couldn't rename the folder: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    folders = folders.map((f) => (f.id === id ? { ...f, name: res.data.name } : f));
+    return true;
+  }
+
+  async function removeFolder(id: number): Promise<boolean> {
     const name = folders.find((f) => f.id === id)?.name ?? "folder";
+    const gone = descendantIds(folders, id);
     const res = await withMutation(() => deleteFolder(id));
     if (!res.ok) {
       toast(`Couldn't delete ${name}: ${res.error}`, { kind: "error" });
-      return;
+      return false;
     }
-    folders = folders.filter((f) => f.id !== id && f.parent_id !== id);
-    // The FK sets `folder_id` to NULL server-side, which stamps a new seq on
-    // every orphaned page. Reflect it now; the delta confirms it shortly.
-    pages = pages.map((p) => p.folder_id === id ? { ...p, folder_id: null } : p);
+    folders = folders.filter((f) => !gone.has(f.id));
+    pages = pages.map((p) => (p.folder_id != null && gone.has(p.folder_id) ? { ...p, folder_id: null } : p));
+    if (typeof view.scope === "number" && gone.has(view.scope)) view.scope = "all";
     refreshProjectModel(project?.id);
+    toast(`Deleted ${name}`, { kind: "success", duration: 2500 });
+    return true;
   }
 
-  // Count all items (pages + subfolders) in a folder recursively
-  function folderItemCount(folderId: number): number {
-    const directPages = pagesInFolder(folderId).length;
-    const subs = childFolders(folderId);
-    return directPages + subs.length + subs.reduce((n, f) => n + folderItemCount(f.id), 0);
+  function setScope(next: FolderScope) {
+    if (next !== view.scope) {
+      view.selected = new Set();
+      composer = null;
+    }
+    view.scope = next;
+    view.search = "";
+    view.closePopovers();
+    foldersOpen = false;
+    listEl?.scrollTo({ top: 0 });
+  }
+
+  async function dropOn(target: number | null) {
+    const id = dragId;
+    dragId = null;
+    dropTarget = undefined;
+    const page = pages.find((p) => p.id === id);
+    if (page) await moveToFolder(page, target);
+  }
+
+  // ── Move picker (touch, and the context menu) ────────
+
+  let movePage = $state<ListPage | null>(null);
+  let moveFolderId = $state<number | null>(null);
+  let moveOptions = $derived([
+    { value: null, label: "Unfiled" },
+    ...folders.map((f) => ({ value: f.id, label: folderPathLabel(folders, f.id) })),
+  ]);
+
+  // ── Context menu ─────────────────────────────────────
+
+  function menuFor(page: ListPage, x: number, y: number, trigger: HTMLElement | null) {
+    const items: ContextMenuItem[] = [
+      { label: "Open", icon: ArrowUpRight, href: `#${pagePath(page.id)}` },
+      { label: "Peek", icon: Eye, action: () => peek(page) },
+      {
+        label: "Copy link",
+        icon: LinkIcon,
+        action: () => copyToClipboard(`${location.origin}${location.pathname}#${pagePath(page.id)}`, "link"),
+      },
+      { label: `Copy ${page.identifier}`, icon: Copy, action: () => copyToClipboard(page.identifier) },
+    ];
+    if (canEdit) {
+      items.push(
+        { label: page.pinned ? "Unpin" : "Pin", icon: Pin, action: () => togglePin(page) },
+        {
+          label: "Move to folder…",
+          icon: FolderInput,
+          action: () => {
+            movePage = page;
+            moveFolderId = page.folder_id ?? null;
+          },
+        },
+      );
+      if (page.status === "archived") {
+        items.push({ label: "Restore", icon: RotateCcw, action: () => setStatus(page, "active") });
+      } else {
+        for (const [s, icon] of [["draft", PenLine], ["active", CircleDot], ["complete", CheckCircle2]] as const) {
+          items.push({
+            label: `Mark ${STATUS_LABEL[s].toLowerCase()}`,
+            icon,
+            disabled: page.status === s,
+            action: () => setStatus(page, s),
+          });
+        }
+        items.push({ label: "Archive", icon: Archive, action: () => setStatus(page, "archived") });
+      }
+    }
+    openContextMenu(x, y, items, trigger);
+  }
+
+  function onRowContextMenu(page: ListPage, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    menuFor(page, e.clientX, e.clientY, e.currentTarget as HTMLElement);
+  }
+
+  function onRowLongPress(page: ListPage, e: PointerEvent) {
+    menuFor(page, e.clientX, e.clientY, e.target as HTMLElement);
   }
 </script>
 
 <svelte:window
-  onclick={() => { newMenuOpen = false; }}
-  onkeydown={(e) => {
-    if (e.key === "Escape" && newMenuOpen) newMenuOpen = false;
-    else if (e.key === "Escape" && overviewOpen) overviewOpen = false;
-  }}
+  onkeydown={onKeydown}
+  onclick={() => view.closePopovers()}
 />
 
 {#snippet topbarContent()}
-  <div class="relative flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
-    <!-- Breadcrumb: Project > Pages. Project segment collapses below sm. -->
-    <div class="order-1 flex items-center gap-1.5 shrink-0">
+  <PagesTopbar
+    {view}
+    {projectIdentifier}
+    count={shownCount}
+    {scope}
+    {labels}
+    {editors}
+    {changedCount}
+    onCycleChanged={cycleChanged}
+    {canEdit}
+    {scopeLabel}
+    onNewPage={() => startCreate()}
+    onOpenFolders={() => (foldersOpen = true)}
+    onOpenPulse={() => (pulseOpen = true)}
+    bind:searchInputEl
+  />
+{/snippet}
+
+{#snippet row(page: ListPage, opts: { folder?: boolean; status?: boolean; snippet?: string | null; note?: import("svelte").Snippet } = {})}
+  <PageRowView
+    {page}
+    meta={metaMap.get(page.id)}
+    {labels}
+    href="#{pagePath(page.id)}"
+    folderLabel={opts.folder && page.folder_id != null ? folderPathLabel(folders, page.folder_id) : null}
+    excerpts={view.excerpts}
+    focused={view.focusedId === page.id}
+    selected={view.selected.has(page.id)}
+    selecting={view.selected.size > 0}
+    changed={changedIds.has(page.id)}
+    flashing={flashIds.has(page.id)}
+    dragging={dragId === page.id}
+    {canEdit}
+    showStatus={opts.status ?? true}
+    snippet={opts.snippet ?? null}
+    note={opts.note}
+    onActivate={activate}
+    onOpen={open}
+    onToggleSelect={(p) => view.toggleSelected(p.id)}
+    onTogglePin={togglePin}
+    onContextMenu={onRowContextMenu}
+    onLongPress={onRowLongPress}
+    onDragStart={(p, e) => {
+      if (!canEdit) return;
+      dragId = p.id;
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", p.identifier);
+      }
+    }}
+    onDragEnd={() => {
+      dragId = null;
+      dropTarget = undefined;
+    }}
+  />
+{/snippet}
+
+{#snippet emptyState(title: string, body: string, action: { label: string; run: () => void } | null = null)}
+  <div class="flex flex-col items-center py-16 gap-3 px-6 max-w-[440px] mx-auto text-center" data-testid="pages-empty">
+    <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.16} />
+    <p class="text-heading font-medium text-[var(--text)]">{title}</p>
+    {#if body}<p class="text-body-sm text-[var(--text-muted)] leading-relaxed">{body}</p>{/if}
+    {#if action}
       <button
-        class="hidden sm:inline text-body-sm font-mono font-medium text-[var(--text-muted)]
-               hover:text-[var(--text)] transition-colors"
-        onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        class="mt-1 flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+               px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+        onclick={(e) => { e.stopPropagation(); action.run(); }}
       >
-        {projectIdentifier}
+        {action.label}
       </button>
-      <ChevronRight size={12} class="hidden sm:block text-[var(--text-faint)]" />
-      <span class="text-body-sm font-medium text-[var(--text)]">
-        Pages
-      </span>
-      {#if !loading}
-        <span
-          class="ml-1 text-micro text-[var(--text-faint)] font-medium
-                 tabular-nums"
-        >
-          {visiblePages.length}
-        </span>
-      {/if}
-    </div>
-
-    <!-- LIF-305: the sub-tab strip takes the topbar's bottom row (order-4 +
-         basis-full, after every order-3 control) so the breadcrumb and the
-         Browse toolbar keep sharing the top row exactly as before. -->
-    <div class="order-4 basis-full">
-      <SubTabs tabs={pageSubTabs} active={activeSubTab} onselect={selectSubTab} />
-    </div>
-
-    {#if activeSubTab === "browse"}
-    <!-- LIF-105: label filter. Only shown when the project has labels
-         defined — keeps the toolbar clean for label-less projects. -->
-    {#if labels.length > 0}
-      <div class="order-3 flex items-center gap-1.5">
-        <Select
-          options={labelOptions}
-          bind:value={filterLabel}
-          placeholder="Label"
-          size="sm"
-          class="w-auto"
-        >
-          {#snippet renderSelected(opt)}
-            <span class="flex items-center gap-1.5 text-body-sm">
-              {#if opt.value && opt.color}
-                <span class="size-2.5 rounded-full shrink-0" style="background: {safeLabelColor(String(opt.color))}"></span>
-                <span class="text-[var(--text)]">{opt.label}</span>
-              {:else}
-                <span class="text-[var(--text-muted)]">{opt.label}</span>
-              {/if}
-            </span>
-          {/snippet}
-          {#snippet renderOption(opt, isSelected)}
-            <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-              {#if opt.value && opt.color}
-                <span class="size-2.5 rounded-full shrink-0" style="background: {safeLabelColor(String(opt.color))}"></span>
-                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
-              {:else}
-                <span class="text-[var(--text-muted)]">{opt.label}</span>
-              {/if}
-            </span>
-          {/snippet}
-        </Select>
-        {#if filterLabel}
-          <button
-            class="flex items-center gap-1 text-caption text-[var(--text-muted)]
-                   hover:text-[var(--text)] px-1.5 py-1 rounded-md
-                   hover:bg-[var(--bg-subtle)] transition-colors"
-            onclick={() => { filterLabel = ""; }}
-            title="Clear label filter"
-          >
-            <X size={12} />
-          </button>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- LIF-112: status filter. Defaults to "Active" (hides archived);
-         pick "All" to reveal archived pages, or a concrete status to
-         narrow. -->
-    <div class="order-3 flex items-center gap-1.5">
-      <Select
-        options={statusFilterOptions}
-        bind:value={filterStatus}
-        size="sm"
-        class="w-auto"
-      >
-        {#snippet renderSelected(opt)}
-          <span class="flex items-center gap-1.5 text-body-sm text-[var(--text)]">
-            {#if opt.value && opt.value !== HIDE_ARCHIVED}
-              {@const meta = statusMeta(String(opt.value))}
-              <meta.icon size={13} class="shrink-0 text-[var(--text-muted)]" />
-            {/if}
-            {opt.label}
-          </span>
-        {/snippet}
-        {#snippet renderOption(opt, isSelected)}
-          <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-            {#if opt.value && opt.value !== HIDE_ARCHIVED}
-              {@const meta = statusMeta(String(opt.value))}
-              <meta.icon size={13} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
-            {/if}
-            <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
-          </span>
-        {/snippet}
-      </Select>
-    </div>
-
-    <!-- Right zone: search + create actions -->
-    <div class="order-3 ml-auto flex items-center gap-1.5 shrink-0">
-      <!-- LIF-231: overview/folder-navigator toggle (below lg, where the
-           sidebar is off-canvas). -->
-      {#if !loading && !error && (pages.length > 0 || folders.length > 0)}
-        <Tooltip content="Overview & folders" placement="bottom">
-          <button
-            class="lg:hidden size-9 sm:size-7 flex items-center justify-center rounded-md
-                   text-[var(--text-muted)] hover:text-[var(--text)]
-                   hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Show overview and folders"
-            aria-expanded={overviewOpen}
-            onclick={(e) => { e.stopPropagation(); overviewOpen = true; }}
-          >
-            <PanelRight size={15} />
-          </button>
-        </Tooltip>
-      {/if}
-
-      <!-- LIF-117: search. Collapsed-to-icon, expands inline on click.
-           Below sm the expanded field overlays the whole topbar row instead
-           of joining it — a fixed-width input in an already-full shrink-0
-           row pushes the row's min width past the viewport (LIF-271). -->
-      {#if searchExpanded}
-        <div
-          class="max-sm:absolute max-sm:inset-0 max-sm:z-20 max-sm:bg-[var(--chrome)]
-                 max-sm:flex max-sm:items-center max-sm:px-3 max-sm:py-1.5"
-        >
-          <div class="relative w-full sm:w-auto">
-            <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
-              <Search size={12} />
-            </div>
-            <!-- svelte-ignore a11y_autofocus -->
-            <input
-              type="text"
-              placeholder="Search pages..."
-              enterkeyhint="search"
-              bind:this={searchInputEl}
-              bind:value={searchQuery}
-              onblur={maybeCollapseSearch}
-              onkeydown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  searchQuery = "";
-                  searchExpanded = false;
-                  (e.currentTarget as HTMLInputElement).blur();
-                }
-              }}
-              class="w-full sm:w-[200px] pl-7 pr-2 py-1 text-body-sm rounded-md
-                     border border-[var(--border)] bg-[var(--surface)]
-                     text-[var(--text)] placeholder:text-[var(--text-faint)]
-                     focus:border-[var(--accent)]
-                     focus:shadow-[0_0_0_3px_var(--accent-subtle)]
-                     outline-none transition-colors"
-            />
-          </div>
-        </div>
-      {:else}
-        <Tooltip content="Search" placement="bottom">
-          <button
-            class="size-7 flex items-center justify-center rounded-md
-                   text-[var(--text-muted)] hover:text-[var(--text)]
-                   hover:bg-[var(--bg-subtle)] transition-colors"
-            onclick={(e) => { e.stopPropagation(); openSearch(); }}
-          >
-            <Search size={14} />
-          </button>
-        </Tooltip>
-      {/if}
-
-      {#if canEdit}
-      <!-- Separator -->
-      <div class="w-px h-4 bg-[var(--border)] mx-1.5"></div>
-
-      <!-- Primary action: New page. Split button — the main segment starts
-           an inline page create; the caret reveals folder creation and
-           page-specific shortcuts (paste-as-page, quick note, status
-           presets). Folds the old separate Folder button into the menu.
-           Hidden for viewers (LIF-234) — pages are maintainer-gated. -->
-      <div class="relative">
-        <button
-          class="group flex items-center gap-1.5 h-7 pl-2.5 pr-2
-                 text-body-sm font-medium text-[var(--btn-success-text)]
-                 bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
-                 rounded-md shadow-sm transition-colors focus:outline-none
-                 focus-visible:ring-2 focus-visible:ring-[var(--btn-success)]
-                 focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--chrome)]
-                 motion-safe:active:scale-[0.97]"
-          aria-haspopup="menu"
-          aria-expanded={newMenuOpen}
-          onclick={(e) => { e.stopPropagation(); newMenuOpen = !newMenuOpen; }}
-        >
-          <Plus size={14} class="shrink-0" />
-          <span class="hidden sm:inline">New</span>
-          <ChevronDown
-            size={14}
-            class="motion-safe:transition-transform {newMenuOpen ? 'rotate-180' : ''}"
-          />
-        </button>
-
-        {#if newMenuOpen}
-          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-          <div
-            role="menu"
-            tabindex="-1"
-            class="absolute right-0 top-full mt-1.5 z-30 w-[228px]
-                   bg-[var(--surface)] border border-[var(--border)]
-                   rounded-lg shadow-lg py-1.5"
-            onclick={(e) => e.stopPropagation()}
-          >
-            <button
-              role="menuitem"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
-                     text-body-sm text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={() => startCreate("page", focusedFolderId)}
-            >
-              <FileText size={14} class="text-[var(--text-muted)]" />
-              <span class="flex-1">New page</span>
-            </button>
-            <button
-              role="menuitem"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
-                     text-body-sm text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={() => startCreate("folder", focusedFolderId)}
-            >
-              <FolderPlus size={14} class="text-[var(--text-muted)]" />
-              <span class="flex-1">New folder</span>
-            </button>
-
-            <div class="my-1 h-px bg-[var(--border)]"></div>
-
-            <button
-              role="menuitem"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
-                     text-body-sm text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={pasteAsNewPage}
-            >
-              <ClipboardPaste size={14} class="text-[var(--success)]" />
-              <span class="flex-1">Paste as new page</span>
-            </button>
-            <button
-              role="menuitem"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
-                     text-body-sm text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={quickNote}
-            >
-              <NotebookPen size={14} class="text-[var(--success)]" />
-              <span class="flex-1">Quick note</span>
-            </button>
-
-            <div class="my-1 h-px bg-[var(--border)]"></div>
-            <div class="px-3 pb-1 pt-0.5 text-micro uppercase tracking-widest
-                        font-semibold text-[var(--text-faint)]">
-              New page as
-            </div>
-            {#each [["draft", "Draft", PenLine], ["active", "Active", CircleDot], ["complete", "Complete", CheckCircle2]] as [value, label, Icon]}
-              {@const IconComp = Icon as typeof PenLine}
-              <button
-                role="menuitem"
-                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-left
-                       text-body-sm text-[var(--text)]
-                       hover:bg-[var(--bg-subtle)] transition-colors"
-                onclick={() => startCreate("page", focusedFolderId, value as string)}
-              >
-                <IconComp size={14} class="text-[var(--text-muted)]" />
-                <span class="flex-1">{label}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-      {/if}
-    </div>
     {/if}
   </div>
 {/snippet}
 
-<div class="h-full flex flex-col">
-  <div class="flex-1 flex min-h-0">
-  <!-- Content — entire scroll area is the root drop zone -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+{#snippet sectionHead(text: string, extra: import("svelte").Snippet | null = null)}
   <div
-    class="flex-1 overflow-y-auto min-w-0"
-    ondragover={(e) => {
-      if (!draggedId) return;
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      dropTarget = "root";
-    }}
-    ondrop={(e) => {
-      // If dropTarget is still root or null, drop to root
-      if (dropTarget === "root" || dropTarget === null) {
-        onDrop(e, null);
-      }
-    }}
+    class="group-head sticky top-0 z-10 flex items-center gap-2 h-9 px-3 sm:px-5 border-b border-[var(--border)]
+           text-caption text-[var(--text-muted)]"
   >
-    {#if loading}
-      <!-- LIF-281: mimics the tree shape (folder rows, each with indented
-           page rows beneath). Mirrors the loaded treeLevel markup: the
-           px-6 py-4 wrapper; folder rows (gap-1.5 py-1.5 px-1.5 -mx-1.5,
-           14px chevron + 18px folder icon + title); the ml-[15px] pl-3
-           border-l children rail; and page rows (items-start gap-2 py-1.5
-           px-1.5 -mx-1.5, 17px status icon at mt-0.5 + title + preview
-           line). Corrects the earlier LIF-246 skeleton, which dropped the
-           row padding, mis-sized the status icon, aligned items center
-           instead of start, and omitted the preview line. -->
-      <div class="px-6 py-4 flex flex-col gap-0.5">
-        {#each [3, 2] as pageCount, folder (folder)}
-          <div class="flex items-center gap-1.5 py-1.5 px-1.5 -mx-1.5">
-            <Skeleton variant="circle" class="size-3.5 shrink-0" />
-            <Skeleton variant="circle" class="size-[18px] rounded-md shrink-0" />
-            <Skeleton variant="bar" class="h-3.5 w-32" />
-          </div>
-          <div class="ml-[15px] pl-3 border-l border-[var(--border)] flex flex-col gap-0.5">
-            {#each Array(pageCount) as _, page (page)}
-              <div class="flex items-start gap-2 py-1.5 px-1.5 -mx-1.5">
-                <Skeleton variant="circle" class="size-[17px] mt-0.5 shrink-0" />
-                <div class="flex-1 min-w-0 flex flex-col gap-1">
-                  <Skeleton variant="bar" class="h-3.5 w-full max-w-[240px]" />
-                  <Skeleton variant="bar" class="h-2.5 w-4/5 max-w-[200px]" />
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/each}
-      </div>
-    {:else if error}
-      <ErrorState title="Couldn't load pages" message={error}>
-        <button
-          class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-          onclick={() => loadData(projectIdentifier)}
-        >
-          Try again
-        </button>
-        <button
-          class="text-body-sm text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-          onclick={() => navigate(`/${projectIdentifier}/overview`)}
-        >
-          Project overview
-        </button>
-      </ErrorState>
-    {:else if activeSubTab === "recent"}
-      <div class="px-6 py-4">
-        {@render flatPageList(
-          recentPages,
-          "A blank page",
-          "Pages are your project's docs: specs, notes, decisions. Start the first one and give the ideas a home.",
-        )}
-      </div>
-    {:else if activeSubTab === "drafts"}
-      <div class="px-6 py-4">
-        {@render flatPageList(draftPages, "No drafts")}
-      </div>
-    {:else if activeSubTab === "archived"}
-      <div class="px-6 py-4">
-        {@render flatPageList(archivedPages, "No archived pages")}
-      </div>
-    {:else if pages.length === 0 && folders.length === 0 && !createTarget}
-      <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[460px] mx-auto text-center">
-        <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} />
-        <div class="flex flex-col items-center gap-1.5">
-          <p class="text-heading font-medium text-[var(--text)]">A blank page</p>
-          <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
-            Pages are your project's docs: specs, notes, decisions. Start the
-            first one and give the ideas a home.
-          </p>
+    <span class="font-medium text-[var(--text)]">{text}</span>
+    {#if extra}{@render extra()}{/if}
+  </div>
+{/snippet}
+
+<div class="h-full flex min-h-0 relative">
+  <!-- Folder pane: docked from lg, a drawer below it. -->
+  {#if !error}
+    {#if foldersOpen}
+      <button class="lg:hidden fixed inset-0 z-40 bg-black/40" aria-label="Close folders" onclick={() => (foldersOpen = false)}></button>
+    {/if}
+    <aside
+      class="w-[272px] lg:w-[232px] shrink-0 overflow-y-auto border-r border-[var(--border)] bg-[var(--bg-subtle)] px-3 py-4
+             max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-50 max-lg:shadow-2xl max-lg:transition-transform max-lg:duration-200
+             {foldersOpen ? 'max-lg:translate-x-0' : 'max-lg:-translate-x-full'}"
+      aria-label="Folders"
+    >
+      {#if loading}
+        <div class="flex flex-col gap-2 px-2">
+          {#each [0, 1, 2, 3] as i (i)}<Skeleton variant="bar" class="h-4 w-3/4" />{/each}
         </div>
-        {#if canEdit}
-          <button
-            class="flex items-center gap-1.5 mt-1 text-body-sm font-medium
-                   text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                   px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
-                   transition-colors"
-            onclick={() => startCreate("page")}
-          >
-            <Plus size={15} />
-            Create a page
-          </button>
-        {/if}
-      </div>
-    {:else if searchQuery.trim()}
-      <!-- LIF-117/118: flat ranked search results. Folders are omitted
-           in this mode because the user is looking for a specific page
-           by name or content; the tree structure would just be visual
-           noise. Results are scored across title/identifier/content and
-           sorted by relevance. -->
-      <div class="px-6 py-4">
-        {#if filteredPages.length === 0}
-          <div class="flex flex-col items-center py-16 gap-3">
-            <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.16} />
-            <p class="text-body-lg text-[var(--text-muted)]">
-              No pages match "{searchQuery}"
-            </p>
-            <button
-              class="text-body-sm text-[var(--accent)] hover:underline"
-              onclick={() => { searchQuery = ""; searchExpanded = false; }}
-            >
-              Clear search
-            </button>
-          </div>
-        {:else}
-          {#if filteredPages.length === RESULT_CAP}
-            <div class="text-micro text-[var(--text-faint)] uppercase tracking-widest font-semibold mb-2 px-1.5">
-              Top {RESULT_CAP} matches — narrow the query for fewer results
-            </div>
-          {/if}
-          {#each filteredPages as hit (hit.page.id)}
-            {@const hMeta = statusMeta(hit.page.status)}
-            <button
-              class="w-full flex flex-col items-stretch gap-0.5 py-1.5 px-1.5 -mx-1.5 rounded-md
-                     text-left group transition-colors hover:bg-[var(--bg-subtle)]"
-              onclick={() => navigate(`/${projectIdentifier}/pages/${hit.page.id}`)}
-            >
-              <div class="flex items-center gap-2">
-                <span class="shrink-0" style="color: {statusColor(hit.page.status)}" title={hMeta.label}>
-                  <hMeta.icon size={17} />
-                </span>
-                <span class="text-body-lg text-[var(--text)] truncate flex-1">
-                  {hit.page.title}
-                </span>
-                <span class="text-caption font-mono text-[var(--text-faint)] shrink-0">
-                  {hit.page.identifier}
-                </span>
-                {#if hit.page.status !== "active"}
-                  <span
-                    class="flex items-center gap-1 shrink-0 text-micro font-medium
-                           px-1.5 py-0.5 rounded-full border border-[var(--border)]
-                           text-[var(--text-muted)]"
-                    title={hMeta.label}
-                  >
-                    <hMeta.icon size={11} class="shrink-0" />
-                    {hMeta.label}
-                  </span>
-                {/if}
-                {#if hit.page.labels.length > 0}
-                  <div class="flex items-center gap-1 shrink-0">
-                    {#each hit.page.labels.slice(0, 2) as lbl}
-                      {@const labelObj = labels.find((l) => l.name === lbl)}
-                      <span
-                        class="text-micro font-medium px-1.5 py-0.5 rounded-full
-                               border border-[var(--border)]"
-                        style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
-                      >
-                        {lbl}
-                      </span>
-                    {/each}
-                    {#if hit.page.labels.length > 2}
-                      <span class="text-micro text-[var(--text-faint)]">
-                        +{hit.page.labels.length - 2}
-                      </span>
-                    {/if}
-                  </div>
-                {/if}
+      {:else}
+        <FolderTree
+          {folders}
+          {stats}
+          allCount={livePages.length}
+          archivedCount={archivedPages.length}
+          {projectIdentifier}
+          conventions={conventionsEntry}
+          {scope}
+          {canEdit}
+          {dropTarget}
+          dragging={dragId !== null}
+          onScope={setScope}
+          onCreate={createFolderIn}
+          onRename={renameFolderTo}
+          onDelete={removeFolder}
+          onNewPage={(id) => { setScope(id); startCreate(id); }}
+          onDragOver={(t) => (dropTarget = t)}
+          onDrop={dropOn}
+        />
+      {/if}
+    </aside>
+  {/if}
+
+  <div class="flex-1 min-w-0 flex flex-col min-h-0">
+    <div class="flex-1 overflow-y-auto min-h-0 @container" bind:this={listEl} data-testid="pages-list">
+      {#if loading}
+        <div class="flex flex-col">
+          {#each [0, 1, 2, 3, 4, 5] as i (i)}
+            <div class="flex items-center gap-3 px-5 min-h-[3.4rem] border-b border-[var(--border)]">
+              <Skeleton variant="circle" class="size-4 shrink-0" />
+              <div class="flex-1 flex flex-col gap-1.5">
+                <Skeleton variant="bar" class="h-3.5 w-full max-w-[280px]" />
+                <Skeleton variant="bar" class="h-2.5 w-4/5 max-w-[420px]" />
               </div>
-              {#if hit.snippet}
-                <!-- LIF-118: content snippet — only shown when content
-                     was the winning signal, so title alone wouldn't
-                     explain why this page surfaced. -->
-                <div class="text-body-sm text-[var(--text-muted)] truncate pl-[26px]">
-                  {hit.snippet}
-                </div>
-              {/if}
-            </button>
+              <Skeleton variant="bar" class="h-3 w-12" />
+            </div>
+          {/each}
+        </div>
+      {:else if error}
+        <ErrorState title="Couldn't load pages" message={error}>
+          <button
+            class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+            onclick={() => loadData(projectIdentifier)}
+          >
+            Try again
+          </button>
+        </ErrorState>
+      {:else if searching}
+        {#if searchHits.length === 0}
+          {@render emptyState(`No pages match "${view.search.trim()}"`, "Search looks at titles, identifiers, labels and the opening text.", {
+            label: "Clear search",
+            run: () => { view.search = ""; view.searchOpen = false; },
+          })}
+        {:else}
+          {#snippet hitsNote()}
+            <span class="text-caption text-[var(--text-faint)]">by relevance{searchHits.length === RESULT_CAP ? `, top ${RESULT_CAP}` : ""}</span>
+          {/snippet}
+          {@render sectionHead(`${searchHits.length} ${searchHits.length === 1 ? "match" : "matches"}`, hitsNote)}
+          {#each searchHits as hit (hit.page.id)}
+            {@render row(hit.page, { folder: true, snippet: hit.snippet })}
           {/each}
         {/if}
-      </div>
-    {:else}
-      <div class="px-6 py-4">
-        <!-- LIF-185: focus banner when a folder is focused from the sidebar. -->
-        {#if focusedFolderId !== null}
-          <div class="flex items-center gap-1.5 mb-4 text-body-sm">
-            <button
-              class="text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-              onclick={() => focusFolder(null)}
-            >
-              All pages
-            </button>
-            <ChevronRight size={13} class="text-[var(--text-faint)]" />
-            <span class="flex items-center gap-1.5 font-medium text-[var(--text)]">
-              <FolderOpen size={15} class="text-[var(--accent)]" />
-              {folderName(focusedFolderId)}
-            </span>
-          </div>
-        {/if}
-
-        <!-- LIF-183: Pinned section. Surfaced above the tree so key docs are
-             one glance away regardless of which folder they live in. Hidden
-             while focused on a single folder to keep that view clean. -->
-        {#if pinnedPages.length > 0 && focusedFolderId === null}
-          <section class="mb-6">
-            <div class="flex items-center gap-1.5 mb-2 px-1">
-              <Pin size={12} class="text-[var(--text-faint)]" />
-              <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-                Pinned
-              </h2>
-              <span class="text-micro text-[var(--text-faint)] tabular-nums">
-                {pinnedPages.length}
-              </span>
-            </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {:else}
+        {#if scope === "all" && treePages.length === 0 && folders.length === 0 && !composer}
+          {@render emptyState(
+            "No pages yet",
+            "Pages hold the project's docs: specs, notes, decisions. Agents can read and write them too.",
+            canEdit ? { label: "New page", run: () => startCreate() } : null,
+          )}
+        {:else}
+          {#if pinnedPages.length > 0}
+            <div class="flex items-center gap-2 px-3 sm:px-5 py-2 border-b border-[var(--border)] overflow-x-auto [scrollbar-width:none]" data-testid="pinned-strip">
+              <Pin size={12} class="shrink-0 text-[var(--text-faint)]" aria-label="Pinned" />
               {#each pinnedPages as page (page.id)}
-                {@const pMeta = statusMeta(page.status)}
-                {@const fName = folderName(page.folder_id)}
-                {@const prev = contentPreview(page.preview)}
-                <button
-                  class="group text-left rounded-xl bg-[var(--surface)] p-3
-                         shadow-[0_1px_2px_rgba(0,0,0,0.06)]
-                         hover:shadow-[0_6px_16px_rgba(0,0,0,0.10)]
-                         transition motion-safe:hover:-translate-y-0.5"
-                  use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
-                  onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
+                <a
+                  href="#{pagePath(page.id)}"
+                  class="shrink-0 max-w-[16rem] flex items-center gap-1.5 h-7 px-2.5 rounded-md text-body-sm text-[var(--text)]
+                         bg-[var(--surface)] ring-1 ring-[var(--border)] hover:ring-[var(--accent)] transition-shadow
+                         {view.focusedId === page.id ? 'ring-[var(--accent)]' : ''}"
+                  data-page-id={page.id}
+                  onclick={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                    e.preventDefault();
+                    activate(page);
+                  }}
+                  oncontextmenu={(e) => onRowContextMenu(page, e)}
                 >
-                  <div class="flex items-start gap-2.5">
-                    <span
-                      class="shrink-0 mt-0.5"
-                      style="color: {statusColor(page.status)}"
-                      title={pMeta.label}
-                    >
-                      <pMeta.icon size={16} />
-                    </span>
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-2">
-                        <span class="text-body font-medium text-[var(--text)] truncate flex-1">
-                          {page.title}
-                        </span>
-                        {#if canEdit}
-                           <!-- LIF-228: pointer-coarse keeps unpin reachable on touch;
-                               there is no other way to unpin a page there. -->
-                          <span
-                            class="shrink-0 text-[var(--text-faint)] opacity-0 group-hover:opacity-100
-                                   pointer-coarse:opacity-100 hover:text-[var(--accent)] transition"
-                            role="button"
-                            tabindex="0"
-                            title="Unpin"
-                            onclick={(e) => togglePin(page, e)}
-                            onkeydown={(e) => { if (e.key === "Enter") togglePin(page, e); }}
-                          >
-                            <PinOff size={13} />
-                          </span>
-                        {/if}
-                      </div>
-                      {#if prev}
-                        <p class="text-caption text-[var(--text-faint)] line-clamp-1 mt-0.5">{prev}</p>
-                      {/if}
-                      <div class="flex items-center gap-2 mt-1.5 text-micro text-[var(--text-faint)]">
-                        <span class="font-mono shrink-0">{page.identifier}</span><span>·</span>
-                        {#if fName}<span class="truncate">{fName}</span><span>·</span>{/if}
-                        <TimeAgo class="tabular-nums shrink-0" date={page.updated_at} />
-                        {#if page.status !== "active"}
-                          <span class="flex items-center gap-1 shrink-0">
-                            <pMeta.icon size={10} /> {pMeta.label}
-                          </span>
-                        {/if}
-                      </div>
-                    </div>
-                  </div>
-                </button>
+                  <FileText size={13} class="shrink-0 text-[var(--text-faint)]" />
+                  <span class="truncate">{page.title || "Untitled"}</span>
+                  {#if changedIds.has(page.id)}<span class="size-1.5 rounded-full bg-[var(--accent)] shrink-0"></span>{/if}
+                </a>
               {/each}
             </div>
-          </section>
+          {/if}
+
+          {#if composer}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div
+              class="composer-in flex flex-wrap items-center gap-2 px-3 sm:px-5 py-2.5 border-b border-[var(--border)]
+                     bg-[color-mix(in_srgb,var(--accent-subtle)_45%,transparent)]"
+              data-testid="page-composer"
+              onclick={(e) => e.stopPropagation()}
+            >
+              <FileText size={15} class="shrink-0 text-[var(--accent)]" />
+              <input
+                class="flex-1 min-w-[12rem] h-8 px-2 rounded-md text-body bg-[var(--surface)] text-[var(--text)]
+                       border border-[var(--border)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)] outline-none"
+                placeholder="Page title"
+                aria-label="New page title"
+                bind:value={composerTitle}
+                disabled={composerBusy}
+                use:autofocus
+                onkeydown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); void commitCreate(); }
+                  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); composer = null; }
+                }}
+              />
+              <div class="inline-flex rounded-md border border-[var(--border)] overflow-hidden" role="group" aria-label="Start as">
+                {#each ["draft", "active"] as const as s (s)}
+                  <button
+                    class="h-8 px-2.5 text-caption font-medium transition-colors
+                           {composer.status === s ? 'bg-[var(--surface)] text-[var(--text)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'}
+                           {s === 'active' ? 'border-l border-[var(--border)]' : ''}"
+                    aria-pressed={composer.status === s}
+                    onclick={() => composer && (composer = { ...composer, status: s })}
+                  >
+                    {STATUS_LABEL[s]}
+                  </button>
+                {/each}
+              </div>
+              <span class="flex items-center gap-1 text-caption text-[var(--text-muted)] min-w-0">
+                <FolderClosed size={13} class="shrink-0 text-[var(--text-faint)]" />
+                <span class="truncate max-w-[12rem]">{composer.folderId != null ? folderPathLabel(folders, composer.folderId) : "Unfiled"}</span>
+              </span>
+              <button
+                class="h-8 px-3 rounded-md text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                       hover:bg-[var(--btn-success-hover)] disabled:opacity-50 transition-colors"
+                disabled={!composerTitle.trim() || composerBusy}
+                onclick={commitCreate}
+              >
+                Create
+              </button>
+              <button class="size-8 grid place-items-center rounded-md text-[var(--text-faint)] hover:text-[var(--text)]" aria-label="Cancel" onclick={() => (composer = null)}>
+                <X size={14} />
+              </button>
+            </div>
+          {/if}
+
+          {#if groups.every((g) => g.pages.length === 0) && pinnedPages.length === 0}
+            {#if filterCount(activeFilters) > 0}
+              {@render emptyState("No pages match these filters", "", { label: "Clear filters", run: () => view.clearFilters() })}
+            {:else if typeof scope === "number"}
+              {@render emptyState(
+                `No pages in ${scopeLabel} yet`,
+                "",
+                canEdit ? { label: "New page here", run: () => startCreate(scope as number) } : null,
+              )}
+            {:else if scope === "archived"}
+              {@render emptyState("Nothing archived", "Archived pages are kept here, out of the way of the rest.")}
+            {:else if !composer}
+              {@render emptyState("No pages yet", "", canEdit ? { label: "New page", run: () => startCreate() } : null)}
+            {/if}
+          {:else}
+            {#each groups as group (group.key)}
+              {#if group.label && (view.group !== "folder" || groups.length > 1 || typeof scope !== "number")}
+                <div
+                  class="group group-head sticky top-0 z-10 flex items-center gap-2 h-9 px-3 sm:px-5 border-b border-[var(--border)]
+                         text-caption text-[var(--text-muted)]
+                         {dragId !== null && group.folderId !== undefined && dropTarget === group.folderId ? 'outline outline-1 outline-dashed outline-[var(--accent)]' : ''}"
+                  role="presentation"
+                  data-group={group.key}
+                  ondragover={(e) => {
+                    if (dragId === null || group.folderId === undefined) return;
+                    e.preventDefault();
+                    dropTarget = group.folderId;
+                  }}
+                  ondrop={(e) => {
+                    if (group.folderId === undefined) return;
+                    e.preventDefault();
+                    void dropOn(group.folderId);
+                  }}
+                >
+                  {#if group.folderId !== undefined}
+                    <FolderClosed size={13} class="shrink-0 text-[var(--text-faint)]" />
+                  {:else if group.labelColor}
+                    <span class="size-2 rounded-full shrink-0" style="background: {group.labelColor}"></span>
+                  {/if}
+                  {#if typeof group.folderId === "number" && group.folderId !== scope}
+                    <button class="font-medium text-[var(--text)] hover:underline truncate" onclick={(e) => { e.stopPropagation(); setScope(group.folderId as number); }}>
+                      {group.label}
+                    </button>
+                  {:else}
+                    <span class="font-medium text-[var(--text)] truncate">{group.label}</span>
+                  {/if}
+                  <span class="tabular-nums text-[var(--text-faint)]">{group.pages.length}</span>
+                  {#if group.pages.length > 0 && view.group !== "edited"}
+                    <span class="hidden sm:inline text-[var(--text-faint)]">
+                      · updated <TimeAgo date={group.pages.reduce((m, p) => (p.updated_at > m ? p.updated_at : m), "")} />
+                    </span>
+                  {/if}
+                  {#if canEdit && group.folderId !== undefined}
+                    <button
+                      class="ml-auto flex items-center gap-1 h-6 px-1.5 rounded text-[var(--text-faint)] hover:text-[var(--text)]
+                             hover:bg-[var(--bg-subtle)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      onclick={(e) => { e.stopPropagation(); startCreate(group.folderId ?? null); }}
+                    >
+                      <Plus size={12} /> New page here
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+              {#if group.pages.length === 0}
+                <p class="px-5 sm:pl-12 py-3 text-caption text-[var(--text-faint)] border-b border-[var(--border)]">
+                  No pages directly in this folder.
+                </p>
+              {/if}
+              {#each group.pages as page (page.id)}
+                {#if scope === "archived"}
+                  {#snippet restore()}
+                    {#if canEdit}
+                      <button
+                        class="shrink-0 h-6 px-2 rounded-md text-caption font-medium text-[var(--text-muted)] ring-1 ring-[var(--border)]
+                               hover:text-[var(--text)] hover:ring-[var(--accent)] transition-shadow"
+                        onclick={(e) => { e.stopPropagation(); void setStatus(page, "active"); }}
+                      >
+                        Restore
+                      </button>
+                    {/if}
+                  {/snippet}
+                  {@render row(page, { folder: view.group !== "folder", status: false, note: restore })}
+                {:else}
+                  {@render row(page, { folder: view.group !== "folder" })}
+                {/if}
+              {/each}
+            {/each}
+          {/if}
         {/if}
-        {@render treeLevel(focusedFolderId)}
+      {/if}
+    </div>
+
+    {#if !loading && !error && view.selected.size === 0}
+      {@const focused = focusedRow() !== null}
+      <div
+        class="hint-bar hidden md:[@media(hover:hover)]:flex shrink-0 items-center gap-4 px-6 h-8 overflow-hidden whitespace-nowrap
+               border-t border-[var(--border)] bg-[var(--bg)] text-micro text-[var(--text-faint)]"
+        aria-hidden="true"
+      >
+        {#if composer}
+          <span><kbd class="hint-kbd">Enter</kbd> create and open</span>
+          <span><kbd class="hint-kbd">Esc</kbd> cancel</span>
+        {:else if focused}
+          <span><kbd class="hint-kbd">Enter</kbd> open</span>
+          {#if !paneMode}<span><kbd class="hint-kbd">Space</kbd> peek</span>{/if}
+          {#if canEdit}
+            <span><kbd class="hint-kbd">P</kbd> pin</span>
+            <span><kbd class="hint-kbd">X</kbd> select</span>
+          {/if}
+          <span><kbd class="hint-kbd">Esc</kbd> {paneMode ? "close the preview" : "unfocus"}</span>
+        {:else}
+          <span><kbd class="hint-kbd">J</kbd><kbd class="hint-kbd">K</kbd> move</span>
+          {#if canEdit}<span><kbd class="hint-kbd">C</kbd> new page</span>{/if}
+          <span><kbd class="hint-kbd">F</kbd> filter</span>
+          <span><kbd class="hint-kbd">/</kbd> search</span>
+          <span><kbd class="hint-kbd">?</kbd> all shortcuts</span>
+        {/if}
+        <span class="ml-auto pl-4 tabular-nums hidden lg:inline">
+          {flatRows.length} shown
+        </span>
       </div>
+    {/if}
+
+    {#if view.selected.size > 0 && canEdit}
+      <PageBulkBar
+        count={view.selected.size}
+        busy={bulkBusy}
+        {folders}
+        {labels}
+        onMove={(fid) => bulk((p) => ((p.folder_id ?? null) === fid ? null : { folder_id: fid }), () => ({ folder_id: fid }), "Moved")}
+        onStatus={(s) => bulk((p) => (p.status === s ? null : { status: s }), () => ({ status: s }), s === "archived" ? "Archived" : "Updated")}
+        onLabel={(name) =>
+          bulk(
+            (p) => (p.labels.includes(name) ? null : { labels: [...p.labels, name] }),
+            (p) => ({ labels: [...p.labels, name] }),
+            "Labeled",
+          )}
+        onPin={(on) => bulk((p) => (p.pinned === on ? null : { pinned: on }), () => ({ pinned: on }), on ? "Pinned" : "Unpinned")}
+        onExport={bulkExport}
+        onClear={() => (view.selected = new Set())}
+      />
     {/if}
   </div>
 
-  <!-- LIF-185: right sidebar — project page overview + folder navigator.
-       Fills the empty right space and lets you focus a single folder.
-       LIF-231: off-canvas drawer below lg, docked at lg+. -->
-   {#if activeSubTab === "browse" && !loading && !error && (pages.length > 0 || folders.length > 0)}
-    {#if overviewOpen}
-      <button
-        class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
-        aria-label="Close overview"
-        onclick={() => (overviewOpen = false)}
-      ></button>
+  <!-- Reading pane, or the page activity while nothing is open. -->
+  {#if !error}
+    {#if pulseOpen}
+      <button class="xl:hidden fixed inset-0 z-40 bg-black/40" aria-label="Close activity" onclick={() => (pulseOpen = false)}></button>
     {/if}
     <aside
-      class="w-[280px] sm:w-[300px] lg:w-[260px] shrink-0 overflow-y-auto
-             border-l border-[var(--border)] bg-[var(--bg-subtle)] px-4 py-5
-             fixed inset-y-0 right-0 z-50 transition-transform duration-200 ease-out
-             {overviewOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'}
-             lg:static lg:z-auto lg:w-[260px] lg:translate-x-0 lg:shadow-none lg:transition-none"
+      class="w-[min(340px,88vw)] xl:w-[clamp(300px,32%,440px)] shrink-0 border-l border-[var(--border)] bg-[var(--surface)] min-h-0 flex flex-col
+             max-xl:fixed max-xl:inset-y-0 max-xl:right-0 max-xl:z-50 max-xl:shadow-2xl max-xl:transition-transform max-xl:duration-200
+             {pulseOpen ? 'max-xl:translate-x-0' : 'max-xl:translate-x-full'}"
+      aria-label={paneRow ? "Page preview" : "Page activity"}
     >
-      <!-- In-drawer close (below lg). -->
-      <div class="lg:hidden flex justify-end -mt-2 -mr-1 mb-1">
-        <button
-          class="size-9 grid place-items-center rounded-md text-[var(--text-muted)]
-                 hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-          aria-label="Close overview"
-          onclick={() => (overviewOpen = false)}
-        >
-          <X size={18} />
-        </button>
-      </div>
-      <!-- Summary -->
-      <div class="grid grid-cols-2 gap-3 mb-5">
-        <div>
-          <p class="text-title font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
-            {visiblePages.length}
-          </p>
-          <p class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
-            {visiblePages.length === 1 ? "Page" : "Pages"}
-          </p>
-        </div>
-        <div>
-          <p class="text-title font-display tracking-tight tabular-nums text-[var(--text)] leading-none">
-            {folders.length}
-          </p>
-          <p class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mt-1">
-            {folders.length === 1 ? "Folder" : "Folders"}
-          </p>
-        </div>
-      </div>
-
-      <!-- Status breakdown -->
-      <div class="flex flex-col gap-1 mb-5">
-        {#each PAGE_STATUSES as s}
-          {#if statusTally[s.value] > 0}
-            <div class="flex items-center gap-2 text-caption">
-              <s.icon size={13} style="color: {statusColor(s.value)}" class="shrink-0" />
-              <span class="flex-1 text-[var(--text-muted)]">{s.label}</span>
-              <span class="tabular-nums text-[var(--text-faint)]">{statusTally[s.value]}</span>
-            </div>
-          {/if}
-        {/each}
-      </div>
-
-      <div class="h-px bg-[var(--border)] -mx-4 mb-4"></div>
-
-      <!-- Folder navigator -->
-      <p class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2 px-1">
-        Folders
-      </p>
-      <div class="flex flex-col gap-0.5">
-        <button
-          class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-body-sm
-                 transition-colors
-                 {focusedFolderId === null
-            ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
-            : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
-          onclick={() => focusFolder(null)}
-        >
-          <FileText size={14} class="shrink-0 text-[var(--text-faint)]" />
-          <span class="flex-1 truncate">All pages</span>
-          <span class="tabular-nums text-micro text-[var(--text-faint)]">{visiblePages.length}</span>
-        </button>
-        {#each sidebarFolders as folder (folder.id)}
-          {@const depth = folderDepth(folder)}
-          <button
-            class="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-body-sm
-                   transition-colors
-                   {focusedFolderId === folder.id
-              ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] font-medium'
-              : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'}"
-            style="padding-left: {depth * 14 + 8}px;"
-            onclick={() => focusFolder(folder.id)}
-          >
-            {#if focusedFolderId === folder.id}
-              <FolderOpen size={14} class="shrink-0 text-[var(--accent)]" />
-            {:else}
-              <FolderClosed size={14} class="shrink-0 text-[var(--text-faint)]" />
-            {/if}
-            <span class="flex-1 truncate">{folder.name}</span>
-            <span class="tabular-nums text-micro text-[var(--text-faint)]">
-              {folderPageCount(folder.id)}
-            </span>
+      {#if paneRow && wide}
+        {#key paneRow.id}
+          <ReadingPane
+            row={paneRow}
+            meta={metaMap.get(paneRow.id)}
+            {folders}
+            {labels}
+            href="#{pagePath(paneRow.id)}"
+            {canEdit}
+            {resolveRef}
+            {navigate}
+            onOpen={() => paneRow && open(paneRow)}
+            onClose={() => (view.focusedId = null)}
+            onTogglePin={() => paneRow && togglePin(paneRow)}
+            onStatus={(s) => paneRow && setStatus(paneRow, s)}
+          />
+        {/key}
+      {:else if !loading}
+        <div class="xl:hidden flex justify-end px-3 pt-3 -mb-3">
+          <button class="size-8 grid place-items-center rounded-md text-[var(--text-muted)] hover:bg-[var(--bg-subtle)]" aria-label="Close activity" onclick={() => (pulseOpen = false)}>
+            <X size={16} />
           </button>
-        {/each}
-      </div>
+        </div>
+        <PagesPulse
+          pages={livePages}
+          meta={metaMap}
+          {metaLoaded}
+          onPick={(p) => { pulseOpen = false; activate(p); }}
+          onShowDrafts={() => {
+            pulseOpen = false;
+            setScope("all");
+            view.filters = { ...view.filters, statuses: ["draft"] };
+          }}
+          onShowUnlinked={() => {
+            pulseOpen = false;
+            setScope("all");
+            view.filters = { ...view.filters, unlinked: true };
+          }}
+        />
+      {/if}
     </aside>
   {/if}
- </div>
 </div>
 
-<!-- LIF-280: selecting a folder from this picker provides the same page
-     re-parenting path as drag-and-drop, without relying on touch-incompatible
-     native HTML5 DnD. -->
 {#if movePage}
-  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center pt-[14dvh] px-2"
-    onclick={(e) => {
-      if (e.target === e.currentTarget && !movingPage) movePage = null;
-    }}
-    onkeydown={(e) => {
-      if (e.key === "Escape" && !movingPage) movePage = null;
-    }}
+    onclick={(e) => { if (e.target === e.currentTarget) movePage = null; }}
+    onkeydown={(e) => { if (e.key === "Escape") movePage = null; }}
   >
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
     <div
-      class="w-full max-w-[calc(100vw-1rem)] sm:max-w-[420px] bg-[var(--surface)]
-             border border-[var(--border)] rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
+      class="w-full sm:max-w-[420px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
       role="dialog"
       aria-modal="true"
       aria-label="Move page to folder"
       tabindex="-1"
     >
       <div class="flex items-center gap-3 px-4 py-3 border-b border-[var(--border)]">
-        <FolderOpen size={16} class="shrink-0 text-[var(--accent)]" />
+        <FolderInput size={16} class="shrink-0 text-[var(--accent)]" />
         <div class="flex-1 min-w-0">
           <h2 class="text-body-lg font-semibold text-[var(--text)]">Move to folder</h2>
           <p class="text-caption text-[var(--text-faint)] truncate">{movePage.title}</p>
         </div>
-        <button
-          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
-                 hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-          aria-label="Close move folder picker"
-          disabled={movingPage}
-          onclick={() => (movePage = null)}
-        >
+        <button class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:bg-[var(--bg-subtle)]" aria-label="Close" onclick={() => (movePage = null)}>
           <X size={15} />
         </button>
       </div>
       <div class="px-4 py-4">
-        <p class="mb-2 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-          Folder
-        </p>
         <Select
-          options={moveFolderOptions}
+          options={moveOptions}
           bind:value={moveFolderId}
-          onchange={(option) => void chooseMoveFolder(option.value as number | null)}
-        >
-          {#snippet renderOption(option, isSelected)}
-            <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium text-[var(--accent)]' : 'text-[var(--text)]'}">
-              {#if option.value === null}
-                <FileText size={14} class="shrink-0 text-[var(--text-muted)]" />
-              {:else}
-                <FolderClosed size={14} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
-              {/if}
-              <span class="truncate">{option.label}</span>
-            </span>
-          {/snippet}
-        </Select>
+          onchange={async (o) => {
+            const target = movePage;
+            if (target && (await moveToFolder(target, o.value as number | null))) movePage = null;
+          }}
+        />
       </div>
     </div>
   </div>
 {/if}
 
-{#snippet flatPageList(pageList: PageRow[], emptyTitle: string, emptyDescription: string = "")}
-  {#if pageList.length === 0}
-    <div class="flex flex-col items-center py-16 gap-3 px-6 max-w-[460px] mx-auto text-center">
-      <Mascot src="/LizzyReading.png" nativeW={527} nativeH={674} scale={0.16} />
-      <div class="flex flex-col items-center gap-1.5">
-        <p class="text-heading font-medium text-[var(--text)]">{emptyTitle}</p>
-        {#if emptyDescription}
-          <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">{emptyDescription}</p>
-        {/if}
-      </div>
-    </div>
-  {:else}
-    <div class="flex flex-col">
-      {#each pageList as page (page.id)}
-        {@const pageMeta = statusMeta(page.status)}
-        {@const containingFolder = folderName(page.folder_id)}
-        <button
-          class="w-full flex items-start gap-2 py-2 px-1.5 -mx-1.5 border-b border-[var(--border)]
-                 last:border-b-0 rounded-md text-left transition-colors hover:bg-[var(--bg-subtle)]"
-          use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
-          onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
-        >
-          <span
-            class="shrink-0 mt-0.5"
-            style="color: {statusColor(page.status)}"
-            title={pageMeta.label}
-          >
-            <pageMeta.icon size={17} />
-          </span>
-          <div class="flex-1 min-w-0">
-            <div class="text-body-lg text-[var(--text)] truncate">{page.title}</div>
-            <div class="flex items-center gap-2 mt-0.5 text-caption text-[var(--text-faint)]">
-              <span class="font-mono shrink-0">{page.identifier}</span>
-              {#if containingFolder}
-                <span>·</span>
-                <span class="truncate">{containingFolder}</span>
-              {/if}
-              <span>·</span>
-              <TimeAgo class="tabular-nums shrink-0" date={page.updated_at} />
-            </div>
-          </div>
-        </button>
-      {/each}
-    </div>
-  {/if}
-{/snippet}
-
-<!--
-  Recursive tree renderer.
-  Each level shows: folders at this depth, then pages at this depth, then inline create if active.
--->
-{#snippet treeLevel(parentId: number | null)}
-  {@const subFolders = childFolders(parentId)}
-  {@const subPages = pagesInFolder(parentId)}
-
-  <!-- Inline create row — pinned to the TOP of the level so a new page is
-       visible immediately, even in a project with hundreds of pages. -->
-  {#if createTarget && createTarget.parentId === parentId}
-    <div class="flex items-center gap-2 py-1">
-      {#if createTarget.type === "folder"}
-        <FolderOpen size={18} class="text-[var(--btn-success)] shrink-0" />
-      {:else}
-        <FileText size={18} class="text-[var(--btn-success)] shrink-0" />
-      {/if}
-      <!-- svelte-ignore a11y_autofocus -->
-      <input
-        type="text"
-        bind:value={createName}
-        class="flex-1 px-2 py-1 text-body-lg rounded
-               border border-[var(--btn-success)] bg-transparent
-               text-[var(--text)] outline-none"
-        placeholder={createTarget.type === "folder" ? "Folder name" : "Page title"}
-        autofocus
-        onkeydown={(e) => {
-          if (e.key === "Enter") commitCreate();
-          if (e.key === "Escape") { createTarget = null; }
-        }}
-        onblur={() => { if (!createName.trim()) createTarget = null; }}
-      />
-    </div>
-  {/if}
-
-  {#each subFolders as folder (folder.id)}
-    {@const isExpanded = expandedFolders.has(folder.id)}
-    {@const isDraggedOver = dropTarget === folder.id}
-
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      ondragover={(e) => { e.stopPropagation(); onDragOver(e, folder.id); }}
-      ondrop={(e) => { e.stopPropagation(); onDrop(e, folder.id); }}
-    >
-      <div
-        class="flex items-center gap-1.5 py-1.5 px-1.5 -mx-1.5 rounded-md
-               cursor-pointer group transition-colors
-               {isDraggedOver
-          ? 'bg-[var(--accent-subtle)] outline outline-1 outline-dashed outline-[var(--accent)]'
-          : 'hover:bg-[var(--bg-subtle)]'}"
-        role="button"
-        tabindex="0"
-        onclick={() => toggleFolder(folder.id)}
-        onkeydown={(e) => { if (e.key === "Enter") toggleFolder(folder.id); }}
-      >
-        <ChevronRight
-          size={14}
-          class="shrink-0 text-[var(--text-faint)] transition-transform
-                 {isExpanded ? 'rotate-90' : ''}"
-        />
-        {#if isExpanded}
-          <FolderOpen size={18} class="shrink-0 text-[var(--accent)]" />
-        {:else}
-          <FolderClosed size={18} class="shrink-0 text-[var(--text-muted)]" />
-        {/if}
-        <span class="text-body-lg font-medium text-[var(--text)] flex-1 truncate">
-          {folder.name}
-        </span>
-        <!-- Hover actions (LIF-234: hidden for viewers). LIF-275: always
-             visible on touch — hover-reveal never fires there. -->
-        {#if canEdit}
-        <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity">
-          <button
-            class="size-6 flex items-center justify-center rounded
-                   text-[var(--text-faint)] hover:text-[var(--accent)]
-                   hover:bg-[var(--accent-subtle)]"
-            title="New page"
-            onclick={(e) => { e.stopPropagation(); startCreate("page", folder.id); }}
-          >
-            <FileText size={13} />
-          </button>
-          <button
-            class="size-6 flex items-center justify-center rounded
-                   text-[var(--text-faint)] hover:text-[var(--accent)]
-                   hover:bg-[var(--accent-subtle)]"
-            title="New subfolder"
-            onclick={(e) => { e.stopPropagation(); startCreate("folder", folder.id); }}
-          >
-            <Plus size={13} />
-          </button>
-          <button
-            class="size-6 flex items-center justify-center rounded
-                   text-[var(--text-faint)] hover:text-[var(--error)]
-                   hover:bg-[var(--error-bg)]"
-            title="Delete folder"
-            onclick={(e) => handleDeleteFolder(folder.id, e)}
-          >
-            <Trash2 size={13} />
-          </button>
-        </div>
-        {/if}
-      </div>
-
-      <!-- Children (recursive), inset under a vertical guide line so the
-           nesting reads clearly. -->
-      {#if isExpanded}
-        <div class="ml-[15px] pl-3 border-l border-[var(--border)]">
-          {@render treeLevel(folder.id)}
-        </div>
-      {/if}
-    </div>
-  {/each}
-
-  <!-- Pages at this level -->
-  {#each subPages as page (page.id)}
-    {@const isDragging = draggedId?.type === "page" && draggedId.id === page.id}
-    {@const sMeta = statusMeta(page.status)}
-    {@const preview = contentPreview(page.preview)}
-    <button
-      class="w-full flex items-start gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
-             text-left group transition-colors
-             {isDragging ? 'opacity-40' : 'hover:bg-[var(--bg-subtle)]'}"
-      use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
-      onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
-      draggable={canEdit}
-      ondragstart={(e) => { if (canEdit) onDragStartPage(e, page.id); }}
-      ondragend={onDragEnd}
-    >
-      <span
-        class="shrink-0 mt-0.5"
-        style="color: {statusColor(page.status)}"
-        title={sMeta.label}
-      >
-        <sMeta.icon size={17} />
-      </span>
-      <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-2">
-          <span class="text-body-lg text-[var(--text)] truncate flex-1">
-            {page.title}
-          </span>
-
-          <!-- Identifier (LIF-DOC-N) — the handle used for cross-references
-               and MCP tools; mirrors the search-result rows so it's visible
-               without searching. Hidden below sm where row width is scarce. -->
-          <span class="hidden sm:inline text-caption font-mono text-[var(--text-faint)] shrink-0">
-            {page.identifier}
-          </span>
-
-          <!-- LIF-105: label chips. Up to 2 then a "+N" overflow. -->
-          {#if page.labels.length > 0}
-            <div class="flex items-center gap-1 shrink-0">
-              {#each page.labels.slice(0, 2) as lbl}
-                {@const labelObj = labels.find((l) => l.name === lbl)}
-                <span
-                  class="text-micro font-medium px-1.5 py-0.5 rounded-full
-                         border border-[var(--border)]"
-                  style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
-                >
-                  {lbl}
-                </span>
-              {/each}
-              {#if page.labels.length > 2}
-                <span class="text-micro text-[var(--text-faint)]">
-                  +{page.labels.length - 2}
-                </span>
-              {/if}
-            </div>
-          {/if}
-
-          <TimeAgo
-            class="text-body-sm text-[var(--text-faint)] shrink-0 tabular-nums
-                   group-hover:text-[var(--text-muted)] transition-colors"
-            date={page.updated_at}
-          />
-
-          <!-- LIF-280: hidden until hover on desktop, but always reachable
-               on touch devices where native drag-and-drop does not work. -->
-          {#if canEdit}
-            <span
-              class="shrink-0 text-[var(--text-faint)] opacity-0 group-hover:opacity-100
-                     pointer-coarse:opacity-100 hover:text-[var(--accent)] transition"
-              role="button"
-              tabindex="0"
-              title="Move to folder…"
-              onclick={(e) => openMovePicker(page, e)}
-              onkeydown={(e) => { if (e.key === "Enter") openMovePicker(page, e); }}
-            >
-              <FolderOpen size={13} />
-            </span>
-          {/if}
-
-          <!-- LIF-183: pin toggle. Always visible (accent) when pinned;
-               otherwise revealed on hover. LIF-234: for a viewer, a pinned
-               page shows a static pin; the toggle affordance is hidden. -->
-          {#if canEdit}
-            <span
-              class="shrink-0 transition
-                     {page.pinned
-                ? 'text-[var(--accent)]'
-                : 'text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 hover:text-[var(--accent)]'}"
-              role="button"
-              tabindex="0"
-              title={page.pinned ? "Unpin" : "Pin to top"}
-              onclick={(e) => togglePin(page, e)}
-              onkeydown={(e) => { if (e.key === "Enter") togglePin(page, e); }}
-            >
-              {#if page.pinned}
-                <Pin size={13} class="fill-current" />
-              {:else}
-                <Pin size={13} />
-              {/if}
-            </span>
-          {:else if page.pinned}
-            <span class="shrink-0 text-[var(--accent)]" title="Pinned">
-              <Pin size={13} class="fill-current" />
-            </span>
-          {/if}
-        </div>
-
-        <!-- Content preview — turns the tree into something scannable. -->
-        {#if preview}
-          <p class="text-caption text-[var(--text-faint)] truncate mt-0.5 pr-6">
-            {preview}
-          </p>
-        {/if}
-      </div>
-    </button>
-  {/each}
-
-{/snippet}
+<style>
+  .group-head {
+    background: color-mix(in srgb, var(--bg-subtle) 55%, var(--bg));
+  }
+  @keyframes composer-in {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+  }
+  .composer-in {
+    animation: composer-in 180ms var(--ease-out-expo);
+  }
+  .hint-kbd {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.15rem;
+    height: 1.15rem;
+    padding: 0 0.3rem;
+    margin-right: 0.3rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    line-height: 1;
+  }
+  .hint-kbd + .hint-kbd {
+    margin-left: -0.15rem;
+  }
+  .hint-bar > span {
+    flex-shrink: 0;
+  }
+</style>

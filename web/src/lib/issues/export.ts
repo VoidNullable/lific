@@ -1,16 +1,19 @@
 import { isSignedOut } from "../signedOut";
 
 /** Use canonical server exports so comments and metadata match single-issue export. */
-export async function selectedIssueExport(identifiers: string[]): Promise<Blob> {
+export async function selectedIssueExport(
+  identifiers: string[],
+  kind: "issues" | "pages" = "issues",
+): Promise<Blob> {
   // LIF-583: exports need an account; a signed-out reader would only collect
   // a 401 per issue.
-  if (isSignedOut()) throw new Error("Sign in to export issues.");
+  if (isSignedOut()) throw new Error(`Sign in to export ${kind}.`);
   const parts: BlobPart[] = [];
   const separator = new TextEncoder().encode("\n\n---\n\n");
   const limit = 16 * 1024 * 1024;
   let size = 0;
   for (const identifier of identifiers) {
-    const response = await fetch(`/api/export/issues/${encodeURIComponent(identifier)}`);
+    const response = await fetch(`/api/export/${kind}/${encodeURIComponent(identifier)}`);
     if (!response.ok) throw new Error(`Could not export ${identifier} (HTTP ${response.status}).`);
     if (!response.body) throw new Error(`No export returned for ${identifier}.`);
     if (parts.length) {
@@ -25,7 +28,7 @@ export async function selectedIssueExport(identifiers: string[]): Promise<Blob> 
         size += value.byteLength;
         if (size > limit) {
           await reader.cancel();
-          throw new Error("Selected exports exceed 16 MiB. Select fewer issues and try again.");
+          throw new Error(`Selected exports exceed 16 MiB. Select fewer ${kind} and try again.`);
         }
         parts.push(value);
       }

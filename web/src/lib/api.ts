@@ -537,6 +537,16 @@ export interface Bot {
   created_at: string;
   connected: boolean;
   tool_id: string | null;
+  /** When its newest live API key was issued. Absent from older servers. */
+  key_created_at?: string | null;
+  /** Whether a live OAuth token connects it. */
+  oauth?: boolean;
+  /** Its latest write or MCP read, UTC without a zone. */
+  last_active?: string | null;
+  /** Writes it has made. */
+  changes?: number;
+  /** Comments it wrote; deleting the account deletes them. */
+  comments?: number;
 }
 
 export interface CreateBotResponse {
@@ -2121,6 +2131,39 @@ export async function deleteFolder(id: number) {
   return request<{ deleted: boolean }>(`/folders/${id}`, {
     method: "DELETE",
   });
+}
+
+export async function renameFolder(id: number, name: string) {
+  return request<Folder>(`/folders/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Who wrote a page, from the audit log. */
+export interface PageMetaPerson {
+  id: number;
+  username: string;
+  display_name: string | null;
+  is_bot: boolean;
+  tool_id: string | null;
+}
+
+/** What the Pages list shows beyond the skinny sync row: a prose excerpt,
+ *  length, who created and last edited it, and what links to it. */
+export interface PageMeta {
+  id: number;
+  excerpt: string;
+  words: number;
+  created_by: PageMetaPerson | null;
+  updated_by: PageMetaPerson | null;
+  links: { issues: number; pages: number; comments: number };
+  /** Identifiers of the issues and pages that link here, newest first. */
+  linked_from: string[];
+}
+
+export async function getPagesMeta(projectId: number) {
+  return request<{ pages: PageMeta[] }>(`/projects/${projectId}/pages/meta`);
 }
 
 // ── Search ──────────────────────────────────────────────────

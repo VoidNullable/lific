@@ -16,6 +16,7 @@ These answer `GET` with no credential. Every other route, and every other method
 | `/api/projects` | The published projects. |
 | `/api/projects/{id}` | One published project. |
 | `/api/projects/{id}/index`, `/changes` | [Delta sync](/docs/rest-api/sync). The cursor counts only this project's writes. |
+| `/api/projects/{id}/pages/meta` | Page excerpts, authors and incoming links. |
 | `/api/projects/{id}/board`, `/issue-counts`, `/relations`, `/insights` | The board, counts, dependency graph and insights. |
 | `/api/projects/{id}/activity`, `/activity/actors` | The project's activity. |
 | `/api/projects/{id}/my-role` | `{"role": null, "is_admin": false}`. |

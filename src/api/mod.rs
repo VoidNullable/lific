@@ -23,6 +23,7 @@ pub(crate) mod idempotency;
 mod insights;
 mod issues;
 mod members;
+mod page_meta;
 mod pages;
 mod plans;
 mod project_archives;
@@ -219,6 +220,12 @@ fn router_impl(
         // the project. See src/api/sync.rs.
         .route("/api/projects/{id}/changes", get(sync::project_changes))
         .route("/api/projects/{id}/index", get(sync::project_index))
+        // Pages tab metadata (excerpt, words, authors, incoming links),
+        // gated like `/index`. See src/api/page_meta.rs.
+        .route(
+            "/api/projects/{id}/pages/meta",
+            get(page_meta::project_pages_meta),
+        )
         .route("/api/export/issues/{identifier}", get(export::export_issue))
         .route("/api/export/pages/{identifier}", get(export::export_page))
         .route(

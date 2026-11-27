@@ -11,8 +11,12 @@
  *     full text readable before choosing;
  *   - "Use <template>" creates the page and the tab becomes that page, with
  *     its state in briefings shown and no switch to flip;
- *   - the Pages list shows neither a conventions block nor the page, and the
- *     page's old address and a palette lookup both lead to the tab;
+ *   - the Pages list and its search leave the page out; the folder pane's
+ *     Conventions entry is a link to the tab with the page's state (not
+ *     written, on, off), never a scope of the list, and a view saved with
+ *     the old Conventions scope opens All pages;
+ *   - the page's old address, with or without a comment target, and a
+ *     palette lookup lead to the tab;
  *   - Change template asks first, then replaces the text, and the old text
  *     is in the page history;
  *   - turning it off and back on each ask first, survive a reload, and keep
@@ -171,6 +175,21 @@ function sampleLine(t: Template): string {
   return line.slice(0, 30);
 }
 
+/** The Pages folder pane's Conventions entry: a link to the tab, with the
+ *  page's state, never the list's selected scope. Opens the pane's drawer
+ *  on a phone. */
+async function conventionsEntry(page: Page, vp: Viewport, base: string, ident: string, state: string) {
+  await page.goto(`${base}/#/${ident}/pages`);
+  if (vp.mobile) await page.getByRole("button", { name: /^Folders:/ }).click();
+  const entry = page.getByTestId("conventions-entry");
+  await entry.waitFor({ state: "visible", timeout: 15_000 });
+  await waitFor(page, () => entry.getAttribute("data-state"), (v) => v === state, `the entry says ${state}`);
+  assert.equal(await entry.evaluate((el) => el.tagName), "A", "the entry is a link");
+  assert.equal(await entry.getAttribute("href"), `#/${ident}/conventions`, "the entry links to the tab");
+  assert.equal(await entry.getAttribute("aria-current"), null, "the entry is never the selected scope");
+  return entry;
+}
+
 /** Undo a stored page diff (unified, no file header) on the text it
  *  produced, giving back the text before the edit. */
 function undoDiff(after: string, diff: string): string {
@@ -230,6 +249,10 @@ async function scenario(
     content: "Steps before a release",
     status: "active",
   });
+
+  // Pages links to the tab, and says nothing is written yet.
+  await conventionsEntry(page, vp, base, ids.bare, "missing");
+  if (vp.mobile) await page.getByRole("button", { name: "Close folders" }).click();
 
   // The tab is in the navigation.
   await page.goto(`${base}/#/${ids.bare}/pages`);
@@ -318,14 +341,32 @@ async function scenario(
   // ── Pages leaves it out; old links lead to the tab ──────────────────
   await page.goto(`${base}/#/${ids.bare}/pages`);
   await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("conventions-section").count(), 0, "no conventions block on Pages");
   const copies = await page.evaluate((ident) => {
     const main = document.querySelector("main") ?? document.body;
     return [...main.querySelectorAll("button, a")].filter((el) => el.textContent?.includes(ident)).length;
   }, created.identifier);
   assert.equal(copies, 0, "the conventions page is not listed in Pages");
   await assertNoOverflow(page, `${vp.name} pages`);
-  await shot(page, vp, "04-pages-list");
+  // Nor does a search on Pages find it.
+  if (vp.mobile) await page.getByRole("button", { name: "Search pages" }).click();
+  await page.getByPlaceholder("Search pages...").fill(created.identifier);
+  await page.getByText("No pages match").waitFor({ state: "visible" });
+  await page.getByTestId("pages-empty").getByRole("button", { name: "Clear search" }).click();
+  // A view saved while Conventions was a scope of this list opens All pages.
+  await page.evaluate((ident) => {
+    localStorage.setItem(`lific:pages-view:${ident}`, JSON.stringify({ scope: "conventions", pane: true }));
+  }, ids.bare);
+  await page.reload();
+  const pagesEntry = await conventionsEntry(page, vp, base, ids.bare, "on");
+  assert.ok(
+    (await page.getByTestId("pages-scope").innerText()).includes("All pages"),
+    "a saved Conventions scope falls back to All pages",
+  );
+  await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
+  await shot(page, vp, "04-pages-folder-pane");
+  await pagesEntry.click();
+  await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
+  await status.waitFor({ state: "visible" });
 
   await page.goto(`${base}/#/${ids.bare}/pages/${created.id}`);
   await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
@@ -357,7 +398,9 @@ async function scenario(
     await page.keyboard.press("Enter");
     await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
   }
-  console.log(`ok   ${vp.name}: Pages leaves the page out, and its old address${vp.mobile ? "" : " and a palette lookup"} open the tab`);
+  console.log(
+    `ok   ${vp.name}: Pages leaves the page out of its list and search and links to the tab; its old address${vp.mobile ? "" : " and a palette lookup"} open the tab`,
+  );
 
   // ── Change template, behind a confirmation ──────────────────────────
   await page.goto(tab);
@@ -444,6 +487,9 @@ async function scenario(
   assert.ok((await status.innerText()).includes("Left out of agents' briefings"));
   assert.equal((await api(page, "GET", `/pages/${created.id}`)).content, byKey("human_owned").content, "off keeps the text");
   await shot(page, vp, "06-tab-off");
+  await conventionsEntry(page, vp, base, ids.bare, "off");
+  await page.goto(tab);
+  await status.waitFor({ state: "visible", timeout: 15_000 });
   await menu(page, "Put back in briefings…");
   await dialog.waitFor({ state: "visible" });
   assert.equal(await dialog.getAttribute("data-mode"), "on");
@@ -523,6 +569,9 @@ async function viewerScenario(browser: Browser, base: string, ident: string, err
   assert.equal(await chooser.locator("[data-template]").count(), 0, "a viewer gets no templates");
   assert.ok((await chooser.innerText()).includes("no conventions yet"), "a viewer is told there are none");
   await shot(page, vp, "08-viewer-no-conventions");
+  // Pages links a viewer to the same tab.
+  await (await conventionsEntry(page, vp, base, ident, "missing")).click();
+  await chooser.waitFor({ state: "visible", timeout: 15_000 });
 
   await api(adminPage, "POST", "/pages", {
     project_id: project.id,
