@@ -93,16 +93,28 @@
     }
   });
 
+  // The project index failed to load: the model goes back to cold and keeps
+  // the reason. Without a page to show, that is the answer to give.
+  const indexError = $derived(
+    model !== null && model.status === "cold" && model.error && conv.kind === "none" ? model.error : "",
+  );
+  const shownError = $derived(error || indexError);
+
   // A model still loading may not hold the page yet; wait rather than
   // offer templates for a page that exists.
-  const waiting = $derived(!error && (model === null || (!ready && conv.kind === "none")));
+  const waiting = $derived(!shownError && (model === null || (!ready && conv.kind === "none")));
+
+  function retry() {
+    if (error || !model) void load(projectIdentifier);
+    else void model.bootstrap();
+  }
 </script>
 
-{#if error}
-  <ErrorState title="Couldn't load conventions" message={error}>
+{#if shownError}
+  <ErrorState title="Couldn't load conventions" message={shownError}>
     <button
       class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-      onclick={() => void load(projectIdentifier)}
+      onclick={retry}
     >
       Try again
     </button>
