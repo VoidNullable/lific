@@ -20,6 +20,7 @@ const fixture = `<script>
   import { init } from './lib/theme';
   import { commandPaletteState } from './lib/commandPaletteState.svelte';
   import { mobileNavState } from './lib/mobileNavState.svelte';
+  import Toaster from './lib/toast/Toaster.svelte';
   init();
   let route = $state(location.hash.slice(1) || '/');
   let refresh = $state();
@@ -34,7 +35,8 @@ const fixture = `<script>
     {:else}<div class="p-8"><h1 id="route" class="text-heading">{route}</h1></div>{/if}
   </Layout>
   {#snippet failed(error)}<pre id="boundary-error">{error.message}</pre>{/snippet}
-</svelte:boundary>`;
+</svelte:boundary>
+<Toaster />`;
 
 const server = await createServer({
   root, server: { host: "127.0.0.1", port: 0, strictPort: false },
@@ -58,16 +60,26 @@ const longTitle = "Investigate the extraordinarily long sidebar regression title
 const destinations = ["Overview", "Issues", "Board", "Modules", "Pages", "Plans", "Graph", "Files", "Activity", "Insights"];
 type Call = { method: string; path: string; query: string; body: any };
 type Gate = { method: string; path: string; status: number; release: () => void; promise: Promise<void> };
+type Item = { kind: "folder" | "project"; id: number };
+const project = (id: number): Item => ({ kind: "project", id });
+const folder = (id: number): Item => ({ kind: "folder", id });
+const same = (a: Item | null, b: Item | null) => !!a && !!b && a.kind === b.kind && a.id === b.id;
 class API {
   user = { id: 1, username: "sidebar", display_name: "Sidebar Operator", email: "sidebar@example.test", is_admin: false };
   projects = ["One", "Two", longName, "Four"].map((name, i) => ({
     id: i + 1, name, identifier: ["ONE", "TWO", "LONG", "FOUR"][i], emoji: "", description: "",
     sort_order: i, created_at: stamp, updated_at: stamp, is_public: false,
   }));
-  groups = [
-    { id: 11, user_id: 1, name: "Work", project_ids: [1, 2], sort_order: 0, created_at: stamp, updated_at: stamp },
-    { id: 12, user_id: 1, name: "Personal", project_ids: [3], sort_order: 1, created_at: stamp, updated_at: stamp },
-  ];
+  // The sidebar as the server stores it: each container's items in order.
+  // `null` is the top level. Mirrors src/db/queries/project_groups.rs closely
+  // enough that a move the client should have refused fails the test.
+  folders = new Map<number, { name: string; items: Item[] }>([
+    [11, { name: "Work", items: [project(1), project(2)] }],
+    [12, { name: "Personal", items: [project(3)] }],
+  ]);
+  root: Item[] = [folder(11), folder(12), project(4)];
+  nextFolder = 13;
+  seenMoves = 0;
   calls: Call[] = [];
   unexpected: string[] = [];
   expectedConsole = new Set<string>();
@@ -82,6 +94,72 @@ class API {
     return gate;
   }
   fail(method: string, path: string) { const gate = this.hold(method, path, 409); gate.release(); }
+  /** Replace the tree: `spec` nests as [name, id, children] for a folder, a
+   *  number for a project. */
+  arrange(spec: (number | [string, number, any[]])[]) {
+    this.folders.clear();
+    const build = (list: (number | [string, number, any[]])[]): Item[] => list.map(entry => {
+      if (typeof entry === "number") return project(entry);
+      const [name, id, children] = entry;
+      this.folders.set(id, { name, items: build(children) });
+      this.nextFolder = Math.max(this.nextFolder, id + 1);
+      return folder(id);
+    });
+    this.root = build(spec);
+  }
+  /** The tree as `Work[One,Two],Four`, the same shape `domTree` reads. */
+  describe(items: Item[] = this.root): string {
+    return items.map(i => i.kind === "project" ? this.projects.find(p => p.id === i.id)!.name
+      : `${this.folders.get(i.id)!.name}[${this.describe(this.folders.get(i.id)!.items)}]`).join(",");
+  }
+  list(parent: number | null) { return parent === null ? this.root : this.folders.get(parent)!.items; }
+  parentOf(item: Item): number | null | undefined {
+    if (this.root.some(i => same(i, item))) return null;
+    for (const [id, f] of this.folders) if (f.items.some(i => same(i, item))) return id;
+    return undefined;
+  }
+  depth(parent: number | null): number {
+    let n = 0;
+    for (let at = parent; at !== null && at !== undefined; at = this.parentOf(folder(at))!) n++;
+    return n;
+  }
+  height(id: number): number {
+    return 1 + Math.max(0, ...this.folders.get(id)!.items.filter(i => i.kind === "folder").map(i => this.height(i.id)));
+  }
+  /** Folder names top-down to `item`, for assertions. */
+  path(item: Item): string[] {
+    const out: string[] = [];
+    for (let at = this.parentOf(item); at !== null && at !== undefined; at = this.parentOf(folder(at))) out.unshift(this.folders.get(at)!.name);
+    return out;
+  }
+  place(item: Item, parent: number | null, before: Item | null) {
+    const from = this.parentOf(item);
+    if (from !== undefined) { const list = this.list(from); list.splice(list.findIndex(i => same(i, item)), 1); }
+    const list = this.list(parent);
+    const at = before ? list.findIndex(i => same(i, before)) : -1;
+    list.splice(at >= 0 ? at : list.length, 0, item);
+  }
+  group(id: number, parent: number | null, depth: number) {
+    const f = this.folders.get(id)!;
+    return { id, user_id: this.user.id, name: f.name, parent_id: parent, depth, sort_order: 0, items: [...f.items],
+      project_ids: f.items.filter(i => i.kind === "project").map(i => i.id), created_at: stamp, updated_at: stamp };
+  }
+  layout() {
+    const groups: ReturnType<API["group"]>[] = [];
+    const walk = (items: Item[], parent: number | null, depth: number) => {
+      for (const i of items) if (i.kind === "folder") { groups.push(this.group(i.id, parent, depth)); walk(this.folders.get(i.id)!.items, i.id, depth + 1); }
+    };
+    walk(this.root, null, 1);
+    return { root: [...this.root], groups, max_depth: 4 };
+  }
+  /** The server's refusals. The client checks first, so reaching one is a bug. */
+  refusal(item: Item, parent: number | null): string | null {
+    if (parent !== null && !this.folders.has(parent)) return "No such folder.";
+    if (item.kind !== "folder") return null;
+    for (let at: number | null | undefined = parent; at !== null && at !== undefined; at = this.parentOf(folder(at)))
+      if (at === item.id) return "cycle";
+    return this.depth(parent) + this.height(item.id) > 4 ? "depth" : null;
+  }
   async attach(context: BrowserContext) {
     await context.route("**/api/**", async route => {
       const req = route.request();
@@ -115,25 +193,38 @@ class API {
           if (method === "PATCH") Object.assign(this.user, body);
           data = this.user;
         } else if (path === "/projects" && method === "GET") data = this.projects;
-        else if (path === "/project-groups" && method === "GET") data = this.groups;
-        else if (path === "/projects/reorder" && method === "PUT") {
-          assert.deepEqual([...body.ids].sort(), this.projects.map(p => p.id).sort());
-          this.projects = body.ids.map((id: number, sort_order: number) => ({ ...this.projects.find(p => p.id === id)!, sort_order }));
-          data = this.projects;
-        } else if (path === "/project-groups/reorder" && method === "PUT") {
-          assert.deepEqual([...body.ids].sort(), this.groups.map(g => g.id).sort());
-          this.groups = body.ids.map((id: number, sort_order: number) => ({ ...this.groups.find(g => g.id === id)!, sort_order }));
-          data = this.groups;
+        else if (path === "/project-groups/layout" && method === "GET") data = this.layout();
+        else if (path === "/project-groups" && method === "GET") data = this.layout().groups;
+        else if (path === "/project-groups/move" && method === "PUT") {
+          const refused = this.refusal(body.item, body.parent_id);
+          if (refused) {
+            this.unexpected.push(`Client sent a refused move (${refused}): ${JSON.stringify(body)}`);
+            return await route.fulfill({ status: 400, json: { error: refused } });
+          }
+          this.place(body.item, body.parent_id, body.before);
+          data = this.layout();
         } else if (path === "/project-groups" && method === "POST") {
-          const group = { id: 13, user_id: this.user.id, name: body.name, project_ids: [], sort_order: this.groups.length, created_at: stamp, updated_at: stamp };
-          this.groups.push(group); data = group;
+          const id = this.nextFolder++;
+          this.folders.set(id, { name: body.name, items: [] });
+          const list = this.list(body.parent_id ?? null);
+          const lastFolder = list.findLastIndex(i => i.kind === "folder");
+          list.splice(lastFolder + 1, 0, folder(id));
+          if (body.contains) this.place(body.contains, id, null);
+          data = this.group(id, body.parent_id ?? null, this.depth(body.parent_id ?? null) + 1);
         } else if (path === "/project-groups/assign" && method === "PUT") {
-          for (const g of this.groups) g.project_ids = g.project_ids.filter(id => id !== body.project_id);
-          if (body.group_id !== null) this.groups.find(g => g.id === body.group_id)!.project_ids.push(body.project_id);
+          this.place(project(body.project_id), body.group_id, null);
           data = { ok: true };
         } else if (/^\/project-groups\/\d+$/.test(path) && method === "PATCH") {
-          const group = this.groups.find(g => g.id === Number(path.split("/").at(-1)))!;
-          group.name = body.name; data = group;
+          const id = Number(path.split("/").at(-1));
+          this.folders.get(id)!.name = body.name;
+          data = this.group(id, this.parentOf(folder(id)) ?? null, this.depth(this.parentOf(folder(id)) ?? null) + 1);
+        } else if (/^\/project-groups\/\d+$/.test(path) && method === "DELETE") {
+          // Contents take the folder's place in its parent; nothing is lost.
+          const id = Number(path.split("/").at(-1));
+          const list = this.list(this.parentOf(folder(id))!);
+          list.splice(list.findIndex(i => same(i, folder(id))), 1, ...this.folders.get(id)!.items);
+          this.folders.delete(id);
+          data = { deleted: true };
         } else if (/^\/projects\/\d+\/my-role$/.test(path) && method === "GET") {
           data = { role: "owner", is_admin: false };
         } else if (["/issues", "/modules", "/pages", "/plans"].includes(path) && method === "GET") {
@@ -242,6 +333,50 @@ async function attr(el: Locator, name: string, value: string | null) {
   }), { name, value });
 }
 const menuItem = (page: Page, name: string) => page.getByRole("menuitem", { name, exact: true });
+
+// The rendered sidebar tree as `Work[One,Two],Four`, read from the DOM.
+function domTree(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const walk = (el: Element | null): string[] => el ? [...el.children].flatMap(c => {
+      if (c.matches("[data-drop-entry]")) return [c.querySelector("a[data-sidebar-project]")!.getAttribute("title")!];
+      if (c.matches(".sidebar-group-heading")) {
+        const id = (c as HTMLElement).dataset.dropId;
+        return [`${c.querySelector("button[title]")!.getAttribute("title")}[${walk(document.getElementById(`group-${id}`)).join(",")}]`];
+      }
+      return [];
+    }) : [];
+    return walk(document.querySelector("aside [data-tree-root]")).join(",");
+  });
+}
+const row = (s: Session, kind: "project" | "folder", id: number) =>
+  s.aside.locator(`[data-drop-row][data-drop-kind="${kind}"][data-drop-id="${id}"]`);
+type Where = "before" | "after" | "inside" | "below";
+async function pointAt(target: Locator, where: Where) {
+  const b = (await target.boundingBox())!;
+  const y = where === "before" ? b.y + 2 : where === "after" ? b.y + b.height - 2 : where === "below" ? b.y + b.height + 24 : b.y + b.height / 2;
+  return { x: b.x + Math.min(b.width / 2, 80), y };
+}
+/** Press on `source` and move past the drag threshold, with a real mouse. */
+async function grab(page: Page, source: Locator) {
+  await source.scrollIntoViewIfNeeded();
+  const { x, y } = await pointAt(source, "inside");
+  await page.mouse.move(x, y); await page.mouse.down();
+  await page.mouse.move(x + 3, y + 7, { steps: 3 });
+  await page.locator("[data-sidebar-drag-ghost]").waitFor();
+}
+async function hoverAt(page: Page, target: Locator, where: Where) {
+  const { x, y } = await pointAt(target, where);
+  await page.mouse.move(x, y, { steps: 6 });
+}
+async function dragTo(page: Page, source: Locator, target: Locator, where: Where) {
+  await grab(page, source); await hoverAt(page, target, where); await page.mouse.up();
+  await page.locator("[data-sidebar-drag-ghost]").waitFor({ state: "detached" });
+}
+const moves = (api: API) => api.calls.filter(c => c.method === "PUT" && c.path === "/project-groups/move").map(c => c.body);
+/** The next move the client sends, once it arrives. */
+async function moved(api: API) {
+  return (await called(api, ++api.seenMoves, "PUT", "/project-groups/move")).body;
+}
 async function action(s: Session, name: string, choice: string) {
   const trigger = s.aside.getByRole("button", { name, exact: true });
   await trigger.focus(); await trigger.click();
@@ -365,7 +500,7 @@ try {
     const api = new API();
     // Every startup read fails until explicitly recovered. Layout currently has
     // multiple initial refresh callers; do not depend on their count or order.
-    api.failingGets.add("/project-groups");
+    api.failingGets.add("/project-groups/layout");
     const s = await session({ api, route: "/ONE/issues/ONE-1", collapsed: [11, 12], observeReveal: true });
     const { page, aside } = s;
     const scrollCalls = () => page.evaluate(() => (window as any).sidebarScrollCalls);
@@ -376,11 +511,11 @@ try {
     assert.deepEqual(await scrollCalls(), [], "Failed membership read must not consume route reveal");
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("lific:sidebar:collapsed-groups")!)), [11, 12]);
 
-    api.failingGets.delete("/project-groups");
-    const gate = held(api, "GET", "/project-groups");
-    const count = api.calls.filter(c => c.path === "/project-groups").length;
+    api.failingGets.delete("/project-groups/layout");
+    const gate = held(api, "GET", "/project-groups/layout");
+    const count = api.calls.filter(c => c.path === "/project-groups/layout").length;
     const recovering = page.evaluate(() => (window as any).fixture.refresh());
-    await called(api, count + 1, "GET", "/project-groups");
+    await called(api, count + 1, "GET", "/project-groups/layout");
     assert.deepEqual(await scrollCalls(), [], "Wait for recovered membership, not just project success");
     gate.release(); await recovering;
     await attr(aside.locator("#group-11"), "hidden", null);
@@ -420,8 +555,8 @@ try {
     assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem("lific:sidebar:collapsed-groups")!))).includes(11));
 
     api.projects.push({ ...api.projects[0], id: 5, identifier: "FIVE", name: "Five", sort_order: 4 });
-    api.groups.find(g => g.id === 11)!.project_ids.push(5);
-    api.failingGets.add("/project-groups");
+    api.folders.get(11)!.items.push(project(5));
+    api.failingGets.add("/project-groups/layout");
     await routeTo(page, "/FIVE/issues");
     await settle(s);
     assert.ok(await aside.locator('a[title="Five"]').isVisible(), "New project arrived in the successful project response");
@@ -430,11 +565,11 @@ try {
     await attr(projectNav, "hidden", "");
     assert.deepEqual(await scrollCalls(), [], "An older successful group load must not permit premature reveal");
 
-    api.failingGets.delete("/project-groups");
-    const gate = held(api, "GET", "/project-groups");
-    const count = api.calls.filter(c => c.path === "/project-groups").length;
+    api.failingGets.delete("/project-groups/layout");
+    const gate = held(api, "GET", "/project-groups/layout");
+    const count = api.calls.filter(c => c.path === "/project-groups/layout").length;
     const recovering = page.evaluate(() => (window as any).fixture.refresh());
-    await called(api, count + 1, "GET", "/project-groups");
+    await called(api, count + 1, "GET", "/project-groups/layout");
     assert.deepEqual(await scrollCalls(), [], "Recovery must wait for the current membership response");
     gate.release(); await recovering;
     await settle(s);
@@ -466,7 +601,7 @@ try {
   await test("long sidebar reveals nearest once and respects subsequent user scrolling", async () => {
     const api = new API();
     const template = api.projects[0];
-    api.groups = [];
+    api.arrange([]);
     api.projects = Array.from({ length: 45 }, (_, i) => ({
       ...template, id: i + 1, identifier: `P${i + 1}`, name: `Project ${i + 1}`, sort_order: i,
     }));
@@ -704,13 +839,13 @@ try {
     });
   });
 
-  await test("group create rename failure retry Cancel Escape", async () => {
+  await test("folder create rename failure retry Cancel Escape", async () => {
     const s = await session(); const { page, aside, api } = s;
-    const input = aside.getByRole("textbox", { name: "Group name", exact: true });
+    const input = aside.getByRole("textbox", { name: "Folder name", exact: true });
     for (const mode of ["create", "rename"]) {
       const start = async () => {
-        if (mode === "create") await action(s, "Actions for Four", "New group…");
-        else await action(s, "Actions for group Work", "Rename");
+        if (mode === "create") { const b = aside.getByRole("button", { name: "New folder", exact: true }); await b.focus(); await b.click(); }
+        else await action(s, "Actions for folder Work", "Rename");
         await input.waitFor();
       };
       for (const cancel of ["Cancel", "Escape"]) {
@@ -720,7 +855,7 @@ try {
         else await aside.getByRole("button", { name: "Cancel", exact: true }).click();
         await input.waitFor({ state: "hidden" });
         assert.equal(api.calls.filter(c => c.method !== "GET").length, before);
-        const trigger = aside.getByRole("button", { name: mode === "create" ? "Actions for Four" : "Actions for group Work", exact: true });
+        const trigger = aside.getByRole("button", { name: mode === "create" ? "New folder" : "Actions for folder Work", exact: true });
         assert.equal(await trigger.evaluate(el => document.activeElement === el), true, "Cancel restores the edit trigger");
       }
       await start();
@@ -740,50 +875,315 @@ try {
       await attr(input, "aria-invalid", "true");
       assert.equal(await input.evaluate(el => document.activeElement === el), true);
       await input.press("Enter"); await input.waitFor({ state: "hidden" });
-      await aside.getByRole("button", { name: `Actions for group ${name}`, exact: true }).waitFor();
+      await aside.getByRole("button", { name: `Actions for folder ${name}`, exact: true }).waitFor();
       const writes = api.calls.filter(c => c.method === method && c.path === path);
-      assert.deepEqual(writes.map(c => c.body), [{ name }, { name }]);
+      const body = mode === "create" ? { name, parent_id: null, contains: null } : { name };
+      assert.deepEqual(writes.map(c => c.body), [body, body]);
     }
+    assert.equal(await domTree(page), api.describe());
   });
 
-  await test("personal group and grouped project order payloads rollback", async () => {
+  await test("menu move up and down payloads, rollback, reload and per-user order", async () => {
     const s = await session(); const { aside, api } = s;
-    const groupOrder = () => aside.locator('button[aria-label^="Actions for group "]').evaluateAll(els => els.map(el => el.getAttribute("aria-label")));
-    const projectOrder = () => aside.locator('#group-11 a[title]').evaluateAll(els => els.map(el => el.getAttribute("title")));
-    const originalGroups = await groupOrder();
-    for (const kind of ["group", "project"]) {
-      const path = kind === "group" ? "/project-groups/reorder" : "/projects/reorder";
-      const trigger = kind === "group" ? "Actions for group Work" : "Actions for One";
-      const original = kind === "group" ? originalGroups : ["One", "Two"];
-      const readOrder = kind === "group" ? groupOrder : projectOrder;
-      const downIds = kind === "group" ? [12, 11] : [2, 1, 3, 4];
-      const upIds = kind === "group" ? [11, 12] : [1, 2, 3, 4];
-      await aside.getByRole("button", { name: trigger, exact: true }).click();
+    const path = "/project-groups/move";
+    let n = 0;
+    const cases = [
+      { trigger: "Actions for folder Work", name: "Work", down: { item: folder(11), parent_id: null, before: project(4) }, up: { item: folder(11), parent_id: null, before: folder(12) },
+        original: `Work[One,Two],Personal[${longName}],Four`, moved: `Personal[${longName}],Work[One,Two],Four` },
+      { trigger: "Actions for One", name: "One", down: { item: project(1), parent_id: 11, before: null }, up: { item: project(1), parent_id: 11, before: project(2) },
+        original: `Work[One,Two],Personal[${longName}],Four`, moved: `Work[Two,One],Personal[${longName}],Four` },
+    ];
+    for (const c of cases) {
+      await aside.getByRole("button", { name: c.trigger, exact: true }).click();
       assert.equal(await menuItem(s.page, "Move up").isDisabled(), true);
       await s.page.keyboard.press("Escape");
-      await action(s, trigger, "Move down");
-      assert.deepEqual((await called(api, 1, "PUT", path)).body, { ids: downIds });
-      await settle(s); assert.deepEqual(await readOrder(), [...original].reverse());
-      await action(s, trigger, "Move up");
-      assert.deepEqual((await called(api, 2, "PUT", path)).body, { ids: upIds });
-      await settle(s); assert.deepEqual(await readOrder(), original);
+      await action(s, c.trigger, "Move down");
+      assert.deepEqual((await called(api, ++n, "PUT", path)).body, c.down);
+      await settle(s); assert.equal(await domTree(s.page), c.moved);
+      await action(s, c.trigger, "Move up");
+      assert.deepEqual((await called(api, ++n, "PUT", path)).body, c.up);
+      await settle(s); assert.equal(await domTree(s.page), c.original);
       const gate = held(api, "PUT", path, 409);
-      await action(s, trigger, "Move down");
-      await called(api, 3, "PUT", path);
-      assert.deepEqual(await readOrder(), [...original].reverse(), "Optimistic order is visible");
+      await action(s, c.trigger, "Move down");
+      await called(api, ++n, "PUT", path);
+      assert.equal(await domTree(s.page), c.moved, "Optimistic order is visible");
       gate.release(); await aside.getByRole("alert").waitFor();
-      assert.match(await aside.getByRole("alert").innerText(), new RegExp(`${kind === "group" ? "Group" : "Project"} order wasn't saved`));
-      assert.deepEqual(await readOrder(), original, "Failed write rolls visible order back");
+      assert.match(await aside.getByRole("alert").innerText(), new RegExp(`${c.name} wasn't moved: Fixture rejected`));
+      assert.equal(await domTree(s.page), c.original, "Failed write rolls visible order back");
     }
     await action(s, "Actions for One", "Move down"); await settle(s);
     await s.page.reload(); await settle(s);
-    assert.deepEqual(await projectOrder(), ["Two", "One"], "Canonical order reloads from API");
+    assert.equal(await domTree(s.page), `Work[Two,One],Personal[${longName}],Four`, "Canonical order reloads from API");
     const otherAPI = new API(); otherAPI.user.id = 2; otherAPI.user.display_name = "Other Operator";
-    otherAPI.groups.forEach(g => g.user_id = 2);
     const other = await session({ api: otherAPI });
-    assert.deepEqual(await other.aside.locator('#group-11 a[title]').evaluateAll(els => els.map(el => el.getAttribute("title"))), ["One", "Two"]);
+    assert.equal(await domTree(other.page), `Work[One,Two],Personal[${longName}],Four`);
     assert.equal(otherAPI.calls.filter(c => c.method !== "GET").length, 0);
-    assert.equal(api.calls.some(c => c.method === "PUT" && /^\/projects\/\d+$/.test(c.path)), false, "Order must not mutate project records");
+    // The shared order other users read is never written by the sidebar.
+    assert.equal(api.calls.some(c => c.method === "PUT" && (/^\/projects\/\d+$/.test(c.path) || c.path === "/projects/reorder")), false,
+      "Sidebar order must not touch project records or the global order");
+  });
+
+  const folderAPI = () => { const api = new API(); api.projects[2].name = "Long"; return api; };
+  const folderShots = process.env.E2E_FOLDER_SHOTS ?? shotDir;
+
+  await test("drag projects and folders in, out, nested, reordered, and reloaded", async () => {
+    const api = folderAPI();
+    const s = await session({ api }); const { page, aside } = s;
+    await settle(s);
+    assert.equal(await domTree(page), "Work[One,Two],Personal[Long],Four");
+    const ghost = page.locator("[data-sidebar-drag-ghost]");
+    const indicator = aside.locator(".sidebar-drop-indicator");
+
+    // Into a folder: the heading's middle, shown as a box around it.
+    await grab(page, row(s, "project", 4));
+    await hoverAt(page, row(s, "folder", 12), "inside");
+    await indicator.and(aside.locator("[data-box]")).waitFor();
+    assert.equal(await indicator.getAttribute("data-refused"), null);
+    assert.match(await ghost.innerText(), /Four/);
+    await page.screenshot({ path: resolve(folderShots, "folders-drag-desktop.png") });
+    await page.mouse.up();
+    assert.deepEqual(await moved(api), { item: project(4), parent_id: 12, before: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[One,Two],Personal[Long,Four]");
+
+    // Reorder inside a folder: before a sibling, a line above it.
+    await grab(page, row(s, "project", 2));
+    await hoverAt(page, row(s, "project", 1), "before");
+    await indicator.waitFor();
+    assert.equal(await indicator.getAttribute("data-box"), null);
+    await page.mouse.up();
+    assert.deepEqual(await moved(api), { item: project(2), parent_id: 11, before: project(1) });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Two,One],Personal[Long,Four]");
+
+    // Out to the top level: the empty space under the tree is its end.
+    await dragTo(page, row(s, "project", 1), aside.locator("[data-tree-root]"), "below");
+    assert.deepEqual(await moved(api), { item: project(1), parent_id: null, before: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Two],Personal[Long,Four],One");
+
+    // A folder into a folder, carrying its contents.
+    await dragTo(page, row(s, "folder", 12), row(s, "folder", 11), "inside");
+    assert.deepEqual(await moved(api), { item: folder(12), parent_id: 11, before: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Two,Personal[Long,Four]],One");
+    assert.equal(await domTree(page), api.describe());
+    await page.screenshot({ path: resolve(folderShots, "folders-tree-desktop.png") });
+
+    // "After" an open folder's heading is its first slot.
+    await dragTo(page, row(s, "project", 1), row(s, "folder", 12), "after");
+    assert.deepEqual(await moved(api), { item: project(1), parent_id: 12, before: project(3) });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Two,Personal[One,Long,Four]]");
+
+    // Releasing where it started sends nothing.
+    const before = moves(api).length;
+    await dragTo(page, row(s, "project", 4), row(s, "project", 4), "inside");
+    assert.equal(moves(api).length, before);
+
+    await page.reload(); await settle(s);
+    assert.equal(await domTree(page), "Work[Two,Personal[One,Long,Four]]", "The arrangement reloads from the server");
+  });
+
+  await test("dragging folds only the dragged item, cancels on Escape, and springs folders open", async () => {
+    const api = folderAPI();
+    const s = await session({ api, route: "/ONE/issues", collapsed: [12] }); const { page, aside } = s;
+    await settle(s);
+    const ghost = page.locator("[data-sidebar-drag-ghost]");
+    await attr(aside.locator("#project-nav-1"), "hidden", null);
+    await attr(aside.locator("#group-12"), "hidden", "");
+
+    // A dragged project leaves its sub-tabs behind; the ghost is one row.
+    await grab(page, row(s, "project", 1));
+    await attr(aside.locator("#project-nav-1"), "hidden", "");
+    assert.ok((await ghost.boundingBox())!.height < 40, "Ghost is one compact row");
+    await attr(aside.locator("#group-11"), "hidden", null);
+    await page.keyboard.press("Escape");
+    await ghost.waitFor({ state: "detached" });
+    await page.mouse.up();
+    await attr(aside.locator("#project-nav-1"), "hidden", null);
+    assert.equal(moves(api).length, 0, "Escape cancels without saving");
+    assert.equal(new URL(page.url()).hash, "#/ONE/issues", "The release after a drag is not a click");
+
+    // A dragged folder folds its own contents away, then restores them.
+    await grab(page, row(s, "folder", 11));
+    await attr(aside.locator("#group-11"), "hidden", "");
+    await page.keyboard.press("Escape"); await page.mouse.up();
+    await attr(aside.locator("#group-11"), "hidden", null);
+
+    // Hovering a closed folder opens it; dropping elsewhere closes it again.
+    // (Sub-tabs folded first so no row sits in the auto-scroll edge.)
+    await aside.getByRole("button", { name: "Collapse One", exact: true }).click();
+    await grab(page, row(s, "project", 4));
+    await hoverAt(page, row(s, "folder", 12), "inside");
+    await attr(aside.locator("#group-12"), "hidden", null);
+    await hoverAt(page, aside.locator("[data-tree-root]"), "below");
+    await page.mouse.up();
+    await attr(aside.locator("#group-12"), "hidden", "");
+    assert.equal(moves(api).length, 0, "Four was already last at the top level");
+
+    // Dropping inside a spring-opened folder keeps the way to it open.
+    await grab(page, row(s, "project", 4));
+    await hoverAt(page, row(s, "folder", 12), "inside");
+    await attr(aside.locator("#group-12"), "hidden", null);
+    await hoverAt(page, row(s, "project", 3), "after");
+    await page.mouse.up();
+    assert.deepEqual(await moved(api), { item: project(4), parent_id: 12, before: null });
+    await settle(s);
+    await attr(aside.locator("#group-12"), "hidden", null);
+    assert.equal(await domTree(page), "Work[One,Two],Personal[Long,Four]");
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("lific:sidebar:collapsed-groups")!)), []);
+
+    // A failed save puts the tree back and says so.
+    const gate = held(api, "PUT", "/project-groups/move", 409);
+    await dragTo(page, row(s, "project", 4), row(s, "folder", 11), "inside");
+    await called(api, 2, "PUT", "/project-groups/move");
+    assert.equal(await domTree(page), "Work[One,Two,Four],Personal[Long]", "Optimistic move is visible");
+    gate.release();
+    await aside.getByRole("alert").filter({ hasText: "Four wasn't moved: Fixture rejected" }).waitFor();
+    assert.equal(await domTree(page), "Work[One,Two],Personal[Long,Four]");
+  });
+
+  await test("refused drops explain themselves and send nothing", async () => {
+    const api = folderAPI();
+    api.arrange([["A", 21, [["B", 22, [["C", 23, [["D", 24, [1]]]]]]]], ["E", 25, [["F", 26, [2]]]], 3, 4]);
+    const s = await session({ api }); const { page, aside } = s;
+    await settle(s);
+    assert.equal(await domTree(page), "A[B[C[D[One]]]],E[F[Two]],Long,Four");
+    const ghost = page.locator("[data-sidebar-drag-ghost]");
+    const indicator = aside.locator(".sidebar-drop-indicator");
+
+    // Too deep: E holds a subfolder, so inside C would make 5 levels.
+    await grab(page, row(s, "folder", 25));
+    await hoverAt(page, row(s, "folder", 23), "inside");
+    await indicator.and(aside.locator("[data-refused]")).waitFor();
+    assert.match(await ghost.innerText(), /Folders can nest 4 levels deep\. Moving 'E' there would make 5 levels\./);
+    await page.screenshot({ path: resolve(folderShots, "folders-refused-desktop.png") });
+    await page.mouse.up();
+    await page.getByRole("alert").filter({ hasText: "Can't move E there. Folders can nest 4 levels deep." }).waitFor();
+    assert.equal(moves(api).length, 0);
+
+    // A folder over its own heading, after leaving it, is "inside itself".
+    await grab(page, row(s, "folder", 26));
+    await hoverAt(page, row(s, "project", 3), "before");
+    await hoverAt(page, row(s, "folder", 26), "inside");
+    await indicator.and(aside.locator("[data-refused]")).waitFor();
+    assert.match(await ghost.innerText(), /A folder can't go inside itself/);
+    await page.mouse.up();
+    assert.equal(moves(api).length, 0);
+
+    // F alone fits inside C, at 4 levels.
+    await dragTo(page, row(s, "folder", 26), row(s, "folder", 23), "inside");
+    assert.deepEqual(await moved(api), { item: folder(26), parent_id: 23, before: null });
+    await settle(s);
+    assert.equal(await domTree(page), "A[B[C[D[One],F[Two]]]],E[],Long,Four");
+
+    // The menus say the same: no subfolder at the cap, and the picker marks
+    // each refused destination with its reason.
+    await action(s, "Actions for folder D", "Move to folder…");
+    for (const [name, hint] of [["Top level", null], ["C", "Here now"], ["D", "Inside itself"], ["E", null]] as const) {
+      const item = menuItem(page, hint ? `${name} ${hint}` : name);
+      assert.equal(await item.isDisabled(), !!hint, name);
+    }
+    await page.screenshot({ path: resolve(folderShots, "folders-picker-desktop.png") });
+    await page.keyboard.press("Escape");
+    await aside.getByRole("button", { name: "Actions for folder D", exact: true }).click();
+    assert.equal(await menuItem(page, "New subfolder 4 levels max").isDisabled(), true);
+    await page.keyboard.press("Escape");
+
+    // Four levels still fit the narrowest sidebar without sideways scrolling.
+    await page.evaluate(() => localStorage.setItem("lific:sidebar:width", "190"));
+    await page.reload(); await settle(s);
+    const one = aside.locator('a[title="One"]');
+    await page.mouse.move(600, 500);
+    assert.ok((await one.locator("span.truncate").boundingBox())!.width >= 24, "A name four levels deep stays readable at 190px");
+    await one.hover();
+    const actions = aside.getByRole("button", { name: "Actions for One", exact: true });
+    const box = (await actions.boundingBox())!;
+    assert.ok(box.x + box.width <= 190, "Deepest project keeps its actions in view");
+    assert.equal(await aside.locator(".sidebar-scroll").evaluate(el => el.scrollWidth <= el.clientWidth), true, "No horizontal sidebar scroll");
+    await page.screenshot({ path: resolve(folderShots, "folders-tree-narrow.png") });
+  });
+
+  await test("folder buttons and menus create, file, move out and delete", async () => {
+    const api = folderAPI();
+    const s = await session({ api }); const { page, aside } = s;
+    await settle(s);
+    const input = aside.getByRole("textbox", { name: "Folder name", exact: true });
+    const posts = () => api.calls.filter(c => c.method === "POST" && c.path === "/project-groups").map(c => c.body);
+
+    await aside.getByRole("button", { name: "New folder", exact: true }).click();
+    await input.fill("Clients"); await input.press("Enter"); await input.waitFor({ state: "hidden" });
+    assert.deepEqual(posts().at(-1), { name: "Clients", parent_id: null, contains: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[One,Two],Personal[Long],Clients[],Four");
+    assert.ok(await aside.locator("#group-13").getByText("Empty", { exact: true }).isVisible());
+
+    await action(s, "Actions for folder Work", "New subfolder");
+    await input.waitFor();
+    assert.equal(await aside.locator("#group-11").getByRole("textbox", { name: "Folder name" }).count(), 1, "The name field shows where the folder goes");
+    await input.fill("Acme"); await input.press("Enter"); await input.waitFor({ state: "hidden" });
+    assert.deepEqual(posts().at(-1), { name: "Acme", parent_id: 11, contains: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Acme[],One,Two],Personal[Long],Clients[],Four");
+
+    await action(s, "Actions for Four", "Move to folder…");
+    assert.equal(await menuItem(page, "Top level Here now").isDisabled(), true);
+    await menuItem(page, "Acme").click();
+    assert.deepEqual(await moved(api), { item: project(4), parent_id: 14, before: null });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Acme[Four],One,Two],Personal[Long],Clients[]");
+
+    await aside.getByRole("button", { name: "Actions for folder Work", exact: true }).click();
+    await menuItem(page, "Rename").waitFor();
+    await page.screenshot({ path: resolve(folderShots, "folders-menu-desktop.png") });
+    await page.keyboard.press("Escape");
+
+    await action(s, "Actions for Four", "Move out of Acme");
+    assert.deepEqual(await moved(api), { item: project(4), parent_id: 11, before: project(1) });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Acme[],Four,One,Two],Personal[Long],Clients[]");
+
+    // "New folder…" in the picker wraps the item in a new folder where it is.
+    await action(s, "Actions for Long", "Move to folder…");
+    await menuItem(page, "New folder…").click();
+    await aside.locator("#group-12").getByRole("textbox", { name: "Folder name" }).waitFor();
+    await input.fill("Archive"); await input.press("Enter"); await input.waitFor({ state: "hidden" });
+    assert.deepEqual(posts().at(-1), { name: "Archive", parent_id: 12, contains: project(3) });
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Acme[],Four,One,Two],Personal[Archive[Long]],Clients[]");
+
+    // Deleting a folder hands its contents to its parent, in its place.
+    await action(s, "Actions for folder Personal", "Delete folder");
+    await called(api, 1, "DELETE", "/project-groups/12");
+    await settle(s);
+    assert.equal(await domTree(page), "Work[Acme[],Four,One,Two],Archive[Long],Clients[]");
+    assert.ok(await aside.locator('a[title="Long"]').isVisible(), "Deleting never hides a project");
+    assert.equal(await domTree(page), api.describe());
+  });
+
+  await test("mobile folders nest with counts and move through menus", async () => {
+    const api = folderAPI();
+    api.arrange([["Work", 11, [1, ["Clients", 13, [2, ["Acme", 14, []]]]]], ["Personal", 12, [3]], 4]);
+    const s = await session({ api, mobile: true }); const { page } = s;
+    const rootPane = page.locator("[data-mobile-root]");
+    await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+    await page.waitForFunction(() => new DOMMatrix(getComputedStyle(document.querySelector('[data-mobile-nav]')!).transform).m41 === 0);
+    const work = rootPane.getByRole("button", { name: /^Work/ });
+    assert.match((await work.innerText()).replace(/\s+/g, " "), /Work 2/, "Folder counts every project inside it");
+    await rootPane.getByText("Empty", { exact: true }).waitFor();
+    await page.screenshot({ path: resolve(folderShots, "folders-tree-mobile.png") });
+    await rootPane.getByRole("button", { name: "Actions for folder Clients", exact: true }).click();
+    await menuItem(page, "New subfolder").waitFor();
+    await page.screenshot({ path: resolve(folderShots, "folders-menu-mobile.png") });
+    await menuItem(page, "Move to folder…").click();
+    for (const name of ["Clients Inside itself", "Acme Inside itself", "Work Here now"]) assert.equal(await menuItem(page, name).isDisabled(), true, name);
+    await page.screenshot({ path: resolve(folderShots, "folders-refused-mobile.png") });
+    await menuItem(page, "Personal").click();
+    assert.deepEqual((await called(api, 1, "PUT", "/project-groups/move")).body, { item: folder(13), parent_id: 12, before: null });
+    await settle(s);
+    assert.equal(api.describe(), "Work[One],Personal[Long,Clients[Two,Acme[]]],Four");
+    await rootPane.getByRole("button", { name: "Actions for folder Clients", exact: true }).waitFor();
   });
 
   await test("Settings identity and theme share live shell state", async () => {
@@ -825,11 +1225,11 @@ try {
     await open();
     await rootPane.getByRole("button", { name: "Actions for One", exact: true }).click();
     await menuItem(page, "Move down").click();
-    assert.deepEqual((await called(s.api, 1, "PUT", "/projects/reorder")).body, { ids: [2, 1, 3, 4] });
-    await rootPane.getByRole("button", { name: "Actions for Work", exact: true }).click();
+    assert.deepEqual((await called(s.api, 1, "PUT", "/project-groups/move")).body, { item: project(1), parent_id: 11, before: null });
+    await rootPane.getByRole("button", { name: "Actions for folder Work", exact: true }).click();
     await menuItem(page, "Rename").waitFor();
     await page.keyboard.press("Escape"); await depth(1);
-    await rootPane.getByRole("button", { name: "New project or group", exact: true }).click();
+    await rootPane.getByRole("button", { name: "New project or folder", exact: true }).click();
     await menuItem(page, "New project").click();
     await page.waitForURL("**/#/projects/new"); await closed();
     await page.goBack(); await depth(0);

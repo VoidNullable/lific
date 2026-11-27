@@ -526,8 +526,8 @@ html[data-motion="reduced"] *::after {
   border-color: var(--sidebar-accent);
   color: var(--sidebar-accent);
 }
-.desktop-sidebar .sidebar-group-heading,
-.desktop-sidebar .sidebar-ungrouped { margin-top: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-group-heading { margin-top: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-group-projects .sidebar-group-heading { margin-top: var(--sidebar-project-gap); }
 .desktop-sidebar .sidebar-group-heading:first-child { margin-top: 0; }
 .desktop-sidebar .sidebar-group-heading:hover { background: var(--sidebar-hover); }
 .desktop-sidebar .sidebar-folder { padding-block: var(--sidebar-project-pad); color: var(--text); }
@@ -546,6 +546,12 @@ html[data-motion="reduced"] *::after {
   margin: 0.125rem 0 0.25rem 1.1875rem;
   padding-left: 0.25rem;
   border-left: 1px solid var(--sidebar-guide);
+}
+/* Subfolders step in by less, so four levels still leave a name readable at
+   the default width. */
+.desktop-sidebar .sidebar-group-projects .sidebar-group-projects {
+  margin-left: 0.75rem;
+  padding-left: 0.1875rem;
 }
 .desktop-sidebar .sidebar-project { margin-top: var(--sidebar-project-gap); }
 .desktop-sidebar .sidebar-project:hover { background: var(--sidebar-hover); }
@@ -585,7 +591,8 @@ html[data-motion="reduced"] *::after {
 .mobile-sidebar .mobile-project-row:is(:hover, :active) { background: var(--sidebar-hover); }
 .mobile-sidebar [data-current-project] .mobile-project-chevron { color: var(--sidebar-accent); }
 .mobile-sidebar .mobile-group-heading { margin-top: var(--sidebar-section-gap); }
-.mobile-sidebar .mobile-ungrouped { margin-top: 0.75rem; }
+.mobile-sidebar .mobile-group-projects .mobile-group-heading { margin-top: 0; }
+.mobile-sidebar .mobile-group-projects { margin-left: 0.75rem; padding-left: 0.25rem; border-left: 1px solid var(--sidebar-guide); }
 .mobile-sidebar .mobile-destinations .sidebar-destination + .sidebar-destination { margin-top: 0.125rem; }
 
 /* ── Mobile nav swipe surface (LIF-349) ────────────────

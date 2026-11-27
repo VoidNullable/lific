@@ -14,6 +14,7 @@ const fixture = `<script>
   import ContextMenu from './lib/ContextMenu.svelte';
   import { openContextMenu } from './lib/contextMenuState.svelte';
   import { mobileNavState } from './lib/mobileNavState.svelte';
+  import { buildTree } from './lib/sidebarTree';
   let nav = $state();
   let open = $state(false);
   let route = $state(location.hash.slice(1) || '/');
@@ -24,7 +25,10 @@ const fixture = `<script>
   let ready = $state(!sessionStorage.getItem('hold-mobile-mount'));
   let fail = true;
   let projects = $state([{ id: 1, identifier: 'ONE', name: 'One', emoji: '' }, { id: 2, identifier: 'TWO', name: 'Two', emoji: '' }].filter(p => p.id !== 1 || !sessionStorage.getItem('missing-one')));
-  let groups = $state([{ id: 1, name: 'Work', project_ids: [1, 2] }, { id: 2, name: 'Other', project_ids: [] }]);
+  const folder = (id, name, items) => ({ id, name, parent_id: null, depth: 1, items, project_ids: items.map(i => i.id) });
+  let layout = $state({ root: [{ kind: 'folder', id: 1 }, { kind: 'folder', id: 2 }], max_depth: 4,
+    groups: [folder(1, 'Work', [{ kind: 'project', id: 1 }, { kind: 'project', id: 2 }]), folder(2, 'Other', [])] });
+  let tree = $derived(buildTree(projects, layout));
   const navigate = (path) => { window.navCalls.push(path); location.hash = path; route = path; };
   window.navCalls = [];
   window.moves = [];
@@ -42,7 +46,7 @@ const fixture = `<script>
   async function save() {
     await Promise.resolve();
     if (fail) { fail = false; groupEditError = 'Name already exists.'; return false; }
-    groups = groups.map(g => g.id === editingGroupId ? {...g, name: draftGroupName} : g);
+    layout = { ...layout, groups: layout.groups.map(g => g.id === editingGroupId ? {...g, name: draftGroupName} : g) };
     editingGroupId = null; groupEditError = ''; return true;
   }
 </script>
@@ -50,15 +54,16 @@ const fixture = `<script>
 <main id="background"><button id="trigger" aria-label="Open navigation" onclick={() => nav.openAt(null)}>Open navigation</button><button id="direct" onclick={() => nav.openAt(projects[0])}>Open One directly</button><a href="#/outside">Outside</a><p>{route}</p></main>
 {#if ready}
 <MobileNav bind:this={nav} bind:open {route} {navigate} user={{username:'test',display_name:'Test'}}
- {projects} {groups} projectsIn={(g) => projects.filter(p => g.project_ids.includes(p.id))} ungrouped={[]}
+ {projects} {tree}
  collapsedGroups={new Set()} onToggleGroup={() => {}} onOpenPalette={() => window.paletteOpened = true}
  onOpenCreateMenu={(e) => menu(e, [{label:'New project', action:() => nav.navigateTo('/projects/new')}])}
- onProjectMenu={(e) => menu(e, [{label:'Inspect', action:() => {}}])}
- onGroupMenu={(e,g) => menu(e, [{label:'Rename', action:() => {editingGroupId=g.id; draftGroupName=g.name; groupEditError='';}}])}
+ onProjectMenu={(e, p) => menu(e, [{label:'Inspect', action:() => {}},
+   {label:'Move up', disabled: p.id === 1, action:() => window.moves.push(['project',p.id,'up'])},
+   {label:'Move down', action:() => window.moves.push(['project',p.id,'down'])}])}
+ onGroupMenu={(e,g) => menu(e, [{label:'Rename', action:() => {editingGroupId=g.id; draftGroupName=g.name; groupEditError='';}},
+   {label:'Move down', action:() => window.moves.push(['group',g.id,'down'])}])}
  bind:editingGroupId bind:draftGroupName {groupEditError} {orderError} onCommitGroupName={save}
  onCancelGroupEdit={() => {editingGroupId=null; groupEditError='';}}
- onMoveProject={(p,d) => window.moves.push(['project',p.id,d])}
- onMoveGroup={(g,d) => window.moves.push(['group',g.id,d])}
  themePref="system" themeResolved="light" onCycleTheme={(e) => menu(e, [{label:'System',action:() => {}}])} />
 {/if}
 <ContextMenu />`;
@@ -166,9 +171,9 @@ try {
   await page.getByRole("menuitem", { name: "Move down", exact: true }).click();
   assert.deepEqual(await page.evaluate(() => (window as any).moves), [["project", 1, "down"]]);
 
-  await rootPane.getByRole("button", { name: "Actions for Work", exact: true }).click();
+  await rootPane.getByRole("button", { name: "Actions for folder Work", exact: true }).click();
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
-  const input = rootPane.getByRole("textbox", { name: "Group name", exact: true });
+  const input = rootPane.getByRole("textbox", { name: "Folder name", exact: true });
   await input.fill("Personal");
   await input.press("Tab");
   assert.equal(await input.inputValue(), "Personal");
@@ -179,14 +184,14 @@ try {
   await input.press("Escape");
   await input.waitFor({ state: "hidden" });
   await depth(1);
-  assert.equal(await active(), "Actions for Work");
-  await rootPane.getByRole("button", { name: "Actions for Work", exact: true }).click();
+  assert.equal(await active(), "Actions for folder Work");
+  await rootPane.getByRole("button", { name: "Actions for folder Work", exact: true }).click();
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
   await input.fill("Personal"); await input.press("Enter");
   await input.waitFor({ state: "hidden" });
-  await rootPane.getByRole("button", { name: "Actions for Personal", exact: true }).waitFor();
-  assert.equal(await active(), "Actions for Personal");
-  await rootPane.getByRole("button", { name: "Actions for Personal", exact: true }).click();
+  await rootPane.getByRole("button", { name: "Actions for folder Personal", exact: true }).waitFor();
+  assert.equal(await active(), "Actions for folder Personal");
+  await rootPane.getByRole("button", { name: "Actions for folder Personal", exact: true }).click();
   await page.getByRole("menuitem", { name: "Move down", exact: true }).click();
   assert.deepEqual(await page.evaluate(() => (window as any).moves), [["project", 1, "down"], ["group", 1, "down"]]);
 
@@ -200,7 +205,7 @@ try {
   await depth(0); await closed();
   assert.equal(await page.evaluate(() => (window as any).navCalls.includes('/cancelled')), false);
   await openRoot();
-  await rootPane.getByRole("button", { name: "New project or group", exact: true }).click();
+  await rootPane.getByRole("button", { name: "New project or folder", exact: true }).click();
   await page.getByRole("menuitem", { name: "New project", exact: true }).click();
   await page.waitForFunction(() => location.hash === '#/projects/new');
   await closed();

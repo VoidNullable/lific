@@ -52,8 +52,8 @@
     Waypoints,
     Paperclip,
     Ellipsis,
-    ArrowUp,
-    ArrowDown,
+    Folder,
+    FolderOpen,
     Inbox,
     UserCheck,
     Bot,
@@ -62,6 +62,7 @@
   import { signInRoute } from "./signedOut";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
+  import { keyOf, newFolderSlot, type FolderNode, type TreeNode } from "./sidebarTree";
   import type { ThemePreference } from "./theme";
 
   let {
@@ -71,9 +72,8 @@
     user,
     signedOut = false,
     projects,
-    groups,
-    projectsIn,
-    ungrouped,
+    tree,
+    newFolderParent = null,
     collapsedGroups,
     onToggleGroup,
     onOpenPalette,
@@ -86,8 +86,6 @@
     onCancelGroupEdit,
     groupEditError = "",
     orderError = "",
-    onMoveProject,
-    onMoveGroup,
     themePref,
     themeResolved,
     onCycleTheme,
@@ -101,9 +99,10 @@
     /** LIF-583: no account features, a Sign in row in the footer. */
     signedOut?: boolean;
     projects: Project[];
-    groups: ProjectGroup[];
-    projectsIn: (group: ProjectGroup) => Project[];
-    ungrouped: Project[];
+    /** The sidebar tree, shared with the docked sidebar. */
+    tree: TreeNode[];
+    /** Where a folder being created will appear; null is the top level. */
+    newFolderParent?: number | null;
     collapsedGroups: Set<number>;
     onToggleGroup: (id: number) => void;
     onOpenPalette: () => void;
@@ -116,8 +115,6 @@
     onCancelGroupEdit: () => void;
     groupEditError?: string;
     orderError?: string;
-    onMoveProject?: (project: Project, direction: "up" | "down") => void | Promise<void>;
-    onMoveGroup?: (group: ProjectGroup, direction: "up" | "down") => void | Promise<void>;
     themePref: ThemePreference;
     themeResolved: "light" | "dark";
     onCycleTheme: (event: MouseEvent) => void;
@@ -501,17 +498,17 @@
   }
   async function saveEdit() {
     if (editBusy) return;
-    if (!draftGroupName?.trim()) { editError = "Enter a group name."; editInput?.focus(); return; }
+    if (!draftGroupName?.trim()) { editError = "Enter a folder name."; editInput?.focus(); return; }
     editBusy = true;
     editError = "";
     try {
       const result = await onCommitGroupName();
       if (result === false || editingGroupId != null) {
-        editError = groupEditError || "Couldn't save the group. Try again.";
+        editError = groupEditError || "Couldn't save the folder. Try again.";
         void tick().then(() => editInput?.focus());
       } else restoreEditFocus();
     } catch (error) {
-      editError = error instanceof Error ? error.message : "Couldn't save the group. Try again.";
+      editError = error instanceof Error ? error.message : "Couldn't save the folder. Try again.";
       void tick().then(() => editInput?.focus());
     } finally { editBusy = false; }
   }
@@ -522,14 +519,6 @@
     editReturnGroup = null;
     onProjectMenu(e, project);
     anchorMenu(e);
-    if (onMoveProject) {
-      const group = groups.find((g) => g.project_ids.includes(project.id));
-      const ordered = group ? projectsIn(group) : ungrouped;
-      contextMenuState.items = [...contextMenuState.items.filter((item) => item.label !== "Move up" && item.label !== "Move down"),
-        { label: "Move up", icon: ArrowUp, disabled: ordered[0]?.id === project.id, action: () => void onMoveProject?.(project, "up") },
-        { label: "Move down", icon: ArrowDown, disabled: ordered.at(-1)?.id === project.id, action: () => void onMoveProject?.(project, "down") },
-      ];
-    }
   }
   function groupMenu(e: MouseEvent, group: ProjectGroup) {
     editReturn = e.currentTarget as HTMLElement;
@@ -537,12 +526,6 @@
     editReturnGroup = group.id;
     onGroupMenu(e, group);
     anchorMenu(e);
-    if (onMoveGroup) {
-      contextMenuState.items = [...contextMenuState.items.filter((item) => item.label !== "Move up" && item.label !== "Move down"),
-        { label: "Move up", icon: ArrowUp, disabled: groups[0]?.id === group.id, action: () => void onMoveGroup?.(group, "up") },
-        { label: "Move down", icon: ArrowDown, disabled: groups.at(-1)?.id === group.id, action: () => void onMoveGroup?.(group, "down") },
-      ];
-    }
   }
 
   function anchorMenu(e: MouseEvent) {
@@ -693,7 +676,7 @@
           <button
             class="size-11 -mr-1 grid place-items-center rounded-lg
                    text-[var(--text-faint)] active:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="New project or group"
+            aria-label="New project or folder"
             onclick={createMenu}
           >
             <Plus size={18} />
@@ -751,8 +734,9 @@
             bind:this={editInput}
             class="w-full h-11 px-3 my-1 rounded-lg text-[16px] bg-[var(--bg)]
                    border border-[var(--border)] text-[var(--text)]"
-            placeholder="Group name"
-            aria-label="Group name"
+            placeholder="Folder name"
+            aria-label="Folder name"
+            maxlength="80"
             aria-invalid={!!(editError || groupEditError)}
             aria-describedby={editError || groupEditError ? "mobile-group-error" : undefined}
             disabled={editBusy}
@@ -772,11 +756,8 @@
           </div>
         {/snippet}
 
-        {#if editingGroupId === NEW_GROUP}
-          {@render groupNameInput()}
-        {/if}
-
-        {#each groups as group (group.id)}
+        {#snippet folderRow(node: FolderNode)}
+          {@const group = node.folder}
           {@const collapsed = collapsedGroups.has(group.id)}
           {#if editingGroupId === group.id}
             {@render groupNameInput()}
@@ -788,36 +769,48 @@
                      text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
               aria-expanded={!collapsed}
               onclick={() => onToggleGroup(group.id)}
-              oncontextmenu={(e) => groupMenu(e, group)}
+              oncontextmenu={signedOut ? undefined : (e) => groupMenu(e, group)}
             >
               <ChevronRight
                 size={15}
                 class="shrink-0 transition-transform text-[var(--text-faint)]
                        {collapsed ? '' : 'rotate-90'}"
               />
+              {#if collapsed}<Folder size={15} class="shrink-0" />{:else}<FolderOpen size={15} class="shrink-0" />{/if}
               <span class="truncate flex-1">{group.name}</span>
+              <span class="shrink-0 text-micro tabular-nums text-[var(--text-faint)]" aria-hidden="true">{node.projectCount}</span>
             </button>
-            <button data-mobile-group-actions={group.id} class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {group.name}" aria-haspopup="menu" onclick={(e) => groupMenu(e, group)}><Ellipsis size={18} /></button>
+            <button data-mobile-group-actions={group.id} class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for folder {group.name}" aria-haspopup="menu" onclick={(e) => groupMenu(e, group)}><Ellipsis size={18} /></button>
             </div>
           {/if}
           {#if !collapsed}
             <div class="mobile-group-projects">
-              {#each projectsIn(group) as project (project.id)}
-                {@render projectRow(project)}
-              {/each}
+              {@render treeNodes(node.children, group.id)}
+              {#if node.children.length === 0 && !(editingGroupId === NEW_GROUP && newFolderParent === group.id)}
+                <p class="px-3 py-2 text-body-sm text-[var(--text-faint)]">Empty</p>
+              {/if}
             </div>
           {/if}
-        {/each}
+        {/snippet}
 
-        <div class:mobile-ungrouped={groups.length > 0}>
-          {#each ungrouped as project (project.id)}
-            {@render projectRow(project)}
+        {#snippet treeNodes(nodes: TreeNode[], parent: number | null)}
+          {@const slot = editingGroupId === NEW_GROUP && newFolderParent === parent ? newFolderSlot(nodes) : -1}
+          {#each nodes as node, i (keyOf(node))}
+            {#if i === slot}{@render groupNameInput()}{/if}
+            {#if node.kind === "folder"}
+              {@render folderRow(node)}
+            {:else}
+              {@render projectRow(node.project)}
+            {/if}
           {/each}
-        </div>
+          {#if slot === nodes.length}{@render groupNameInput()}{/if}
+        {/snippet}
+
+        {@render treeNodes(tree, null)}
 
         {#if signedOut && projects.length === 0}
           <p class="px-3 py-8 text-body text-[var(--text-faint)]">No published projects.</p>
-        {:else if projects.length === 0 && groups.length === 0 && editingGroupId !== NEW_GROUP}
+        {:else if tree.length === 0 && editingGroupId !== NEW_GROUP}
           <div class="px-3 py-8">
             <p class="text-body text-[var(--text-faint)] mb-3">No projects yet.</p>
             <a

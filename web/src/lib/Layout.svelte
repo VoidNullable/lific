@@ -4,43 +4,47 @@
     clearSession,
     sessionKey,
     listProjects,
-    reorderProjects,
-    reorderProjectGroups,
     listIssues,
     listModules,
     listPages,
     listPlans,
-    listProjectGroups,
+    getSidebarLayout,
+    moveSidebarItem,
     createProjectGroup,
     renameProjectGroup,
     deleteProjectGroup,
-    assignProjectGroup,
     getAttention,
     type Project,
     type ProjectGroup,
+    type SidebarItem,
+    type SidebarLayout,
+    type SidebarMove,
     type Issue,
     type Module,
     type Page,
     type Plan,
   } from "./api";
   import { loadCollapsedGroups, saveCollapsedGroups, NEW_GROUP } from "./projectGroups";
+  import {
+    DEFAULT_MAX_DEPTH, applyMove, ancestors, buildTree, canHoldSubfolder, checkMove, flatProjects,
+    folderChoices, hidingFolder, indexTree, itemOf, keyOf, moveOut, newFolderSlot, resolveDrop,
+    sameItem, stepMove, wrapFits, zoneAt, type DropResult, type DropZone, type FolderNode, type TreeNode,
+  } from "./sidebarTree";
   import ProjectIcon from "./ProjectIcon.svelte";
   import MobileNav from "./MobileNav.svelte";
   import CommandPalette from "./CommandPalette.svelte";
   import ShortcutHelp from "./ShortcutHelp.svelte";
-  import { dndzone, type DndEvent } from "svelte-dnd-action";
-  import { flip } from "svelte/animate";
-  import { themePreference, resolvedTheme, setPreference, motionReduced } from "./theme";
+  import { themePreference, resolvedTheme, setPreference } from "./theme";
   import { currentUser, getUserRevision, publishUser } from "./userState";
   import { mobileNavState } from "./mobileNavState.svelte";
   import { navLink } from "./navLink";
-  import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
+  import { List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderOpen, FolderPlus, FolderMinus, FolderInput, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext, untrack, tick } from "svelte";
   import { Ellipsis, ArrowUp, ArrowDown, Inbox, UserCheck, Bot, Settings2, LogIn } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
-  import { contextMenuState, openContextMenu } from "./contextMenuState.svelte";
+  import { contextMenuState, openContextMenu, closeContextMenu } from "./contextMenuState.svelte";
   import { toast } from "./toast/toast.svelte";
   import ContextMenu from "./ContextMenu.svelte"; // LIF-248
   import { commandPaletteState } from "./commandPaletteState.svelte";
@@ -352,25 +356,24 @@
   let projects = $state<Project[]>([]);
   let loading = $state(true);
 
-  // ── Per-user sidebar project groups ────────────────────────
-  let groups = $state<ProjectGroup[]>([]);
+  // ── Per-user sidebar folders ────────────────────────────────
+  // The server's layout is the tree: folders nest, and each level orders its
+  // folders and projects together. `tree` joins it with the project list, so
+  // a project the layout doesn't place still shows, last at the top level.
+  let layout = $state<SidebarLayout | null>(null);
   let groupsLoaded = $state(false);
   let collapsedGroups = $state<Set<number>>(loadCollapsedGroups());
+  let tree = $derived(buildTree(projects, layout));
+  let treeIndex = $derived(indexTree(tree));
+  let groups = $derived<ProjectGroup[]>(layout?.groups ?? []);
+  let maxDepth = $derived(layout?.max_depth ?? DEFAULT_MAX_DEPTH);
+  let railProjects = $derived(flatProjects(tree));
 
-  // Membership is the server's answer, so a project missing from every group
-  // is ungrouped by definition — there's no "ungrouped" row to keep in sync.
-  let groupedIds = $derived(new Set(groups.flatMap((g) => g.project_ids)));
-  let ungrouped = $derived(projects.filter((p) => !groupedIds.has(p.id)));
-
-  // `ungrouped` is derived, so svelte-dnd-action can't own it during a drag.
-  // The in-flight order lives here and wins while the drag is live.
-  let ungroupedDuringDrag = $state<Project[] | null>(null);
-  let ungroupedItems = $derived(ungroupedDuringDrag ?? ungrouped);
-
-  // `projects` is already in sidebar order, so filtering preserves it inside
-  // a group too.
-  function projectsIn(group: ProjectGroup): Project[] {
-    return projects.filter((p) => group.project_ids.includes(p.id));
+  function folderName(id: number | null): string {
+    return groups.find((g) => g.id === id)?.name ?? "";
+  }
+  function itemName(item: SidebarItem): string {
+    return item.kind === "folder" ? folderName(item.id) : projects.find((p) => p.id === item.id)?.name ?? "";
   }
 
   function toggleGroup(id: number) {
@@ -379,10 +382,21 @@
     collapsedGroups = next;
     saveCollapsedGroups(next);
   }
+  function expandFolders(ids: number[]) {
+    if (!ids.some((id) => collapsedGroups.has(id))) return;
+    const next = new Set(collapsedGroups);
+    for (const id of ids) next.delete(id);
+    collapsedGroups = next;
+    saveCollapsedGroups(next);
+  }
 
-  // ── Managing groups ────────────────────────────────────────
-  // The id being renamed, or NEW_GROUP while creating one.
+  // ── Managing folders ───────────────────────────────────────
+  // The id being renamed, or NEW_GROUP while creating one, which then goes
+  // in `newFolderParent` and, when it came from "Move to folder", wraps
+  // `newFolderContains` in the same write.
   let editingGroupId = $state<number | null>(null);
+  let newFolderParent = $state<number | null>(null);
+  let newFolderContains = $state<SidebarItem | null>(null);
   let draftGroupName = $state("");
   let groupEditError = $state("");
   let groupSaving = $state(false);
@@ -391,97 +405,118 @@
   let refreshRequest = 0;
   let groupInput = $state<HTMLInputElement | null>(null);
   let groupEditTrigger: HTMLElement | null = null;
+  // Screen readers hear where a move put things; the tree itself says it
+  // visually.
+  let liveMessage = $state("");
 
   function menuNavigate(path: string) {
     if (navOpen) mobileNav?.navigateTo(path);
     else navigate(path);
   }
 
-  async function moveProject(project: Project, direction: "up" | "down") {
-    if (orderSaving) return;
-    const group = groups.find((g) => g.project_ids.includes(project.id));
-    const siblings = group ? projectsIn(group) : ungrouped;
-    const index = siblings.findIndex((p) => p.id === project.id);
-    const neighbor = siblings[index + (direction === "up" ? -1 : 1)];
-    if (!neighbor) return;
-    const next = [...projects];
-    const a = next.findIndex((p) => p.id === project.id);
-    const b = next.findIndex((p) => p.id === neighbor.id);
-    [next[a], next[b]] = [next[b], next[a]];
-    await persistProjectOrder(next);
-  }
-
-  async function persistProjectOrder(next: Project[]) {
+  /** The one way the sidebar changes its arrangement: check, paint, save,
+   *  and on failure put the previous tree back with a visible message. */
+  async function runMove(move: SidebarMove, reveal = false): Promise<boolean> {
+    if (!layout || orderSaving) return false;
+    const check = checkMove(treeIndex, move, maxDepth);
+    if (check.kind === "refused") {
+      toast(check.reason, { kind: "error" });
+      return false;
+    }
+    if (check.kind === "noop") return true;
+    const name = itemName(move.item);
     refreshRequest++;
-    const previous = projects;
+    const previous = layout;
     orderSaving = true;
     orderError = "";
-    projects = next;
-    const res = await reorderProjects(next.map((p) => p.id));
-    projects = res.ok ? res.data : previous;
-    if (!res.ok) orderError = `Project order wasn't saved: ${res.error}`;
+    layout = applyMove(layout, move);
+    if (reveal && move.parent_id !== null) {
+      expandFolders([...ancestors(treeIndex, { kind: "folder", id: move.parent_id }), move.parent_id]);
+    }
+    const res = await moveSidebarItem(move);
     orderSaving = false;
+    if (res.ok) {
+      layout = res.data;
+      liveMessage = `Moved ${name} ${move.parent_id === null ? "to the top level" : `into ${folderName(move.parent_id)}`}.`;
+      return true;
+    }
+    layout = previous;
+    orderError = `${name || "That item"} wasn't moved: ${res.error}`;
+    return false;
   }
 
-  async function moveGroup(group: ProjectGroup, direction: "up" | "down") {
-    if (orderSaving) return;
-    const index = groups.findIndex((g) => g.id === group.id);
-    const to = index + (direction === "up" ? -1 : 1);
-    if (to < 0 || to >= groups.length) return;
-    refreshRequest++;
-    const previous = groups;
-    const next = [...groups];
-    [next[index], next[to]] = [next[to], next[index]];
-    groups = next;
-    orderSaving = true;
-    orderError = "";
-    const res = await reorderProjectGroups(next.map((g) => g.id));
-    groups = res.ok ? res.data : previous;
-    if (!res.ok) orderError = `Group order wasn't saved: ${res.error}`;
-    orderSaving = false;
+  function moveItems(item: SidebarItem) {
+    const up = stepMove(treeIndex, item, "up");
+    const down = stepMove(treeIndex, item, "down");
+    const out = moveOut(treeIndex, item);
+    const busy = orderSaving || !groupsLoaded;
+    return [
+      { label: "Move up", icon: ArrowUp, disabled: busy || !up, action: () => { if (up) void runMove(up); } },
+      { label: "Move down", icon: ArrowDown, disabled: busy || !down, action: () => { if (down) void runMove(down); } },
+      { label: "Move to folder…", icon: FolderInput, disabled: busy, action: () => openMoveMenu(item) },
+      ...(out
+        ? [{
+            label: `Move out of ${folderName(treeIndex.get(keyOf(item))?.parent ?? null)}`,
+            icon: FolderMinus,
+            disabled: busy,
+            action: () => void runMove(out),
+          }]
+        : []),
+    ];
   }
-  // Set when "New group…" came from a project's menu: the project to file
-  // into the group as soon as it exists.
-  let pendingGroupProjectId = $state<number | null>(null);
+
+  // The menu that opened "Move to folder…", so its replacement opens in the
+  // same place and returns focus to the same row.
+  let menuAnchor: { x: number; y: number; trigger: HTMLElement | null } = { x: 0, y: 0, trigger: null };
+
+  function anchorFrom(e: MouseEvent) {
+    const trigger = e.currentTarget as HTMLElement;
+    const rect = trigger.getBoundingClientRect();
+    menuAnchor = {
+      x: e.type === "contextmenu" ? e.clientX : rect.right,
+      y: e.type === "contextmenu" ? e.clientY : rect.bottom,
+      trigger,
+    };
+    return menuAnchor;
+  }
+
+  /** Every destination, with the reason on the ones that can't be picked;
+   *  the keyboard and touch way to do what dragging does. */
+  function openMoveMenu(item: SidebarItem) {
+    const parent = treeIndex.get(keyOf(item))?.parent ?? null;
+    const fits = wrapFits(treeIndex, item, maxDepth);
+    openContextMenu(menuAnchor.x, menuAnchor.y, [
+      ...folderChoices(tree, treeIndex, item, maxDepth).map((choice) => ({
+        label: choice.name,
+        icon: choice.id === null ? Home : Folder,
+        indent: choice.level,
+        hint: choice.disabled ?? undefined,
+        disabled: !!choice.disabled,
+        action: () => void runMove({ item, parent_id: choice.id, before: null }, true),
+      })),
+      {
+        label: "New folder…",
+        icon: FolderPlus,
+        hint: fits ? undefined : `${maxDepth} levels max`,
+        disabled: !fits,
+        action: () => startCreatingGroup(parent, item),
+      },
+    ], menuAnchor.trigger);
+  }
 
   function openProjectMenu(e: MouseEvent, project: Project) {
     e.preventDefault();
     e.stopPropagation();
-    const current = groups.find((g) => g.project_ids.includes(project.id));
-    const siblings = current ? projectsIn(current) : ungrouped;
-    const index = siblings.findIndex((p) => p.id === project.id);
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    openContextMenu(e.type === "contextmenu" ? e.clientX : rect.right, e.type === "contextmenu" ? e.clientY : rect.bottom, [
-      { label: "Move up", icon: ArrowUp, disabled: orderSaving || index === 0, action: () => void moveProject(project, "up") },
-      { label: "Move down", icon: ArrowDown, disabled: orderSaving || index === siblings.length - 1, action: () => void moveProject(project, "down") },
-      ...groups
-        .filter((g) => g.id !== current?.id)
-        .map((g) => ({
-          label: `Move to ${g.name}`,
-          icon: Folder,
-          action: () => void assignProject(project.id, g.id),
-        })),
-      ...(current
-        ? [
-            {
-              label: "Remove from group",
-              icon: FolderMinus,
-              action: () => void assignProject(project.id, null),
-            },
-          ]
-        : []),
-      {
-        label: "New group…",
-        icon: FolderPlus,
-        action: () => startCreatingGroup(project.id),
-      },
+    const { x, y, trigger } = anchorFrom(e);
+    openContextMenu(x, y, [
+      ...moveItems({ kind: "project", id: project.id }),
       {
         label: "Project settings",
         icon: Settings2,
         href: `#/${project.identifier}/settings`,
-        action: () => navigate(`/${project.identifier}/settings`),
+        action: () => menuNavigate(`/${project.identifier}/settings`),
       },
-    ], e.currentTarget as HTMLElement);
+    ], trigger);
   }
 
   const projectViews = [
@@ -510,14 +545,20 @@
   function openGroupMenu(e: MouseEvent, group: ProjectGroup) {
     e.preventDefault();
     e.stopPropagation();
-    const index = groups.findIndex((g) => g.id === group.id);
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    openContextMenu(e.type === "contextmenu" ? e.clientX : rect.right, e.type === "contextmenu" ? e.clientY : rect.bottom, [
-      { label: "Move up", icon: ArrowUp, disabled: orderSaving || index === 0, action: () => void moveGroup(group, "up") },
-      { label: "Move down", icon: ArrowDown, disabled: orderSaving || index === groups.length - 1, action: () => void moveGroup(group, "down") },
+    const { x, y, trigger } = anchorFrom(e);
+    const roomy = canHoldSubfolder(treeIndex, group.id, maxDepth);
+    openContextMenu(x, y, [
+      ...moveItems({ kind: "folder", id: group.id }),
+      {
+        label: "New subfolder",
+        icon: FolderPlus,
+        hint: roomy ? undefined : `${maxDepth} levels max`,
+        disabled: !roomy,
+        action: () => startCreatingGroup(group.id),
+      },
       { label: "Rename", icon: Pencil, action: () => startRenamingGroup(group) },
-      { label: "Delete group", icon: Trash2, action: () => void removeGroup(group) },
-    ], e.currentTarget as HTMLElement);
+      { label: "Delete folder", icon: Trash2, action: () => void removeGroup(group) },
+    ], trigger);
   }
 
   function openCreateMenu(e: MouseEvent) {
@@ -529,7 +570,7 @@
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     openContextMenu(rect.left, rect.bottom, [
       { label: "New project", icon: Plus, href: "#/projects/new", action: () => menuNavigate("/projects/new") },
-      { label: "New group", icon: FolderPlus, action: () => startCreatingGroup() },
+      { label: "New folder", icon: FolderPlus, action: () => startCreatingGroup() },
     ], e.currentTarget as HTMLElement);
   }
 
@@ -540,12 +581,17 @@
     draftGroupName = group.name;
   }
 
-  function startCreatingGroup(projectId: number | null = null) {
+  function startCreatingGroup(parent: number | null = null, contains: SidebarItem | null = null) {
     groupEditTrigger = document.activeElement as HTMLElement | null;
     groupEditError = "";
     editingGroupId = NEW_GROUP;
+    newFolderParent = parent;
+    newFolderContains = contains;
     draftGroupName = "";
-    pendingGroupProjectId = projectId;
+    // The name field shows where the folder will be, so open the way there.
+    if (parent !== null) expandFolders([...ancestors(treeIndex, { kind: "folder", id: parent }), parent]);
+    // The rail has no room for the field.
+    if (sidebarCollapsed && !navOpen) toggleSidebar();
   }
 
   function cancelGroupEdit() {
@@ -553,7 +599,8 @@
     const id = editingGroupId;
     groupEditError = "";
     editingGroupId = null;
-    pendingGroupProjectId = null;
+    newFolderParent = null;
+    newFolderContains = null;
     if (!navOpen) void tick().then(() => {
       const target = groupEditTrigger?.isConnected ? groupEditTrigger
         : document.querySelector<HTMLElement>(`[data-sidebar-group-actions="${id}"]`);
@@ -561,30 +608,19 @@
     });
   }
 
-  async function assignProject(projectId: number, groupId: number | null) {
-    const res = await assignProjectGroup(projectId, groupId);
-    if (res.ok) {
-      await refreshProjects();
-    } else {
-      toast(res.error, { kind: "error" });
-    }
-  }
-
   async function commitGroupName() {
     if (groupSaving) return false;
     const name = draftGroupName.trim();
     const editing = editingGroupId;
-    const pending = pendingGroupProjectId;
     if (!name || editing === null) {
-      groupEditError = "Enter a group name.";
+      groupEditError = "Enter a folder name.";
       return false;
     }
     groupSaving = true;
     groupEditError = "";
-
     const res =
       editing === NEW_GROUP
-        ? await createProjectGroup(name)
+        ? await createProjectGroup(name, newFolderParent, newFolderContains)
         : await renameProjectGroup(editing, name);
     if (!res.ok) {
       groupSaving = false;
@@ -595,26 +631,17 @@
     }
     groupSaving = false;
     cancelGroupEdit();
-    // The group exists now even if the follow-up assignment fails, so report
-    // that separately: the user's next move is to file the project by hand,
-    // not to create the group again.
-    if (editing === NEW_GROUP && pending !== null) {
-      const assigned = await assignProjectGroup(pending, res.data.id);
-      if (!assigned.ok) {
-        toast(`Group created, but the project wasn't moved into it: ${assigned.error}`, {
-          kind: "error",
-        });
-      }
-    }
+    liveMessage = editing === NEW_GROUP ? `Created folder ${res.data.name}.` : `Renamed to ${res.data.name}.`;
     await refreshProjects();
     return true;
   }
 
-  // Deleting a group never touches the projects inside it — they reappear in
-  // the ungrouped list below, so there is nothing to confirm.
+  // Deleting a folder never touches the projects inside it: they and any
+  // subfolders take its place in its parent, so there is nothing to confirm.
   async function removeGroup(group: ProjectGroup) {
     const res = await deleteProjectGroup(group.id);
     if (res.ok) {
+      liveMessage = `Deleted folder ${group.name}. What it held moved up a level.`;
       await refreshProjects();
     } else {
       toast(res.error, { kind: "error" });
@@ -691,82 +718,270 @@
   }
 
   async function refreshProjects() {
-    // LIF-233: never swap the projects array out from under an in-flight drag —
-    // svelte-dnd-action owns it during the consider/finalize lifecycle, and a
-    // route-change refresh landing mid-drag would corrupt the zone. The
-    // finalize handler re-syncs from the server response once the drop settles.
+    // Never swap the tree out from under a drag or a save in flight: the
+    // drop and the save each settle from the server's own answer.
     if (dragActive || orderSaving) return;
     const request = ++refreshRequest;
     groupsLoaded = false;
-    // Groups are an account's own filing; a signed-out reader has none.
-    const [projectsRes, groupsRes] = await Promise.all([
+    // Folders are an account's own filing; a signed-out reader has none.
+    const [projectsRes, layoutRes] = await Promise.all([
       listProjects(),
       signedOut
-        ? Promise.resolve({ ok: true as const, data: [] as ProjectGroup[] })
-        : listProjectGroups(),
+        ? Promise.resolve({ ok: true as const, data: { root: [], groups: [], max_depth: DEFAULT_MAX_DEPTH } as SidebarLayout })
+        : getSidebarLayout(),
     ]);
     if (request !== refreshRequest || dragActive || orderSaving) return;
     if (projectsRes.ok) {
       projects = projectsRes.data;
     }
-    if (groupsRes.ok) {
-      groups = groupsRes.data;
+    if (layoutRes.ok) {
+      layout = layoutRes.data;
       groupsLoaded = true;
     }
   }
 
-  // ── LIF-233: drag-to-reorder projects in the sidebar ────────
-  // The dndzone owns `projects` during a drag. We veto auto-refresh while
-  // dragActive, then persist the new order on finalize (server reindexes
-  // sort_order and returns the canonical list).
+  // ── Dragging in the tree ────────────────────────────────────
+  // A pointer drag, not HTML5 drag and drop, so the dragged item travels as
+  // one compact row whatever it holds, and the drop can mean before, after or
+  // inside. Only the dragged item folds its own contents away; the rest of
+  // the tree keeps its shape so nothing jumps under the cursor. Mouse and pen
+  // only: touch scrolls, and every move is also in the item's menu.
   let dragActive = $state(false);
-  // LIF-246: checked fresh at each drag/flip (not memoized) so a live
-  // toggle of the motion preference takes effect on the next reorder —
-  // same pattern as IssueList's flipMs().
-  function flipMs(): number {
-    return motionReduced() ? 0 : 150;
+  interface Drag {
+    item: SidebarItem;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    result: DropResult | null;
+    /** Whether the pointer has been over anything but the dragged row. */
+    leftOrigin: boolean;
+    indicator: { top: number; left: number; width: number; height: number; box: boolean; refused: boolean } | null;
+  }
+  let drag = $state<Drag | null>(null);
+  // Folders opened by hovering during this drag; closed again after the drop
+  // unless the dropped item landed inside one of them.
+  let springOpen = $state(new Set<number>());
+  let springTimer: ReturnType<typeof setTimeout> | null = null;
+  let springTarget: number | null = null;
+  let scrollEl = $state<HTMLElement | null>(null);
+  let scrollFrame = 0;
+  const SPRING_MS = 600;
+  const DRAG_SLOP = 5;
+
+  function folderOpen(id: number): boolean {
+    if (dragActive && drag && sameItem(drag.item, { kind: "folder", id })) return false;
+    return springOpen.has(id) || !collapsedGroups.has(id);
   }
 
-  function handleProjectConsider(e: CustomEvent<DndEvent<Project>>) {
-    dragActive = true;
-    ungroupedDuringDrag = e.detail.items;
+  function dragSource(node: HTMLElement, item: SidebarItem) {
+    let current = item;
+    const down = (e: PointerEvent) => {
+      if (e.button !== 0 || e.pointerType === "touch" || signedOut || !groupsLoaded || orderSaving || drag) return;
+      if ((e.target as HTMLElement).closest("input, form")) return;
+      drag = { item: current, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY, result: null, leftOrigin: false, indicator: null };
+      window.addEventListener("pointermove", onDragMove);
+      window.addEventListener("pointerup", onDragEnd);
+      window.addEventListener("pointercancel", cancelDrag);
+      window.addEventListener("keydown", onDragKey, true);
+      window.addEventListener("blur", cancelDrag);
+    };
+    // Links and the native image drag would start HTML5 drag and drop.
+    const native = (e: DragEvent) => e.preventDefault();
+    node.addEventListener("pointerdown", down);
+    node.addEventListener("dragstart", native);
+    return {
+      update(next: SidebarItem) { current = next; },
+      destroy() {
+        node.removeEventListener("pointerdown", down);
+        node.removeEventListener("dragstart", native);
+      },
+    };
   }
 
-  async function handleProjectFinalize(e: CustomEvent<DndEvent<Project>>) {
-    ungroupedDuringDrag = e.detail.items;
-    const ids = reorderPayload(e.detail);
-    await persistProjectOrder(ids.map((id) => projects.find((p) => p.id === id)!));
-    ungroupedDuringDrag = null;
-    dragActive = false;
-  }
-
-  // Relocate the dragged project against its siblings while preserving the
-  // personal order of projects outside this zone.
-  function reorderPayload(detail: DndEvent<Project>): number[] {
-    const movedId = Number(detail.info.id);
-    const moved = projects.find((p) => p.id === movedId);
-    if (!moved) return projects.map((p) => p.id);
-
-    const items = detail.items;
-    const pos = items.findIndex((p) => p.id === movedId);
-    const after = items[pos + 1];
-    const before = items[pos - 1];
-
-    const rest = projects.filter((p) => p.id !== movedId);
-    // Anchor to whichever ungrouped neighbour the drop landed against; with
-    // no neighbour on either side the zone held only this project, so its
-    // position relative to everything else is unchanged.
-    let at: number;
-    if (after) {
-      at = rest.findIndex((p) => p.id === after.id);
-    } else if (before) {
-      at = rest.findIndex((p) => p.id === before.id) + 1;
-    } else {
-      at = rest.length;
+  function onDragMove(e: PointerEvent) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    if (!dragActive) {
+      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_SLOP) return;
+      dragActive = true;
+      closeContextMenu(false);
+      document.body.classList.add("sidebar-dragging");
+      scrollFrame = requestAnimationFrame(autoScroll);
     }
-    rest.splice(at, 0, moved);
-    return rest.map((p) => p.id);
+    e.preventDefault();
+    updateDropTarget();
   }
+
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key !== "Escape" || !drag || !dragActive) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finishDrag([], true);
+  }
+
+  // Near the top or bottom edge, scroll the tree, and re-aim since the rows
+  // moved under a still pointer.
+  function autoScroll() {
+    if (!dragActive || !drag || !scrollEl) return;
+    const rect = scrollEl.getBoundingClientRect();
+    const edge = 32;
+    const inside = drag.x >= rect.left && drag.x <= rect.right;
+    const step = !inside ? 0
+      : drag.y < rect.top + edge ? -Math.ceil((rect.top + edge - drag.y) / 4)
+      : drag.y > rect.bottom - edge ? Math.ceil((drag.y - rect.bottom + edge) / 4) : 0;
+    if (step) {
+      const before = scrollEl.scrollTop;
+      scrollEl.scrollTop += step;
+      if (scrollEl.scrollTop !== before) updateDropTarget();
+    }
+    scrollFrame = requestAnimationFrame(autoScroll);
+  }
+
+  /** Aim at the row under the pointer. Gaps between rows belong to the row
+   *  below (before it); a project's open sub-tabs belong to the project
+   *  (after it); space under the last row is the end of the top level. */
+  function updateDropTarget() {
+    if (!drag || !scrollEl) return;
+    const { x, y } = drag;
+    const box = scrollEl.getBoundingClientRect();
+    let target: SidebarItem | null | undefined;
+    let zone: DropZone = "after";
+    let row: HTMLElement | null = null;
+    if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) {
+      target = null;
+      for (const el of scrollEl.querySelectorAll<HTMLElement>("[data-drop-row]")) {
+        if (!el.getClientRects().length) continue;
+        const rect = el.getBoundingClientRect();
+        const kind = el.dataset.dropKind as SidebarItem["kind"] | "into";
+        const extent = kind === "project" ? el.closest<HTMLElement>("[data-drop-entry]")?.getBoundingClientRect().bottom ?? rect.bottom : rect.bottom;
+        if (y >= extent) continue;
+        row = el;
+        const id = Number(el.dataset.dropId);
+        if (kind === "into") { target = { kind: "folder", id }; zone = "inside"; }
+        else {
+          target = { kind, id };
+          zone = y < rect.top ? "before" : y <= rect.bottom ? zoneAt(kind, y - rect.top, rect.height) : "after";
+        }
+        break;
+      }
+    }
+    if (target === undefined) {
+      drag.result = null;
+      drag.indicator = null;
+      armSpring(null);
+      return;
+    }
+    // A drag starts on its own row; it only reads as "inside itself" once
+    // the pointer has gone elsewhere and come back.
+    if (!drag.leftOrigin) {
+      if (target && sameItem(target, drag.item)) {
+        drag.result = { kind: "noop" };
+        drag.indicator = null;
+        armSpring(null);
+        return;
+      }
+      drag.leftOrigin = true;
+    }
+    const result = resolveDrop(treeIndex, tree, drag.item, target, zone, folderOpen, maxDepth);
+    drag.result = result;
+    armSpring(target?.kind === "folder" && zone === "inside" && !folderOpen(target.id) && !sameItem(target, drag.item) ? target.id : null);
+    if (result.kind === "noop") { drag.indicator = null; return; }
+    const refused = result.kind === "refused";
+    const at = (top: number, left: number, width: number, height = 2, boxed = false) => ({
+      top: top - box.top + scrollEl!.scrollTop, left: left - box.left, width, height, box: boxed, refused,
+    });
+    if (!row || target === null) {
+      const list = scrollEl.querySelector<HTMLElement>("[data-tree-root]");
+      const r = (list ?? scrollEl).getBoundingClientRect();
+      drag.indicator = at(r.bottom, r.left, r.width);
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    if (zone === "inside") drag.indicator = at(rect.top, rect.left, rect.width, rect.height, true);
+    else if (zone === "before") drag.indicator = at(rect.top - 1, rect.left, rect.width);
+    else if (result.kind === "move" && target.kind === "folder" && result.move.parent_id === target.id) {
+      // "After" an open folder's heading is its first slot: indent to show it.
+      const indent = 1.4375 * sidebarFontSize;
+      drag.indicator = at(rect.bottom, rect.left + indent, rect.width - indent);
+    } else {
+      const bottom = row.dataset.dropKind === "project"
+        ? row.closest<HTMLElement>("[data-drop-entry]")?.getBoundingClientRect().bottom ?? rect.bottom
+        : rect.bottom;
+      drag.indicator = at(bottom, rect.left, rect.width);
+    }
+  }
+
+  function armSpring(folder: number | null) {
+    if (folder === springTarget) return;
+    if (springTimer) clearTimeout(springTimer);
+    springTimer = null;
+    springTarget = folder;
+    if (folder === null) return;
+    springTimer = setTimeout(() => {
+      springTimer = null;
+      if (!dragActive || springTarget !== folder) return;
+      springOpen = new Set([...springOpen, folder]);
+      void tick().then(updateDropTarget);
+    }, SPRING_MS);
+  }
+
+  function stopDragListeners() {
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", cancelDrag);
+    window.removeEventListener("keydown", onDragKey, true);
+    window.removeEventListener("blur", cancelDrag);
+    cancelAnimationFrame(scrollFrame);
+    armSpring(null);
+    document.body.classList.remove("sidebar-dragging");
+  }
+
+  /** `held`: the button is still down (Escape), so the click that would
+   *  follow its release is still to come. */
+  function finishDrag(keepOpen: number[] = [], held = false) {
+    stopDragListeners();
+    const started = dragActive;
+    drag = null;
+    dragActive = false;
+    // Spring-opened folders close again, except the way to the dropped item.
+    if (keepOpen.length) expandFolders(keepOpen.filter((id) => springOpen.has(id) || !collapsedGroups.has(id)));
+    springOpen = new Set();
+    if (started) {
+      // The release would otherwise click the row it ended on.
+      const swallow = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+      const stop = () => setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      if (held) window.addEventListener("pointerup", stop, { capture: true, once: true });
+      else stop();
+    }
+  }
+
+  function cancelDrag() {
+    finishDrag();
+  }
+
+  async function onDragEnd(e: PointerEvent) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    if (!dragActive) { finishDrag(); return; }
+    updateDropTarget();
+    const result = drag.result;
+    const name = itemName(drag.item);
+    if (result?.kind === "refused") {
+      finishDrag();
+      toast(`Can't move ${name || "that"} there. ${result.reason}`, { kind: "error" });
+      return;
+    }
+    if (result?.kind !== "move") { finishDrag(); return; }
+    const parent = result.move.parent_id;
+    const keep = parent === null ? [] : [...ancestors(treeIndex, { kind: "folder", id: parent }), parent].filter((id) => springOpen.has(id));
+    finishDrag(keep);
+    await runMove(result.move);
+  }
+
+  onDestroy(stopDragListeners);
 
   function initials(name: string): string {
     return name
@@ -912,20 +1127,23 @@
     if (!groupsLoaded) return;
     // Track asynchronous group arrival so a direct link is revealed once
     // both lists have loaded, but do not track deliberate disclosure edits.
-    const containing = groups.find((g) => g.project_ids.includes(project.id));
+    const path = ancestors(treeIndex, { kind: "project", id: project.id });
     if (revealedProjectId === project.id) return;
     revealedProjectId = project.id;
     untrack(() => {
       expandedProjects = new Set([...expandedProjects, project.id]);
-      if (containing && collapsedGroups.has(containing.id)) toggleGroup(containing.id);
+      expandFolders(path);
     });
     void tick().then(() => {
       if (revealedProjectId !== project.id || !matchMedia("(min-width: 768px)").matches) return;
       document.querySelector<HTMLElement>(`[data-sidebar-project="${project.id}"]`)?.scrollIntoView({ block: "nearest" });
     });
   });
+  // While dragging, only the dragged project folds its sub-tabs away; it
+  // opens again on drop because `expandedProjects` is never touched.
   function subnavOpen(project: Project): boolean {
-    return !dragActive && expandedProjects.has(project.id);
+    if (dragActive && drag && sameItem(drag.item, { kind: "project", id: project.id })) return false;
+    return expandedProjects.has(project.id);
   }
   function toggleProject(project: Project) {
     const next = new Set(expandedProjects);
@@ -941,6 +1159,10 @@
     projects.find(
       (p) => p.identifier.toLowerCase() === (activeProject ?? "").toLowerCase(),
     ) ?? null,
+  );
+  // The collapsed folder, outermost first, that hides the current project.
+  let hiddenActiveFolder = $derived(
+    activeProjectRecord ? hidingFolder(treeIndex, { kind: "project", id: activeProjectRecord.id }, collapsedGroups) : null,
   );
   let mobileSection = $derived.by(() => {
     if (route === "/") return "Home";
@@ -1078,33 +1300,43 @@
         <hr class="sidebar-section-rule shrink-0" />
 
         <!-- The header renders unconditionally: on a brand-new instance it is
-             the way in. Groups are created from a project's menu. -->
-        <div class="sidebar-new-project shrink-0 px-2">
+             the way in. Folders are also made from a folder's or a project's
+             menu. -->
+        <div class="sidebar-new-project shrink-0 px-2 flex items-center gap-0.5">
           <a href="#/projects/new" use:navLink={navigate}
             aria-current={route === "/projects/new" ? "page" : undefined}
-            class="sidebar-destination w-full h-9 flex items-center gap-2.5 pl-2 pr-2 rounded-md text-left text-body transition-colors"
+            class="sidebar-destination min-w-0 flex-1 h-9 flex items-center gap-2.5 pl-2 pr-2 rounded-md text-left text-body transition-colors"
           >
             <span class="sidebar-project-icon sidebar-new-project-icon rounded-md"><Plus size={15} /></span>
             <span class="flex-1 min-w-0 truncate">New project</span>
           </a>
+          <button class="sidebar-new-folder size-8 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)]
+                         hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
+            title="New folder" aria-label="New folder" data-sidebar-new-folder
+            onclick={() => startCreatingGroup()}><FolderPlus size={16} /></button>
         </div>
         {/if}
 
-        <div class="sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-1">
+        <div class="sidebar-scroll relative flex-1 min-h-0 overflow-y-auto px-2 pb-1" bind:this={scrollEl}>
 
-        <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
-             the grouped lists and the ungrouped drag zone below, so a project
-             looks and behaves identically wherever it is filed. -->
+        <!-- One project entry: the pill plus its sub-nav, in one wrapper so
+             a drag over its open sub-tabs still means "after this project".
+             Identical wherever the project is filed. -->
         {#snippet projectEntry(project: Project)}
             {@const isProjectActive = activeProject === project.identifier}
             {@const open = subnavOpen(project)}
+            {@const dragging = dragActive && sameItem(drag?.item, { kind: "project", id: project.id })}
+            <div data-drop-entry data-dragging={dragging || undefined}>
             <div
               class="sidebar-row sidebar-project group w-full flex items-center rounded-md
                      text-left text-body font-medium text-[var(--text)] transition-colors"
+              data-drop-row data-drop-kind="project" data-drop-id={project.id}
+              use:dragSource={{ kind: "project", id: project.id }}
             >
               <!-- The icon leads the row so it sits where the collapsed rail
                    draws the same project; the disclosure moves to the end. -->
               <a href={`#/${project.identifier}/overview`} use:navLink={navigate}
+                draggable="false"
                 data-sidebar-project={project.id}
                 aria-current={route === `/${project.identifier}/overview` ? "page" : undefined}
                 title={project.name} class="sidebar-project-link min-w-0 flex-1 flex items-center gap-2.5 pl-2"
@@ -1207,20 +1439,21 @@
                   </div>
                 {/if}
               </div>
+            </div>
         {/snippet}
 
-        <!-- Outside the guard below: on an empty instance this input is the
-             whole first-group flow. -->
+        <!-- Escape cancels from the input or either form button. Rendered
+             where the folder will appear, or in place of the one renamed. -->
         {#snippet groupNameInput()}
-          <!-- Escape cancels from the input or either form button. -->
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <form class="px-1 py-1" onsubmit={(e) => { e.preventDefault(); void commitGroupName(); }}
             onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); cancelGroupEdit(); } }}>
           <input
             class="w-full h-7 px-2 mb-0.5 rounded-md text-body-sm bg-[var(--bg)]
                    border border-[var(--border)] text-[var(--text)]"
-            placeholder="Group name"
-            aria-label="Group name" aria-invalid={!!groupEditError} aria-describedby={groupEditError ? "group-edit-error" : undefined}
+            placeholder="Folder name"
+            aria-label="Folder name" aria-invalid={!!groupEditError} aria-describedby={groupEditError ? "group-edit-error" : undefined}
+            maxlength="80"
             bind:this={groupInput}
             bind:value={draftGroupName}
             disabled={groupSaving}
@@ -1234,84 +1467,84 @@
           </form>
         {/snippet}
 
-        {#if editingGroupId === NEW_GROUP}
-          {@render groupNameInput()}
-        {/if}
         {#if orderError}<p role="alert" class="px-2 py-1 text-caption text-[var(--error)] break-words">{orderError}</p>{/if}
 
-        <!-- Groups render above the ungrouped list. The guard covers groups as
-             well as projects so a group whose last project left stays around
-             to be renamed or deleted instead of vanishing. -->
-        {#if projects.length > 0 || groups.length > 0}
-          {#each groups as group (group.id)}
-            {@const collapsed = collapsedGroups.has(group.id)}
-            {#if editingGroupId === group.id}
-              {@render groupNameInput()}
-            {:else}
-            <!-- A group is a folder in the tree: folder glyph where a project
-                 draws its icon, open or closed with the group, and a count. -->
-            <div class="sidebar-row sidebar-group-heading group flex items-center rounded-md" data-collapsed={collapsed || undefined}>
-            <button
-              class="sidebar-folder min-w-0 flex-1 flex items-center gap-2.5 pl-2 pr-1 rounded-md
-                     text-left text-body font-medium transition-colors"
-              aria-expanded={!collapsed}
-              aria-controls={`group-${group.id}`} title={group.name}
-              onclick={() => toggleGroup(group.id)}
-              oncontextmenu={(e) => openGroupMenu(e, group)}
-            >
-              <span class="sidebar-project-icon sidebar-folder-icon">
-                {#if collapsed}
-                  <Folder size={18} />
-                {:else}
-                  <FolderOpen size={18} />
-                {/if}
-              </span>
-              <span class="truncate flex-1">{group.name}</span>
-              <span class="sidebar-folder-count text-micro tabular-nums" aria-hidden="true">{projectsIn(group).length}</span>
-            </button>
-            <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
-              data-sidebar-group-actions={group.id}
-              aria-label={`Actions for group ${group.name}`} aria-haspopup="menu" onclick={(e) => openGroupMenu(e, group)}><Ellipsis size={15} /></button>
-            </div>
-            {/if}
-            {#if collapsed && projectsIn(group).some((p) => p.identifier === activeProject)}
-              <button class="ml-3 max-w-[calc(100%-0.75rem)] truncate text-caption text-[var(--accent)] px-2 py-1"
-                title={`Show ${activeProjectRecord?.name}`} onclick={() => toggleGroup(group.id)}>Current: {activeProjectRecord?.name}</button>
-            {/if}
-              <!-- The folder's contents hang off a guide under its icon. -->
-              <div id={`group-${group.id}`} hidden={collapsed} class="sidebar-group-projects">
-                {#each projectsIn(group) as project (project.id)}
-                  {@render projectEntry(project)}
-                {/each}
-              </div>
-          {/each}
-
-          <!-- LIF-233: drag-to-reorder zone, now holding only the ungrouped
-               projects. Each is a SINGLE direct child of the zone (pill + its
-               sub-nav wrapped together), so svelte-dnd-action's
-               one-item-per-child model stays 1:1 — the active project's
-               expanded sub-nav must NOT become its own draggable item. The
-               header/+button and the groups above sit OUTSIDE the zone. -->
-          <div class:sidebar-ungrouped={groups.length > 0}
-            use:dndzone={{
-              items: ungroupedItems,
-              flipDurationMs: flipMs(),
-              type: "lific-projects",
-              dropTargetStyle: {},
-              dragDisabled: signedOut || orderSaving || ungroupedItems.length < 2,
-            }}
-            onconsider={handleProjectConsider}
-            onfinalize={handleProjectFinalize}
+        <!-- A folder: folder glyph where a project draws its icon, open or
+             closed, and a count of every project inside it. -->
+        {#snippet folderRow(node: FolderNode)}
+          {@const group = node.folder}
+          {@const open = folderOpen(group.id)}
+          {@const dragging = dragActive && sameItem(drag?.item, { kind: "folder", id: group.id })}
+          {#if editingGroupId === group.id}
+            {@render groupNameInput()}
+          {:else}
+          <div class="sidebar-row sidebar-group-heading group flex items-center rounded-md"
+            data-collapsed={!open || undefined} data-dragging={dragging || undefined}
+            data-drop-row data-drop-kind="folder" data-drop-id={group.id}
+            use:dragSource={{ kind: "folder", id: group.id }}>
+          <button
+            class="sidebar-folder min-w-0 flex-1 flex items-center gap-2.5 pl-2 pr-1 rounded-md
+                   text-left text-body font-medium transition-colors"
+            aria-expanded={open}
+            aria-controls={`group-${group.id}`} title={group.name}
+            onclick={() => toggleGroup(group.id)}
+            oncontextmenu={signedOut ? undefined : (e) => openGroupMenu(e, group)}
           >
-          {#each ungroupedItems as project (project.id)}
-            <!-- animate:flip gives the reorder its slide; the wrapper holds
-                 both the pill and (when open) the sub-nav so they move as a
-                 unit. -->
-            <div animate:flip={{ duration: flipMs() }}>
-              {@render projectEntry(project)}
-            </div>
-          {/each}
+            <span class="sidebar-project-icon sidebar-folder-icon">
+              {#if open}
+                <FolderOpen size={18} />
+              {:else}
+                <Folder size={18} />
+              {/if}
+            </span>
+            <span class="truncate flex-1">{group.name}</span>
+            <span class="sidebar-folder-count text-micro tabular-nums" aria-hidden="true">{node.projectCount}</span>
+          </button>
+          <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
+            data-sidebar-group-actions={group.id}
+            aria-label={`Actions for folder ${group.name}`} aria-haspopup="menu" onclick={(e) => openGroupMenu(e, group)}><Ellipsis size={15} /></button>
           </div>
+          {/if}
+          {#if !open && !dragActive && hiddenActiveFolder === group.id && activeProjectRecord}
+            <button class="ml-3 max-w-[calc(100%-0.75rem)] truncate text-caption text-[var(--accent)] px-2 py-1"
+              title={`Show ${activeProjectRecord.name}`}
+              onclick={() => expandFolders(ancestors(treeIndex, { kind: "project", id: activeProjectRecord!.id }))}>Current: {activeProjectRecord.name}</button>
+          {/if}
+          <!-- The folder's contents hang off a guide under its icon. -->
+          <div id={`group-${group.id}`} hidden={!open} class="sidebar-group-projects">
+            {@render treeNodes(node.children, group.id)}
+            {#if node.children.length === 0 && !(editingGroupId === NEW_GROUP && newFolderParent === group.id)}
+              <p class="sidebar-folder-empty px-2 py-1 text-caption text-[var(--text-faint)]"
+                data-drop-row data-drop-kind="into" data-drop-id={group.id}>Empty</p>
+            {/if}
+          </div>
+        {/snippet}
+
+        {#snippet treeNodes(nodes: TreeNode[], parent: number | null)}
+          {@const slot = editingGroupId === NEW_GROUP && newFolderParent === parent ? newFolderSlot(nodes) : -1}
+          {#each nodes as node, i (keyOf(node))}
+            {#if i === slot}{@render groupNameInput()}{/if}
+            {#if node.kind === "folder"}
+              {@render folderRow(node)}
+            {:else}
+              {@render projectEntry(node.project)}
+            {/if}
+          {/each}
+          {#if slot === nodes.length}{@render groupNameInput()}{/if}
+        {/snippet}
+
+        <!-- The guard covers folders as well as projects so an empty folder
+             stays around to be filled, renamed or deleted. -->
+        {#if projects.length > 0 || groups.length > 0 || editingGroupId === NEW_GROUP}
+          <div data-tree-root data-dragging={dragActive || undefined}>
+            {@render treeNodes(tree, null)}
+          </div>
+          {#if dragActive && drag?.indicator}
+            {@const at = drag.indicator}
+            <div class="sidebar-drop-indicator" aria-hidden="true"
+              data-box={at.box || undefined} data-refused={at.refused || undefined}
+              style={`top: ${at.top}px; left: ${at.left}px; width: ${at.width}px; height: ${at.height}px`}></div>
+          {/if}
         {:else if signedOut}
           <p class="px-3 py-6 text-body-sm text-[var(--text-faint)]">No published projects.</p>
         {:else if editingGroupId !== NEW_GROUP}
@@ -1327,7 +1560,7 @@
                 class="text-body-sm text-[var(--accent)] hover:underline"
                 onclick={() => startCreatingGroup()}
               >
-                Create a group
+                Create a folder
               </button>
             </div>
           </div>
@@ -1467,7 +1700,7 @@
           {@render railLink("/agents", "Agent activity", Bot, route === "/agents", activeAgents)}
           <hr class="rail-rule" />
           {/if}
-          {#each [...groups.flatMap((g) => projectsIn(g)), ...ungrouped] as project (project.id)}
+          {#each railProjects as project (project.id)}
             {@const current = activeProject?.toLowerCase() === project.identifier.toLowerCase()}
             <button
               class="sidebar-destination rail-item size-10 grid place-items-center rounded-md transition-colors"
@@ -1492,8 +1725,8 @@
           <button
             class="rail-item size-10 grid place-items-center rounded-md text-[var(--text-faint)]
                    hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
-            aria-label="New project or group" aria-haspopup="menu"
-            use:tip={"New project or group"}
+            aria-label="New project or folder" aria-haspopup="menu"
+            use:tip={"New project or folder"}
             onclick={openCreateMenu}
           >
             <Plus size={17} />
@@ -1537,6 +1770,30 @@
         </div>
       {/snippet}
     </aside>
+    {#if dragActive && drag}
+      {@const item = drag.item}
+      {@const node = treeIndex.get(keyOf(item))?.node}
+      <!-- The dragged item as one compact row: never its sub-tabs or contents. -->
+      <div class="sidebar-drag-ghost fixed z-[130] pointer-events-none max-w-64 px-2 py-1.5 rounded-md text-body-sm"
+        data-sidebar-drag-ghost data-refused={drag.result?.kind === "refused" || undefined}
+        style={`top: ${drag.y + 12}px; left: ${drag.x + 14}px`}>
+        <div class="flex items-center gap-2 min-w-0">
+          {#if node?.kind === "folder"}
+            <Folder size={16} class="shrink-0 text-[var(--sidebar-accent)]" />
+            <span class="truncate font-medium">{node.folder.name}</span>
+            <span class="sidebar-folder-count text-micro tabular-nums">{node.projectCount}</span>
+          {:else if node?.kind === "project"}
+            {#if node.project.emoji}<ProjectIcon value={node.project.emoji} size={16} />
+            {:else}<span class="sidebar-initials size-5 grid place-items-center rounded text-micro font-medium">{node.project.identifier.slice(0, 2)}</span>{/if}
+            <span class="truncate font-medium">{node.project.name}</span>
+          {/if}
+        </div>
+        {#if drag.result?.kind === "refused"}
+          <p class="mt-1 text-caption text-[var(--error)] whitespace-normal">{drag.result.reason}</p>
+        {/if}
+      </div>
+    {/if}
+    <p class="sr-only" role="status" aria-live="polite">{liveMessage}</p>
     {#if railTip && sidebarCollapsed}
       <div role="tooltip" class="rail-tip fixed z-50 -translate-y-1/2 pointer-events-none whitespace-nowrap
                                   px-2 py-1 rounded-md text-caption"
@@ -1673,9 +1930,8 @@
     {user}
     {signedOut}
     {projects}
-    {groups}
-    {projectsIn}
-    ungrouped={ungroupedItems}
+    {tree}
+    {newFolderParent}
     {collapsedGroups}
     onToggleGroup={toggleGroup}
     onOpenPalette={() => palette?.openPalette()}
@@ -1742,8 +1998,55 @@
     .sidebar-overflow { opacity: 0; }
     .sidebar-row:hover .sidebar-overflow,
     .sidebar-row:focus-within .sidebar-overflow { opacity: 1; }
+    /* In subfolders, where names have the least room, the hidden button
+       gives its width back until the row is hovered or focused. */
+    .sidebar-group-projects .sidebar-group-projects .sidebar-row:not(:hover):not(:focus-within) .sidebar-overflow {
+      width: 0;
+      overflow: hidden;
+    }
   }
   @media (pointer: coarse) {
     .sidebar-overflow { min-width: 44px; min-height: 44px; }
   }
+  /* The dragged item stays in place, faded, so its origin is never lost. */
+  [data-drop-entry][data-dragging] > .sidebar-row,
+  .sidebar-group-heading[data-dragging] { opacity: 0.4; }
+  [data-tree-root][data-dragging] .sidebar-row:hover { background: transparent; }
+  .sidebar-drop-indicator {
+    position: absolute;
+    z-index: 5;
+    pointer-events: none;
+    border-radius: 2px;
+    background: var(--sidebar-accent);
+  }
+  .sidebar-drop-indicator::before {
+    content: "";
+    position: absolute;
+    left: -3px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: inherit;
+  }
+  .sidebar-drop-indicator[data-box] {
+    background: color-mix(in srgb, var(--sidebar-accent) 14%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--sidebar-accent);
+    border-radius: 0.375rem;
+  }
+  .sidebar-drop-indicator[data-box]::before { display: none; }
+  .sidebar-drop-indicator[data-refused] { background: var(--error); }
+  .sidebar-drop-indicator[data-box][data-refused] {
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--error);
+  }
+  .sidebar-drag-ghost {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+  }
+  .sidebar-drag-ghost[data-refused] { border-color: var(--error); }
+  :global(body.sidebar-dragging) { cursor: grabbing; user-select: none; }
+  :global(body.sidebar-dragging *) { cursor: grabbing !important; }
 </style>
