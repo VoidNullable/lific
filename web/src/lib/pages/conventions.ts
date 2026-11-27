@@ -5,6 +5,7 @@
 // tab offers the templates instead of the page.
 
 import type { ConventionTemplate, ConventionTemplateKey } from "../api";
+import { commentTargetFromHash, routeWithCommentTarget, splitResourcePath } from "../commentLinks";
 
 /** The fields of a page row this decision reads. */
 export interface ConventionsCandidate {
@@ -49,6 +50,39 @@ export function pageRoute(projectIdentifier: string, page: { id: number; convent
  *  Blank, the start you write yourself. */
 export function templateName(t: Pick<ConventionTemplate, "key" | "name">): string {
   return t.key === "empty" ? "Blank" : t.name;
+}
+
+/** A few words on who runs the tracker under each template. Shorter than the
+ *  server's summary, which restates the text's opening paragraph; that text
+ *  sits right beside the list. */
+const TAGLINES: Partial<Record<ConventionTemplateKey, string>> = {
+  empty: "Write your own",
+  ai_managed: "Agents run the tracker",
+  human_managed: "People file, agents close",
+  human_owned: "People file and close",
+};
+
+export function templateTagline(t: Pick<ConventionTemplate, "key" | "summary">): string {
+  return TAGLINES[t.key] ?? t.summary;
+}
+
+/** Turn the conventions page's old address into its tab, keeping a comment
+ *  target in the form the router reads (`?comment=N`). `hash` may be a hash
+ *  route (`#/P/pages/3?comment=42`) or, on a path-style link
+ *  (`/P/pages/3#comment-42`), a bare anchor; the path is dropped then, as
+ *  App's boot code does. */
+export function conventionsRedirect(
+  projectIdentifier: string,
+  loc: { pathname: string; hash: string },
+): { route: string; url: string } {
+  const target = commentTargetFromHash(loc.hash);
+  const route = target
+    ? routeWithCommentTarget(conventionsRoute(projectIdentifier), target)
+    : conventionsRoute(projectIdentifier);
+  const basePath =
+    splitResourcePath(loc.pathname)?.basePath ??
+    (loc.hash.startsWith("#/") ? loc.pathname.replace(/\/$/, "") : "");
+  return { route, url: `${basePath}/#${route}` };
 }
 
 /** The choices when the templates endpoint does not answer: the same keys

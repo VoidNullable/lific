@@ -13,7 +13,6 @@
   import type { PageRow } from "../sync/types";
   import { refreshProjectModel } from "../sync/readModel.svelte";
   import { toast } from "../toast/toast.svelte";
-  import { ScrollText } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
   import Breadcrumbs from "../Breadcrumbs.svelte";
   import SignInButton from "../SignInButton.svelte";
@@ -123,79 +122,54 @@
 
 <div class="h-full overflow-y-auto">
   <div
-    class="max-w-[960px] mx-auto px-4 py-6 sm:px-10 sm:py-8 flex flex-col gap-5"
+    class="max-w-[1080px] mx-auto px-4 pb-10 pt-6 sm:px-10 sm:pt-8"
     data-testid="conventions-chooser"
     data-state={conv.kind}
   >
-    <header class="flex items-start gap-3">
-      <span class="shrink-0 size-10 grid place-items-center rounded-lg bg-[var(--accent-subtle)] text-[var(--accent)]">
-        <ScrollText size={20} />
-      </span>
-      <div class="flex-1 min-w-0">
-        <h1 class="text-title font-medium text-[var(--text)]">Conventions</h1>
-        <p class="text-body text-[var(--text-muted)] leading-relaxed mt-1 max-w-[62ch]">
-          How work in this tracker should go: which module gets what, when an
-          issue is marked for a person, who closes what. Agents read this page
-          at the start of each session.
-        </p>
-      </div>
+    <header class="mb-6 sm:mb-8 max-w-[68ch]">
+      <h1 class="text-title font-medium text-[var(--text)]">Conventions</h1>
+      <p class="text-body text-[var(--text-muted)] mt-1">
+        {#if canEdit}
+          Agents read this page at the start of every session; pick the
+          template closest to how you work, then make it yours.
+        {:else if conv.kind === "none"}
+          This project has no conventions yet.
+        {:else}
+          No conventions written yet.
+        {/if}
+      </p>
     </header>
 
-    {#if !canEdit}
-      <p class="text-body text-[var(--text-muted)] rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-        {conv.kind === "none"
-          ? "This project has no conventions yet."
-          : "No conventions written yet."}
-      </p>
-    {:else}
-      <section class="flex flex-col gap-3" aria-labelledby="conventions-start-heading">
-        <div>
-          <h2 id="conventions-start-heading" class="text-body-lg font-medium text-[var(--text)]">Pick a starting point</h2>
-          <p class="text-body-sm text-[var(--text-muted)] mt-0.5">
-            Read each template before you choose. The text becomes the page,
-            and you can edit every line of it afterwards.
-          </p>
-        </div>
-
-        {#if templatesError}
-          <p class="text-body-sm text-[var(--error)]" role="alert">
-            Couldn't load the templates: {templatesError}.
-            <button class="text-[var(--accent)] hover:underline" onclick={() => void loadTemplates()}>Try again</button>
-          </p>
-        {:else}
-          <ConventionsTemplatePicker {templates} bind:selected disabled={busy} previewHeight="min(28rem, 55dvh)" />
-          <!-- On a phone the preview runs long, so the action stays in reach. -->
-          <div
-            class="sticky bottom-0 -mx-4 px-4 py-3 bg-[var(--bg)] border-t border-[var(--border)]
-                   pb-[max(0.75rem,env(safe-area-inset-bottom))]
-                   sm:static sm:mx-0 sm:px-0 sm:py-0 sm:border-0 sm:bg-transparent
-                   flex flex-wrap items-center gap-3"
-          >
+    {#if canEdit}
+      {#if templatesError}
+        <p class="text-body-sm text-[var(--error)]" role="alert">
+          Couldn't load the templates: {templatesError}.
+          <button class="text-[var(--accent)] hover:underline" onclick={() => void loadTemplates()}>Try again</button>
+        </p>
+      {:else}
+        <ConventionsTemplatePicker {templates} bind:selected disabled={busy}>
+          {#snippet action(t)}
             <button
               type="button"
               data-testid="conventions-use-template"
-              class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                     px-4 py-2 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
+              class="text-body-sm font-medium text-[var(--accent-text)] bg-[var(--accent)]
+                     px-3.5 py-1.5 rounded-md hover:opacity-90 transition-opacity
+                     focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
                      disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={busy || chosen === null}
+              disabled={busy}
               onclick={() => void start()}
             >
               {#if busy}
                 Starting…
-              {:else if chosen?.key === "empty"}
-                Start with a blank page
-              {:else if chosen}
-                Use {templateName(chosen)}
+              {:else if t.key === "empty"}
+                Start blank
               {:else}
-                Use this template
+                Use {templateName(t)}
               {/if}
             </button>
-            {#if conv.kind === "empty"}
-              <span class="text-caption text-[var(--text-faint)]">Fills in {conv.page.identifier}, which has no text yet.</span>
-            {/if}
-          </div>
-        {/if}
-      </section>
+          {/snippet}
+        </ConventionsTemplatePicker>
+      {/if}
     {/if}
   </div>
 </div>

@@ -290,7 +290,7 @@
         later on the project's Conventions tab.
       </p>
     </div>
-    <ConventionsTemplatePicker {templates} bind:selected={conventions} previewHeight="16rem" />
+    <ConventionsTemplatePicker {templates} bind:selected={conventions} excerpt />
   </section>
 </div>
 
