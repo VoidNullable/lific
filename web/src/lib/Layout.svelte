@@ -1897,7 +1897,10 @@
            ABOVE main via z-index. The chrome's cast shadow now renders
            on top of every child, indelibly. -->
       <div class="relative flex-1 min-w-0 overflow-hidden md:rounded-tl-xl">
-        <main class="absolute inset-0 bg-[var(--bg)] overflow-y-auto">
+        <!-- The scroller carries the radius too: Chromium sometimes leaves a
+             composited scroller (and its sticky rows) out of an ancestor's
+             rounded overflow clip, painting a square corner. -->
+        <main class="absolute inset-0 bg-[var(--bg)] overflow-y-auto md:rounded-tl-xl">
           {@render children()}
         </main>
         <!-- Top edge: TL → TR. -->

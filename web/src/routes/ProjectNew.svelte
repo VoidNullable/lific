@@ -17,7 +17,9 @@
   } from "../lib/reauth";
   import { toast } from "../lib/toast/toast.svelte";
   import ProjectForm from "../lib/ProjectForm.svelte";
-  import { ArrowLeft, Lock } from "lucide-svelte";
+  import ProjectIcon from "../lib/ProjectIcon.svelte";
+  import StatusIcon from "../lib/StatusIcon.svelte";
+  import { ArrowLeft, ArrowRight, ChevronRight, CircleAlert, FileText, Lock, PackageOpen } from "lucide-svelte";
   import { getContext, onMount } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -63,7 +65,17 @@
   let reauthError = $state("");
   let autoReauthNote = $state("");
 
-  let canSave = $derived(name.trim().length > 0 && identifier.trim().length > 0);
+  let identifierError = $state<string | null>(null);
+  let canSave = $derived(name.trim().length > 0 && identifier.trim().length > 0 && !identifierError);
+  let shownId = $derived(identifier.trim().toUpperCase() || "PRO");
+  const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.defaultPrevented) {
+      e.preventDefault();
+      save();
+    }
+  }
 
   onMount(async () => {
     const [user, instance] = await Promise.all([me(), getInstance()]);
@@ -178,27 +190,29 @@
   }
 </script>
 
-<div class="h-full flex flex-col">
-  <!-- Form -->
-  <div class="flex-1 overflow-y-auto">
-    {#if canImportArchive}
-      <div class="mx-auto w-full max-w-[680px] px-6 pt-6 text-body-sm text-[var(--text-muted)]">
-        Moving a project from another Lific instance?
-        <button class="text-[var(--accent)] underline underline-offset-2" onclick={() => navigate("/projects/import")}>Import a project archive</button>
-      </div>
-    {/if}
-    <ProjectForm
-      bind:name
-      bind:identifier
-      bind:description
-      bind:emoji
-      bind:leadUserId
-      bind:groupId
-      bind:conventions
-      mode="create"
-    />
+<svelte:window onkeydown={onKeydown} />
+
+<div class="new-project h-full overflow-y-auto">
+  <div class="np-split max-w-[1180px] mx-auto px-4 md:px-10 pt-8 md:pt-12 pb-16">
+    <div class="min-w-0 max-w-[760px] flex flex-col gap-6">
+      <ProjectForm
+        bind:name
+        bind:identifier
+        bind:description
+        bind:emoji
+        bind:leadUserId
+        bind:groupId
+        bind:conventions
+        bind:identifierError
+      />
+      {#if error}
+        <p class="flex items-start gap-2 text-body-sm text-[var(--error)] rounded-lg bg-[var(--error-bg)] px-3.5 py-2.5" role="alert">
+          <CircleAlert size={15} class="shrink-0 mt-0.5" />
+          <span>Couldn't create the project: {error}</span>
+        </p>
+      {/if}
     {#if pendingCreate}
-      <div class="mx-auto mb-8 w-full max-w-[680px] px-6">
+      <div>
         <div class="rounded-lg border border-[var(--border)] bg-[var(--bg-subtle)] p-4 flex flex-col gap-3">
           <div class="flex items-start gap-2 text-body-sm text-[var(--text)]">
             <Lock size={15} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
@@ -236,6 +250,58 @@
         </div>
       </div>
     {/if}
+    </div>
+
+    <!-- ── ASIDE: where the project will show up ─────────────── -->
+    <aside class="np-aside flex flex-col gap-6" aria-label="Preview">
+      <div class="hidden xl:block">
+        <p class="text-caption font-medium uppercase tracking-wider text-[var(--text-faint)] mb-2">Preview</p>
+        <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-3 flex flex-col gap-3">
+          <div>
+            <p class="text-caption text-[var(--text-muted)] px-1 mb-1.5">In the sidebar</p>
+            <div class="flex items-center gap-2.5 rounded-lg px-2 py-1.5 bg-[var(--chart-hover)]">
+              {#if emoji}
+                <span class="size-6 grid place-items-center shrink-0"><ProjectIcon value={emoji} size={18} /></span>
+              {:else}
+                <span class="size-6 grid place-items-center shrink-0 rounded-md bg-[var(--chart-tile)] text-caption font-medium tracking-tight text-[var(--text-muted)]">{shownId.slice(0, 2)}</span>
+              {/if}
+              <span class="truncate flex-1 text-body-sm {name.trim() ? 'text-[var(--text)]' : 'text-[var(--text-faint)]'}">{name.trim() || "Untitled project"}</span>
+              <ChevronRight size={14} class="text-[var(--text-faint)]" />
+            </div>
+          </div>
+          <div class="border-t border-[var(--border)] pt-3">
+            <p class="text-caption text-[var(--text-muted)] px-1 mb-1.5">Its links</p>
+            <div class="flex items-center gap-2.5 px-2 py-1.5">
+              <StatusIcon status="todo" size={14} />
+              <span class="font-mono text-caption font-semibold text-[var(--text-muted)] shrink-0">{shownId}-1</span>
+              <span class="h-2 flex-1 rounded-full bg-[var(--chart-tile)]"></span>
+            </div>
+            <div class="flex items-center gap-2.5 px-2 py-1.5">
+              <FileText size={14} class="text-[var(--text-faint)] shrink-0" />
+              <span class="font-mono text-caption font-semibold text-[var(--text-muted)] shrink-0">{shownId}-DOC-1</span>
+              <span class="truncate text-caption text-[var(--text-muted)]">Conventions</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {#if canImportArchive}
+        <div class="flex items-start gap-3 px-3.5 py-3">
+          <span class="size-8 grid place-items-center rounded-lg bg-[var(--chart-tile)] text-[var(--text-muted)] shrink-0">
+            <PackageOpen size={16} />
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="text-body-sm text-[var(--text-muted)]">Moving from another Lific instance?</p>
+            <button
+              class="inline-flex items-center gap-1 text-body-sm font-medium text-[var(--text)] hover:text-[var(--accent)] rounded transition-colors"
+              onclick={() => navigate("/projects/import")}
+            >
+              Import a project archive <ArrowRight size={13} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      {/if}
+    </aside>
   </div>
 </div>
 
@@ -261,6 +327,7 @@
           {error}
         </span>
       {/if}
+      <kbd class="hidden md:inline text-caption font-mono text-[var(--text-faint)]" aria-hidden="true">{modKey}+Enter</kbd>
       <button
         class="text-body-sm text-[var(--text-muted)] px-2.5 py-1
                rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
@@ -274,6 +341,7 @@
                hover:bg-[var(--accent-hover)] transition-colors
                disabled:opacity-40 disabled:cursor-not-allowed"
         disabled={!canSave || saving || pendingCreate !== null}
+        title="{modKey}+Enter"
         onclick={save}
       >
         {saving ? "Creating..." : "Create project"}
@@ -281,3 +349,26 @@
     </div>
   </div>
 {/snippet}
+
+<style>
+  .new-project {
+    --chart-hover: color-mix(in oklab, var(--text) 4.5%, transparent);
+    --chart-tile: color-mix(in oklab, var(--text) 7.5%, transparent);
+  }
+  .np-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2.5rem;
+  }
+  @media (min-width: 1280px) {
+    .np-split {
+      grid-template-columns: minmax(0, 1fr) 280px;
+      column-gap: 3rem;
+    }
+    .np-aside {
+      position: sticky;
+      top: 3rem;
+      align-self: start;
+    }
+  }
+</style>

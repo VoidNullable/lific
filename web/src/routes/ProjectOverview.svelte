@@ -44,7 +44,6 @@
   import WeekBars from "../lib/overview/WeekBars.svelte";
   import { byDay, digest, type ActivityLine } from "../lib/overview/activity";
   import OpenTrend from "../lib/home/OpenTrend.svelte";
-  import HeatBar from "../lib/home/HeatBar.svelte";
   import { recordProjectVisit } from "../lib/home/lastVisit";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import IconPicker from "../lib/IconPicker.svelte";
@@ -59,7 +58,8 @@
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import Mascot from "../lib/Mascot.svelte";
-  import { ageLabel, daysSince, heat, importanceScore } from "../lib/issues/importance";
+  import { ageLabel, daysSince, importanceScore } from "../lib/issues/importance";
+  import { ASSIGNEE_FILTER_HUMAN } from "../lib/issues/assignees";
   import { loadListState, saveListState, type PersistedListState } from "../lib/issues/persistence";
   import { saveSubTab } from "../lib/subtab";
   import { STATUS_UNRESOLVED } from "../lib/issues/grouping";
@@ -256,7 +256,9 @@
     const held = (h: { blockers: Issue[]; waiting: boolean }) => h.blockers.length > 0 || h.waiting;
     return {
       attention: scored,
-      progress: scored.filter((s) => s.issue.status === "active"),
+      progress: scored
+        .filter((s) => s.issue.status === "active")
+        .sort((a, b) => a.issue.updated_at.localeCompare(b.issue.updated_at)),
       ready: scored.filter((s) => !s.issue.needs_human && s.issue.status !== "active" && !held(s.hold)),
       person: scored.filter((s) => !!s.issue.needs_human),
       blocked: scored.filter((s) => held(s.hold)),
@@ -264,13 +266,24 @@
   });
 
   const workTabs = $derived([
-    { id: "attention", label: "Needs attention", count: work.attention.length },
+    // Every open issue, ranked: its count would only repeat the Open stat.
+    { id: "attention", label: "Needs attention", count: null },
     { id: "progress", label: "In progress", count: work.progress.length },
     { id: "ready", label: "Ready for agents", count: work.ready.length },
     { id: "person", label: "For a person", count: work.person.length },
     { id: "blocked", label: "Blocked", count: work.blocked.length },
   ]);
   const workRows = $derived(work[workTab]);
+  const WORK_MAX = 40;
+
+  // Where "see them all" goes for each tab: the issue list can express the
+  // in-progress and for-a-person slices, but not the blocked or ready ones.
+  const workLink = $derived.by((): { label: string; filters: Partial<PersistedListState> } => {
+    if (workTab === "progress") return { label: "All in progress", filters: { filterStatus: ["active"] } };
+    if (workTab === "person")
+      return { label: "All for a person", filters: { filterStatus: [STATUS_UNRESOLVED], filterAssignee: [ASSIGNEE_FILTER_HUMAN] } };
+    return { label: "All open issues", filters: { filterStatus: [STATUS_UNRESOLVED] } };
+  });
 
   const WORK_NOTES: Record<WorkTab, string> = {
     attention: "Open work ranked by priority, age and time since it last moved.",
@@ -579,6 +592,7 @@
               <input
                 bind:value={draftName}
                 aria-label="Project name"
+                data-display-field
                 class="text-[1.9rem] font-semibold tracking-tight leading-tight bg-transparent outline-none
                        text-[var(--text)] w-full max-w-[24ch] rounded px-1 -mx-1
                        focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
@@ -780,9 +794,9 @@
                 </p>
               </div>
             {:else}
-              {@const shown = workExpanded ? workRows.slice(0, 40) : workRows.slice(0, WORK_CAP)}
+              {@const shown = workExpanded ? workRows.slice(0, WORK_MAX) : workRows.slice(0, WORK_CAP)}
               <ol class="flex flex-col">
-                {#each shown as { issue, score, hold }, rank (issue.id)}
+                {#each shown as { issue, hold }, rank (issue.id)}
                   {@const idle = daysSince(issue.updated_at)}
                   <li>
                     <a
@@ -793,9 +807,8 @@
                              hover:bg-[var(--chart-hover)] transition-colors"
                     >
                       <span class="w-5 shrink-0 text-caption tabular-nums text-[var(--text-faint)] text-right">{rank + 1}</span>
-                      <span class="w-12 shrink-0 hidden sm:block"><HeatBar value={heat(score)} /></span>
                       <StatusIcon status={issue.status} size={14} />
-                      <span class="text-caption font-mono text-[var(--text-faint)] w-[62px] shrink-0 truncate">{issue.identifier}</span>
+                      <span class="text-caption font-mono text-[var(--text-faint)] w-[8ch] shrink-0 truncate">{issue.identifier}</span>
                       <span class="flex-1 min-w-0">
                         <span class="block text-body-sm text-[var(--text)] truncate">{issue.title}</span>
                         {#if workTab === "blocked"}
@@ -810,13 +823,15 @@
                       </span>
                       <AssigneeMarker {issue} />
                       <PriorityIcon priority={issue.priority} size={15} />
-                      <span class="shrink-0 hidden md:flex items-center justify-end gap-1.5 w-[118px] text-micro tabular-nums">
-                        <span class="text-[var(--text-faint)]">{ageLabel(daysSince(issue.created_at))} old</span>
-                        {#if idle >= 14}
-                          <span class="px-1.5 py-0.5 rounded-full text-[var(--warn-text)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)]">idle {ageLabel(idle)}</span>
-                        {:else}
-                          <span class="px-1.5 py-0.5 text-[var(--text-faint)]">idle {ageLabel(idle)}</span>
-                        {/if}
+                      <span class="shrink-0 hidden md:flex items-center gap-1.5 text-micro tabular-nums whitespace-nowrap">
+                        <span class="w-[4.5em] text-right text-[var(--text-faint)]">{ageLabel(daysSince(issue.created_at))} old</span>
+                        <span class="w-[5.75em] flex justify-end">
+                          {#if idle >= 14}
+                            <span class="px-1.5 py-0.5 rounded-full text-[var(--warn-text)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)]">idle {ageLabel(idle)}</span>
+                          {:else}
+                            <span class="px-1.5 py-0.5 text-[var(--text-faint)]">idle {ageLabel(idle)}</span>
+                          {/if}
+                        </span>
                       </span>
                     </a>
                   </li>
@@ -824,16 +839,21 @@
               </ol>
               <div class="flex items-center justify-between gap-3 pt-2.5 text-caption">
                 {#if workRows.length > WORK_CAP}
-                  <button class="text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-                          onclick={() => (workExpanded = !workExpanded)}>
-                    {workExpanded ? "Show fewer" : `Show ${Math.min(workRows.length, 40) - WORK_CAP} more`}
-                  </button>
+                  <span class="flex items-baseline gap-2">
+                    <button class="text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                            onclick={() => (workExpanded = !workExpanded)}>
+                      {workExpanded ? "Show fewer" : `Show ${Math.min(workRows.length, WORK_MAX) - WORK_CAP} more`}
+                    </button>
+                    {#if workExpanded && workRows.length > WORK_MAX}
+                      <span class="text-[var(--text-faint)] tabular-nums">Top {WORK_MAX} of {workRows.length}</span>
+                    {/if}
+                  </span>
                 {:else}
                   <span></span>
                 {/if}
                 <button class="inline-flex items-center gap-1 text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-                        onclick={() => openInList({ filterStatus: [STATUS_UNRESOLVED] })}>
-                  All open issues <ArrowRight size={12} />
+                        onclick={() => openInList(workLink.filters)}>
+                  {workLink.label} <ArrowRight size={12} />
                 </button>
               </div>
             {/if}

@@ -138,12 +138,12 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
     await page.setViewportSize({ width: 390, height: 900 });
     await page.goto(`${base}/settings`);
     for (const id of ["codex-laptop", "codex-desktop", "custom-agent"]) {
-      await page.getByRole("button", { name: "Add custom or named connection" }).click();
-      await page.getByLabel("Config template").selectOption(id.startsWith("codex") ? "codex" : "");
-      await page.getByLabel("Connection ID", { exact: true }).fill(id);
-      await page.getByLabel("Display name (optional)").fill(id);
-      await page.getByRole("button", { name: "Connect agent", exact: true }).click();
+      await page.getByRole("button", { name: "New agent account" }).click();
       const dialog = page.getByRole("dialog");
+      await dialog.getByRole("radio", { name: id.startsWith("codex") ? "Codex" : "Other MCP client", exact: true }).click();
+      await dialog.getByLabel("Account ID", { exact: true }).fill(id);
+      await dialog.getByLabel("Name", { exact: true }).fill(id);
+      await dialog.getByRole("button", { name: "Create account and key", exact: true }).click();
       await dialog.getByRole("button", { name: "Copy key", exact: true }).waitFor();
       if (id === "custom-agent") {
         assert((await dialog.innerText()).includes("HTTP MCP settings"));
@@ -154,17 +154,22 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
     await page.reload();
     const laptop = page.locator('[data-connection-id="codex-laptop"]');
     const desktop = page.locator('[data-connection-id="codex-desktop"]');
-    await laptop.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await laptop.getByRole("button", { name: "Reconnect", exact: true }).waitFor();
-    assert(await desktop.getByRole("button", { name: "Disconnect", exact: true }).isVisible());
-    await laptop.getByRole("button", { name: "Reconnect", exact: true }).click();
+    const revoke = async () => {
+      await laptop.getByRole("button", { name: "Revoke key", exact: true }).click();
+      await laptop.getByRole("button", { name: "Yes, revoke", exact: true }).click();
+      await laptop.getByRole("button", { name: "New key", exact: true }).waitFor();
+    };
+    await revoke();
+    assert(await desktop.getByRole("button", { name: "Revoke key", exact: true }).isVisible());
+    await laptop.getByRole("button", { name: "New key", exact: true }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Copy key", exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "Done", exact: true }).click();
     assert.equal(await laptop.count(), 1);
-    await laptop.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await laptop.getByRole("button", { name: "Remove", exact: true }).click();
+    await revoke();
+    await laptop.getByRole("button", { name: "Delete", exact: true }).click();
+    await laptop.getByRole("button", { name: "Delete account", exact: true }).click();
     await laptop.waitFor({ state: "detached" });
-    assert(await desktop.getByRole("button", { name: "Disconnect", exact: true }).isVisible());
+    assert(await desktop.getByRole("button", { name: "Revoke key", exact: true }).isVisible());
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     if (process.env.LIFIC_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.LIFIC_SCREENSHOT_DIR, "lific-discord-tools-390.png"), fullPage: true });
     assert.equal(errors.length, 0, errors.join("\n"));

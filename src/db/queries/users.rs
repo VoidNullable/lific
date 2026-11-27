@@ -1324,7 +1324,16 @@ pub fn list_bots(
                     SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0
                     UNION
                     SELECT 1 FROM oauth_tokens t WHERE t.user_id = u.id AND t.revoked = 0
-                ) as connected, u.tool_id
+                ) as connected, u.tool_id,
+                (SELECT MAX(k.created_at) FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0),
+                EXISTS(SELECT 1 FROM oauth_tokens t WHERE t.user_id = u.id AND t.revoked = 0),
+                (SELECT MAX(ts) FROM (
+                    SELECT MAX(a.ts) AS ts FROM audit_log a WHERE a.actor_user_id = u.id
+                    UNION ALL
+                    SELECT MAX(r.ts) FROM agent_reads r WHERE r.user_id = u.id
+                )),
+                (SELECT COUNT(*) FROM audit_log a WHERE a.actor_user_id = u.id),
+                (SELECT COUNT(*) FROM comments c WHERE c.user_id = u.id)
          FROM users u
          WHERE u.is_bot = 1 AND u.owner_id = ?1
          ORDER BY u.created_at DESC",
@@ -1338,6 +1347,11 @@ pub fn list_bots(
             created_at: row.get(4)?,
             connected: row.get(5)?,
             tool_id: row.get(6)?,
+            key_created_at: row.get(7)?,
+            oauth: row.get(8)?,
+            last_active: row.get(9)?,
+            changes: row.get(10)?,
+            comments: row.get(11)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2486,6 +2500,50 @@ mod tests {
             listed.iter().any(|b| b.id == bot && b.connected),
             "API-key-connected bot (legacy path) still lists as connected"
         );
+    }
+
+    #[test]
+    fn listed_bots_carry_their_key_and_what_they_did() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "codex", "Codex").unwrap();
+        let quiet = ensure_bot(&conn, owner.id, "zed", "Zed").unwrap();
+        insert_oauth_token_for(&conn, quiet.id);
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, user_id, created_at) VALUES ('codex-key', 'x', ?1, '2026-01-02 03:04:05')",
+            params![bot.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (ts, actor_user_id, transport, entity_type, entity_id, action)
+             VALUES ('2026-02-01 00:00:00', ?1, 'mcp', 'issue', 1, 'create'),
+                    ('2026-02-03 00:00:00', ?1, 'mcp', 'issue', 1, 'update')",
+            params![bot.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_reads (ts, user_id, tool) VALUES ('2026-02-05 00:00:00', ?1, 'get_issue')",
+            params![bot.id],
+        )
+        .unwrap();
+
+        let listed = list_bots(&conn, owner.id).unwrap();
+        let codex = listed.iter().find(|b| b.id == bot.id).unwrap();
+        assert_eq!(codex.key_created_at.as_deref(), Some("2026-01-02 03:04:05"));
+        assert!(!codex.oauth);
+        assert_eq!(codex.changes, 2);
+        assert_eq!(
+            codex.last_active.as_deref(),
+            Some("2026-02-05 00:00:00"),
+            "a read after the last write counts as activity"
+        );
+
+        let zed = listed.iter().find(|b| b.id == quiet.id).unwrap();
+        assert!(zed.oauth && zed.connected);
+        assert_eq!(zed.key_created_at, None);
+        assert_eq!((zed.changes, zed.comments), (0, 0));
+        assert_eq!(zed.last_active, None);
     }
 
     // ── LIF-190: profile + password updates ─────────────────
