@@ -24,7 +24,8 @@
     "lightbox": "bun lightbox.ts",
     "body-editor": "bun body-editor.ts",
     "palette-design": "bun palette-design.ts",
-    "conventions": "bun conventions.ts"
+    "conventions": "bun conventions.ts",
+    "pages-list": "bun pages-list.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"
