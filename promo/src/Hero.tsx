@@ -2,80 +2,35 @@ import React from "react";
 import { AbsoluteFill, staticFile, Img } from "remotion";
 import { C } from "./theme";
 import { DISPLAY } from "./fonts";
-import {
-  LificApp,
-  IssueCard,
-  IssueData,
-  Label,
-  colX,
-  cardsTop,
-  CARD_W,
-  CARD_PAD,
-} from "./components/lific-ui";
 
 /*
- * README hero image (replaces the old Photoshop LificHero.png): the
- * pixel-faithful board replica dimmed behind the current logo + Space
- * Grotesk wordmark. Rendered as a Still — regenerate any time with:
- *   npx remotion still Hero ../LificHero.png
- * Everything is static (no useCurrentFrame), so frame 0 is the image.
+ * README hero image and the site's og.png: a screenshot of the 3.0 board,
+ * dimmed behind the logo and the Space Grotesk wordmark. The screenshot is
+ * the running app on a seeded demo project (1600x1000 at 2x), not a
+ * replica, so it cannot drift from the interface. Rendered as a Still:
+ *   bunx remotion still Hero ../LificHero.png
+ * then copy the result to site/public/og.png. Everything is static, so
+ * frame 0 is the image.
  */
 
-const L: Record<string, Label> = {
-  webui: { name: "web-ui", color: "#4dd9c7" },
-  core: { name: "core", color: "#9287d7" },
-  mcp: { name: "mcp", color: "#b48af0" },
-  auth: { name: "auth", color: "#fb923c" },
-  bug: { name: "bug", color: "#f87171" },
-};
-
-const CARDS: { issue: IssueData; col: number; slot: number }[] = [
-  { col: 0, slot: 0, issue: { identifier: "LIF-231", title: "Board column virtualization", priority: "medium", labels: [L.webui], updated: "2d ago" } },
-  { col: 0, slot: 1, issue: { identifier: "LIF-214", title: "Bulk-edit issues from the list", priority: "high", labels: [L.webui], updated: "4h ago" } },
-  { col: 0, slot: 2, issue: { identifier: "LIF-207", title: "Saved filters per project", priority: "low", updated: "1d ago" } },
-  { col: 1, slot: 0, issue: { identifier: "LIF-198", title: "Fix WAL checkpoint race", priority: "high", labels: [L.core, L.bug], updated: "26m ago" } },
-  { col: 1, slot: 1, issue: { identifier: "LIF-226", title: "MCP: recurring plan templates", priority: "medium", labels: [L.mcp], updated: "2h ago" } },
-  { col: 2, slot: 0, issue: { identifier: "LIF-183", title: "OAuth device flow for CLI", labels: [L.auth], updated: "5h ago", status: "done" } },
-  { col: 2, slot: 1, issue: { identifier: "LIF-171", title: "Backup retention config", labels: [L.core], updated: "1d ago", status: "done" } },
-];
-
-const APP_W = 1500;
-const APP_H = 860;
+// The screenshot's CSS width, and how much the hero enlarges it.
+const SHOT_W = 1600;
+const SHOT_SCALE = 1.32;
 
 export const Hero: React.FC = () => {
   return (
     <AbsoluteFill style={{ backgroundColor: C.stone950 }}>
-      {/* The real board UI, slightly scaled, anchored top-left */}
-      <div
+      {/* The board, slightly enlarged, anchored top-left */}
+      <Img
+        src={staticFile("board-3.0.png")}
         style={{
           position: "absolute",
           left: -30,
           top: 30,
-          transform: "scale(1.32)",
-          transformOrigin: "top left",
+          width: SHOT_W * SHOT_SCALE,
           opacity: 0.52,
         }}
-      >
-        <LificApp
-          width={APP_W}
-          height={APP_H}
-          counts={{ backlog: 2, todo: 3, active: 2, done: 2 }}
-          totalLabel={"7"}
-        >
-          {CARDS.map(({ issue, col, slot }) => (
-            <div
-              key={issue.identifier}
-              style={{
-                position: "absolute",
-                left: colX(col) + CARD_PAD,
-                top: cardsTop() + slot * 95,
-              }}
-            >
-              <IssueCard issue={issue} width={CARD_W} />
-            </div>
-          ))}
-        </LificApp>
-      </div>
+      />
 
       {/* Fades: darken toward the right (logo zone) and the edges */}
       <AbsoluteFill
