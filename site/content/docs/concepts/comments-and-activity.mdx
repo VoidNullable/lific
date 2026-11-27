@@ -45,11 +45,11 @@ A body can mention at most 256 distinct people and reference at most 256 distinc
 
 ### Editing and deleting
 
-Only a comment's author or an instance administrator can edit or delete it, and either one still needs to be able to read the issue or page, so a member removed from a project cannot change their old comments there. An edit re-resolves mentions and attachment links from the new body. For a small change, `edit_comment` replaces one exact string, like `edit_issue`.
+Only a comment's author or an instance administrator can edit or delete it, and either one still needs a role in the project, so a member removed from a project cannot change their old comments there, even when the project is published. An edit re-resolves mentions and attachment links from the new body. For a small change, `edit_comment` replaces one exact string, like `edit_issue`.
 
 Deleting a comment moves it to the trash, and it disappears from threads, search and public projects at once. There is no way to restore a single deleted comment. Comments deleted together with their issue or page come back when it is restored; a comment deleted on its own stays in the trash until the [retention sweep](/docs/configuration#retention) removes it.
 
-Anyone who can read an issue or page can comment on it. For a workspace page, that means administrators.
+Anyone with a role in the project, `viewer` included, can comment on its issues and pages. Reading a [published project](/docs/public-projects) without a role does not let you comment. For a workspace page, commenting takes an administrator.
 
 ## Reading a thread
 

@@ -42,7 +42,7 @@ The session lives in an HttpOnly, `SameSite=Lax` cookie named `lific_token`, whi
 
 A request the cookie authenticates that can change something (any method but `GET`, `HEAD` and `OPTIONS`) must also carry an `Origin` header naming this server: the address the request was sent to, the origin of `public_url`, or an entry in `cors_origins`. A missing Origin, `null`, or any other origin gets `403 cross-origin request refused`, and nothing is written. An empty `cors_origins` does not widen this. Requests authenticated by a `Bearer` header skip the check, since a page on another site cannot make a browser attach one.
 
-These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [reads of published projects](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
+These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [reads of published projects](/docs/rest-api/public), the [OAuth and discovery routes](/docs/rest-api/oauth), and [`PUT /api/uploads/{token}`](/docs/rest-api/attachments#put-apiuploadstoken), whose URL is its own credential.
 
 Two cases act as the instance's first administrator:
 
@@ -141,7 +141,7 @@ Handlers answer failures with a JSON object carrying one `error` string, and a s
 | `403` | Authenticated but not allowed, including `recent authentication required`. The refusal of an OAuth token on an account route is plain text. |
 | `404` | The record does not exist, is in the trash, or is hidden from you in a way that must not reveal that it exists. |
 | `405` | The path exists but not with that method. |
-| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, an `expected_seq` mismatch, or an `Idempotency-Key` reused for a different request (see above). |
+| `409` | A conflict: a duplicate name, a project identifier already in use, removing the last lead, a live claim held by someone else, a GitHub import already running, an `expected_seq` mismatch, or an `Idempotency-Key` reused for a different request (see above). |
 | `413` | The request or its result is larger than Lific accepts. The message names the limit. |
 | `415`, `422` | The body is not JSON, or does not have the expected shape. These come from the request parser as plain text. |
 | `429` | A shared slot is taken: exports, project archives, the rate limit on requests with no credential. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
@@ -192,7 +192,7 @@ These records appear across many endpoints. Other shapes are described with the 
 
 `id`, `project_id`, `sequence` (the number in the identifier), `identifier`, `title`, `description`, `status` (`backlog`, `todo`, `active`, `done` or `cancelled`), `priority` (`urgent`, `high`, `medium`, `low` or `none`), `module_id`, `sort_order` (a number), `start_date`, `target_date`, `created_at`, `updated_at`, `seq` and `labels` (label names).
 
-`source` appears only on an issue that came from an import, such as `github:owner/repo#12`. Single-issue responses add relation arrays when they have entries: `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`, each a list of identifiers. An empty relation array is left out. An issue that waits on a person or a date carries `waits`, an array of [`Wait`](/docs/rest-api/work#waits) objects, in lists and single reads; it too is left out when empty.
+`source` appears only on an issue that came from an import, such as `github:owner/repo#12`. Single-issue responses add relation arrays when they have entries: `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`, each a list of identifiers. An empty relation array is left out. An issue that waits on a person or a date carries `waits`, an array of [`Wait`](/docs/rest-api/work#waits) objects, in lists and single reads; it too is left out when empty. Every issue carries `needs_human`, an issue that names people carries `assignees`, and an issue under a live [claim](/docs/rest-api/work#post-apiissuesidclaim) carries `claim`; see [`GET /api/issues`](/docs/rest-api/work#get-apiissues) for their shapes.
 
 ```json
 {
@@ -212,7 +212,8 @@ These records appear across many endpoints. Other shapes are described with the 
   "updated_at": "2026-07-15 09:30:00",
   "seq": 118,
   "labels": ["docs"],
-  "blocked_by": ["APP-2"]
+  "blocked_by": ["APP-2"],
+  "needs_human": false
 }
 ```
 
@@ -239,13 +240,13 @@ Unless an endpoint says otherwise, a successful delete answers `{"deleted": true
 | Page | Covers |
 | --- | --- |
 | [Accounts and access](/docs/rest-api/identity) | Instance settings, signing in, sessions, API keys, connected tools, user administration. |
-| [Projects](/docs/rest-api/projects) | Projects, sidebar groups, membership, saved views, board and insights, project activity, GitHub import. |
+| [Projects](/docs/rest-api/projects) | Projects, sidebar groups, membership, saved views, board and insights, project and agent activity, the home overview, GitHub import. |
 | [Issues, pages and plans](/docs/rest-api/work) | Issues, relations, waits and the server clock, the trash, comments, pages, plans, modules, labels and folders. |
-| [Attachments](/docs/rest-api/attachments) | Uploading, downloading, previews and the project file list. |
+| [Attachments](/docs/rest-api/attachments) | Uploading, upload tickets, downloading, previews and the project file list. |
 | [Search, sync and realtime](/docs/rest-api/sync) | Search, the delta sync endpoints and the realtime WebSocket. |
 | [Exports and archives](/docs/rest-api/export) | Markdown, JSON and ZIP exports, and whole-project archives. |
 | [Repositories and commits](/docs/rest-api/repositories) | Repository bindings and closing issues from commit messages. |
 | [Reading without a credential](/docs/rest-api/public) | The routes that answer anyone for a published project. |
 | [OAuth and discovery](/docs/rest-api/oauth) | Client registration, authorization, device login, tokens and metadata. |
 
-The MCP endpoint, `/mcp`, is served by the same process and takes the same bearer credentials. It is documented under [MCP](/docs/mcp).
+The MCP endpoint, `/mcp`, is served by the same process and takes the same bearer credentials, in the `Authorization` header only: a path such as `/mcp/<token>` answers `404`. It is documented under [MCP](/docs/mcp).

@@ -33,6 +33,11 @@ Read each section under [Release notes](#release-notes) for versions newer than 
 | Multi-instance MCP | From [v2.9](#v29), every backend must have identical tool definitions. Upgrade them together before restarting the proxy. |
 | Agents running `lific mcp` over stdio | From [v2.11](#v211), stop every process that opens the database, agent sessions included, and upgrade them all together. |
 | Project permissions switched off | From [v3.0](#v30), project roles are always enforced. Roles are seeded from what people did, and anyone left out is reported. |
+| MCP clients with a token in the URL | From [v3.0](#v30), `/mcp/<token>` answers `404`. Move them to `/mcp` with a bearer header or OAuth. |
+| Scripts that sign in with a password | From [v3.0](#v30), sign-in responses carry no token. Give those scripts an API key. |
+| Plain HTTP on a LAN address, or a reverse proxy | From [v3.0](#v30), set `public_url` to the address people open. Without it, nobody can sign in over plain HTTP beyond localhost, and browser writes through a proxy that rewrites `Host` get `403`. |
+| A published project | From [v3.0](#v30), plans, history, waits and live updates in it become readable by anyone. Review it, or unpublish it, first. |
+| Issues that stay `active` for weeks | From [v3.0](#v30), the server moves active issues idle for 14 days back to `todo` once a day. |
 
 `lific doctor` reports pending migrations without applying them. `lific doctor --repair` does apply them, so only run it after taking the backup.
 
@@ -68,6 +73,10 @@ Migrations run on this first start.
 Newest first. Each section lists what changed for someone upgrading past that version.
 
 ### v3.0
+
+Eighteen migrations run on first start. One rewrites every stored page edit in the activity log as a line diff, which can take tens of seconds on a large database; the space it frees returns to the file system only after a `VACUUM`. Take a backup first and stop every process that opens the database, `lific mcp` sessions included. A 2.11 binary refuses the migrated database, so going back means restoring the backup.
+
+Afterwards, run `lific doctor`, resolve any `project_access` warning, remove `mcp_path_token` and `mcp_path_user` from `lific.toml`, and refresh MCP tool discovery in your clients.
 
 #### Cached sync replicas
 
@@ -106,8 +115,6 @@ Other changes that come with it:
 - `lific instance set --authz-enforced` is gone, so a script that passes it fails. The web UI's instance settings no longer have a **Project permissions** switch.
 - The rules that only applied with the setting off are gone too. A project's lead can delete or archive it, `maintainer` can change modules, labels and folders, workspace pages are for administrators only, and `@`-mentions only match people who can see the project.
 
-Going back to 2.11 means restoring the backup you took before upgrading: 2.11 refuses a database that 3.0 has migrated.
-
 #### Replace credential-in-path MCP connections
 
 The `/mcp/<token>` endpoint has been removed and returns `404`. Credentials in URLs can appear in proxy logs and browser or shell history.
@@ -116,7 +123,7 @@ The `mcp_path_token` and `mcp_path_user` settings in `[server]` are accepted but
 
 Change each affected client's URL to `https://your-server.example/mcp` and choose one replacement:
 
-- Send `Authorization: Bearer <API_KEY>` in the request headers. Create a key with `lific key create --name <NAME>` or reconnect with `lific connect --client <CLIENT> --url https://your-server.example/mcp --yes`.
+- Send `Authorization: Bearer <API_KEY>` in the request headers. Create a key with `lific key create --name <NAME> --user <USER>` or reconnect with `lific connect --client <CLIENT> --url https://your-server.example/mcp --yes`.
 - Use the client's OAuth login with that same `/mcp` URL. For clients supported by the command, run `lific connect --oauth --client <CLIENT> --url https://your-server.example/mcp --yes`.
 
 The old `mcp_path_token` was a separate server secret, not an API key. Copying it into an Authorization header will not make it work. If the old URL instead contained a valid API key, that key can be sent in the header.
@@ -133,9 +140,9 @@ The database migration seeds number counters from existing rows, including trash
 
 A published project is no longer served on a separate, reduced view. Everyone can read it at its ordinary links and through the ordinary API: visitors with no account, every signed-in account on the instance, and every API key and MCP connection. Changing anything still needs a role in the project. See [Public projects](/docs/public-projects).
 
-- **More becomes readable.** Plans and their steps, activity and edit history, insights, assignees, waits with their notes, comment authors' usernames and live updates are now readable in a published project. Before upgrading an instance with a published project, review its plans, history and waits, or unpublish it until you have.
+- **More becomes readable.** Plans and their steps, activity and edit history, insights, assignees, waits with their notes, claims with the holder's username, comment authors' usernames and live updates are now readable in a published project. Before upgrading an instance with a published project, review its plans, history and waits, or unpublish it until you have.
 - **Every account and key can read published projects.** An account or API key with no role in a published project now reads it, sees it in its project list and sidebar, and gets `403` when it tries to change it. Email addresses, keys, tokens, member lists and settings stay private, and so do the membership and repository-binding entries in a project's activity. Activity also stops showing any reader rows recorded by a project they cannot read, and shows "a private issue" for an issue identifier in such a project.
-- **`/public/api` is gone.** Every route under `/public/api/projects/{project}` now answers `404`. Clients use the ordinary routes with no credential instead, for example `GET /api/issues/resolve/APP-12`. [Reading without a credential](/docs/rest-api/public) lists them. The per-address limit rises from 240 to 600 reads a minute, because a signed-out reader now loads the full app; the other anonymous limits are unchanged: 4 requests in progress, 4 downloads, and 1 thumbnail or preview at a time.
+- **`/public/api` is gone.** Every route under `/public/api` now answers `404`. Clients use the ordinary routes with no credential instead, for example `GET /api/issues/resolve/APP-12`. [Reading without a credential](/docs/rest-api/public) lists them. The per-address limit rises from 240 to 600 reads a minute, because a signed-out reader now loads the full app; the other anonymous limits are unchanged: 4 requests in progress, 4 downloads, and 1 thumbnail or preview at a time.
 - **Old public links redirect.** `/public/APP/...` answers `301` to `/APP/...`, so a shared `/public/APP/issues/APP-1` opens `/APP/issues/APP-1`. `/public/APP` opens the issue list.
 - **The signed-out home page changes.** With auth required, opening `/` while signed out shows the only published project, a list when there are several, and the sign-in page when there are none.
 - **Rate limits and caching.** Only requests with no credential count against the anonymous limits. Responses to them are never cached (`Cache-Control: no-store`). If a proxy or CDN in front of Lific special-cased `/public/`, apply the same rules to requests that carry neither an `Authorization: Bearer` header nor a `lific_token` session cookie instead. A request whose `lific_token` cookie has expired is also read anonymously, so a proxy that cannot check the cookie should still not cache a response to a request that carries one.
@@ -146,12 +153,22 @@ No migration is involved: publication stays a per-project setting, and upgrading
 
 The browser session now lives only in the HttpOnly `lific_token` cookie, which no script on the page can read. Nothing in this change needs a migration.
 
-- **Sign-in responses no longer include the session token.** `POST /api/auth/login`, `/api/auth/signup`, `/api/auth/auto-login`, `/api/auth/me/refresh` and `/api/auth/me/password` set the cookie and leave `token` out of the JSON body. A script that signed in with a password and sent the returned token as a bearer token stops working: give it an API key instead, from **Settings → API keys** or `lific key create --user <name>`. MCP clients and `lific login` use OAuth and are not affected.
+- **Sign-in responses no longer include the session token.** `POST /api/auth/login`, `/api/auth/signup`, `/api/auth/auto-login`, `/api/auth/me/refresh` and `/api/auth/me/password` set the cookie and leave `token` out of the JSON body. A script that signed in with a password and sent the returned token as a bearer token stops working: give it an API key instead: create an agent account for it under **Settings → Agents**, or run `lific key create --name <NAME> --user <name>` on the server. MCP clients and `lific login` use OAuth and are not affected.
 - **Browsers stay signed in.** Earlier versions also kept a copy of the token in the browser's local storage. 3.0 deletes that copy on first load and carries on with the cookie set at the last sign-in.
 - **Writes made with the cookie must come from this server's own origin.** A request authenticated by the cookie that can change something (anything but `GET`, `HEAD` and `OPTIONS`) needs an `Origin` header matching the address it was sent to, the origin of `public_url`, or an entry in `cors_origins`; otherwise it gets `403`. Requests authenticated by a `Bearer` header are not checked. If a page on another site writes to Lific with a signed-in user's cookie, list that site in `cors_origins`. An empty `cors_origins` does not allow other origins here.
 - **Plain HTTP beyond localhost needs `public_url`.** Browsers drop `Secure` cookies over plain HTTP, and the session cookie is marked `Secure` except in two cases: `public_url` is an explicit `http://` URL (as in 2.x), or the request is plain HTTP to `localhost` or another loopback address (new, so a default local install works). If people reach the instance over plain HTTP at any other address, such as a LAN IP or host name, set `public_url = "http://..."` to that address, or nobody can sign in to the web UI.
 - **A `Bearer` header always decides the request.** When a request carries `Authorization: Bearer ...` (the scheme in any case), the cookie is ignored, and a missing or wrong credential after it is answered `401`. A header with any other scheme, such as the `Basic` credentials a browser sends to an HTTP basic-auth proxy in front of Lific, is not a Lific credential: Lific ignores it and the cookie applies, so such a proxy keeps working.
 - **Behind a reverse proxy, keep the browser's address recognizable.** Either set `public_url` to the address people open, or have the proxy pass the original `Host` header (and `X-Forwarded-Proto` when it terminates TLS), so the origin check can tell the browser's own writes from someone else's.
+
+#### Idle active issues return to `todo`
+
+The server now returns active issues that nobody has touched for 14 days (no edit, comment, label change or claim) to `todo`, with a comment saying why. The job runs once a day, starting 45 seconds after `lific start`, so the first pass happens right after the upgrade. If you do not want that, turn it off before starting 3.0, with the new binary against the existing database:
+
+```shell
+lific instance set --stale-active-reset-days 0
+```
+
+That command applies the pending migrations first, so take the backup before running it. Any other number from 1 to 365 sets a different period. See [`lific instance`](/docs/cli#instance).
 
 #### Tool surface version
 

@@ -165,13 +165,13 @@ A connected tool is a bot account owned by you, with its own API key. It acts wi
 
 ### GET `/api/auth/bots`
 
-Your connected tools: `id`, `username`, `display_name`, `owner_id`, `created_at`, `tool_id` and `connected`. `connected` is true while the bot holds a live API key or OAuth token.
+Your connected tools: `id`, `username`, `display_name`, `owner_id`, `created_at`, `tool_id`, `connected`, `key_created_at`, `oauth`, `last_active`, `changes` and `comments`. `connected` is true while the bot holds a live API key or OAuth token. `key_created_at` is when its newest live API key was issued (null without one), and `oauth` is true while a live OAuth token connects it. `last_active` is its most recent write or MCP read (null if it has done neither), `changes` counts the writes it has made, and `comments` counts the comments it wrote.
 
 ### POST `/api/auth/bots`
 
 Connects a tool and returns its key. **Recent browser session.**
 
-Body: `tool` and optional `display_name`. `tool` is a connection id of 1 to 48 letters, digits, hyphens or underscores. The ids `opencode`, `cursor`, `claude-code`, `claude`, `codex`, `pi`, `vscode` and `zed` get a readable default name; any other id is a custom connection named after itself unless you pass `display_name` (1 to 80 characters).
+Body: `tool` and optional `display_name`. `tool` is a connection id of 1 to 48 letters, digits, hyphens or underscores, starting with a letter or digit, and is stored in lowercase. The ids `opencode`, `cursor`, `claude-code`, `claude`, `codex`, `pi`, `vscode` and `zed` get a readable default name; any other id is a custom connection named after itself unless you pass `display_name` (1 to 80 characters).
 
 A tool that already holds a live credential is refused with `400`; disconnect it first. A tool whose credential was revoked reconnects under the same bot account.
 
@@ -183,7 +183,7 @@ Revokes the tool's API keys and OAuth tokens. The bot account and its history st
 
 ### DELETE `/api/auth/bots/{id}`
 
-Deletes the bot account. Same ownership rule. Returns `{"deleted": true}`.
+Deletes the bot account with its credentials and every comment it wrote. Same ownership rule. Returns `{"deleted": true}`.
 
 ## Users
 

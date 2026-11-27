@@ -6,7 +6,7 @@ description: A map of Lific's data model, the identifiers that name each piece, 
 Almost everything in Lific lives inside a [project](/docs/concepts/projects). A project owns its issues, pages and plans, the modules and labels used to sort them, the folders its pages sit in, and the list of people allowed to see any of it.
 
 - An [issue](/docs/concepts/issues) is one piece of work. Issues are flat: there are no sub-issues. They can block, duplicate or relate to each other, across projects too.
-- A [page](/docs/concepts/pages) is Markdown documentation. Project pages sit in folders; workspace pages belong to no project.
+- A [page](/docs/concepts/pages) is Markdown documentation. Project pages sit in folders; workspace pages belong to no project. One page per project can be its [conventions page](/docs/concepts/pages#conventions-page), the rules agents read at the start of every briefing.
 - A [plan](/docs/concepts/plans) is a tree of steps, which is where hierarchy lives. A step can mirror an issue, so finishing the issue checks the step off.
 - A [module](/docs/concepts/modules-and-labels) is an area of a project, and an issue belongs to at most one. A [label](/docs/concepts/modules-and-labels) is a tag, and an issue or project page can carry any number.
 - A [comment](/docs/concepts/comments-and-activity) belongs to exactly one issue or one page. The [activity log](/docs/concepts/comments-and-activity#activity-log) records every change to all of the above.
@@ -24,6 +24,8 @@ Issues, pages and plans have short identifiers built from the project's identifi
 | Plan | `APP-PLAN-2` | Plans in project `APP` |
 | Comment | `7` | The whole instance. Link to one with `#comment-7` on its issue or page. |
 | Attachment | `12` | The whole instance. Bodies reference it as `/api/attachments/12`. |
+
+An issue, page or plan number is never handed out again, even after the item is permanently deleted, and a moved issue's old number stays taken, so an old reference never points at something else.
 
 A project identifier is one to five characters: an uppercase letter, then uppercase letters or digits. `DOC` is reserved for workspace pages. The project half of an identifier is matched without case, so `app-42` finds `APP-42`; the `DOC` and `PLAN` parts must be written in capitals.
 

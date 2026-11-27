@@ -1,6 +1,6 @@
 ---
 title: Projects
-description: Create and configure projects, publish them, manage members and roles, arrange your sidebar, keep saved views, read the board and insights, and import from GitHub.
+description: Create and configure projects, publish them, manage members and roles, arrange your sidebar, keep saved views, read the board, insights and agent activity, and import from GitHub.
 ---
 
 A project holds everything else and is the unit of access. The [projects concept page](/docs/concepts/projects) explains identifiers, roles and what deletion destroys. The project's own issues, pages and plans are on [Issues, pages and plans](/docs/rest-api/work); its repository bindings are on [Repositories and commits](/docs/rest-api/repositories).
@@ -15,7 +15,7 @@ The projects you can read, as a `Project` array in your own sidebar order. A pro
 
 Creates a project. Any signed-in caller.
 
-Body: `name`, `identifier`, and optional `description` (Markdown, default empty), `emoji`, `lead_user_id` and `conventions`: the template the project's [conventions page](/docs/concepts/pages#conventions-page) starts from, `empty` (default), `ai_managed`, `human_managed` or `human_owned`. The project starts with that page. The identifier is one to five characters, an uppercase letter followed by uppercase letters or digits, and cannot be `DOC`; anything else is `400`.
+Body: `name`, `identifier`, and optional `description` (Markdown, default empty), `emoji`, `lead_user_id` and `conventions`: the template the project's [conventions page](/docs/concepts/pages#conventions-page) starts from, `empty` (default), `ai_managed`, `human_managed` or `human_owned`. The project starts with that page. The identifier is one to five characters, an uppercase letter followed by uppercase letters or digits, and cannot be `DOC`; anything else is `400`. An identifier another project already uses, compared without regard to case, is `409` naming it.
 
 The lead gets a `lead` membership. Leaving `lead_user_id` out, or naming yourself, makes you the lead with no further check; for a connected tool, "yourself" is the person who owns it. Naming **somebody else** gives them lasting access, so it needs a [recent browser session](/docs/rest-api#which-credentials-an-endpoint-accepts).
 
@@ -40,7 +40,7 @@ Setting `lead_user_id` to a user also gives them a `lead` membership, so that on
 
 `is_public: true` makes the project readable by everyone through the ordinary routes, [with or without a credential](/docs/rest-api/public), and `false` withdraws that on the next request. See [Public projects](/docs/public-projects) before turning it on: it exposes existing content, not just what you write afterwards.
 
-Changing the identifier renames every issue, page and plan identifier in the project at once; old written references stop resolving. Returns the `Project`.
+Changing the identifier renames every issue, page and plan identifier in the project at once; old written references stop resolving. The new identifier follows the rules for creating one, and one already used by another project is `409`. Returns the `Project`.
 
 ### DELETE `/api/projects/{id}`
 
@@ -52,11 +52,11 @@ Takes the project out of the instance and keeps it as one compressed file in the
 
 ### GET `/api/archived-projects`
 
-Every archived project, newest first. **Administrator** only, in both modes. Each entry has `id`, `identifier`, `name`, `description`, `emoji`, `file_name`, `size_bytes`, `issue_count`, `page_count`, `archived_at`, `archived_by`, `archived_by_name`, `was_public`, and `file_present`, which is `false` when the file is no longer on disk.
+Every archived project, newest first. **Administrator** only. Each entry has `id`, `identifier`, `name`, `description`, `emoji`, `file_name`, `size_bytes`, `issue_count`, `page_count`, `archived_at`, `archived_by`, `archived_by_name`, `was_public`, and `file_present`, which is `false` when the file is no longer on disk.
 
 ### POST `/api/archived-projects/{id}/unarchive`
 
-Brings the project back from its file. **Administrator** only, in both modes. Returns `{"project_id", "identifier", "was_public"}`. `409` when a live project already has the identifier or the file no longer matches its recorded checksum, `404` when the file is missing, `429` while another archive operation is running.
+Brings the project back from its file. **Administrator** only. Returns `{"project_id", "identifier", "was_public"}`. `409` when a live project already has the identifier or the file no longer matches its recorded checksum, `404` when the file is missing, `429` while another archive operation is running.
 
 ### PUT `/api/projects/reorder`
 
@@ -114,7 +114,7 @@ Members with their names: each record adds `username` and `display_name`. **View
 
 Adds a member. **Lead, from a recent browser session**, even for a caller who is a lead: an API key cannot hand out standing access. Both checks run inside the transaction that writes the row.
 
-Body: `user_id` and optional `role` (`viewer`, `maintainer` or `lead`; default `viewer`). An unknown role is `400`; a user who is already a member is `409`. Returns the member record.
+Body: `user_id` and optional `role` (`viewer`, `maintainer` or `lead`; default `viewer`). An unknown role is `400`, an unknown `user_id` is `404`, and a user who is already a member is `409`. Returns the member record.
 
 ```bash
 curl -X POST "$LIFIC/api/projects/1/members" \
@@ -133,7 +133,7 @@ Removes a member. **Lead**, with no recency requirement. Removing the last `lead
 
 ### GET `/api/projects/{id}/my-role`
 
-Your own standing, so a client can decide what to show without reading the roster. **Viewer.** Returns `role` (`viewer`, `maintainer`, `lead`, or null when you are not a member) and `is_admin`. For a connected tool, the role is its owner's.
+Your own standing, so a client can decide what to show without reading the roster. **Viewer**, or anyone who can read a published project, so a reader with no role gets `{"role": null, "is_admin": false}` instead of `403`. Returns `role` (`viewer`, `maintainer`, `lead`, or null when you are not a member) and `is_admin`. For a connected tool, the role is its owner's.
 
 ## Saved views
 
@@ -141,16 +141,17 @@ Saved views are personal. Every route lists and changes only your own views in o
 
 A view has `id`, `project_id`, `user_id`, `name`, `config`, `is_default`, `created_at` and `updated_at`.
 
-`config` is a string containing JSON, at most 8 KiB. Lific checks only that it parses and never reads inside it. The web UI stores this shape and tolerates missing fields:
+`config` is a string containing JSON, at most 8 KiB. Lific checks only that it parses and never reads inside it. The web UI stores this shape and tolerates missing fields. Each filter is a list of values; views saved by older versions, with one string per filter, still load:
 
 ```json
 {
   "version": 1,
   "layout": "list",
-  "filterStatus": "",
-  "filterPriority": "",
-  "filterLabel": "",
-  "filterModule": "",
+  "filterStatus": ["active", "todo"],
+  "filterPriority": [],
+  "filterLabel": [],
+  "filterModule": [],
+  "filterAssignee": [],
   "searchQuery": "",
   "sortField": "updated",
   "sortDir": "desc",
@@ -224,6 +225,37 @@ Returns `items` and `has_more`. Each item has:
 ### GET `/api/projects/{id}/activity/actors`
 
 Totals per actor in the project. **Viewer.** Each entry has `actor_user_id`, `username`, `display_name`, `is_bot`, `actions`, `last_ts` and `top_transport` (the interface they used most).
+
+### GET `/api/agents/activity`
+
+What connected tools have been doing, across every project you can see; the web UI's Agent activity page draws it. Any signed-in caller. Only bot accounts count as agents, and only actions in projects you can see are counted. An agent's MCP reads count as well as its writes; reads are kept for 30 days.
+
+Query: `window` (`1h`, the default, `24h` or `7d`; anything else is `400`) and `tz`, your offset from UTC in minutes east (default 0), which aligns the buckets to your local clock.
+
+Each action is one of four kinds: `read`, `edit`, `create` (of an issue, page, plan, module, project, label or folder) or `close` (an issue moved to `done` or `cancelled`). A count object has `read`, `edit`, `create` and `close`. Returns:
+
+- `window`, `now` (server time, RFC 3339 UTC) and `bucket_seconds` (300, 3,600 or 86,400)
+- `buckets`: 12, 24 or 7 of them, oldest first, each `start` (RFC 3339 UTC) plus the four counts
+- `totals`: the counts for the whole window
+- `agents`: every agent that acted in the last 30 days, each with `user_id`, `username`, `display_name`, `tool_id` (such as `opencode`), `owner` (`user_id`, `username`, `display_name`), `status` (`active` when it last acted under 10 minutes ago, `idle` under an hour, otherwise `inactive`), `last_seen`, `counts` and `series` (its total actions per bucket)
+- `active_count`: how many agents are `active`
+- `recent`: the latest actions, newest first, at most 30, each with `at`, `kind`, `agent` (`user_id`, `display_name`), `entity_type`, `identifier`, `title`, `detail`, `route` (the web UI path, or null when the item is gone) and `tool` (the MCP tool, for reads)
+
+### GET `/api/home/overview`
+
+The numbers behind the web UI's Home page and a project's overview, across every project you can see. Any signed-in caller.
+
+Query, every field optional: `since` (an ISO 8601 instant; anything else is `400`), `tz` (your offset from UTC in minutes east, default 0, which decides where each day starts) and `project_id`, which narrows every number to that project. A project you cannot see counts as empty rather than an error.
+
+Returns:
+
+- `open_total`: open issues (not `done` or `cancelled`)
+- `age_buckets`: open issues by age, youngest first, with `key` (`week`, `month`, `quarter`, `half` or `older`), `total`, a count per priority (`urgent`, `high`, `medium`, `low`, `none`), `agent_ready` (unassigned, unblocked, not active and not claimed) and `needs_human`
+- `open_trend`: `date` and `count` of open issues at the end of each of the last 91 days, ending today
+- `projects`: `project_id`, `open` and `last_activity` for each project with open issues or any activity
+- `since`: `agents_opened`, `agents_closed`, `people_opened` and `people_closed` after `since`, or null without it
+- `my_done`: `date` and `count` of issues you or your connected tools moved to `done`, for each of the last 84 days, ending today
+- `claims`: open issues under a live claim, most recently claimed first, each with `issue_id`, `project_id`, `identifier`, `title`, `status`, `priority` and `claim`
 
 ## GitHub import
 

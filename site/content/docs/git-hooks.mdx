@@ -44,7 +44,7 @@ lific git-hook --range origin/main..HEAD --dry-run
 1 to close, 1 skipped.
 ```
 
-Closing an issue is the same update as setting its status to `done` yourself: it is recorded in the issue's history and the activity log, and any issue it was blocking is released. An issue that is already `done` or `cancelled` is skipped as `already closed`, so running the command twice over the same commits is harmless. It does close an issue again if someone reopened it after the first run.
+Closing an issue is the same update as setting its status to `done` yourself: it is recorded in the issue's history and the activity log, any issue it was blocking is released, and any claim on it ends. An issue that is already `done` or `cancelled` is skipped as `already closed`, so running the command twice over the same commits is harmless. It does close an issue again if someone reopened it after the first run.
 
 ### Against a local database or a server
 

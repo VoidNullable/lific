@@ -42,6 +42,10 @@ Moving an issue to `done` has two effects that `cancelled` does not:
 
 A commit message such as `closes APP-42`, `fixes APP-42` or `resolves APP-42` moves the issue to `done` when you run [`lific git-hook`](/docs/cli) from a git hook or CI job.
 
+### Idle active issues
+
+Nothing ends `active` when the session that set it stops, so the server moves an `active` issue nobody has touched for 14 days back to `todo`. It checks once a day, starting shortly after the server starts, and leaves a comment on each issue it moves saying why. Any change counts as a touch, including a comment, a label change or a [claim](#claims). An administrator sets the period with `lific instance set --stale-active-reset-days`, and `0` turns it off. Before then, briefings list active issues idle for three days as stale, and `list_issues` takes `stale=true` to find them.
+
 The [activity log](/docs/concepts/comments-and-activity) records every status change with who made it and through which interface.
 
 ## Priority
@@ -74,7 +78,7 @@ Assignment says whether an agent may take an issue. An issue is in one of three 
 
 Only human accounts can be named; an agent's own account cannot, because unassigned already means "any agent". `me` stands for the caller, and for an agent it stands for the person who connected it. A named person must be able to see the project. Human and named people are exclusive in one request. Every write replaces the whole assignment, and the activity log records each person added or removed.
 
-Responses carry `needs_human` (true for the second and third states) and `assignees` (the named people). `workable=true` does not look at assignment; filter with `assignee`: `none` for the agents' pool, `human` for every issue a person must do, `me`, or a username. The web UI's home page lists the open issues that name you, the ones marked for any person, and the ones waiting on you.
+Responses carry `needs_human` (true for the second and third states) and `assignees` (the named people). `workable=true` does not look at assignment; filter with `assignee`: `none` for the agents' pool, `human` for every issue a person must do, `me`, or a username. In the web UI, the Inbox and Home list the open issues that name you, the ones marked for any person, and the ones waiting on you, and **Assigned to me** lists the ones that name you.
 
 Assignments are readable by anyone who can read the project, which includes everyone when it is [published](/docs/public-projects). A project archive carries them by username; on import, a name with no matching person falls back to "any person".
 
@@ -133,7 +137,7 @@ A new session takes over a claim by working as the worker the claim reported, fo
 
 A claim ends early when its holder releases it, when the issue is closed or deleted, or when it moves to another project, where its holder may have no right to release it. Only the holder can release a live claim. `done` and `cancelled` issues cannot be claimed.
 
-Claims are not recorded in the activity log, the public view of a [published project](/docs/public-projects) leaves them out, and a project archive does not carry them. A claim also counts as activity for [stale active issues](/docs/cli#instance): an issue whose claim is live, or was renewed or released within the threshold, is not reported as stale or moved back to `todo`.
+Claims are not recorded in the activity log, and a project archive does not carry them. Anyone who can read the issue sees its claim, which includes every reader of a [published project](/docs/public-projects). A claim also counts as activity for [stale active issues](/docs/cli#instance): an issue whose claim is live, or was renewed or released within the threshold, is not reported as stale or moved back to `todo`.
 
 The web UI shows the holder in the issue's **Claimed by** field and the peek panel, and Home lists every claimed issue under the agent queue.
 
@@ -149,10 +153,14 @@ Deleting an issue moves it to the trash, along with its comments. It disappears 
 
 The trash protects against mistakes. It is not a backup; use the automatic backups or `lific dump` for that.
 
+## Retrying a create
+
+A create can be written on the server while its reply is lost, and sending it again would file a second issue. To retry safely, give the create a key: `op_key` on MCP `create_issue`, or an `Idempotency-Key` header on `POST /api/issues`. A retry with the same key returns the first result and writes nothing. The same key with a different request is refused. A failed create records no key, so a corrected retry goes through. Keys last 24 hours. Comments, pages and plans take the same key. See [Retrying a create with `op_key`](/docs/mcp/tools#retrying-a-create-with-op_key) and [with `Idempotency-Key`](/docs/rest-api#retrying-a-create-with-idempotency-key).
+
 ## Concurrent edits
 
 By default the last write wins. To avoid overwriting someone else's change, send the `expected_seq` you last read with an update. If the issue has changed since, the update is refused: REST answers `409` with the current issue, and MCP returns an error. For a small change to a long description, `edit_issue` replaces one exact string and leaves the rest of the text untouched.
 
 ## Who can change an issue
 
-Reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
+Reading an issue takes the `viewer` role in its project, and creating, editing, assigning, linking, adding or clearing a wait, claiming or releasing, moving, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.

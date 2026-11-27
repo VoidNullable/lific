@@ -42,9 +42,11 @@ Issue and project exports are scoped to the caller. An issue's frontmatter lists
 
 An archive copies one project, with its issues, pages, plans, comments, attachments, history and activity log, into a **new private project** on another instance. Memberships, credentials, saved views and repository bindings do not travel, and an import never merges into an existing project. [Project archives](/docs/project-archives) explains the whole procedure and what to check afterwards.
 
-Because an archive holds a project's full history, including text that was later deleted, these three routes accept **only a browser session token** in the `Authorization` header. API keys, operator keys, OAuth tokens, connected tools, and the first-administrator identity of an instance without authentication all get `403`. The session is checked again at every step, including inside the transaction that reads or writes the project.
+Because an archive holds a project's full history, including text that was later deleted, these three routes accept **only a browser session**, from the `lific_token` cookie or as a bearer token in the `Authorization` header. API keys, operator keys, OAuth tokens, connected tools, and the first-administrator identity of an instance without authentication all get `403`. The session is checked again at every step, including inside the transaction that reads or writes the project.
 
 One archive export or import runs at a time on the instance; another is `429` with `Retry-After: 30`.
+
+Archives are written in format 3. An import accepts formats 1, 2 and 3, so an instance older than 3.0 cannot import an archive this one exports; upgrade the destination first.
 
 ### GET `/api/project-archives`
 

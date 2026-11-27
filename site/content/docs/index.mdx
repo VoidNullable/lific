@@ -39,9 +39,9 @@ These docs are also published as plain text. [/llms.txt](https://lific.dev/llms.
 A few conventions hold across the MCP tools and are worth knowing before your first call:
 
 - Refer to things by identifier: `APP-42` for an issue, `APP-DOC-3` for a project page, `DOC-3` for a workspace page, `APP-PLAN-2` for a plan. Comments use their numeric id.
-- A failed tool call returns text that starts with `Error:` and says what to change. It is not a protocol error, so read the text.
+- A failed tool call comes back as a tool result flagged `isError: true`, with text that starts with `Error:` and says what to change. A misspelled or missing parameter is reported the same way. It is not a protocol error, so read the text.
 - For a small change to a long description or comment, use `edit_issue`, `edit_page` or `edit_comment` with `old_string` and `new_string`. They replace one exact string and leave the rest alone, so you do not have to resend the whole body.
 - List results are paged. When more exist, the output ends with the `offset` to pass on the next call.
-- Call `list_issues` with `workable=true` to get open issues whose blockers are all done.
+- Call `list_issues` with `workable=true` to get open issues whose blockers are all done, that no wait is holding and that no other worker has claimed.
 
 [Working with Lific as an agent](/docs/mcp/agents) expands on these conventions. The [MCP overview](/docs/mcp) covers transports and authentication, the [tool reference](/docs/mcp/tools) documents every parameter, and [Limits](/docs/limits) lists every size and rate limit you can run into.

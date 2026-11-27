@@ -33,8 +33,8 @@ There is no MCP interface for archives.
 
 Use this when you can sign in to both instances.
 
-1. On the source, open the project's **Overview** and find **Project archive**. Only the lead and administrators see it.
-2. Read the warning about history, confirm it, and choose **Download project archive**. This saves `<ID>.lific.tar.gz` and leaves the project unchanged. The **Export** button in the top bar is the Markdown export, not an archive.
+1. On the source, open the project's settings, from **Project settings** in the project's sidebar menu or at `/APP/settings`, and find **Project archive** under **Import and export**. Only the lead and administrators see it.
+2. Read the warning about history, confirm it, and choose **Download project archive**. This saves `<ID>.lific.tar.gz` and leaves the project unchanged. **Export as Markdown** in the same section, and **Export** on the project's overview, make the Markdown export, not an archive.
 3. On the destination, sign in as an administrator, choose **New project**, then **Import a project archive**. This works on an instance with no projects yet.
 4. Choose the file, check the name and size shown, read the confirmation, and choose **Import as private project**. The page shows the destination's upload limits; use the CLI for anything larger.
 5. Wait for the result. The upload percentage measures bytes sent; **Importing...** means the server is processing the file, and it cannot be canceled. The operation and its result survive leaving and returning to the import page in the same tab.
@@ -72,6 +72,7 @@ The imported project is private, even if the source was published. To publish it
 ## What transfers
 
 - The project, its modules, labels and folders.
+- The project's conventions page, and whether it is switched on for briefings.
 - Issues, pages, plans and plan steps, and comments, including deleted ones. Each comment keeps its kind, so decisions and verification evidence retain their badges after import.
 - Labels on issues and pages, relations between issues in the project, and links between pages and issues.
 - Attached files that are linked to exported content.
@@ -93,7 +94,7 @@ Relations to issues in other projects are left out and listed in the report. Nei
 
 ## What does not transfer
 
-Accounts, passwords, API keys, OAuth data, sessions, instance settings, members and roles, sidebar groups, saved views, repository bindings and sync cursors. Mentions stay in comment text, but the notifications tied to accounts do not. The destination rebuilds search indexes and thumbnails itself.
+Accounts, passwords, API keys, OAuth data, sessions, instance settings, members and roles, sidebar groups, saved views, repository bindings, sync cursors and live claims, so every imported issue starts unclaimed. The old identifiers that issues moved into or out of the project left behind do not resolve on the destination. A number this project gave up when an issue moved out still stays taken. Mentions stay in comment text, but the notifications tied to accounts do not. The destination rebuilds search indexes and thumbnails itself.
 
 ## Authors and history
 
@@ -132,7 +133,7 @@ An archive is refused if it is damaged or unsafe: an unknown format version, an 
 
 ### Archive format
 
-An archive is a gzip-compressed tar file. It starts with `manifest.json`, followed only by files named `blobs/<sha256>`. The format version (currently 2) is separate from the database schema version. Version 2 added each comment's kind. Lific still imports version 1 archives and treats their comments as ordinary comments, and archives written before waits or assignments existed simply have none. An older Lific that only knows version 1 refuses a version 2 archive. Lific reads only the tables and columns it knows about; an archive cannot supply SQL, column names or schema.
+An archive is a gzip-compressed tar file. It starts with `manifest.json`, followed only by files named `blobs/<sha256>`. The format version (currently 3) is separate from the database schema version. Version 2 added each comment's kind, and version 3 the highest number assigned to each kind of item. Lific still imports version 1 and 2 archives: it treats version 1 comments as ordinary comments and seeds the number counters from the rows, and archives written before waits, assignments or conventions pages existed simply have none. An older Lific refuses an archive whose version is newer than the one it knows, so a version 3 archive needs Lific 3.0 or later. Lific reads only the tables and columns it knows about; an archive cannot supply SQL, column names or schema.
 
 Export reads the project in one database transaction while holding the attachment lock, so the archive is a consistent snapshot.
 

@@ -58,7 +58,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How many context tokens does an issue tracker's MCP server cost?",
-    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on October 13, 2026, for v2.11.0: 5,781 tokens (31 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
+    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on November 27, 2026, for v3.0.0: 7,862 tokens (32 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
   },
 ];
 
@@ -476,9 +476,9 @@ export default function Compare() {
                     <Cmd>lific mcp</Cmd>
                   </>,
                   <>
-                    31 tools: issues, nestable plans, pages, comments,
+                    32 tools: issues, nestable plans, pages, comments,
                     attachments, search, audit history. The whole surface costs
-                    about 5.8k tokens of context (measured below).
+                    about 7.9k tokens of context (measured below).
                   </>,
                 ],
               },
@@ -601,8 +601,8 @@ export default function Compare() {
             So we measured, on {STAMP}: each server launched over stdio,
             asked for its tool list, schemas tokenized. Numbers below are what
             an agent pays before it reads a single line of your code. Lific&apos;s
-            own row was measured again the same way on October 13, 2026, against
-            v2.11.0; the other rows are the {STAMP} figures.
+            own row was measured again the same way on November 27, 2026, against
+            v3.0.0; the other rows are the {STAMP} figures.
           </Body>
           <ComparisonTable
             caption="Measured tool counts and tool-schema token costs of each tracker's MCP server"
@@ -618,11 +618,11 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    Built in: <Cmd>lific mcp</Cmd> (v2.11.0)
+                    Built in: <Cmd>lific mcp</Cmd> (v3.0.0)
                   </>,
-                  <>31</>,
-                  <>5,781 tokens</>,
-                  <>2.9%</>,
+                  <>32</>,
+                  <>7,862 tokens</>,
+                  <>3.9%</>,
                 ],
               },
               {
@@ -719,15 +719,18 @@ export default function Compare() {
             Linear also revises its tool set regularly.
           </Body>
           <Body>
-            Lific&apos;s own 5.8k fits the budget. Per tool, its schemas are
-            the third wordiest on this page, after Plane and beads.
+            Lific&apos;s own 7.9k fits the budget too, but of the measured
+            servers only Plane&apos;s bill is larger, and per tool Lific&apos;s schemas are the wordiest
+            on this page. Part of the 3.0 figure is the annotations and output
+            schemas its tools now declare; without them it is 6,750 tokens.
           </Body>
           <p className="mt-4 max-w-[75ch] text-caption leading-relaxed text-text-faint">
             Methodology: each server was launched over stdio (the others on{" "}
-            {STAMP}, Lific again on October 13, 2026),
+            {STAMP}, Lific again on November 27, 2026),
             sent <Cmd>initialize</Cmd> and <Cmd>tools/list</Cmd> via the
             official MCP Python SDK, and the returned tool definitions (name,
-            description, input schema) were serialized as compact JSON and
+            description, input schema, and for Lific 3.0 also annotations and
+            output schemas) were serialized as compact JSON and
             tokenized with tiktoken&apos;s o200k_base. Clients serialize
             schemas differently, so treat small deltas as noise; the order of
             magnitude is the point.
@@ -749,8 +752,8 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    One Rust binary: <Cmd>cargo install lific</Cmd>, or
-                    prebuilt binaries for Linux, macOS, and Windows.
+                    One Rust binary: <Cmd>cargo install lific</Cmd>, Homebrew,
+                    winget, or prebuilt binaries for Linux, macOS, and Windows.
                   </>,
                   <>SQLite</>,
                   <>None; self-host only</>,
@@ -844,12 +847,13 @@ export default function Compare() {
                 ),
               },
               {
-                head: "A small context bill.",
+                head: "A context bill inside the budget.",
                 body: (
                   <>
-                    About 5.8k tokens for the full 31-tool surface, roughly
-                    one long file read, so connecting the tracker doesn&apos;t
-                    crowd out the actual work.
+                    About 7.9k tokens for the full 32-tool surface, roughly
+                    one long file read and under 4 percent of a 200k context,
+                    so connecting the tracker doesn&apos;t crowd out the actual
+                    work.
                   </>
                 ),
               },
@@ -908,26 +912,6 @@ export default function Compare() {
           </Body>
           <FactList
             items={[
-              {
-                head: "No Windows service integration.",
-                body: (
-                  <>
-                    Windows{" "}
-                    <a
-                      href="/docs/windows"
-                      className="text-text underline decoration-border underline-offset-4 hover:text-accent hover:decoration-accent"
-                    >
-                      works natively
-                    </a>{" "}
-                    and every release ships{" "}
-                    <Cmd>lific-windows-x86_64.exe</Cmd> alongside the Linux and
-                    macOS binaries, but <Cmd>lific init</Cmd> only installs a
-                    background service on Linux (systemd user session) and
-                    macOS (launchd). On Windows, keeping the server running is
-                    on you (Task Scheduler or a terminal).
-                  </>
-                ),
-              },
               {
                 head: "No repo-local mode.",
                 body: (

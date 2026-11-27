@@ -70,4 +70,4 @@ Behind a reverse proxy, set [`trusted_proxies`](/docs/configuration#server) so t
 
 ## The retired `/public/api`
 
-Lific 2.x served published projects on separate routes under `/public/api/projects/{project}`. They are gone in 3.0 and answer `404`. Point a client at the routes above and look projects up by id, or by identifier through `/api/issues/resolve/{identifier}` and the other `resolve` routes. Old `/public/{project}/...` page links in a browser redirect to `/{project}/...`.
+Lific 2.x served published projects on separate routes under `/public/api/projects/{project}`. They are gone in 3.0 and answer `404`. Point a client at the routes above and look projects up by id, or by identifier through `/api/issues/resolve/{identifier}` and the other `resolve` routes. Old `/public/{project}/...` page links answer `301` with a redirect to `/{project}/...`, keeping the query string; `/public/{project}` on its own goes to the project's issue list.

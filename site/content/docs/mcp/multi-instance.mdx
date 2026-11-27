@@ -9,9 +9,15 @@ tool call names the server it is for.
 
 The proxy routes **tool calls only**. It answers `initialize`, `ping` and
 `tools/list` itself, and refuses `resources/*`, `prompts/*`, `completion/*` and
-`logging/setLevel` with `-32601`. Lific servers advertise no resources or
-prompts, so nothing a Lific server offers is lost. If you also point it at
-something that does serve them, give that server its own MCP entry.
+`logging/setLevel` with `-32601`. Lific servers serve issues, pages and
+attachments as [resources](/docs/mcp#resources); a host that attaches those
+needs a single-server entry such as `lific mcp --remote` for that server.
+Tools reach the same content through the proxy.
+
+The proxy does not answer `server/discover` either, so a client on MCP
+2026-07-28 gets `-32601` and must fall back to `initialize`. `initialize` returns
+the client's protocol version when it is `2024-11-05`, `2025-03-26` or
+`2025-06-18`, and `2025-06-18` otherwise.
 
 Use it when you keep a private tracker and also work in a community tracker.
 Instead of two copies of every tool, the agent sees one `create_issue` with an
@@ -76,8 +82,8 @@ logs and in `list_instances`.
 
 Either mechanism Lific already has works. Per instance, pick one.
 
-For a dedicated API key, open **Connected Tools** in that instance's web UI and
-create a key. Export it under the name you put in `token_env`:
+For a dedicated API key, open **Agents** in that instance's account settings
+and create an agent account with its key. Export it under the name you put in `token_env`:
 
 ```fish
 set -x LIFIC_PRIVATE_TOKEN   lific_...

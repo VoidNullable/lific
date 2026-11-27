@@ -54,7 +54,7 @@ More: [Installation](https://lific.dev/docs/installation) · [Quickstart](https:
 
 | Call | What it does |
 | --- | --- |
-| `get_briefing(project="APP", since="last")` | Resume a project: the human queue across projects, what changed since your last briefing, plans and next steps, blocked and workable issues |
+| `get_briefing(project="APP", since="last")` | Resume a project: its conventions page, the human queue across projects, what changed since your last briefing, plans and next steps, blocked and workable issues |
 | `list_issues(project="APP", workable=true)` | Open issues whose blockers are all resolved |
 | `list_issues(members=["me"])` | Your active work across the projects you belong to |
 | `create_plan` / `get_plan` | Nested step plans that survive the session; a step and its issue close together |
@@ -147,7 +147,7 @@ It's built for one person directing several agents.
 
 ## Running it
 
-**Access.** New installs check project membership on every call, reads included. Add people with `lific member add --project APP --user sam --role maintainer`. See [Self-hosting](https://lific.dev/docs/self-hosting).
+**Access.** Lific checks project membership on every call, reads included. A published project can be read by anyone; changing it still takes a role. Add people with `lific member add --project APP --user sam --role maintainer`. See [Self-hosting](https://lific.dev/docs/self-hosting).
 
 **Backups.** Lific writes an archive every hour and keeps 24. For a one-off:
 

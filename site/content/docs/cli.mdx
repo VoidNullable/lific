@@ -104,7 +104,7 @@ lific start [--port <PORT>] [--host <HOST>] [--init-if-missing]
 
 ### service
 
-Manages the background service that `lific init` installs: a systemd user unit on Linux, or a LaunchAgent on macOS. Other platforms have no supported service manager.
+Manages the background service that `lific init` installs: a systemd user unit on Linux, a LaunchAgent on macOS, or a per-user startup entry with Lific's own supervisor on Windows ([Windows](/docs/windows#the-background-service) explains it). Where none of these is available, such as Linux without a systemd user session, the command says what that platform needs.
 
 ```shell
 lific service install
@@ -240,7 +240,7 @@ A key with no user acts as the operator and is not limited by project membership
 
 ### member
 
-Controls which projects a user can see and change. A new user sees no projects until you add them. [Projects](/docs/concepts/projects#members-and-roles) explains the roles.
+Controls which projects a user can see and change. A new user sees no private projects until you add them; [published projects](/docs/public-projects) are readable by everyone, but changing them still needs a role. [Projects](/docs/concepts/projects#members-and-roles) explains the roles.
 
 ```shell
 lific member list --project <PROJECT>
@@ -340,7 +340,7 @@ lific issue unlink <SOURCE> <TARGET>
 | `-m, --module <MODULE>` | A module name. With `list`, filters by module. |
 | `-l, --label <LABEL>` | For `list`: shows only issues with this label. |
 | `-l, --labels <LABELS>` | For `create` and `update`: comma-separated label names. On `update` the list replaces all of the issue's labels. |
-| `-w, --workable` | For `list`: shows only open issues whose blockers are all `done`. |
+| `-w, --workable` | For `list`: shows only open issues whose blockers are all `done`, with no [wait](/docs/concepts/issues#waiting-on-a-person-or-a-date) holding them and no live [claim](/docs/concepts/issues#claims) by another worker. |
 | `--assign <WHO>` | For `create` and `update`: who must do it, comma-separated. `human` for any person, or usernames; `me` is you. On `update` it replaces the assignment. See [Assignment](/docs/concepts/issues#assignment). |
 | `--unassign` | For `update`: clears the assignment so any agent may take the issue. |
 | `--assignee <WHO>` | For `list`: `none` (free for agents), `human` (a person must do it), `me`, or a username. |
@@ -563,7 +563,7 @@ The CLI allows larger archives than a browser upload does. [Limits](/docs/limits
 
 ### doctor
 
-Checks that the instance works: the configuration, the database, backups, the local server, OAuth discovery and a real MCP round trip. When `server.public_url` is set, it checks OAuth discovery there too. Each check reports pass, warn or fail, and the command exits nonzero when anything fails, so scripts and CI can rely on it. Checks that need a running server are skipped, not failed, when nothing is listening.
+Checks that the instance works: the configuration, the database, backups, the background service, the local server, OAuth discovery and a real MCP round trip. When `server.public_url` is set, it checks OAuth discovery there too. Each check reports pass, warn or fail, and the command exits nonzero when anything fails, so scripts and CI can rely on it. Checks that need a running server are skipped, not failed, when nothing is listening.
 
 ```shell
 lific doctor [--key <API_KEY>] [--repair]
@@ -573,6 +573,13 @@ lific doctor [--key <API_KEY>] [--repair]
 | --- | --- |
 | `--key <API_KEY>` | Uses this key for an authorized MCP check. Also read from `LIFIC_API_KEY`. Without a key, `doctor` still checks that authentication is enforced and discovery is advertised. |
 | `--repair` | Applies pending database migrations while checking. Needs a readable configuration or an explicit `--db`. |
+
+Without `--config`, `doctor` uses the usual [file discovery](/docs/configuration#file-discovery). When that finds no file, it diagnoses the configuration the running server was started with, then the one the installed service names, and says where it came from. It warns when the running server or the service points at a different file than the one it used, and fails when either names a file that no longer exists. No service installed for your account is not a warning, because a system unit, a container or another supervisor may run the server.
+
+Two checks look for what older versions left behind:
+
+- `removed_setting` warns while `mcp_path_token` or `mcp_path_user` is still in `[server]`. Both are ignored; remove them.
+- `client_config` fails when a supported AI client's global or current-project configuration still points at a removed `/mcp/<token>` URL, and warns for a file it cannot read or parse. It names the file without printing the credential. [Connect agents](/docs/connect#server-url) explains which entries count.
 
 On an instance upgraded from one that ran with project permissions switched off, the `project_access` check warns while anyone who lost access to a project in the [3.0 upgrade](/docs/upgrading#v30) still has no role in it, names them, and passes once every one is resolved. The text report names the first ten; with `--json`, the check's `entries` array lists every one. The check also runs on a database named with `--db` when the configuration could not be read.
 

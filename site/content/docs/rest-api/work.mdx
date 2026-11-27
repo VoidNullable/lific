@@ -65,7 +65,7 @@ Changes an issue. **Maintainer.** Every field is optional: `title`, `description
 
 `labels`, when present, becomes the complete label set; leave it out to keep the current labels. Send `expected_seq` to refuse the update with `409` if somebody else changed the issue since you read it; see [Concurrent edits](/docs/rest-api#concurrent-edits-and-expected_seq).
 
-Moving an issue to `done` checks off plan steps that mirror it and archives a plan anchored to it; moving it out of `done` unchecks them. Returns the `Issue`.
+Moving an issue to `done` or `cancelled` checks off the steps of active plans that mirror it, and moving it to `done` also archives an active plan anchored to it. Moving it out of `done` or `cancelled` unchecks those steps. An active plan whose last open step is checked off this way becomes `done`, and a `done` plan whose step is unchecked becomes `active` again. Returns the `Issue`.
 
 ```bash
 curl -X PUT "$LIFIC/api/issues/42" \
@@ -103,7 +103,7 @@ curl -X POST "$LIFIC/api/issues/42/move" \
 
 ### POST `/api/issues/{id}/claim`
 
-Holds the issue for your worker for a limited time, or extends the claim you hold. **Maintainer.** The body is optional and takes only `minutes` (1 to 1440, default 15). The worker is the `X-Lific-Worker` header, taken as sent when it is a valid worker id, else derived from `Mcp-Session-Id`; with neither, the claim belongs to your whole account. To take over a claim from a new client, send the worker id it reported as `X-Lific-Worker`, on the claim and on the lists alike. See [Claims](/docs/concepts/issues#claims).
+Holds the issue for your worker for a limited time, or extends the claim you hold. **Maintainer.** The body is optional and takes only `minutes` (1 to 1440, default 15). The worker is the `X-Lific-Worker` header, taken as sent when it is a valid worker id and otherwise hashed into one. Without that header it is derived from `Mcp-Session-Id`, and with neither, the claim belongs to your whole account. To take over a claim from a new client, send the worker id it reported as `X-Lific-Worker`, on the claim and on the lists alike. See [Claims](/docs/concepts/issues#claims).
 
 A `todo` or `backlog` issue becomes `active`. A live claim held by anyone else is `409`, naming the holder and when the claim ends. A `done` or `cancelled` issue, or a bad `minutes`, is `400`. Returns the `Issue` with its `claim`; a re-claim keeps `claimed_at` and moves `expires_at`.
 
@@ -190,13 +190,13 @@ Clears a wait. **Maintainer.** A `wait_id` that does not exist, or belongs to an
 
 ### GET `/api/clock`
 
-The server's calendar day and its offset from UTC, which decide whether a date wait is holding, due or overdue. Any signed-in caller; a request with no identity is `403`. No parameters.
+The server's calendar day and its offset from UTC, which decide whether a date wait is holding, due or overdue, and its current time, which decides whether a [claim](#post-apiissuesidclaim) has ended. Anyone, including a request with no credential. No parameters.
 
 ```json
-{ "today": "2026-09-25", "utc_offset_minutes": -300 }
+{ "today": "2026-09-25", "utc_offset_minutes": -300, "now_ms": 1790344800000 }
 ```
 
-`utc_offset_minutes` is minutes east of UTC. A client that works out wait states itself should compute today at this offset, not in its own timezone, so that it agrees with the server. The web UI does this so an open tab turns over at the server's midnight.
+`utc_offset_minutes` is minutes east of UTC. `now_ms` is the server's time in milliseconds since the Unix epoch; compare a claim's `expires_at` with it rather than with the client's own clock. A client that works out wait states itself should compute today at this offset, not in its own timezone, so that it agrees with the server. The web UI does this so an open tab turns over at the server's midnight.
 
 ## Comments
 
@@ -267,7 +267,7 @@ The starting texts a conventions page can be created from, in order. Any signed-
 
 ### GET `/api/projects/{id}/pages/meta`
 
-What a page list shows beyond the [sync rows](/docs/rest-api/sync), for every page in the project, archived and conventions pages included. **Viewer.** Returns `{"pages": [...]}`, each with `id`, `excerpt` (the first prose of the body as plain text, skipping headings and code, at most 220 characters), `words`, `created_by` and `updated_by` (`id`, `username`, `display_name`, `is_bot`, `tool_id`, or null when the history does not say), `links` (how many issues, other pages and comments in the project mention the page's identifier or link to it) and `linked_from` (the identifiers of those issues and pages, most recently updated first, at most 20).
+What a page list shows beyond the [sync rows](/docs/rest-api/sync), for every page in the project, archived and conventions pages included. **Viewer.** Returns `{"pages": [...]}`, each with `id`, `excerpt` (the first prose of the body as plain text, skipping headings and code, at most 220 characters), `words`, `created_by` and `updated_by` (`id`, `username`, `display_name`, `is_bot`, `tool_id`, or null when the history does not say), `links` (an object of `issues`, `pages` and `comments`: how many of each in the project mention the page's identifier or link to it, counting each one once) and `linked_from` (the identifiers of those issues and pages, most recently updated first, at most 20).
 
 ### GET `/api/pages/{id}`
 

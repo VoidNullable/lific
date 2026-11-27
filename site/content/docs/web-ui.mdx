@@ -5,36 +5,61 @@ description: How to triage issues, edit them, write pages, run plans, handle fil
 
 The web UI is the browser app built into the Lific server. Open the server's address and sign in, and you work on the same data the [CLI](/docs/cli), the [REST API](/docs/rest-api) and [MCP](/docs/mcp) see. There is nothing to install and nothing syncs to your machine: the page talks to your instance over HTTP and a WebSocket.
 
-Every view has its own link, so you can paste or bookmark any of them: `/APP/issues`, `/APP/board`, `/APP/issues/APP-42`, `/APP/pages/7`, `/APP/plans/2`.
+Every view has its own link, so you can paste or bookmark any of them: `/APP/issues`, `/APP/board`, `/APP/issues/APP-42`, `/APP/pages/7`, `/APP/plans/2`. Browser tabs and history name the view you are on, such as `Issues · APP · Lific`. Opening a link without a session, such as a bookmark or an expired tab, takes you back to it after you sign in.
 
 ## Find your way around
 
 **Home** (`/`) covers every project you can see. It shows open work by how long it has been open, the open count over the last 90 days, and how recently each project changed. Below that, the **Agent queue** ranks unassigned, unblocked issues by priority, age and idle time, with the issues an agent has [claimed](/docs/concepts/issues#claims) listed under it by holder and time left, and **Only you** lists issues assigned to you, marked for a person, or waiting on you. Recent activity, your finished work over the last twelve weeks and your pinned pages close the page. Recently viewed items are in the command palette.
 
-The sidebar lists your projects. Expand one to reach its sections: **Overview**, **Issues**, **Board**, **Graph**, **Modules**, **Pages**, **Files**, **Plans**, **Activity** and **Insights**. Under the active section it also lists the items you opened recently in that section.
+The sidebar opens with a **Workspace** section: **Home**, **Inbox**, **Assigned to me** and **Agent activity**, each with a live count where it has one. It stays in place while the project list below it scrolls. **Search…** above it opens the command palette.
 
-Sidebar order is personal. Right-click a project or group for **Move up** and **Move down**, to move the project into a group or out of one, or to start a new group. None of this changes anybody else's sidebar. Drag the sidebar's edge to resize it, or collapse it with the control beside the Lific wordmark (`Cmd/Ctrl+\`). This browser remembers both.
+Expand a project to reach its views: **Overview**, **Issues**, **Board**, **Modules**, **Pages**, **Conventions** and **Plans**, then, below a rule, **Graph**, **Files**, **Activity** and **Insights**. Under the views it lists the items you opened recently in the section you are in.
 
-Issue, page, plan and module lists have sub-tabs with counts. Lific remembers the tab you last used in each project:
+Sidebar order is personal, and so are its folders: arranging your sidebar never changes what anyone else sees. **New project** at the top of the list creates a project, and the folder button beside it creates a folder. Folders show how many projects they hold and nest up to four levels deep. Drag a project or folder before, after or into another; a closed folder springs open while you hold a drag over it, and a drop that is not allowed says why. Right-click a project or folder, or use its **⋯** button, for **Move up**, **Move down**, **Move to folder…** and **Move out of** its folder. A folder's menu also has **New subfolder**, **Rename** and **Delete folder**, and deleting a folder moves what it held up one level. A project's menu has **Project settings**. On a phone, the same moves are made through these menus.
+
+Drag the sidebar's edge to resize it. The control beside the Lific wordmark (`Cmd/Ctrl+\`) folds it into an icon rail: the workspace links, one button per project that opens a menu of its views, the theme and your account, each with a tooltip. This browser remembers both.
+
+Issue, plan and module lists have sub-tabs with counts. Lific remembers the tab you last used in each project:
 
 | List | Sub-tabs |
 | --- | --- |
 | Issues | All, Recent, Open, Closed |
-| Pages | Browse, Recent, Drafts, Archived |
 | Plans | Active, Done, Archived, All |
 | Modules | Active, Backlog, Archive, All |
+
+Pages use a folder pane instead; see [Write pages](#write-pages).
+
+## Work through your Inbox
+
+**Inbox** (`/inbox`) is one feed of the open issues that need you, across every project you can see: issues assigned to you, issues marked for any person, and issues waiting on you. Each row names every reason it is there. Tabs with counts split it into **All**, **Unread**, **Assigned**, **For anyone**, **Waiting** and **Later**. Read state is kept per device, in this browser.
+
+On wide screens a reading pane shows the selected issue's description and latest comments, with a reply box and buttons to open it, start it or mark it done. Rows have quick actions on hover: mark read or unread, put off until later, and mark done. **Later** puts an issue off until a day you pick (tomorrow, next Monday or in a week). It does this with a date [wait](/docs/concepts/issues#waiting-on-a-person-or-a-date) noted "Put off from the inbox", and the issue moves to the **Later** tab until that day. The sidebar's Inbox count leaves put-off issues out.
+
+Search the inbox, filter it by project, sort it by priority, newest or oldest, and group it by project, priority, reason or last update. Tick rows to mark them read, put them off until tomorrow or mark them done together. The keys are shown in a hint bar along the bottom: `J`/`K` move, `Enter` or `O` opens, `U` marks read or unread, `E` marks done, `L` puts off until tomorrow, `X` selects, `Shift+A` marks everything shown as read, `1` to `6` switch tabs and `/` searches.
+
+**Assigned to me** (`/assigned`) lists the open issues that name you across projects, grouped by status and sorted by priority, then by recent change.
+
+**Agent activity** (`/agents`) shows what your connected agents have been doing over the last hour, 24 hours or 7 days: a chart of their reads, edits, creations and closures, each agent's status (active, idle or inactive) with its counts and a sparkline, and a feed of recent actions that links to what they touched. Only bot accounts count as agents, and only projects you can see are included. The sidebar's count is how many agents acted in the last 10 minutes.
 
 ## Triage issues
 
 **Issues** shows the list and **Board** shows the same issues in columns. Switching between them keeps your filters and search.
 
-Filter by status, priority, assignee, module or label, type in the search box, then choose the sort, grouping and row density. The right-hand panel counts the current issues by priority and by module. Click a row there to toggle that filter.
+The toolbar has two rows. The top one holds the page name and count, the list and board switch, the search field (`/`) and **New issue** (`C`). The second holds the sub-tabs, then **Filter** (`F`), saved views, the sort and **Display**, where you choose the grouping and row density. Filter by status, priority, assignee, module or label. Active filters are spelled out as chips under the toolbar, each with its own remove button. When the filters hide everything, the list says how many issues they hide, with the same chips to remove them.
+
+On extra-wide screens a project pulse panel sits on the right: a completion ring, the status mix, open work by priority, module progress, labels and recently updated issues. Click a row there to toggle that filter. The panel collapses to a labeled edge tab, and this browser remembers it.
+
+A row that changes, from this tab or from someone else, glows once. When rows changed since your last visit, an "N updated" chip in the toolbar steps through them. A hint bar along the bottom of the list shows what the keys do right now.
 
 Each filter takes several values and shows issues matching any of them: check **Urgent** and **High** to see both. Different filters combine, so adding the label **bug** narrows that to urgent or high bugs. **Any** clears a filter.
 
 To keep an arrangement, save it as a named view. A view stores the layout (list or board), the filters, the search text, the sort, the grouping, the density, the board's swimlanes and its hidden columns. Views are yours alone and belong to one project. Star one to make it your default: it is applied the first time you open that project in a browser tab. A dot means the current view has unsaved changes.
 
-On the board, split the columns into swimlanes by module or by priority, collapse columns you are not using, and hide statuses you do not want to see. Drag a card to another column to change its status, or to another lane to change its module or priority; a toast offers **Undo**. The `+` on a column header opens the new-issue form with that status filled in. `C` opens the same form from the list or the board.
+On the board, split the columns into swimlanes by module or by priority, collapse columns you are not using, and hide statuses you do not want to see. Drag a card to another column to change its status, or to another lane to change its module or priority; a toast offers **Undo**. The `+` on a column header opens the new-issue form with that status filled in, and `C` opens the same form from the board.
+
+### Create issues from the list
+
+In the list, **New issue** or `C` opens a composer above the rows. Type a title and press `Enter` to create the issue; the composer stays open for the next one and counts how many you made. `Cmd/Ctrl+Enter` creates the issue and opens it, and `Esc` closes the composer. The status button at its left picks the status the issue starts in. The `+` on a group header opens the composer preset to that group's status, priority or module. The arrow beside **New issue** offers **Open full editor** and a new issue in a chosen status.
 
 ### Select and act on several issues
 
@@ -50,9 +75,13 @@ Deleting an issue removes it from the list straight away and shows a toast with 
 
 ## Edit an issue
 
-The issue view puts the description on the left and the fields on the right: Status, Priority, Module and Labels, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. Relation chips show the other issue's current status and change when it does. `Shift`-click a chip to preview that issue instead of opening it.
+The issue view puts the description on the left and the fields on the right: Status, Priority, Module, Assignee, Labels, Start and Due, then **Waiting on**, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. On a phone the fields open from a strip of the issue's properties under the title. `S`, `P`, `M`, `L` and `D` open the status, priority, module, label and due date pickers.
 
-To add a relation, click **Add relation** under the relations, choose its kind, then pick the other issue. The picker searches the current project; type a full identifier such as `OPS-12` to link an issue in another project. Click the × on a chip to remove it. That removes every relation between the two issues, so a pair that both blocks and relates loses both. Viewers see the chips without these controls.
+Start and Due take a date from a date picker, which also offers to clear it. On an open issue, a due date is marked when it is close or today, and shown in red with **overdue** once it has passed.
+
+Each relation shows the other issue's status and title, and changes when it does. `Shift`-click one to preview that issue instead of opening it.
+
+To add a relation, click **Add relation** under the relations, choose its kind, then pick the other issue. The picker searches the current project; type a full identifier such as `OPS-12` to link an issue in another project. Click the × beside a relation to remove it. That removes every relation between the two issues, so a pair that both blocks and relates loses both. Viewers see the relations without these controls.
 
 The **Waiting on** field holds blockers that are not issues: a person, or a window of days with an optional note. Choose **Add blocker**, then **Person** or **Dates**. Each one shows whether it is still waiting, due to check or overdue, and its clear button removes it. List rows and board cards show a small marker naming who or when the issue waits on, in red once overdue. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
 
@@ -60,9 +89,9 @@ While an agent holds a [claim](/docs/concepts/issues#claims) on the issue, a **C
 
 The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
 
-To move an issue to another project, open the **⋯** menu in the top bar, or the command palette, and choose **Move to project**. The list offers every other project you can edit. After you confirm, the issue opens under its new identifier, and a toast names any labels, module or assignees that could not come along. The old identifier keeps working in links and search. See [moving to another project](/docs/concepts/issues#moving-to-another-project).
+The top bar also shows when the issue was last saved and how many comments it has; click the count to jump to the thread. The **⋯** menu has **Copy link** for everyone, **Export as Markdown** for anyone signed in, and for maintainers **Move to project…** and **Delete issue**. Deleting from the issue view works like deleting from the list: the toast offers **Undo**, with no confirmation first.
 
-Start and target dates are not shown or editable in the browser. Set them through the [CLI](/docs/cli), the [REST API](/docs/rest-api) or [MCP](/docs/mcp).
+To move an issue to another project, open the **⋯** menu in the top bar, or the command palette, and choose **Move to project**. The list offers every other project you can edit. After you confirm, the issue opens under its new identifier, and a toast names any labels, module or assignees that could not come along. The old identifier keeps working in links and search. See [moving to another project](/docs/concepts/issues#moving-to-another-project).
 
 ### The Markdown editor
 
@@ -91,7 +120,9 @@ To add a relation, drag from the dot on a card's right edge onto another card, t
 
 ## Discuss in comments
 
-Issues and pages have one comment thread each. Comments are Markdown and can carry attachments. Type `@` to mention someone.
+Issues and pages have one comment thread each. Comments are Markdown and can carry attachments. Type `@` to mention someone. Press `C` anywhere on an issue or page to jump to the comment box.
+
+Check **Record as decision** before posting to mark a comment as a [decision](/docs/concepts/comments-and-activity#decisions). Decisions carry a **Decision** badge, and **Decisions only** filters the thread to them.
 
 Only your own comments show an actions menu, with **Edit** and **Delete**. An edited comment is marked `edited`; hover the label for the exact time. A **Verification** badge marks a comment that holds the evidence an agent recorded when it closed the issue.
 
@@ -101,17 +132,35 @@ A long thread opens on its newest comments, with **Load older comments** above t
 
 ## Write pages
 
-[Pages](/docs/concepts/pages) are Markdown documents. Each has a status (draft, active, complete or archived) that you set from the status picker. **Browse** shows the page tree, **Drafts** and **Archived** collect pages with those statuses, and **Recent** sorts by last update.
+[Pages](/docs/concepts/pages) are Markdown documents. Each has a status (draft, active, complete or archived).
 
-Put project pages in folders by dragging a page onto a folder on desktop, or with the move-to-folder picker on a touch screen. A page and its folder must be in the same project. **Pin** keeps a page at the top of the page list and puts it on Home.
+The Pages tab has three panes: folders on the left, the page list in the middle, and on wide screens a reading pane that shows the selected page rendered. While no page is selected, the reading pane lists recent edits and who made them, drafts that are waiting, active pages nobody has touched in 60 days, the most linked pages, and how many pages nothing links to. **Display** turns the reading pane off; `Space` then peeks a page instead. Below 1024px the folders open from the top bar.
 
-Pages are edited in place like issue descriptions (see above) and have their own comments and activity. Workspace pages belong to no project, have no folders or labels, and only an administrator can edit them.
+The folder pane starts with **All pages** and a link to the [Conventions](#conventions) tab, which says when the conventions are not written yet or switched off. Then come the folders, each with how many pages it holds. Pick one to see only its pages and its subfolders' pages. A folder's menu has **New page here**, **New subfolder**, **Rename** (in place) and **Delete folder**. Drag a page onto a folder to move it there; on a touch screen, use **Move to folder…** from the page's menu. A page and its folder must be in the same project. Once something is archived, **Archived** appears at the bottom of the pane; archived pages are kept there, out of the rest of the list, each with **Restore**.
+
+Each row is one line: the title, the status (**Draft** or **Complete**; active pages show nothing), labels, how many issues, pages and comments link to it, who last edited it (an agent shows its tool's mark), the identifier and the date. The line under it is the page's first sentence. Pages edited since your last visit are marked, and an "N updated" chip steps through them; your own edits are not marked.
+
+The top bar matches the issue list: a search field (`/`) and **New page** (`C`), then **Filter** (`F`) and **Display**. Filter by status, label, who last edited the page, or only pages nothing links to; active filters show as chips. Display groups the list by folder, day edited, label or status, sorts it by last edited, created, title or status, and turns the excerpts off. **New page** asks for a title and whether the page starts as a draft or active, and creates it in the folder you are looking at.
+
+Pinned pages sit in one row above the list while it shows all pages without filters. Pinning also puts a page on Home and the project overview.
+
+`J`/`K` move through the list, `Enter` opens the page, `P` pins or unpins it, and `X` selects it (`Ctrl/Cmd+A` selects every page shown). Selected pages can be moved to a folder, given a status or a label, pinned, or exported as one Markdown file. Right-click a page, or press and hold it on a touch screen, to open or peek it, copy its link or identifier, pin it, move it, change its status or archive it.
+
+A page itself reads in a 760 px column. Under the title sit the status picker, the pin toggle and the labels, then a line with when it was created, its length and its reading time. A status change saves at once. On wide screens an outline of the page's headings sits beside the body and follows your scroll; on narrower screens it folds into **On this page** above it. Pages are edited in place like issue descriptions (see above) and share the issue view's comment thread, top bar and **⋯** menu. **Delete page** in that menu offers **Undo** instead of a confirmation.
+
+Workspace pages belong to no project, have no folders or labels, and only an administrator can read or edit them.
+
+### Conventions
+
+Each project's [conventions page](/docs/concepts/pages#conventions-page) has its own tab, **Conventions**, listed after Pages in the sidebar, the collapsed rail, the mobile menu and the command palette (**Open conventions**). The Pages list leaves the conventions page out, and its old page link opens the tab.
+
+Until the page has text, the tab shows the four templates at full length. A maintainer picks one and uses it, or starts blank. Once it has text, the tab is the page itself, with the usual editor, history and comments. Its **⋯** menu has **Change template…** and **Leave out of briefings…** (or **Put back in briefings…**), each behind a confirmation.
 
 ## Work with plans
 
 A [plan](/docs/concepts/plans) is a checklist of steps, nested as deeply as you like, for work that spans several sessions. Open a plan to add steps and sub-steps, tick them off, write a note on a step, or delete a step (which deletes its sub-steps too). Set the plan's status to active, done or archived from its sidebar.
 
-Use **link** on a step to attach an issue. The two stay in step: ticking the step marks the issue `done`, marking the issue `done` ticks the step, and reopening the issue unticks it. **Anchor issue** in the sidebar names the issue the plan breaks down; when that issue is marked `done`, the plan is archived.
+Use **link** on a step to attach an issue. The two stay in step: ticking the step marks the issue `done`, marking the issue `done` or `cancelled` ticks the step, and reopening the issue unticks it. A plan whose last step is ticked moves to done on its own, and moves back to active when a step is unticked. **Anchor issue** in the sidebar names the issue the plan breaks down; when that issue is marked `done`, the plan is archived.
 
 Plans keep an activity history but have no comments. The web UI cannot reorder or move steps; use the CLI, API or MCP for that.
 
@@ -137,7 +186,7 @@ The **Attachments** panel under an issue or page body lists the files linked to 
 
 ## Keyboard and command palette
 
-Press `?` to see every shortcut, grouped into Global, Issue list, Board, Peek panel, Command palette and Markdown editor. The most useful:
+Press `?` to see every shortcut, grouped into Global, Issue list, Board, Pages, Inbox, Issue and page view, Peek panel, Command palette and Markdown editor. The most useful:
 
 | Keys | Action |
 | --- | --- |
@@ -152,8 +201,11 @@ Press `?` to see every shortcut, grouped into Global, Issue list, Board, Peek pa
 | `P` / `Shift+P` | Open the priority picker, or cycle priority |
 | `M` | Open the module picker |
 | `C` | New issue |
+| `F` | Open the filters |
 | `/` | Focus search |
 | `Esc` | Clear focus or selection, or close what is open |
+
+On an issue or page, `E` puts the caret in the body, `C` goes to the comment box, `S`, `P`, `M`, `L` and `D` open an issue's status, priority, module, label and due date pickers, and `Esc` goes back to the list.
 
 Shortcuts do not fire while you are typing in a field. The peek panel, command palette, shortcut list, context menus and the mobile navigation drawer take over the keyboard while they are open.
 
@@ -162,31 +214,48 @@ The command palette finds things by identifier or by text:
 - `APP156`, `app 156` and `APP-156` go straight to that issue.
 - `app doc 3` or `APP-DOC-3` opens that page, and `doc 3` opens page 3 of the project you are in.
 - A bare number such as `156` (or `#156`) looks for that issue number in every project. The current project's issue always comes first, so `Enter` opens it. If you press `Enter` before the number has resolved, the palette waits for it rather than opening something else.
-- With nothing typed, the palette lists the items you viewed most recently, then your projects.
+- With nothing typed, the palette lists the items you opened recently and the next likely actions: **New issue**, **New page**, **Switch project** and **New project**. Projects show up when you type their name.
 - Anything else searches the current project's issues and pages as you type, along with project, module and folder names, and adds full-text results from the server when there are few local matches. When no server result contains every word, that group is labelled "partial matches" and shows results containing any of them.
 
-`Cmd/Ctrl+Enter`, a `Cmd/Ctrl`-click or a middle click opens a result in a new tab. On an issue or page, the palette also offers actions for it, such as setting its status or renaming it.
+The scope chip beside the input narrows results to issues, pages, plans, projects or actions; `Tab` and `Shift+Tab` cycle it. On wide screens a preview column shows the selected issue or page: its status, priority, project, who it is for, labels and the first lines of its text. Reopening the palette within a minute brings back your last query and selection.
+
+`Cmd/Ctrl+Enter`, a `Cmd/Ctrl`-click or a middle click opens a result in a new tab. `Cmd/Ctrl+.` opens actions for the selected result: open it, open it in a new tab, copy its link or identifier, and for an issue set its status or priority. On an issue or page, the palette also offers actions for the one on screen, such as setting its status, setting a due date, pinning a page, exporting or renaming it.
 
 A copy control sits beside identifiers in the breadcrumb trail, on board cards and in the peek panel; list rows have the same action in their right-click menu. It shows a check mark once the identifier is on your clipboard.
 
 ## Run a project
 
-**Overview** is the project's home page. Everyone sees its progress, a "Needs attention" list of open issues and recent activity. A lead can also change the project's name, icon and description, change its lead, manage members and their viewer, maintainer or lead roles, import issues from GitHub, and [archive](/docs/archiving-projects) or delete the project. Maintainers manage labels here; modules are managed in **Modules**. [Projects](/docs/concepts/projects#members-and-roles) explains what each role can do. You can also file the project into one of your sidebar groups. **Export** in the top bar downloads the project as Markdown for reading.
+**Overview** is the project's home page. Five numbers lead it: open issues and their change this week, what is in progress, what closed in the last four weeks, what an agent can pick up, and what waits on a person. A bar of every issue by status sits under them. Click a status, a number or a label to open the issue list filtered to it. A **Work** list ranks open issues with tabs for **Needs attention**, **In progress**, **Ready for agents**, **For a person** and **Blocked**; blocked issues name their blocker. Below that come the open count over 90 days, opened against closed for the last four weeks, each module's progress, active plans, pinned and recent pages, recent activity, who has been working, and open issues per label. The overview refreshes as changes arrive and says what agents and people opened and closed since your last visit. **Export** in the top bar downloads the project as Markdown for reading.
 
-Two more panels appear only for the project's lead or an instance administrator:
+**Settings** is the overview's second tab (`/APP/settings`, or **Project settings** in the project's sidebar menu), with a section index that follows the scroll:
 
+- **General**: icon, name, description, identifier (changed in the Danger zone), lead, and the folder the project sits in in your own sidebar. Only a lead or an administrator can change the project's fields; the sidebar folder is yours to set.
+- **Labels**: maintainers create, edit and merge labels here. Modules are managed in **Modules**.
+- **Members**: the lead manages members and their viewer, maintainer or lead roles. [Projects](/docs/concepts/projects#members-and-roles) explains what each role can do.
 - **Public access** publishes the project: anyone with a link to it, signed in or not, can read its issues, pages, plans, comments and files, and only members can change them. See [Public projects](/docs/public-projects).
-- **Project archive** downloads a full copy of the project, with its history, for moving it to another instance. See [Project archives](/docs/project-archives).
+- **Import and export**: a Markdown export for everyone, the **Project archive** download for the lead (a full copy with its history, for moving the project to another instance; see [Project archives](/docs/project-archives)), and an import of issues from GitHub.
+- **Danger zone**: changing the identifier, and [archiving](/docs/archiving-projects) or deleting the project.
+
+Members, Danger zone and the GitHub import appear for the project's lead or an instance administrator, and so do Public access and the project archive.
+
+Signed-out visitors to a published project see the same app, read-only, with a **Sign in** button where a member would see an edit control. A signed-in account without a role sees the project read-only too.
+
+**New project** opens a form laid out like a project's overview header: pick the icon, type the name and a description, then the identifier, the lead and your sidebar folder, and a conventions template. The identifier is suggested from the name, never starts with a digit, and steps around ones already in use; one the server would refuse is named before you submit. `Cmd/Ctrl+Enter` creates the project. On wide screens a preview shows its sidebar row and links as you type. Administrators also get a link to import a project archive.
 
 **Activity** is the project's full change history. Each entry shows who made the change and whether it came from the web, API, MCP or CLI. Click a person or tool in the side panel to show only their changes, and expand an entry for exact local and UTC times and the old and new values.
 
 **Insights** charts issues created against issues closed per week, breaks the project's issues down by status, priority and module, and lists who made the most changes.
 
-## Accounts, connected tools and settings
+## Accounts, agents and settings
 
 Settings has an **Account** tab for everyone and an **Instance** tab for administrators.
 
-**Account** holds your display name, appearance, password, connected tools and sign-out. Appearance covers accent color, density, font size, reduced motion and the Light, Dark or System theme. The theme is also in the sidebar's theme menu, and a change in one tab applies to your other open tabs.
+**Account** is split into **Profile**, **Appearance**, **Agents** and **Security**, with a section index that follows the scroll. Each setting is a row with a one-line explanation beside its control.
+
+- **Profile**: your display name and email. Your username is fixed.
+- **Appearance**, kept in this browser: the Light, Dark or System theme, accent color, density, text size and motion. The theme is also in the sidebar's theme menu, and a change in one tab applies to your other open tabs.
+- **Agents**: the agent accounts you own; see [Connect an AI tool](#connect-an-ai-tool).
+- **Security**: change your password, sign this browser out, or sign out everywhere.
 
 **Instance** holds:
 
@@ -202,20 +271,24 @@ Below the accounts, **Archived projects** lists every [archived project](/docs/a
 
 ### Connect an AI tool
 
-**Connected tools** on the Account tab writes an MCP configuration for one tool at a time. It has templates for OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code and Zed, and **Add custom or named connection** for any other HTTP MCP client. Give each connection its own name, such as "Codex on my laptop", so its activity is labeled correctly and disconnecting it leaves your other tools connected. [`lific connect`](/docs/connect) on the command line supports more clients, including Gemini CLI, Windsurf, Goose and Crush.
+Each agent works in Lific through its own account and API key, so its work is recorded under that account and you can cut one off without touching the others. **Agents** on the Account tab lists the agent accounts you own: each with its tool's mark, its username, whether it has a live key or an OAuth sign-in, when the key was issued, when it was last active and how many changes it has made.
+
+**New agent account** asks which tool will use it, which only picks the setup steps shown next. There are steps for OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code and Zed, and **Other MCP client** for anything else. Then give it a name and an account ID; the dialog shows the username the account will get before it creates the account and its key. The username is the account ID followed by your own username. Give each machine or setup its own account, with an ID such as `codex-laptop`, so its activity is labeled correctly. A client that signs in through OAuth gets an account when you approve it. [`lific connect`](/docs/connect) on the command line does the same from a terminal and supports more clients, including Gemini CLI, Windsurf, Goose and Crush.
+
+**Revoke key** (or **Revoke access** for an OAuth sign-in) stops an agent working until you give it a **New key**; the account and everything it did stay. **Delete** removes an account that has no key, and names the comments that go with it. Both ask first.
 
 ### Change your password or sign out everywhere
 
-Both actions revoke every session, API key, OAuth token and connected tool that belongs to your account or to the tools it owns.
+Both actions revoke every session, API key and OAuth sign-in that belongs to your account or to your agents.
 
 - **Change password** signs you out on every other device and keeps this browser signed in with a new session.
-- **Sign out everywhere and revoke access** does the same, but signs this browser out too. It asks you to confirm first. If the request fails, you stay signed in.
+- **Sign out everywhere** does the same, but signs this browser out too. It asks you to confirm first. If the request fails, you stay signed in.
 
-Afterwards, reconnect each tool from Connected tools or with `lific connect`, replace any API key a script uses, and restart running MCP clients. They do not pick up new credentials by themselves.
+Afterwards, give each agent a new key from Agents or with `lific connect`, replace any API key a script uses, and restart running MCP clients. They do not pick up new credentials by themselves.
 
 ### When Lific asks for your password again
 
-Actions that give someone lasting access need a sign-in from the last 15 minutes: connecting a tool, creating an account, making someone an administrator, restoring a deactivated account, changing instance settings, adding a project member and raising someone's project role. If your sign-in is older, a password field appears next to the action. Confirm, and the action continues with what you entered; a wrong password changes nothing. With single-user mode on, the session is usually refreshed without asking.
+Actions that give someone lasting access need a sign-in from the last 15 minutes: creating an agent account or key, creating an account, making someone an administrator, restoring a deactivated account, changing instance settings, adding a project member and raising someone's project role. If your sign-in is older, a password field appears next to the action. Confirm, and the action continues with what you entered; a wrong password changes nothing. With single-user mode on, the session is usually refreshed without asking.
 
 Actions that only take access away never ask: signing out, removing an administrator, deactivating an account, lowering a project role, removing a member and refusing a device login.
 
@@ -226,9 +299,10 @@ A browser that supports installing web apps can add Lific to your home screen an
 - Selecting a project opens its sections. **Back**, including the phone's back button, returns to the project list before closing the menu.
 - The board shows one column at a time; swipe between them.
 - Less-used list controls (saved views, sort and display) move into one menu.
-- Move pages with the move-to-folder picker instead of dragging.
+- Move pages with **Move to folder…** in a page's menu (press and hold the row) instead of dragging, and move projects and folders in the sidebar through their menus.
+- An issue's fields open from the strip of properties under its title.
 - Opening a link to an issue, page, plan or module as the first page puts its list behind it, so Back goes to the list instead of leaving the app.
 
 ## Staying current
 
-Lists, boards and open items update live as other people and agents make changes. Tabs in the same browser share one connection. After a dropped connection, Lific catches up on what it missed; let the view refresh before you continue an edit.
+Lists, boards and open items update live as other people and agents make changes, including a body you are writing in: changes from agents and other tabs flow into the text without moving your caret. Tabs in the same browser share one connection. On reload, the app first shows the data you last saw from a cache in this browser, then brings it up to date; the cache is kept per account and cleared when you sign out. After a dropped connection, Lific catches up on what it missed; let the view refresh before you continue an edit.

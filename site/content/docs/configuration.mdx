@@ -5,7 +5,7 @@ description: Where Lific looks for lific.toml, what every setting does and its d
 
 Lific reads its settings from one TOML file, `lific.toml`. `lific init` writes one for you. Every section and key is optional, and anything you leave out takes the default shown on this page.
 
-Some settings live in the database instead, because administrators change them while the server runs: the instance name, signup, session length, the login message and browser auto-login. Change those in the web UI's instance settings or with [`lific instance set`](/docs/cli#instance).
+Some settings live in the database instead, because administrators change them while the server runs: the instance name, signup, session length, the login message, browser auto-login, and how long an active issue may sit untouched before it is reported as stale or moved back to `todo`. Change those in the web UI's instance settings or with [`lific instance set`](/docs/cli#instance); the two stale-issue periods are only in the CLI.
 
 ## File discovery
 
@@ -79,10 +79,12 @@ trash_days = 30
 | `host` | string | `"0.0.0.0"` | The address `lific start` listens on. The default accepts connections from any network the machine is on. |
 | `port` | integer, 0 to 65535 | `3456` | The TCP port `lific start` listens on. |
 | `public_url` | string | unset | The address people and tools use to reach the server, such as `https://lific.example.com`. See below. |
-| `cors_origins` | array of strings | `[]` | Browser origins allowed to call the API from another site. An empty list allows any origin. |
+| `cors_origins` | array of strings | `[]` | Browser origins allowed to call the API from another site. An empty list allows any origin for CORS. A write signed in with the web session cookie must still come from this server's own origin, `public_url`, or an origin listed here. |
 | `trusted_proxies` | array of strings | `[]` | IP addresses or CIDR ranges of your reverse proxies. Only these may tell Lific the real client address. An invalid entry stops the server from starting. |
 
 `public_url` is the OAuth issuer that MCP clients discover, the base of the links in CLI and MCP output, and the address `lific connect` writes into remote tool configurations. Its host name is added to the hosts the MCP endpoint accepts, which a reverse proxy needs. Its scheme also decides the session cookie: an `https://` URL, or no URL at all, gives a cookie marked `Secure`, and only an explicit `http://` URL turns that off, because browsers discard `Secure` cookies over plain HTTP. One exception needs no setting: a plain-HTTP request to a loopback address (`localhost`, `127.0.0.1`, `::1`) gets the cookie without `Secure`, so a default local install can be signed in to from any browser.
+
+The origin of `public_url` is also one of the origins a write signed in with the session cookie may come from. Without it, such a write must carry an `Origin` matching the scheme and host the request was sent to, so behind a reverse proxy either set `public_url` to the address people open, or have the proxy pass the original `Host` header (and `X-Forwarded-Proto` when it terminates TLS). Otherwise browser writes get `403`. Requests with an `Authorization: Bearer` header are not checked.
 
 `trusted_proxies` names proxy hops, not trusted clients. Lific ignores forwarding headers unless the connection itself comes from an address on this list. From a trusted proxy, Lific reads `X-Forwarded-For` from right to left, skips addresses on the list, and takes the first one that is not as the client. It uses `X-Real-IP` only when `X-Forwarded-For` is absent. A malformed chain, or one made entirely of trusted addresses, falls back to the proxy's own address, and IPv4-mapped IPv6 addresses count as IPv4. List every proxy layer you run, and do not add client networks just because they appear in a header. The client address matters because rate limits and the audit log are keyed on it.
 

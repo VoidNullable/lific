@@ -57,7 +57,7 @@ When you create or update an issue or page, you name its labels, and the list yo
 - Send `[]` to remove them all.
 - Send a list to replace them. To add one label, send the current labels plus the new one.
 
-Names must match an existing label exactly, including case. A name with no matching label is skipped without an error, so check the result if the label set matters. Create the label first to use a new one.
+Over MCP, a name matches a label without regard to case, and an exact spelling wins when two labels differ only in case. Over REST, names must match exactly, including case. A name with no matching label is skipped without an error (MCP lists the dropped names in its reply), so check the result if the label set matters. Create the label first to use a new one.
 
 ### Merging and deleting labels
 

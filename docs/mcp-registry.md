@@ -2,19 +2,17 @@
 
 Lific is listed on the official [MCP Registry](https://registry.modelcontextprotocol.io)
 (`registry.modelcontextprotocol.io`, API v0.1, currently in **preview**). The
-registry hosts **metadata only** — the actual artifact lives on crates.io. This
+registry hosts **metadata only**; the actual artifact lives on crates.io. This
 doc is the exact runbook for (re)publishing.
-
-Tracked by LIF-253.
 
 ## What's already in the repo
 
-- **`server.json`** (repo root) — the server manifest the registry ingests.
+- **`server.json`** (repo root): the server manifest the registry ingests.
   Schema version `2025-12-11`.
-- **README ownership marker** — a visible line in `README.md`:
+- **README ownership marker**: a visible line in `README.md`:
   `mcp-name: io.github.VoidNullable/lific`. This is how the registry proves we
   own the `lific` crate (see "Ownership verification" below). **Do not delete
-  it and do not move it into an HTML comment** — see the crates.io gotcha below.
+  it and do not move it into an HTML comment** (see the crates.io gotcha below).
 
 ## Key facts (verified against the registry docs, July 2026)
 
@@ -31,9 +29,9 @@ Tracked by LIF-253.
   positional `packageArguments` entry (`{"type":"positional","value":"mcp"}`),
   so a client resolves the launch as `lific mcp` over stdio.
 
-## Namespace and casing — READ THIS
+## Namespace and casing: READ THIS
 
-The server name is **`io.github.VoidNullable/lific`** — matching the GitHub login
+The server name is **`io.github.VoidNullable/lific`**, matching the GitHub login
 `VoidNullable` **with its exact capitalization**.
 
 This is deliberate and it contradicts the naive "namespaces are lowercase"
@@ -62,7 +60,7 @@ crates.io**.
 
 **crates.io strips HTML comments during markdown→HTML rendering.** The
 `<!-- mcp-name: ... -->` hidden-comment trick that works for PyPI and NuGet
-**does NOT work for cargo** — the token never appears in the HTML the validator
+**does NOT work for cargo**: the token never appears in the HTML the validator
 inspects. The marker therefore lives in `README.md` as **visible markdown text**
 (a bullet under the "MCP Registry" heading). Keep it visible.
 Source: <https://modelcontextprotocol.io/registry/package-types> (Cargo →
@@ -74,33 +72,33 @@ marker must be present in the crate version you publish. `Cargo.toml` already
 BEFORE (or together with) publishing to the MCP Registry, so the marker is live
 when the registry fetches it.
 
-## How publishing works now — automated on release (LIF-253)
+## How publishing works now: automated on release
 
-**As of LIF-253, publishing to the MCP Registry is automated in
+**Publishing to the MCP Registry is automated in
 `.github/workflows/release.yml`.** You do not normally run `mcp-publisher` by
-hand — cutting a release does it for you. The manual runbook below is the
+hand; cutting a release does it for you. The manual runbook below is the
 **fallback** for when the automated job fails (a flaky registry) or you need to
 re-publish out of band.
 
 The release workflow has a `publish-registry` job that:
 
-1. `needs: [verify, publish]` — it runs **after** the crates.io `publish` job,
+1. `needs: [verify, publish]`: it runs **after** the crates.io `publish` job,
    so the crate (and its `mcp-name:` ownership marker) is live before the
    registry fetches it.
 2. Installs a **pinned, checksum-verified** `mcp-publisher` (currently `v1.7.9`,
    linux/amd64 SHA256 hardcoded in the workflow `env`) rather than a fetched
-   `latest` binary — reproducible and supply-chain-safe. Re-pin the version and
+   `latest` binary, so it is reproducible and supply-chain-safe. Re-pin the version and
    SHA256 together when bumping.
-3. Authenticates with **GitHub OIDC** — `./mcp-publisher login github-oidc` —
+3. Authenticates with **GitHub OIDC** (`./mcp-publisher login github-oidc`),
    which needs `permissions: id-token: write` (set on the job). No stored
    secret or PAT: the OIDC token proves the `io.github.VoidNullable/*`
    namespace. The namespace casing must match `server.json`'s `name` and the
-   README marker exactly (the check is case-sensitive — see casing section).
+   README marker exactly (the check is case-sensitive; see the casing section).
 4. Waits (up to ~2 min) for the just-published crate version to appear on
    crates.io, since the ownership check reads the crate's README.
 5. `./mcp-publisher publish`, with a retry loop that absorbs crates.io
    propagation lag but **fails fast on a 422 validation error** (a bad
-   `server.json` — retrying wouldn't help).
+   `server.json`, which retrying wouldn't help).
 
 The job is marked **`continue-on-error: true`**: a flaky or slow registry never
 fails an otherwise-successful release (the binaries and crates.io publish have
@@ -130,7 +128,7 @@ mcp-publisher --help   # sanity check
 ### Every publish
 
 Preconditions: the crate version you're announcing is already live on crates.io
-(the release pipeline handles this — see below), and its README contains the
+(the release pipeline handles this; see below), and its README contains the
 `mcp-name` marker.
 
 ```bash
@@ -155,14 +153,14 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Voi
 ### Bumping the version on each release
 
 The registry is versioned. On every Lific release the registry's `version` must
-track the shipped crate. **The `publish-registry` CI job re-publishes for you**
-— you just have to keep `server.json`'s version in sync, and the `verify` job
+track the shipped crate. **The `publish-registry` CI job re-publishes for you**;
+you just have to keep `server.json`'s version in sync, and the `verify` job
 will fail the release if you forget.
 
 1. Bump `version` in **`Cargo.toml`** (the release source of truth).
 2. Update **both** `version` fields in **`server.json`** to the same value:
    the top-level `version` and the `packages[0].version`. They must always
-   equal `Cargo.toml`'s version and the release tag — the `verify` job asserts
+   equal `Cargo.toml`'s version and the release tag. The `verify` job asserts
    this and fails fast on drift.
 3. Cut the release using `.github/workflows/release.yml`: update the version,
    commit it, and push the release tag. The release workflow builds
@@ -175,15 +173,15 @@ will fail the release if you forget.
 
 > Tip: keep `Cargo.toml`, `server.json` (×2), and the release tag in lockstep.
 > A mismatch between the registry `version` and the crates.io version is the
-> most common drift — the `verify` job now catches it before any build runs.
+> most common drift; the `verify` job now catches it before any build runs.
 
-## CI wiring (done — LIF-253)
+## CI wiring (done)
 
 The automated `publish-registry` job in `.github/workflows/release.yml` is the
 implementation of what this section used to describe as "later." It runs after
 the crates.io `publish` job, installs a pinned+checksummed `mcp-publisher`,
 authenticates via `mcp-publisher login github-oidc` (`id-token: write`), waits
-for crates.io propagation, and publishes — non-fatally (`continue-on-error`).
+for crates.io propagation, and publishes, non-fatally (`continue-on-error`).
 See "How publishing works now" at the top of this doc for the details.
 
 If the registry's namespace normalization bug ([registry#689]) ever lands and

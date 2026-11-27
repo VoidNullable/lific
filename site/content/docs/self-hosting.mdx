@@ -126,8 +126,9 @@ trusted_proxies = ["127.0.0.1"]
 - Its host name is added to the hosts the `/mcp` endpoint accepts. Without it, `/mcp` accepts only requests whose `Host` header is `localhost`, `127.0.0.1` or `::1`, and refuses a proxy that forwards your public host name, or a client that reaches the server by its LAN address.
 - It is the base of issue links in CLI and MCP output.
 - Its scheme decides whether the session cookie is marked `Secure`. An `https://` URL, or none, keeps `Secure` on. An explicit `http://` URL turns it off, because browsers drop `Secure` cookies over plain HTTP and nobody could sign in to the web UI. A plain-HTTP request to `localhost` or another loopback address gets the cookie without `Secure` anyway; an instance reached over plain HTTP on any other address needs `public_url = "http://..."`.
+- Its origin is one the web UI's writes may come from. A change made with the session cookie must carry an `Origin` header naming `public_url`, an entry in `cors_origins`, or the scheme and host the request was sent to, or it gets `403`. Without `public_url`, the proxy must pass the original `Host` header, and `X-Forwarded-Proto` when it terminates TLS, so Lific can recognize the browser's own writes.
 
-`cors_origins = []` allows every browser origin. List your origins once a browser page on another site needs to call the API.
+`cors_origins = []` allows every browser origin for CORS. It does not let another site write with a signed-in user's cookie: list that site's origin for that. List your origins once a browser page on another site needs to call the API.
 
 The proxy must pass `/api/events/ws` through as a WebSocket, including the `Upgrade` and `Connection` headers, with an idle timeout long enough to hold the connection open. If pages work but changes made in another tab or by an agent never appear until you reload, check this first.
 
@@ -148,7 +149,7 @@ Lific honors the pair only from a peer in `trusted_proxies`. When a trusted peer
 
 ## Authentication
 
-Keep `[auth] required = true` on any instance other people can reach. Every MCP request then carries `Authorization: Bearer <credential>`, where the credential is an API key or an OAuth access token. REST requests carry the same header, or come from the web UI with its HttpOnly session cookie. [Public projects](/docs/public-projects) are the only anonymous exception: a project lead or administrator can publish one project's current issues, pages, comments and linked files for anyone to read.
+Keep `[auth] required = true` on any instance other people can reach. Every MCP request then carries `Authorization: Bearer <credential>`, where the credential is an API key or an OAuth access token. REST requests carry the same header, or come from the web UI with its HttpOnly session cookie. [Public projects](/docs/public-projects) are the only anonymous exception: a project lead or administrator can publish a project, and then anyone can read it at its ordinary links and API routes without a credential. Changing it still needs a role.
 
 Create API keys on the machine running Lific:
 
@@ -182,7 +183,7 @@ lific user demote --username grace
 
 `--signup-domains` limits self-registration to a comma-separated list of email domains, and an empty string allows any. `user create` prompts for the password when you leave out `--password`. `--admin` and `user promote` make someone an instance administrator, who can see and change everything; `user demote` takes it away. The same actions are in the web UI's Instance tab.
 
-Project membership decides what everyone else sees. Every REST and MCP call checks the caller's role in the project, reads included, and a new account sees nothing until someone adds it to a project, with `lific member add --project APP --user grace --role maintainer` or the project's Members settings. Administrators and unbound API keys bypass the check. An instance upgraded from a release that let this be switched off is handled as [Upgrading to 3.0](/docs/upgrading#v30) describes. [Projects](/docs/concepts/projects#members-and-roles) describes the three roles.
+Project membership decides what everyone else sees. Every REST and MCP call checks the caller's role in the project, reads included, and a new account sees no private project until someone adds it to one, with `lific member add --project APP --user grace --role maintainer` or the project's Members settings. Administrators and unbound API keys bypass the check. Published projects are readable by every account, but writing to one still needs a role. An instance upgraded from a release that let this be switched off is handled as [Upgrading to 3.0](/docs/upgrading#v30) describes. [Projects](/docs/concepts/projects#members-and-roles) describes the three roles.
 
 ## Backups
 
@@ -261,5 +262,7 @@ Every response carries these headers. A route that sets its own value keeps it; 
 | `Cross-Origin-Resource-Policy` | `same-origin` |
 
 Browsers therefore refuse to show Lific inside a frame on any page, including your own sites. Do not strip these headers at the proxy. To show Lific's data inside another application, use the [REST API](/docs/rest-api).
+
+Once a day, starting 45 seconds after `lific start`, the server moves active issues that nobody has touched for 14 days (no edit, comment, label change or claim) back to `todo` and leaves a comment saying why. Change the period with `lific instance set --stale-active-reset-days <DAYS>`, or set it to `0` to turn this off. A change applies at the next daily run, without a restart.
 
 `lific doctor` checks the configuration, the database, the running server, OAuth discovery and a real MCP round trip, and exits with a nonzero status when something is wrong. Run it after any configuration change.

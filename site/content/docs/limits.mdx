@@ -16,6 +16,7 @@ Some limits refuse the request with an error that names the limit. Others quietl
 | Project archive upload request | 129 MiB | `POST /api/project-archives` | `413` |
 | GitHub import request | 16 KiB | `POST /api/projects/{id}/import/github` | `413` |
 | OAuth request body | 64 KiB | `/oauth/*` routes | `413` |
+| MCP request body | About 14.3 MiB, enough for a 10 MiB file sent base64-encoded to `upload_attachment` | `POST /mcp` | `413`, before any tool runs |
 
 The 2 MiB ceiling also decides the largest issue description or page you can save over REST, since the text travels in the request body.
 
@@ -31,10 +32,15 @@ The 2 MiB ceiling also decides the largest issue description or page you can sav
 | Instance name | 60 characters | Instance settings | `400` |
 | Login message | 280 characters | Instance settings | `400` |
 | Session lifetime | 1 to 365 days (default 30) | Instance settings | `400` |
+| Stale active threshold | 1 to 365 days (default 3) | Instance settings, `lific instance set --stale-active-days` | `400` |
+| Stale active reset | 0 to 365 days (default 14; 0 turns it off) | Instance settings, `lific instance set --stale-active-reset-days` | `400` |
 | Attachment alt text | 1,000 characters | Editing an attachment | `400` |
 | Saved view configuration | 8 KiB | Saved views | `400` |
 | Wait note | 500 characters | Waits on a person or a date, over REST and MCP `link_issues` | `400` (MCP: `Error:` text) |
 | Issues created in one call | 50 | MCP `create_issue` with `issues` | `Error:` text, and nothing is created |
+| Issues read in one call | 50 | MCP `get_issue` with `identifiers` | `Error:` text |
+| Claim length | 1 to 1,440 minutes (24 hours), default 15 | MCP `update_issue` `claim_minutes`, REST `POST /api/issues/{id}/claim` | `400` (MCP: `Error:` text). A claim ends on its own when the time runs out. |
+| Worker id | Up to 64 letters, digits, `.`, `_`, `:` or `-` | MCP `update_issue` `worker` | `Error:` text. Over REST, an `X-Lific-Worker` value outside this shape is not refused; it is hashed into a worker id of its own. |
 | Create retry key | 1 to 255 bytes, no control characters, kept 24 hours | MCP `op_key`, REST `Idempotency-Key` | `400` (MCP: `Error:` text), and nothing is created |
 | Stored create result | 1 MiB | The result a retry key replays | The key is kept without the result; a retry writes nothing and is told to read the record (REST: `409`) |
 
@@ -72,9 +78,11 @@ Agent harnesses cut long tool output off without telling the agent, near 50 KB i
 | `get_page` with `since_seq` | 30,000 characters of diff | The diff is cut, with a note to read the changed sections instead. |
 | Page writes over MCP | 30,000 characters | The write succeeds and the response notes that readers will get an outline. |
 | `get_briefing` | 6,000 characters in total | Lines are dropped from the longest sections until the response fits. |
+| `get_briefing` conventions page | 4,000 characters, outside the 6,000-character budget | The page is cut, with a pointer to `get_page` for the rest. |
 | `get_briefing` sections | 8 issues per issue section, 5 plans, 5 changes of each kind, 3 idle plans and 3 empty modules for triage, titles cut at 80 characters | Each cut section says how many it left out and names the call that lists them. Issue and plan counts stop at 100 (`100+`). |
 | `get_briefing` `pages` | 10 pages | Further page identifiers are not reported; the section says how many were left out. |
 | `create_issue` duplicate hint | 3 similar open issues per new issue | Only the closest are listed. |
+| `get_issue` decisions | The 50 newest decisions, within 32 KiB | Older decisions are counted, with a pointer to `list_comments` with `kind=decision`. |
 
 ## Page version history
 
@@ -94,7 +102,10 @@ Lific keeps recent versions of each page's content so `get_page(since_seq=...)` 
 | Limit | Value | Applies to | When exceeded |
 | --- | --- | --- | --- |
 | File size | 10 MiB | Uploads over REST, the web UI and the MCP `upload_attachment` tool | `400` (MCP: `Error:` text) |
-| Upload rate | 30 uploads per 10 minutes per user | REST uploads, including the web UI | `403` |
+| Upload rate | 30 uploads per 10 minutes per user | REST uploads, including the web UI, and imports of a pasted image URL | `403` |
+| Image URL import | 10 seconds to fetch, public addresses only, no redirects, an image within the file size limit | `POST /api/attachments/import`, used when you paste an image URL into the web UI | The import fails and the pasted URL is kept as text |
+| MCP upload ticket | One `PUT` of the declared size, within 10 minutes | `upload_attachment` with `size` and no content, over HTTP MCP | The ticket expires and a new one is needed |
+| Image sent to a model | Scaled to fit 1,600 px and 1 MB | `get_attachment` on a larger image | The model gets a scaled copy. `full: true` returns the original when providers accept its size. |
 | Thumbnail source | 50 megapixels | Thumbnail generation | The upload succeeds without a thumbnail |
 | ZIP preview | First 200 entries | Attachment previews | The listing is marked truncated |
 
@@ -124,7 +135,7 @@ These limit how many expensive operations run at once on the whole instance. A r
 | Limit | Value | When exceeded |
 | --- | --- | --- |
 | Markdown exports in progress over REST and MCP | 2 | `429` (MCP: `Error:` text) |
-| Browser project archive exports and imports in progress | 1 | `429` |
+| Browser project archive exports and imports, archiving and unarchiving a project | 1 in progress, shared by all four | `429` |
 | GitHub imports from the web UI | 1 per project, 4 per instance | `409` |
 | Requests with no credential in progress | 4 | `503` |
 | Attachment downloads with no credential in progress | 4 | `503` |
@@ -175,6 +186,7 @@ A browser upload must finish within 120 seconds and may not stall for more than 
 | --- | --- | --- |
 | Database file | 512 MiB | 16 TiB |
 | One attachment | 64 MiB | 16 TiB |
+| One [archived project](/docs/archiving-projects) file | 512 MiB | 16 TiB |
 | Everything together | 1 GiB | 16 TiB |
 | Entries in the archive | 10,000 | 10 million |
 | Manifest | 1 MiB | 64 MiB |
@@ -205,6 +217,7 @@ Without a token, GitHub itself allows 60 requests an hour, which a large reposit
 | Redirect URIs per client | 8, each up to 2,048 bytes | `400` |
 | Registered clients | 1,024 per instance, 4 MiB in total | `429` until old ones are removed |
 | Pending device codes | 1,024 per instance | `429` |
+| Client metadata document (an HTTPS `client_id`) | 16 KiB, fetched within 5 seconds from a public address with no redirects, then cached for an hour | The authorization request is refused |
 
 A registered client that has never been used is removed after 7 days, which frees room for new registrations.
 

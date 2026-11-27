@@ -20,7 +20,7 @@ Searches issues, pages, comments and attachments in every project you can read. 
 
 Returns an array of `result_type`, `id`, `identifier`, `title`, `snippet` and `project_id`. For a comment on a page, `parent_page_id` holds the page's id.
 
-In `fts` mode every word must match. When nothing in the requested scope contains every word and the query has more than one word, the search runs again with any word allowed, ranked by relevance (or recency, with `sort=recent`), and each of those results carries `partial_match: true`. Ordinary results have no `partial_match` field. Paging walks the same partial list. `literal` mode never falls back.
+In `fts` mode every word must match. When nothing in the requested scope contains every word and the query has more than one word, the search runs again with any word allowed, ranked by relevance (or recency, with `sort=recent`), and each of those results carries `partial_match: true`. Ordinary results have no `partial_match` field. Paging walks the same partial list. `literal` mode never falls back. A project's [conventions page](/docs/concepts/pages#conventions-page), while it is turned on, ranks a little higher than other matches in `fts` mode sorted by relevance.
 
 Attachment matches cover file names and the text of small text files. Their relevance cannot be compared with the other results, so in `fts` mode they come after all issue, page and comment matches. An attachment result's `identifier` names an item you can read that uses it, and `title` is the file name.
 
@@ -93,7 +93,7 @@ imports and `lific doctor --repair` do not replace it.
 
 Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id`. A change with `deleted: true` carries nothing else: remove your copy. Otherwise it also has:
 
-- **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`, and `waits` when the issue has any (see [waits](/docs/rest-api/work#waits))
+- **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`, `waits` when the issue has any (see [waits](/docs/rest-api/work#waits)), `needs_human`, and `assignees` when the issue names people (see [`GET /api/issues`](/docs/rest-api/work#get-apiissues))
 - **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `conventions`, `conventions_enabled`, `created_at`, `updated_at`, `preview`, `labels`
 - **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment`, `decision`, or `verification`; not `kind`, which already names the change type)
 
@@ -120,7 +120,8 @@ A comment belongs to the project of the issue or page it is on.
       "created_at": "2026-08-20 09:14:02",
       "updated_at": "2026-08-27 11:02:55",
       "preview": "Load once, then pull changes by cursor.",
-      "labels": ["sync"]
+      "labels": ["sync"],
+      "needs_human": false
     },
     { "kind": "page", "seq": 42, "deleted": true, "id": 4 }
   ],
@@ -133,11 +134,13 @@ A comment belongs to the project of the issue or page it is on.
 
 ### GET `/api/events/ws`
 
-A WebSocket that tells a signed-in client when something it can see has changed. Events say **what** changed, not the new content: refetch the affected view, or call `/changes`.
+A WebSocket that tells a client when something it can see has changed. Events say **what** changed, not the new content: refetch the affected view, or call `/changes`.
 
-**Authentication is the `lific_token` session cookie, and nothing else.** A bearer header, API key or OAuth token is not accepted here. A browser sends the cookie automatically after signing in; another client can send a `Cookie: lific_token=<session token>` header on the upgrade request. A request carrying an `Origin` header must come from the server's own origin or one listed in `cors_origins`. A missing or invalid session, or a refused origin, is `403`.
+**Authentication is the `lific_token` session cookie, and nothing else.** A bearer header, API key or OAuth token is not accepted here. A browser sends the cookie automatically after signing in; another client can send a `Cookie: lific_token=<session token>` header on the upgrade request. A request carrying an `Origin` header must come from the server's own origin or one listed in `cors_origins`; any other origin is `403`.
 
-Each user may hold 16 sockets and the instance 1,024; one more is refused with `429` before the upgrade. The server checks the session again about once a minute and closes the socket when it is no longer valid. A password change, signing out everywhere or deactivation closes it at once.
+A request with no session cookie, or with one whose session has expired or been revoked, connects as a signed-out reader and receives events for [published projects](/docs/rest-api/public) only. It counts against the limits for requests with no credential. On an instance with `[auth] required = false`, such a request is refused with `403` instead.
+
+Each user may hold 16 sockets and the instance 1,024, and signed-out readers share 64; one more is refused with `429` before the upgrade. The server checks the session again about once a minute and closes the socket when it is no longer valid. A password change, signing out everywhere or deactivation closes it at once.
 
 Events are JSON objects with a `type`:
 

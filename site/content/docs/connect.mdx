@@ -87,7 +87,7 @@ The owner is the only human account, or the only administrator when there are se
 
 Changing your password, signing out everywhere, or having an operator run `lific user set-password` revokes every credential the account owns, including the keys and OAuth tokens of every tool it has connected. The bot identities survive, so the tools are still listed; they are simply disconnected.
 
-Re-run `lific connect` for each affected client to mint a fresh credential and rewrite its configuration, or reconnect from the Connected tools section of Settings in the web UI. A tool that OAuth'd in has to run its own login flow again. A running stdio MCP session picks up nothing automatically: restart the client after reconnecting.
+Re-run `lific connect` for each affected client to mint a fresh credential and rewrite its configuration, or give the agent a new key from the Agents section of Settings in the web UI. A tool that OAuth'd in has to run its own login flow again. A running stdio MCP session picks up nothing automatically: restart the client after reconnecting.
 
 ### `LIFIC_API_KEY` and `LIFIC_TOKEN`
 

@@ -43,12 +43,12 @@ A page's status describes the document, not the work it is about. Lific uses it 
 
 | Status | Meaning | In the web UI |
 | --- | --- | --- |
-| `draft` | Being written. Not yet something to rely on. | Listed under **Drafts** as well as in the tree. |
-| `active` | Current and in use. | Shown normally. |
-| `complete` | Finished and still accurate, such as a spec for shipped work. | Shown normally. |
-| `archived` | Kept for the record, no longer current. | Hidden from the page tree and recent pages until you choose **Archived** or the **All** filter. |
+| `draft` | Being written. Not yet something to rely on. | Marked **Draft** in the page list, and counted among waiting drafts in the reading pane. |
+| `active` | Current and in use. | Shown with no status mark. |
+| `complete` | Finished and still accurate, such as a spec for shipped work. | Marked **Complete**. |
+| `archived` | Kept for the record, no longer current. | Left out of the page list and its folders, and kept under **Archived** at the bottom of the folder pane, with **Restore**. |
 
-An archived page is still readable by identifier, still found by search, and still served by a public project. Archiving hides it from browsing and nothing else. Delete the page if it should go.
+An archived page is still readable by identifier, still found by search, and still readable in a published project. Archiving hides it from browsing and nothing else. Delete the page if it should go.
 
 `list_resources` over MCP and `GET /api/pages` both take a `status` filter.
 
@@ -70,7 +70,7 @@ A project page can carry any number of its project's labels, the same ones its i
 
 Each project can have one conventions page: the rules for working with its issues, pages and plans, such as who files issues, who closes them, and what proof a closed issue needs. It is an ordinary project page with a mark on it, so it has a title, folder, labels, comments and history like any other.
 
-A new project starts with one, titled **Conventions**. You choose its starting text when you create the project:
+A new project starts with one, titled **Conventions**. It takes the project's first page number, so the first page you create in a new project is `APP-DOC-2`. You choose its starting text when you create the project:
 
 | Template | For a project where |
 | --- | --- |
@@ -79,19 +79,19 @@ A new project starts with one, titled **Conventions**. You choose its starting t
 | `human_managed` | People write the issues and agents work and close them. |
 | `human_owned` | People write and close issues; agents do the work and comment. |
 
-[`get_briefing`](/docs/mcp/tools#get_briefing) opens with the page when it has text and is turned on, so every agent session starts from the same rules. Turning it off (the switch on the page in the web UI, or `conventions_enabled: false` on `PUT /api/pages/{id}`) keeps the text but takes it out of the briefing and search ranking. Search ranks a turned-on conventions page above other results of similar relevance, but not above an issue that matches the query much better.
+[`get_briefing`](/docs/mcp/tools#get_briefing) opens with the page when it has text and is turned on, so every agent session starts from the same rules. Turning it off (**Leave out of briefings…** in the page's menu on the web UI's Conventions tab, or `conventions_enabled: false` on `PUT /api/pages/{id}`) keeps the text but takes it out of the briefing and search ranking. Search ranks a turned-on conventions page above other results of similar relevance, but not above an issue that matches the query much better.
 
-A project can only have one. Deleting it leaves the project without one, and a new one can then be made with `create_page(conventions=true)` or from the project's page list in the web UI. Restoring the deleted page from the trash brings it back as the conventions page, unless a replacement was created meanwhile; then it comes back as an ordinary page. Project archives carry the mark.
+A project can only have one. Deleting it leaves the project without one, and a new one can then be made with `create_page(conventions=true)` or from the project's Conventions tab in the web UI. Restoring the deleted page from the trash brings it back as the conventions page, unless a replacement was created meanwhile; then it comes back as an ordinary page. Project archives carry the mark.
 
 Projects created before conventions pages existed have none. Their briefing shows a one-line reminder until the project gets one, through `manage_resource(resource_type='project', action='update', conventions='<template>')` or the web UI, or until someone passes `conventions='none'` to stop it.
 
 ## Pinning
 
-A pinned page is shown in its own section above the folder tree in the page list. Pinning is shared: pinning a page pins it for everyone in the project. It does not change the page's folder or status. Pinning is a page edit, so it takes `maintainer`.
+A pinned page is shown in a row above the page list, and on Home and the project overview. Pinning is shared: pinning a page pins it for everyone in the project. It does not change the page's folder or status. Pinning is a page edit, so it takes `maintainer`.
 
 ## Comments
 
-Every page has its own comment thread, including workspace pages. Anyone who can read the page can comment. See [Comments and activity](/docs/concepts/comments-and-activity).
+Every page has its own comment thread, including workspace pages. Anyone with a role in the project can comment, `viewer` included; on a workspace page, an administrator. See [Comments and activity](/docs/concepts/comments-and-activity).
 
 ## Long pages
 

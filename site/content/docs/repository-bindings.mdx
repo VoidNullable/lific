@@ -43,7 +43,7 @@ lific login --url https://tracker.example.com
 lific --backend http --url https://tracker.example.com bind APP
 ```
 
-Binding a repository, and removing or merging bindings, needs the project's lead role or an instance administrator. The account your agent uses also needs to be able to read the project, or the binding is invisible to it.
+Binding a repository, and removing or merging bindings, needs the project's lead role or an instance administrator. The account your agent uses also needs a role in the project, or the binding is invisible to it. Being able to read a [published project](/docs/public-projects) is not enough.
 
 An MCP client connected straight to the server's `/mcp` URL cannot use a binding, because the server cannot see the client's working directory. Have the client launch a local stdio proxy from the checkout instead:
 
@@ -68,7 +68,7 @@ Normalizing the remote removes the transport, any credentials and a trailing `.g
 
 A shallow clone gives no root alias, because its oldest visible commit is not the real root. A repository with no commits has none either. A checkout with neither alias cannot be bound: add an `origin` remote that names a host, or make a commit in a full clone.
 
-Moving a checkout changes neither alias. Forks usually share a root commit with the original, so an alias is a lookup key, not proof that a repository belongs to anyone, and a binding grants no access. Resolution only ever reports projects the caller is allowed to see.
+Moving a checkout changes neither alias. Forks usually share a root commit with the original, so an alias is a lookup key, not proof that a repository belongs to anyone, and a binding grants no access. Resolution only ever reports projects the caller has a role in, or every project for an administrator.
 
 Resolving never records new aliases. If you change `origin` and the root commit still matches, the repository keeps resolving but the new remote is not stored. Run `lific bind APP` again to add it. Bindings do not travel in [project archives](/docs/project-archives).
 
@@ -104,15 +104,15 @@ An explicit `project` always wins. Everything else keeps its unbound meaning: `s
 
 `resolution` is `none`, `one` or `conflict`. `project` is set only for `one`, and `projects` lists the candidates only for `conflict`. Each alias says whether it matched. An unmatched alias next to a resolved project is normal when only the other alias was stored.
 
-If the agent reports no binding, check that it started in the checkout, that it uses the instance you bound, that its account can read the project, and that git is installed. An account that cannot see a project gets the same answer as if no binding existed.
+If the agent reports no binding, check that it started in the checkout, that it uses the instance you bound, that its account has a role in the project, and that git is installed. An account without a role gets the same answer as if no binding existed.
 
 When the two aliases point at different bindings, `lific bind` refuses to move them silently. Look at the records over the REST API, then delete the wrong binding or merge the two:
 
 | Route | Purpose |
 | --- | --- |
-| `POST /api/repos/resolve` | Resolve an `aliases` array of `{ "kind", "value" }` objects. Matches you can see include their binding IDs. |
+| `POST /api/repos/resolve` | Resolve an `aliases` array of `{ "kind", "value" }` objects. Matches in projects you have a role in include their binding IDs. |
 | `POST /api/repos/bind` | Bind a `project` identifier to an `aliases` array. Aliases that belong to another binding are refused. Needs lead or administrator. |
-| `GET /api/projects/{id}/bindings` | List a project's bindings and their aliases. Needs read access to the project. |
+| `GET /api/projects/{id}/bindings` | List a project's bindings and their aliases. Needs a role in the project; publishing it does not open this list. |
 | `DELETE /api/repos/bindings/{id}` | Remove a binding. Needs lead or administrator on its project. |
 | `POST /api/repos/merge` | Move the aliases of binding `from` into binding `into`. Needs lead or administrator on both projects. |
 

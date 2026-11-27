@@ -5,7 +5,7 @@ description: What a project holds, how its identifier is built, what each member
 
 A project holds a body of work: its [issues](/docs/concepts/issues), [pages](/docs/concepts/pages), [plans](/docs/concepts/plans), [modules and labels](/docs/concepts/modules-and-labels), page folders, and each member's saved views. It is also where access is decided. A role is something you hold on one project, not on the instance.
 
-Any signed-in user can create a project and becomes its lead. Naming somebody else as the lead when creating it requires a browser session signed in within the last 15 minutes, because that gives another account standing access.
+Any signed-in user can create a project and becomes its lead. When a connected agent creates one, the agent's owner becomes the lead. Naming somebody else as the lead when creating it requires a browser session signed in within the last 15 minutes, because that gives another account standing access.
 
 ## Fields
 
@@ -37,7 +37,7 @@ A membership is one user, one project and one role. Roles are ordered, and each 
 | --- | --- |
 | `viewer` | Read the project and everything in it, write comments, and keep personal saved views. |
 | `maintainer` | Create, edit, delete and restore issues, pages and plans; link issues; manage plan steps; create, rename and delete modules, labels and folders. |
-| `lead` | Edit the project's settings, including its identifier and primary lead; add, remove and change members; publish or unpublish it; bind repositories; run a GitHub import; export a project archive; delete the project. |
+| `lead` | Edit the project's settings, including its identifier and primary lead; add, remove and change members; publish or unpublish it; bind repositories; run a GitHub import; export a project archive; archive or delete the project. |
 
 An instance administrator is not a project role. It is a flag on the account, and it passes every project check whether or not the administrator is a member. Only administrators can use workspace pages, change instance settings, and import project archives.
 
@@ -65,7 +65,7 @@ A credential that authenticates without naming a user acts as the first administ
 
 ## Sidebar groups
 
-You can file projects into named groups to organize your sidebar. Groups are private: nobody else sees them, and filing a project changes nothing about the project. A project sits in at most one of your groups. A group lists only projects you can still see, so losing access to a project removes it from view without unfiling it, and you cannot file a project you cannot see.
+You can file projects into named folders to organize your sidebar. Folders are private: nobody else sees them, and filing a project changes nothing about the project. Folders nest up to four levels deep, and folders and projects share one order that is yours alone; `GET /api/projects` lists projects in that order. A project sits in at most one of your folders. Deleting a folder moves what it held up one level. A folder lists only projects you can still see, so losing access to a project removes it from view without unfiling it, and you cannot file a project you cannot see.
 
 ## Deleting a project
 

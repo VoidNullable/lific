@@ -72,6 +72,23 @@ The server checks every resolved address and connects only to a checked address.
 
 The response must be HTTP 200 and contain PNG, JPEG, GIF, WebP or SVG data under the attachment MIME rules. Raster images must have readable image headers; SVG must start with an SVG root, optionally after an XML declaration or comments. Non-images, oversized files, redirects, blocked destinations and failed fetches return `400`. No attachment is stored on failure.
 
+## PUT `/api/uploads/{token}`
+
+Receives the file for an upload ticket. A ticket comes from MCP `upload_attachment` over HTTP when the agent passes a `size` instead of content (see [`upload_attachment`](/docs/mcp/tools#upload_attachment)): the reply holds this URL and a ready `curl` command. No credential: the token in the URL is the credential, and it works once, within 10 minutes of being issued. Each user can hold 20 open tickets.
+
+Send the raw bytes as the request body, exactly as many as the ticket's `size`. The ticket is used up before the body is read, so a failed upload needs a new ticket.
+
+- An unknown, used or expired token is `404`.
+- A body larger or smaller than `size` is `413` or `400`.
+- The account that asked for the ticket must still be active, and still allowed to link the item the ticket names; otherwise the upload is refused, usually with `403`, and nothing is stored.
+- The file's type is checked from its bytes under the same rules as `POST /api/attachments`; a type that is not accepted is `400`.
+
+Answers `201` with the upload response above plus `markdown`, the snippet that embeds the file. The attachment is recorded as uploaded by the account that asked for the ticket, through MCP.
+
+```bash
+curl -X PUT --data-binary @crash.png "$LIFIC/api/uploads/<token>"
+```
+
 ## GET `/api/attachments`
 
 The files linked to one item. Query: `entity_type` (`issue`, `page` or `comment`) and `entity_id`, both required. **Viewer** on the item's project. Returns an attachment array.

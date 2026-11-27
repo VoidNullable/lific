@@ -86,7 +86,7 @@ A PNG, JPEG, GIF or WebP image whose longer side is over 480 pixels gets a 480-p
 
 `GET /api/attachments/{id}/preview` shows what is inside a ZIP (file names and sizes) or a SQLite database (tables and row counts), up to 200 entries, without extracting or running anything from the file.
 
-Search finds attachments by filename, and by the contents of plain-text files up to 512 KiB. Attachments that are not linked anywhere are never returned. Over MCP, `get_attachment` returns a text file in pages of lines and an image as something a multimodal agent can look at.
+Search finds attachments by filename, and by the contents of plain-text files up to 512 KiB. Attachments that are not linked anywhere are never returned. Over MCP, `get_attachment` returns a text file or an SVG's source in pages of lines, and an image as something a multimodal agent can look at, as a scaled copy when the original is over 1600 px or 1 MB. See [`get_attachment`](/docs/mcp/tools#get_attachment) for other types.
 
 An attachment has optional alt text for screen readers, set with `PATCH /api/attachments/{id}` by anyone who could delete it.
 

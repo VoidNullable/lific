@@ -12,7 +12,7 @@ The short version:
 - Remote stdio, `lific mcp --remote --url <BASE_URL>`, is a local command that forwards to a server's HTTP endpoint with a bearer credential.
 - A tool that cannot do what you asked returns a failed tool result (`isError: true`) whose text starts with `Error:`, not a protocol error. A parameter the tool does not declare is refused before it runs, with a suggestion for the name you probably meant.
 - Lists are paged. When more rows exist, the output ends with the `offset` to pass on the next call.
-- Clients on MCP 2026-07-28 can skip `initialize` and start with `server/discover`; older clients keep the `initialize` handshake. Both work on every transport.
+- Clients on MCP 2026-07-28 can skip `initialize` and start with `server/discover`; older clients keep the `initialize` handshake. Both work over HTTP, local stdio and remote stdio; the multi-instance proxy answers `initialize` only.
 
 Most people never configure this by hand. [`lific connect`](/docs/connect) detects your AI tools and writes one of these setups for each. This page describes what it writes, and what to write yourself when it does not cover your client.
 
@@ -27,7 +27,7 @@ Most people never configure this by hand. [`lific connect`](/docs/connect) detec
 
 Both single-server stdio forms resolve a [repository binding](/docs/repository-bindings) from the directory the client launches them in, so a few project-scoped tools can omit `project`. A direct HTTP connection has no checkout to inspect and never infers a project. The [tool reference](/docs/mcp/tools#which-tools-use-a-repository-binding) lists the tools that use a binding.
 
-The server advertises the tools capability only. It serves no MCP resources or prompts on any transport.
+The server advertises the tools and resources capabilities. It serves issues, pages and attachments as [resources](#resources), and no prompts.
 
 ## HTTP endpoint
 
@@ -35,13 +35,13 @@ The server advertises the tools capability only. It serves no MCP resources or p
 https://your-server.example/mcp
 ```
 
-The endpoint speaks Streamable HTTP in stateless mode and answers each POST with a JSON response. It is not a standalone SSE endpoint. The server negotiates the MCP protocol version per client: an `initialize` naming any released revision from `2024-11-05` to `2025-11-25` gets that revision back, and a `2026-07-28` client sends its version in each request's `_meta` instead of initializing.
+The endpoint speaks Streamable HTTP in stateless mode and answers each POST with a JSON response. It is not a standalone SSE endpoint. A request body may be up to about 14.3 MiB, enough for a maximum-size base64 `upload_attachment`; a larger one is refused with `413` before any tool runs. The server negotiates the MCP protocol version per client: an `initialize` naming any released revision from `2024-11-05` to `2025-11-25` gets that revision back, and a `2026-07-28` client sends its version in each request's `_meta` instead of initializing.
 
 A request must carry a `Host` the server recognizes, as a guard against DNS rebinding: `localhost`, `127.0.0.1`, `::1`, or the hostname of `server.public_url` when that is set. Behind a reverse proxy, set [`server.public_url`](/docs/configuration) to the address agents use, or requests are refused with `403 Forbidden: Host header is not allowed`.
 
 ### API key
 
-Create a key with `lific key create --name <NAME>`, or from **Connected Tools** in the web UI. The plaintext value is shown once. Send it as a bearer token:
+Create a key with `lific key create --name <NAME>`, or from **Agents** in the web UI's account settings. The plaintext value is shown once. Send it as a bearer token:
 
 ```json
 {
@@ -76,6 +76,10 @@ Approval binds the grant to a per-tool bot owned by the approving human, and the
 With `[auth] required = false`, a request that carries no credential runs as the operator. A request that carries an invalid credential is still refused. [Self-hosting](/docs/self-hosting#authentication) explains when Lific refuses to start in that mode.
 
 The credential-in-path endpoint was removed in 3.0 and returns `404`. Use `/mcp` with an Authorization header or OAuth; see [Upgrading](/docs/upgrading#v30).
+
+### Workers and claims
+
+The endpoint keeps no session, but a client that sends `Mcp-Session-Id` or `X-Lific-Worker` is its own worker for [claims](/docs/concepts/issues#claims), so two connections on one key do not hold each other's issues. Without either header, a claim belongs to the whole account. To resume a claim from a new connection, send the worker id the claim reported as `X-Lific-Worker` on every request.
 
 ## Local stdio and `LIFIC_TOKEN`
 

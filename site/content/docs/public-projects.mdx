@@ -29,7 +29,7 @@ A project's lead or an instance administrator. A connected AI tool can publish o
 
 In the web UI:
 
-1. Open the project's **Overview** and find **Public access**. Other members do not see this panel.
+1. Open the project's settings, from **Project settings** in the project's sidebar menu or at `/APP/settings`, and find **Public access**. Other members do not see this section.
 2. Read the list of what becomes readable, tick the box confirming you reviewed the content, and choose **Publish project**.
 3. Copy the project link from the panel, or open it, and check it while signed out.
 
@@ -100,10 +100,12 @@ An anonymous download that stalls for 15 seconds, or runs for 5 minutes, is ende
 
 Every response to a request with no credential carries `Cache-Control: no-store`, `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`, so nothing outlives an unpublish in a shared cache. Anonymous downloads also carry `Content-Security-Policy: default-src 'none'; sandbox`; anything other than a plain image or media file downloads rather than opening in the browser, and SVG files are served as `application/octet-stream`.
 
+If a reverse proxy or CDN in front of Lific caches or rate-limits public traffic, apply those rules only to requests that carry neither an `Authorization: Bearer` header nor a `lific_token` session cookie. A request whose cookie has expired is also read anonymously, so a proxy that cannot check the cookie should still never cache a response to a request that carries one. Published projects have no path of their own to match on.
+
 [Reading without a credential](/docs/rest-api/public) lists the API routes a visitor can use.
 
 ## Upgrading from 2.x
 
-Lific 2.x served published projects on a separate, reduced view under `/public/APP` and `/public/api/projects/APP`. Lific 3.0 removes both. Old `/public/APP/...` links redirect to the same place under `/APP/...`, and `/public/api/...` answers `404`. What a published project shows has also grown: plans, edit history, assignees and waits are now readable. See [Upgrading](/docs/upgrading#v30) before you upgrade an instance with a published project.
+Lific 2.x served published projects on a separate, reduced view under `/public/APP` and `/public/api/projects/APP`. Lific 3.0 removes both. Old `/public/APP/...` links answer `301` to the same place under `/APP/...`, and every route under `/public/api` answers `404`. What a published project shows has also grown: plans and their steps, activity and edit history, insights, assignees, waits with their notes, claims with the holder's username, comment authors' usernames and live updates are now readable, and not only by visitors: every signed-in account, API key and MCP connection without a role reads the project too. See [Upgrading](/docs/upgrading#v30) before you upgrade an instance with a published project.
 
 Publication is a per-project setting stored in the database. It defaults to off, and upgrading publishes nothing.
