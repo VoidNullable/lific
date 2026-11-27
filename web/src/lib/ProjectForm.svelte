@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     listUsers,
+    listProjects,
     listProjectGroups,
     listConventionTemplates,
     type UserSummary,
@@ -11,7 +12,11 @@
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
   import { FALLBACK_TEMPLATES } from "./pages/conventions";
+  import { cleanIdentifier, identifierProblem, suggestIdentifier, IDENTIFIER_MAX } from "./projectIdentifier";
+  import { ImagePlus, RotateCcw } from "lucide-svelte";
 
+  // The create form. Its top half is the project's overview header, filled in
+  // where it will appear; the rest is the setup a header doesn't show.
   let {
     name = $bindable(""),
     identifier = $bindable(""),
@@ -20,25 +25,25 @@
     leadUserId = $bindable<number | null>(null),
     groupId = $bindable<number | null>(null),
     conventions = $bindable<ConventionTemplateKey>("empty"),
-    mode = "create",
-    identifierLocked = false,
+    identifierError = $bindable<string | null>(null),
   }: {
     name?: string;
     identifier?: string;
     description?: string;
     emoji?: string;
     leadUserId?: number | null;
-    /** Sidebar group to file the project into. The form only collects it —
+    /** Sidebar group to file the project into. The form only collects it;
      *  persisting it is the caller's job, since it rides a separate endpoint. */
     groupId?: number | null;
-    /** LIF-524: the conventions page's starting template. Create mode only. */
+    /** LIF-524: the conventions page's starting template. */
     conventions?: ConventionTemplateKey;
-    mode?: "create" | "edit";
-    identifierLocked?: boolean;
+    /** Why the identifier would be refused, for the caller's Create button. */
+    identifierError?: string | null;
   } = $props();
 
   let users = $state<UserSummary[]>([]);
   let groups = $state<ProjectGroup[]>([]);
+  let takenBy = $state(new Map<string, string>());
   let identifierTouched = $state(false);
 
   $effect(() => {
@@ -48,26 +53,30 @@
     listProjectGroups().then((res) => {
       if (res.ok) groups = res.data;
     });
+    listProjects().then((res) => {
+      if (res.ok) takenBy = new Map(res.data.map((p) => [p.identifier.toUpperCase(), p.name]));
+    });
   });
 
   // LIF-524: names and summaries come from the server; without it the four
   // choices still show, by name only.
-  let templates = $state<ConventionTemplate[]>(FALLBACK_TEMPLATES);
+  // Until the answer is in, placeholders hold the space rather than the
+  // nameless fallbacks flashing up and then gaining their summaries.
+  let templates = $state<ConventionTemplate[] | null>(null);
   $effect(() => {
-    if (mode !== "create") return;
     listConventionTemplates().then((res) => {
-      if (res.ok && res.data.length > 0) templates = res.data;
+      templates = res.ok && res.data.length > 0 ? res.data : FALLBACK_TEMPLATES;
     });
   });
 
-  // Auto-generate identifier from name (create mode only)
+  let suggested = $derived(suggestIdentifier(name, new Set(takenBy.keys())));
+
   $effect(() => {
-    if (mode === "create" && !identifierTouched && name) {
-      identifier = name
-        .toUpperCase()
-        .replace(/[^A-Z0-9]+/g, "")
-        .slice(0, 5);
-    }
+    if (!identifierTouched) identifier = suggested;
+  });
+
+  $effect(() => {
+    identifierError = identifierProblem(identifier, takenBy);
   });
 
   const PLACEHOLDERS = [
@@ -87,22 +96,25 @@
   ];
   const placeholder = PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)];
 
-  let previewId = $derived((identifier.trim().toUpperCase() || "PRO") + "-1");
+  let shownId = $derived(identifier || "PRO");
 
   let groupOptions = $derived([
     { value: null, label: "No group" },
     ...groups.map((g) => ({ value: g.id, label: g.name })),
   ]);
 
+  // Deactivated accounts stay in the user list for admins; they can't lead.
   let userOptions = $derived([
     { value: null, label: "No lead" },
-    ...users.map((u) => ({
-      value: u.id,
-      label: u.display_name || u.username,
-      username: u.username,
-      is_admin: u.is_admin,
-      created_at: u.created_at,
-    })),
+    ...users
+      .filter((u) => u.is_active !== false)
+      .map((u) => ({
+        value: u.id,
+        label: u.display_name || u.username,
+        username: u.username,
+        is_admin: u.is_admin,
+        created_at: u.created_at,
+      })),
   ]);
 
   function formatMemberSince(iso: string): string {
@@ -113,171 +125,207 @@
   function userInitials(name: string): string {
     return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
   }
+
+  function onIdentifierInput(e: Event) {
+    const el = e.currentTarget as HTMLInputElement;
+    const cleaned = cleanIdentifier(el.value);
+    if (el.value !== cleaned) el.value = cleaned;
+    identifier = cleaned;
+    identifierTouched = true;
+  }
+
+  function useSuggested() {
+    identifierTouched = false;
+    identifier = suggested;
+  }
+
+  const fieldClass =
+    "text-body-sm rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] " +
+    "px-2.5 py-1.5 outline-none transition-colors placeholder:text-[var(--text-faint)] " +
+    "focus:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent-subtle)]";
 </script>
 
-<div class="max-w-[560px] mx-auto px-6 pt-12 md:pt-16">
-  <!-- Name -->
-  <div class="mb-8">
-    <label
-      for="project-name"
-      class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit"
-    >
-      Name
-    </label>
-    <input
-      id="project-name"
-      type="text"
-      bind:value={name}
-      class="w-full rounded-md px-3 py-2.5 text-body-lg
-             border border-[var(--border)] bg-[var(--bg-subtle)]
-             text-[var(--text)] placeholder:text-[var(--text-faint)]
-             outline-none transition-colors
-             focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]"
-      placeholder={mode === "create" ? placeholder : ""}
-      autofocus={mode === "create"}
-    />
+{#snippet row(label: string, help: string, control: import("svelte").Snippet, forId?: string)}
+  <div class="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-8 px-4 py-4 border-t border-[var(--border)] first:border-t-0">
+    <div class="sm:w-44 shrink-0">
+      {#if forId}
+        <label for={forId} class="block text-body-sm font-medium text-[var(--text)]">{label}</label>
+      {:else}
+        <p class="text-body-sm font-medium text-[var(--text)]">{label}</p>
+      {/if}
+      <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">{help}</p>
+    </div>
+    <div class="flex-1 min-w-0">{@render control()}</div>
   </div>
+{/snippet}
 
-  <!-- Identifier + Lead + Icon row -->
-  <div class="flex gap-5 items-start mb-8">
-    <div class="shrink-0">
-      <label
-        for="project-id"
-        class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit"
-      >
-        Identifier
-      </label>
-      <input
-        id="project-id"
-        type="text"
-        bind:value={identifier}
-        oninput={() => { identifierTouched = true; }}
-        disabled={identifierLocked}
-        class="w-[120px] rounded-md px-3 py-2.5 text-body-lg font-mono
-               uppercase tracking-wide
-               border border-[var(--border)] bg-[var(--bg-subtle)]
-               text-[var(--text)] placeholder:text-[var(--text-faint)]
-               outline-none transition-colors
-               focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]
-               disabled:opacity-50 disabled:cursor-not-allowed"
-        placeholder="PRO"
-        maxlength="5"
-        spellcheck="false"
-        autocapitalize="characters"
-      />
-      <p class="mt-1.5 text-body-sm text-[var(--text-faint)] w-fit">
-        {mode === "edit" ? "Issue prefix" : "Issues become"}
-      </p>
-      <span
-        class="inline-block font-mono text-caption font-medium
-               text-[var(--accent)] bg-[var(--accent-subtle)]
-               px-1.5 py-0.5 rounded mt-0.5"
-      >
-        {previewId}
+{#snippet initialsTile()}
+  <span class="relative grid place-items-center size-full">
+    {#if identifier}
+      <span class="text-body-sm font-mono font-semibold text-[var(--text-muted)]">{identifier.slice(0, 2)}</span>
+    {:else}
+      <ImagePlus size={18} class="text-[var(--text-faint)]" />
+    {/if}
+    {#if identifier}
+      <span class="absolute -right-1.5 -bottom-1.5 size-5 grid place-items-center rounded-full bg-[var(--surface)] border border-[var(--border)] text-[var(--text-muted)]">
+        <ImagePlus size={11} />
       </span>
-    </div>
+    {/if}
+  </span>
+{/snippet}
 
-    <div class="flex-1">
-      <label
-        class="block text-body-sm font-medium text-[var(--text)] mb-2"
-      >
-        Lead
-      </label>
-      <Select
-        options={userOptions}
-        bind:value={leadUserId}
-        placeholder="No lead"
-        renderSelected={selectedUser}
-        renderOption={userOption}
+<div class="flex flex-col gap-10">
+  <!-- ── IDENTITY: the overview header, filled in where it will show ── -->
+  <header class="flex items-start gap-4 sm:gap-5 pb-7 border-b border-[var(--border)]">
+    <div class="shrink-0 pt-0.5">
+      <IconPicker value={emoji} onchange={(v) => { emoji = v; }} size="lg" empty={initialsTile} />
+    </div>
+    <div class="flex-1 min-w-0">
+      <label for="project-name" class="sr-only">Name</label>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        id="project-name"
+        type="text"
+        bind:value={name}
+        {placeholder}
+        autofocus
+        autocomplete="off"
+        data-display-field
+        class="block w-full bg-transparent border border-transparent text-[1.55rem] sm:text-[1.9rem] font-semibold tracking-tight leading-tight
+               text-[var(--text)] placeholder:text-[var(--text-faint)] rounded-md px-2 -mx-2 py-1
+               outline-none transition-colors hover:bg-[var(--chart-hover)] focus:bg-[var(--chart-hover)]"
       />
+      <label for="project-desc" class="sr-only">Description</label>
+      <textarea
+        id="project-desc"
+        bind:value={description}
+        rows="1"
+        placeholder="Add a description. What is this project about?"
+        class="desc block w-full mt-1 bg-transparent border border-transparent text-body-lg leading-relaxed text-[var(--text-muted)]
+               placeholder:text-[var(--text-faint)] rounded-md px-2 -mx-2 py-1 resize-none
+               outline-none transition-colors hover:bg-[var(--chart-hover)] focus:bg-[var(--chart-hover)] focus:text-[var(--text)]"
+      ></textarea>
     </div>
+  </header>
 
-    <div>
-      <label
-        class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit"
-      >
-        Icon
-      </label>
-      <IconPicker value={emoji} onchange={(v) => { emoji = v; }} />
+  <!-- ── SETUP ─────────────────────────────────────────────────── -->
+  <section aria-labelledby="new-setup-heading">
+    <div class="mb-3">
+      <h2 id="new-setup-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--text)]">Setup</h2>
+      <p class="text-body-sm text-[var(--text-muted)] mt-0.5">Only the identifier is needed. The rest can change later in settings.</p>
     </div>
-  </div>
-
-  {#if groups.length > 0}
-    <!-- Sidebar grouping. Personal to the signed-in user, unlike Lead. -->
-    <div class="mb-8 max-w-xs">
-      <label class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit">
-        Group
-      </label>
-      <Select options={groupOptions} bind:value={groupId} placeholder="No group" />
-    </div>
-  {/if}
-
-  <!-- Description -->
-  <div class="mb-8">
-    <div class="flex items-baseline gap-2 mb-2">
-      <label
-        for="project-desc"
-        class="text-body-sm font-medium text-[var(--text)]"
-      >
-        Description
-      </label>
-      <span class="text-caption text-[var(--text-faint)]">optional</span>
-    </div>
-    <textarea
-      id="project-desc"
-      bind:value={description}
-      class="w-full rounded-md px-3 py-2.5 text-body-lg min-h-[100px]
-             border border-[var(--border)] bg-[var(--bg-subtle)]
-             text-[var(--text)] placeholder:text-[var(--text-faint)]
-             outline-none resize-y transition-colors
-             focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]"
-      placeholder="What is this project about?"
-      rows="3"
-    ></textarea>
-  </div>
-
-  {#if mode === "create"}
-    <!-- LIF-524: the template the project's conventions page starts from. -->
-    <fieldset class="mb-8">
-      <legend class="text-body-sm font-medium text-[var(--text)] mb-1">Conventions</legend>
-      <p class="text-caption text-[var(--text-faint)] mb-2.5">
-        The rules for working in this tracker. Agents read them with their
-        briefing at the start of each session. You can edit the page later.
-      </p>
-      <div class="flex flex-col gap-2" role="radiogroup" aria-label="Conventions template">
-        {#each templates as t (t.key)}
-          {@const selected = conventions === t.key}
-          <button
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            data-template={t.key}
-            class="flex items-start gap-3 rounded-md border px-3 py-2.5 text-left transition-colors
-                   focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_var(--accent-subtle)]
-                   {selected
-              ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
-              : 'border-[var(--border)] bg-[var(--bg-subtle)] hover:border-[var(--text-faint)]'}"
-            onclick={() => (conventions = t.key)}
-          >
-            <span
-              class="mt-0.5 size-4 shrink-0 rounded-full border-2 grid place-items-center
-                     {selected ? 'border-[var(--accent)]' : 'border-[var(--text-faint)]'}"
+    <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+      {#snippet idControl()}
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <input
+            id="project-id"
+            type="text"
+            value={identifier}
+            oninput={onIdentifierInput}
+            class="{fieldClass} w-[7.5rem] font-mono uppercase tracking-wider"
+            placeholder="PRO"
+            maxlength={IDENTIFIER_MAX}
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="characters"
+            aria-invalid={identifierError ? "true" : undefined}
+            aria-describedby="project-id-note"
+          />
+          <span id="project-id-note" class="text-caption" aria-live="polite">
+            {#if identifierError}
+              <span class="text-[var(--error)]">{identifierError}</span>
+            {:else}
+              <span class="text-[var(--text-muted)]">Issues become</span>
+              <span class="font-mono font-semibold text-[var(--text)] px-1.5 py-0.5 rounded-md bg-[var(--chart-tile)]">{shownId}-1</span>
+              <span class="font-mono text-[var(--text-faint)]">{shownId}-2 …</span>
+            {/if}
+          </span>
+          {#if identifierTouched && suggested && identifier !== suggested}
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 text-caption text-[var(--text-muted)] hover:text-[var(--text)] rounded px-1 transition-colors"
+              onclick={useSuggested}
             >
-              {#if selected}<span class="size-2 rounded-full bg-[var(--accent)]"></span>{/if}
-            </span>
-            <span class="flex-1 min-w-0">
-              <span class="block text-body-sm font-medium {selected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">
-                {t.name}
-              </span>
-              {#if t.summary}
-                <span class="block text-caption text-[var(--text-muted)] leading-snug mt-0.5">{t.summary}</span>
-              {/if}
-            </span>
-          </button>
+              <RotateCcw size={11} /> Use {suggested}
+            </button>
+          {/if}
+        </div>
+      {/snippet}
+      {@render row("Identifier", `Up to ${IDENTIFIER_MAX} letters or digits, starting with a letter.`, idControl, "project-id")}
+
+      {#snippet leadControl()}
+        <div class="max-w-[36ch]">
+          <Select
+            options={userOptions}
+            bind:value={leadUserId}
+            placeholder="No lead"
+            size="sm"
+            renderSelected={selectedUser}
+            renderOption={userOption}
+          />
+        </div>
+      {/snippet}
+      {@render row("Lead", "Owns the project and can change its settings.", leadControl)}
+
+      {#if groups.length > 0}
+        {#snippet groupControl()}
+          <div class="max-w-[36ch]">
+            <Select options={groupOptions} bind:value={groupId} placeholder="No group" size="sm" />
+          </div>
+        {/snippet}
+        <!-- Sidebar grouping. Personal to the signed-in user, unlike Lead. -->
+        {@render row("Group", "The sidebar folder it sits in. Only you see this.", groupControl)}
+      {/if}
+    </div>
+  </section>
+
+  <!-- ── CONVENTIONS (LIF-524) ─────────────────────────────────── -->
+  <section aria-labelledby="new-conventions-heading">
+    <div class="mb-3">
+      <h2 id="new-conventions-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--text)]">Conventions</h2>
+      <p class="text-body-sm text-[var(--text-muted)] mt-0.5">
+        The rules for working in this tracker. Agents read them with their briefing at the start
+        of each session. Pick a starting point; the page stays yours to edit.
+      </p>
+    </div>
+    <div class="grid sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Conventions template" aria-busy={templates === null}>
+      {#if templates === null}
+        {#each [0, 1, 2, 3] as i (i)}
+          <div class="h-[4.5rem] rounded-xl bg-[var(--chart-tile)] animate-pulse motion-reduce:animate-none"></div>
         {/each}
-      </div>
-    </fieldset>
-  {/if}
+      {/if}
+      {#each templates ?? [] as t (t.key)}
+        {@const selected = conventions === t.key}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={selected}
+          data-template={t.key}
+          class="flex items-start gap-3 rounded-xl px-4 py-3.5 text-left transition-colors border
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]
+                 {selected
+            ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+            : 'border-transparent bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] hover:border-[var(--border)]'}"
+          onclick={() => (conventions = t.key)}
+        >
+          <span
+            class="mt-0.5 size-4 shrink-0 rounded-full border-2 grid place-items-center
+                   {selected ? 'border-[var(--accent)]' : 'border-[var(--text-faint)]'}"
+          >
+            {#if selected}<span class="size-2 rounded-full bg-[var(--accent)]"></span>{/if}
+          </span>
+          <span class="flex-1 min-w-0">
+            <span class="block text-body-sm font-medium {selected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">
+              {t.name}
+            </span>
+            {#if t.summary}
+              <span class="block text-caption text-[var(--text-muted)] leading-snug mt-0.5">{t.summary}</span>
+            {/if}
+          </span>
+        </button>
+      {/each}
+    </div>
+  </section>
 </div>
 
 {#snippet selectedUser(opt: { value: string | number | null; label: string; [key: string]: unknown })}
@@ -290,7 +338,7 @@
         {userInitials(opt.label)}
       </div>
     {/if}
-    <span class="text-body-lg text-[var(--text)]">{opt.label}</span>
+    <span class="text-body-sm {opt.value === null ? 'text-[var(--text-muted)]' : 'text-[var(--text)]'}">{opt.label}</span>
   </div>
 {/snippet}
 
@@ -332,3 +380,10 @@
     </div>
   {/if}
 {/snippet}
+
+<style>
+  .desc {
+    field-sizing: content;
+    min-height: 2.25rem;
+  }
+</style>

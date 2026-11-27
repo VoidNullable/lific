@@ -579,6 +579,7 @@
               <input
                 bind:value={draftName}
                 aria-label="Project name"
+                data-display-field
                 class="text-[1.9rem] font-semibold tracking-tight leading-tight bg-transparent outline-none
                        text-[var(--text)] w-full max-w-[24ch] rounded px-1 -mx-1
                        focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
