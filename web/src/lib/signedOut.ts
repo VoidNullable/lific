@@ -49,6 +49,7 @@ export const SIGNED_OUT_PAGES: ReadonlySet<string> = new Set([
   "issue-detail",
   "pages",
   "page-detail",
+  "conventions",
   "plans",
   "plan-detail",
   "modules",

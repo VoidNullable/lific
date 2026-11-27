@@ -1,28 +1,33 @@
 #!/usr/bin/env bun
 /**
- * LIF-524: the per-project conventions page in the web UI.
+ * LIF-524: a project's Conventions tab in the web UI.
  *
  * Spawns the debug binary against a scratch config + DB, signs in, and at a
  * desktop viewport (1440x900) and a phone viewport (390x844) checks that:
  *
- *   - a project without a conventions page shows the Conventions block at
- *     the top of Pages, with the three templates and a blank start;
- *   - picking a template creates the page and lands on it, labelled as the
- *     project's conventions;
- *   - the page view's switch turns it off, the off state survives a reload,
- *     and the text is unchanged; the Pages block then shows "Off" and the
- *     page stays out of the ordinary tree;
- *   - a project whose conventions page is empty offers the templates (no
- *     blank start), and a template fills in that same page;
- *   - the create-project picker sends the chosen template, and the new
- *     project's Pages block shows the page.
+ *   - the sidebar (desktop) or the mobile nav (phone) lists Conventions;
+ *   - a project without a conventions page shows the template choice on
+ *     /<PROJECT>/conventions: four templates, Blank among them, each one's
+ *     full text readable before choosing;
+ *   - "Use <template>" creates the page and the tab becomes that page, with
+ *     its state in briefings shown and no switch to flip;
+ *   - the Pages list shows neither a conventions block nor the page, and the
+ *     page's old address and a palette lookup both lead to the tab;
+ *   - Change template asks first, then replaces the text, and the old text
+ *     is in the page history;
+ *   - turning it off and back on each ask first, survive a reload, and keep
+ *     the text;
+ *   - a project whose conventions page is empty offers the templates and
+ *     fills in that same page;
+ *   - the create-project picker shares the component and sends the choice.
  *
- * Also checks once that a viewer sees the block without the templates.
+ * Also checks that a viewer, and a signed-out reader of a published
+ * project, get the tab read-only.
  *
  * Run:  cd e2e && bun conventions.ts
  * Binary: $LIFIC_BIN, else target/debug/lific (debug rust-embed reads
  * web/dist from disk, so build the web UI first).
- * Screenshots: $SHOTS, else /tmp/opencode/conventions-e2e.
+ * Screenshots: $SHOTS, else /tmp/opencode/conventions-tab-shots.
  */
 import { strict as assert } from "node:assert";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
@@ -31,10 +36,11 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BIN = process.env.LIFIC_BIN ?? join(ROOT, "target", "debug", "lific");
-const SHOTS = process.env.SHOTS ?? "/tmp/opencode/conventions-e2e";
+const SHOTS = process.env.SHOTS ?? "/tmp/opencode/conventions-tab-shots";
 const ADMIN_PASSWORD = "conventions-admin-password-123";
 const PASSWORD = "conventions-user-password-123";
 
@@ -155,6 +161,22 @@ async function waitFor<T>(page: Page, read: () => Promise<T>, ok: (v: T) => bool
   return last;
 }
 
+/** A distinctive line of a template's text, to find it in a preview. */
+function sampleLine(t: Template): string {
+  const line = t.content
+    .split("\n")
+    .map((l) => l.replace(/^[#>*\-\d.\s]+/, "").replace(/[*_`]/g, "").trim())
+    .find((l) => l.length > 30);
+  assert.ok(line, `${t.key} has a line to look for`);
+  return line.slice(0, 30);
+}
+
+/** Open the document's ⋯ menu and pick an item. */
+async function menu(page: Page, item: string) {
+  await page.getByRole("button", { name: "More actions" }).first().click();
+  await page.getByRole("menuitem", { name: item, exact: true }).click();
+}
+
 async function scenario(
   browser: Browser,
   base: string,
@@ -168,6 +190,7 @@ async function scenario(
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (err) => errors.push(`${vp.name}: ${err}`));
   const byKey = (key: string) => templates.find((t) => t.key === key)!;
+  const tab = `${base}/#/${ids.bare}/conventions`;
 
   // ── A project with no conventions page ──────────────────────────────
   const bare = await projectByIdent(page, ids.bare);
@@ -180,151 +203,248 @@ async function scenario(
     status: "active",
   });
 
-  await page.goto(`${base}/${ids.bare}/pages`);
-  const section = page.getByTestId("conventions-section");
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await section.getAttribute("data-state"), "none", "no page: the empty state shows");
-  for (const key of ["ai_managed", "human_managed", "human_owned", "blank"]) {
-    await section.locator(`[data-template="${key}"]`).waitFor({ state: "visible" });
+  // The tab is in the navigation.
+  await page.goto(`${base}/#/${ids.bare}/pages`);
+  if (vp.mobile) {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+    await page.getByRole("button", { name: `Open Project ${ids.bare} navigation` }).click();
+    const link = page.locator(`[data-mobile-nav] a[href="#/${ids.bare}/conventions"]`);
+    await link.waitFor({ state: "visible" });
+    await link.click();
+  } else {
+    const link = page.locator(`a.sidebar-destination[href="#/${ids.bare}/conventions"]`);
+    await link.waitFor({ state: "visible" });
+    await link.click();
   }
-  for (const key of ["ai_managed", "human_managed", "human_owned"]) {
-    const t = byKey(key);
-    const text = await section.locator(`[data-template="${key}"]`).innerText();
-    assert.ok(text.includes(t.name), `${key} button names the template`);
-    if (t.summary) assert.ok(text.includes(t.summary), `${key} button shows the summary`);
-  }
-  assert.equal(await section.locator('[data-template="empty"]').count(), 0, "the empty template is the blank start");
-  await assertNoOverflow(page, `${vp.name} pages, no conventions`);
-  await shot(page, vp, "01-pages-no-conventions");
-  console.log(`ok   ${vp.name}: a project without a conventions page offers the templates and a blank start`);
+  await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`));
+  console.log(`ok   ${vp.name}: the navigation lists Conventions`);
 
-  // ── Pick a template ─────────────────────────────────────────────────
-  await section.locator('[data-template="human_managed"]').click();
-  await page.waitForURL(/\/pages\/\d+$/, { timeout: 15_000 });
-  const createdId = Number(page.url().match(/\/pages\/(\d+)$/)![1]);
-  const banner = page.getByTestId("conventions-banner");
-  await banner.waitFor({ state: "visible", timeout: 15_000 });
-  assert.ok((await banner.innerText()).includes("This project's conventions"), "the page is labelled");
-  const created = await api(page, "GET", `/pages/${createdId}`);
-  assert.equal(created.conventions, true, "the new page is the conventions page");
-  assert.equal(created.conventions_enabled, true, "a new conventions page starts on");
+  const chooser = page.getByTestId("conventions-chooser");
+  await chooser.waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(await chooser.getAttribute("data-state"), "none", "no page: the template choice shows");
+  const radios = chooser.getByRole("radiogroup", { name: "Conventions template" });
+  for (const t of templates) {
+    const text = await radios.locator(`[role=radio][data-template="${t.key}"]`).innerText();
+    assert.ok(text.includes(t.key === "empty" ? "Blank" : t.name), `${t.key} is named`);
+  }
+  const preview = chooser.getByTestId("template-preview");
+  const first = byKey("ai_managed");
+  await waitFor(page, () => preview.getAttribute("data-template"), (v) => v === "ai_managed", "the first template is previewed");
+  assert.ok((await preview.innerText()).includes(sampleLine(first)), "the preview shows the template's text");
+  await radios.locator('[role=radio][data-template="human_managed"]').click();
+  await waitFor(page, () => preview.getAttribute("data-template"), (v) => v === "human_managed", "picking previews it");
+  assert.ok((await preview.innerText()).includes(sampleLine(byKey("human_managed"))), "the preview follows the choice");
+  await radios.locator('[role=radio][data-template="empty"]').click();
+  assert.ok((await preview.innerText()).includes("empty page"), "Blank says what it is");
+  await radios.locator('[role=radio][data-template="human_managed"]').click();
+  const use = chooser.getByTestId("conventions-use-template");
+  assert.equal((await use.innerText()).trim(), "Use Human managed", "one action names the choice");
+  await assertNoOverflow(page, `${vp.name} conventions, no page`);
+  await shot(page, vp, "01-tab-template-choice");
+  console.log(`ok   ${vp.name}: without a page the tab offers four templates with their full text`);
+
+  // ── Use it: the tab becomes the page ────────────────────────────────
+  await use.click();
+  const status = page.getByTestId("conventions-status");
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  assert.ok(page.url().endsWith(`#/${ids.bare}/conventions`), "the tab keeps its address");
+  assert.equal(await status.getAttribute("data-enabled"), "true", "a new page is in briefings");
+  assert.ok((await status.innerText()).includes("In agents' briefings"), "the state is stated");
+  assert.equal(await page.getByRole("switch").count(), 0, "there is no switch to flip");
+  const created = await waitFor(page, () => conventionsPage(page, bare.id), (p) => p !== null, "the page exists");
   assert.equal(created.content, byKey("human_managed").content, "the page holds the template");
   assert.equal(created.status, "active", "the page is created active");
-  const toggle = page.getByRole("switch", { name: "Include in agents' briefings" });
-  assert.equal(await toggle.getAttribute("aria-checked"), "true", "the switch starts on");
+  await page.getByText(sampleLine(byKey("human_managed"))).first().waitFor({ state: "visible" });
   await assertNoOverflow(page, `${vp.name} conventions page`);
-  await shot(page, vp, "02-conventions-page-on");
-  console.log(`ok   ${vp.name}: a template creates the page and lands on it`);
+  await shot(page, vp, "02-tab-with-page");
+  console.log(`ok   ${vp.name}: a template creates the page and the tab shows it`);
 
-  // ── Switch it off; it stays off after a reload, text intact ─────────
-  await toggle.click();
+  // ── Pages leaves it out; old links lead to the tab ──────────────────
+  await page.goto(`${base}/#/${ids.bare}/pages`);
+  await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
+  assert.equal(await page.getByTestId("conventions-section").count(), 0, "no conventions block on Pages");
+  const copies = await page.evaluate((ident) => {
+    const main = document.querySelector("main") ?? document.body;
+    return [...main.querySelectorAll("button, a")].filter((el) => el.textContent?.includes(ident)).length;
+  }, created.identifier);
+  assert.equal(copies, 0, "the conventions page is not listed in Pages");
+  await assertNoOverflow(page, `${vp.name} pages`);
+  await shot(page, vp, "03-pages-list");
+
+  await page.goto(`${base}/#/${ids.bare}/pages/${created.id}`);
+  await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
+  await status.waitFor({ state: "visible" });
+  if (!vp.mobile) {
+    await page.goto(`${base}/#/${ids.bare}/pages`);
+    await page.getByText("Release checklist").filter({ visible: true }).first().waitFor();
+    await page.keyboard.press("Control+k");
+    const input = page.getByPlaceholder("Search or jump to…");
+    await input.waitFor({ state: "visible" });
+    await input.fill(created.identifier);
+    await page.locator("[data-flat-idx]").filter({ hasText: created.identifier }).first().waitFor({ state: "visible" });
+    await page.keyboard.press("Enter");
+    await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
+  }
+  console.log(`ok   ${vp.name}: Pages leaves the page out, and its old address${vp.mobile ? "" : " and a palette lookup"} open the tab`);
+
+  // ── Change template, behind a confirmation ──────────────────────────
+  await page.goto(tab);
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  const before = (await api(page, "GET", `/pages/${created.id}/activity`)).items.length;
+  await menu(page, "Change template…");
+  const dialog = page.getByTestId("conventions-dialog");
+  await dialog.waitFor({ state: "visible" });
+  assert.equal(await dialog.getAttribute("data-mode"), "template");
+  assert.ok((await dialog.innerText()).includes("stays in the page's history"), "the dialog says the old text is kept");
+  await dialog.locator('[role=radio][data-template="human_owned"]').click();
+  await waitFor(page, () => dialog.getByTestId("template-preview").getAttribute("data-template"), (v) => v === "human_owned", "the dialog previews the choice");
+  const confirm = dialog.getByTestId("conventions-dialog-confirm");
+  assert.equal((await confirm.innerText()).trim(), "Replace with Human owned");
+  await assertNoOverflow(page, `${vp.name} change template`);
+  await shot(page, vp, "04-change-template-confirm");
+  // Cancel changes nothing.
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal((await api(page, "GET", `/pages/${created.id}`)).content, created.content, "cancel keeps the text");
+  await menu(page, "Change template…");
+  await dialog.locator('[role=radio][data-template="human_owned"]').click();
+  await confirm.click();
+  await dialog.waitFor({ state: "hidden" });
   await waitFor(
     page,
-    async () => (await api(page, "GET", `/pages/${createdId}`)).conventions_enabled,
+    async () => (await api(page, "GET", `/pages/${created.id}`)).content,
+    (c) => c === byKey("human_owned").content,
+    "the text is the new template",
+  );
+  const after = (await api(page, "GET", `/pages/${created.id}/activity`)).items.length;
+  assert.ok(after > before, "the replacement is in the page history");
+  console.log(`ok   ${vp.name}: Change template asks first, then replaces the text, with history`);
+
+  // ── Turn off, then back on ──────────────────────────────────────────
+  await menu(page, "Leave out of briefings…");
+  await dialog.waitFor({ state: "visible" });
+  assert.equal(await dialog.getAttribute("data-mode"), "off");
+  assert.ok((await dialog.innerText()).includes("stay here"), "turning off says the page stays");
+  await confirm.click();
+  await dialog.waitFor({ state: "hidden" });
+  await waitFor(
+    page,
+    async () => (await api(page, "GET", `/pages/${created.id}`)).conventions_enabled,
     (v) => v === false,
-    "the switch stored conventions_enabled=false",
+    "conventions_enabled=false is stored",
   );
   await page.reload();
-  await banner.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await toggle.getAttribute("aria-checked"), "false", "the switch is still off after a reload");
-  assert.ok((await banner.innerText()).includes("leave it out"), "the off state is explained");
-  const afterOff = await api(page, "GET", `/pages/${createdId}`);
-  assert.equal(afterOff.content, created.content, "turning it off keeps the text");
-  await shot(page, vp, "03-conventions-page-off");
-  console.log(`ok   ${vp.name}: the switch turns it off, it survives a reload, the text stays`);
-
-  // ── The Pages block shows it, off, and the tree leaves it out ───────
-  await page.goto(`${base}/${ids.bare}/pages`);
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  await waitFor(page, () => section.getAttribute("data-state"), (v) => v === "page", "the block shows the page");
-  await section.getByTestId("conventions-off").waitFor({ state: "visible" });
-  assert.ok((await section.innerText()).includes(created.title), "the block names the page");
-  // The sidebar's recents also hold the title, hidden on a phone.
-  await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
-  const treeCopies = await page.evaluate((ident) => {
-    const sectionEl = document.querySelector('[data-testid="conventions-section"]');
-    return [...document.querySelectorAll("button")].filter(
-      (b) => !sectionEl?.contains(b) && b.textContent?.includes(ident),
-    ).length;
-  }, created.identifier);
-  assert.equal(treeCopies, 0, "the conventions page is not repeated in the tree");
-  await assertNoOverflow(page, `${vp.name} pages, with conventions`);
-  await shot(page, vp, "04-pages-conventions-off");
-  await section.locator("button").first().click();
-  await page.waitForURL(new RegExp(`/pages/${createdId}$`));
-  console.log(`ok   ${vp.name}: the Pages block shows the page with Off, and the tree leaves it out`);
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(await status.getAttribute("data-enabled"), "false", "off survives a reload");
+  assert.ok((await status.innerText()).includes("Left out of agents' briefings"));
+  assert.equal((await api(page, "GET", `/pages/${created.id}`)).content, byKey("human_owned").content, "off keeps the text");
+  await shot(page, vp, "05-tab-off");
+  await menu(page, "Put back in briefings…");
+  await dialog.waitFor({ state: "visible" });
+  assert.equal(await dialog.getAttribute("data-mode"), "on");
+  await confirm.click();
+  await dialog.waitFor({ state: "hidden" });
+  await waitFor(page, () => status.getAttribute("data-enabled"), (v) => v === "true", "back in briefings");
+  assert.equal((await api(page, "GET", `/pages/${created.id}`)).conventions_enabled, true);
+  console.log(`ok   ${vp.name}: off and on each ask first, survive a reload and keep the text`);
 
   // ── A conventions page with no text yet ─────────────────────────────
   const emptyProject = await projectByIdent(page, ids.emptyPage);
   const emptyPage = await conventionsPage(page, emptyProject.id);
   assert.ok(emptyPage, "an API-created project has a conventions page");
   assert.equal(emptyPage.content.trim(), "", "and the empty template leaves it blank");
-  await page.goto(`${base}/${ids.emptyPage}/pages`);
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await section.getAttribute("data-state"), "empty", "an empty page offers the templates");
-  await section.locator('[data-template="ai_managed"]').waitFor({ state: "visible" });
-  assert.equal(await section.locator('[data-template="blank"]').count(), 0, "no blank start: the page exists");
-  await assertNoOverflow(page, `${vp.name} pages, empty conventions`);
-  await shot(page, vp, "05-pages-empty-conventions");
-  await section.locator('[data-template="ai_managed"]').click();
-  await page.waitForURL(new RegExp(`/pages/${emptyPage.id}$`), { timeout: 15_000 });
-  await page.getByTestId("conventions-banner").waitFor({ state: "visible" });
+  await page.goto(`${base}/#/${ids.emptyPage}/conventions`);
+  await chooser.waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(await chooser.getAttribute("data-state"), "empty", "an empty page offers the templates");
+  await chooser.getByTestId("conventions-use-template").click();
+  await status.waitFor({ state: "visible", timeout: 15_000 });
   const filled = await api(page, "GET", `/pages/${emptyPage.id}`);
   assert.equal(filled.content, byKey("ai_managed").content, "the template filled in the same page");
+  assert.equal(await conventionsPage(page, emptyProject.id).then((p) => p.id), emptyPage.id, "no second page");
   console.log(`ok   ${vp.name}: an empty conventions page takes a template in place`);
 
   // ── The create-project picker ───────────────────────────────────────
-  await page.goto(`${base}/projects/new`);
+  await page.goto(`${base}/#/projects/new`);
   await page.locator("#project-name").waitFor({ state: "visible", timeout: 15_000 });
-  const radios = page.getByRole("radiogroup", { name: "Conventions template" });
-  await radios.locator('[data-template="human_owned"]').waitFor({ state: "visible" });
-  assert.equal(
-    await radios.locator('[data-template="empty"]').getAttribute("aria-checked"),
-    "true",
-    "Empty is the default",
-  );
-  for (const t of templates) {
-    const text = await radios.locator(`[data-template="${t.key}"]`).innerText();
-    assert.ok(text.includes(t.name), `${t.key} option is named`);
-    if (t.summary) assert.ok(text.includes(t.summary), `${t.key} option shows its summary`);
-  }
+  const picker = page.getByRole("radiogroup", { name: "Conventions template" });
+  await picker.locator('[role=radio][data-template="human_owned"]').waitFor({ state: "visible" });
+  assert.equal(await picker.locator('[role=radio][data-template="empty"]').getAttribute("aria-checked"), "true", "Blank is the default");
   await page.fill("#project-name", `Picked ${vp.name}`);
   await page.fill("#project-id", ids.created);
-  await radios.locator('[data-template="human_owned"]').click();
-  assert.equal(await radios.locator('[data-template="human_owned"]').getAttribute("aria-checked"), "true");
-  await radios.scrollIntoViewIfNeeded();
+  await picker.locator('[role=radio][data-template="human_owned"]').click();
+  assert.equal(await picker.locator('[role=radio][data-template="human_owned"]').getAttribute("aria-checked"), "true");
+  assert.ok(
+    (await page.getByTestId("template-preview").innerText()).includes(sampleLine(byKey("human_owned"))),
+    "the form previews the choice",
+  );
+  await picker.scrollIntoViewIfNeeded();
   await assertNoOverflow(page, `${vp.name} new project`);
   await shot(page, vp, "06-new-project-picker");
   await page.getByRole("button", { name: "Create project" }).click();
   await page.waitForURL(new RegExp(`/${ids.created}/overview$`), { timeout: 15_000 });
   const picked = await projectByIdent(page, ids.created);
   const pickedPage = await conventionsPage(page, picked.id);
-  assert.ok(pickedPage, "the new project has a conventions page");
-  assert.equal(pickedPage.content, byKey("human_owned").content, "it holds the chosen template");
-  await page.goto(`${base}/${ids.created}/pages`);
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await section.getAttribute("data-state"), "page", "the new project's Pages block shows the page");
-  assert.equal(await section.getByTestId("conventions-off").count(), 0, "and it is on");
-  await assertNoOverflow(page, `${vp.name} new project pages`);
-  await shot(page, vp, "07-new-project-pages");
-  console.log(`ok   ${vp.name}: the create-project picker sends the template and Pages shows it`);
+  assert.equal(pickedPage?.content, byKey("human_owned").content, "the new project holds the chosen template");
+  await page.goto(`${base}/#/${ids.created}/conventions`);
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  console.log(`ok   ${vp.name}: the create-project picker sends the template and the tab shows it`);
 
   await context.close();
 }
 
-/** A viewer sees the block and what it is for, but no templates. */
+/** A viewer reads the tab: no templates, no changes. */
 async function viewerScenario(browser: Browser, base: string, ident: string, errors: string[]) {
-  const context = await newContext(browser, VIEWPORTS[0]);
+  const vp = VIEWPORTS[0];
+  const admin = await newContext(browser, vp);
+  const adminPage = await signIn(admin, base, "ada", ADMIN_PASSWORD);
+  const project = await projectByIdent(adminPage, ident);
+
+  const context = await newContext(browser, vp);
   const page = await signIn(context, base, "mia", PASSWORD);
   page.on("pageerror", (err) => errors.push(`viewer: ${err}`));
-  await page.goto(`${base}/${ident}/pages`);
-  const section = page.getByTestId("conventions-section");
-  await section.waitFor({ state: "visible", timeout: 15_000 });
-  assert.equal(await section.getAttribute("data-state"), "none");
-  assert.equal(await section.locator("[data-template]").count(), 0, "a viewer gets no templates");
-  assert.ok((await section.innerText()).includes("no conventions yet"), "a viewer is told there are none");
-  await shot(page, VIEWPORTS[0], "08-viewer-no-conventions");
-  console.log("ok   viewer: the block shows without templates");
+  await page.goto(`${base}/#/${ident}/conventions`);
+  const chooser = page.getByTestId("conventions-chooser");
+  await chooser.waitFor({ state: "visible", timeout: 15_000 });
+  assert.equal(await chooser.getAttribute("data-state"), "none");
+  await page.waitForTimeout(500);
+  assert.equal(await chooser.locator("[data-template]").count(), 0, "a viewer gets no templates");
+  assert.ok((await chooser.innerText()).includes("no conventions yet"), "a viewer is told there are none");
+  await shot(page, vp, "07-viewer-no-conventions");
+
+  await api(adminPage, "POST", "/pages", {
+    project_id: project.id,
+    title: "Conventions",
+    status: "active",
+    conventions: true,
+    content: "# Conventions\n\nViewers read this.",
+  });
+  await page.reload();
+  const status = page.getByTestId("conventions-status");
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  await page.getByText("Viewers read this.").waitFor({ state: "visible" });
+  await page.getByRole("button", { name: "More actions" }).first().click();
+  await page.getByRole("menuitem", { name: "Copy link" }).waitFor({ state: "visible" });
+  assert.equal(await page.getByRole("menuitem", { name: "Change template…" }).count(), 0, "a viewer can't change the template");
+  assert.equal(await page.getByRole("menuitem", { name: "Leave out of briefings…" }).count(), 0, "or turn it off");
+  console.log("ok   viewer: the tab is read-only, with and without a page");
+  await context.close();
+  await admin.close();
+}
+
+/** A signed-out reader of a published project reads the tab. */
+async function signedOutScenario(browser: Browser, base: string, ident: string, errors: string[]) {
+  const vp = VIEWPORTS[1];
+  const context = await newContext(browser, vp);
+  const page = await context.newPage();
+  page.on("pageerror", (err) => errors.push(`signed out: ${err}`));
+  await page.goto(`${base}/#/${ident}/conventions`);
+  const status = page.getByTestId("conventions-status");
+  await status.waitFor({ state: "visible", timeout: 15_000 });
+  await page.getByText("Readers read this.").waitFor({ state: "visible" });
+  assert.ok(page.url().endsWith(`#/${ident}/conventions`), "a reader stays on the tab");
+  assert.equal(await page.getByRole("menuitem", { name: "Change template…" }).count(), 0);
+  await assertNoOverflow(page, "signed out conventions");
+  console.log("ok   signed out: a published project's tab is readable");
   await context.close();
 }
 
@@ -349,7 +469,7 @@ async function main(): Promise<number> {
     console.error("conventions test deadline exceeded");
     server?.kill("SIGKILL");
     process.exit(1);
-  }, 240_000);
+  }, 300_000);
 
   try {
     cli(config, db, [
@@ -366,10 +486,14 @@ async function main(): Promise<number> {
       "user", "create", "--username", "mia",
       "--email", "mia@example.test", "--password", PASSWORD,
     ]);
-    for (const ident of ["BAREA", "BAREB", "VIEW"]) {
+    for (const ident of ["BAREA", "BAREB", "VIEW", "PUB"]) {
       cli(config, db, ["project", "create", "--name", `Project ${ident}`, "--identifier", ident, "--json"]);
     }
     cli(config, db, ["member", "add", "--project", "VIEW", "--user", "mia", "--role", "viewer"]);
+    // Publishing has no CLI by design (see public-projects.ts).
+    const seed = new Database(db);
+    seed.run("UPDATE projects SET is_public = 1 WHERE identifier = 'PUB'");
+    seed.close();
 
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
@@ -384,7 +508,8 @@ async function main(): Promise<number> {
     const errors: string[] = [];
 
     // Setup through the API: the templates, projects whose conventions page
-    // is empty, and a viewer project with no conventions page at all.
+    // is empty, a viewer project with no conventions page at all, and a
+    // published project with one.
     const probe = await browser.newContext();
     const probePage = await signIn(probe, base, "ada", ADMIN_PASSWORD);
     const templates: Template[] = await api(probePage, "GET", "/conventions/templates");
@@ -399,11 +524,21 @@ async function main(): Promise<number> {
     const view = await projectByIdent(probePage, "VIEW");
     const viewPage = await conventionsPage(probePage, view.id);
     if (viewPage) await api(probePage, "DELETE", `/pages/${viewPage.id}`);
+    const pub = await projectByIdent(probePage, "PUB");
+    const pubPage = await conventionsPage(probePage, pub.id);
+    const readerText = "# Conventions\n\nReaders read this.";
+    if (pubPage) await api(probePage, "PUT", `/pages/${pubPage.id}`, { content: readerText });
+    else {
+      await api(probePage, "POST", "/pages", {
+        project_id: pub.id, title: "Conventions", status: "active", conventions: true, content: readerText,
+      });
+    }
     await probe.close();
 
     await scenario(browser, base, VIEWPORTS[0], { bare: "BAREA", emptyPage: "EMPTA", created: "PICKA" }, templates, errors);
     await scenario(browser, base, VIEWPORTS[1], { bare: "BAREB", emptyPage: "EMPTB", created: "PICKB" }, templates, errors);
     await viewerScenario(browser, base, "VIEW", errors);
+    await signedOutScenario(browser, base, "PUB", errors);
 
     assert.deepEqual(errors, [], "no page errors");
     console.log(`conventions: all checks passed (screenshots in ${SHOTS})`);

@@ -80,12 +80,12 @@ export async function checkLoginRedirect(
       await page.goto(`${base}/#/login`, { waitUntil: "load", timeout: 15_000 });
       await signIn(page, username, password);
       await page.waitForURL(`${base}/#/`, { timeout: 15_000 });
-      const remembered = `${base}/#/login?next=${encodeURIComponent("/DEMO/pages/1")}`;
+      const remembered = `${base}/#/login?next=${encodeURIComponent("/DEMO/issues/DEMO-1")}`;
       // A fresh page, so this is a cold load of the login link, not a hash
       // change inside an already-running app.
       const fresh = await context.newPage();
       await fresh.goto(remembered, { waitUntil: "load", timeout: 15_000 });
-      await fresh.waitForURL(/#\/DEMO\/pages\/1$/, { timeout: 15_000 }).catch(() => {
+      await fresh.waitForURL(/#\/DEMO\/issues\/DEMO-1$/, { timeout: 15_000 }).catch(() => {
         throw new Error(`signed-in login link stayed at ${fresh.url()}`);
       });
       console.log("ok   a signed-in login link continues to next");

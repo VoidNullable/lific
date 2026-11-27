@@ -32,7 +32,7 @@ describe("signed-out state", () => {
   test("covers a project's read pages and nothing account-shaped", () => {
     for (const page of ["project-overview", "issues", "board", "graph", "issue-detail", "pages",
       "page-detail", "plans", "plan-detail", "modules", "module-detail", "activity", "insights",
-      "files"]) {
+      "files", "conventions"]) {
       expect(SIGNED_OUT_PAGES.has(page)).toBe(true);
     }
     for (const page of ["home", "inbox", "assigned", "agents", "settings", "instance-settings",

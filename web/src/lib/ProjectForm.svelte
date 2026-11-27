@@ -15,6 +15,7 @@
   import { FALLBACK_TEMPLATES } from "./pages/conventions";
   import { cleanIdentifier, identifierProblem, suggestIdentifier, IDENTIFIER_MAX } from "./projectIdentifier";
   import { ImagePlus, RotateCcw } from "lucide-svelte";
+  import ConventionsTemplatePicker from "./pages/ConventionsTemplatePicker.svelte";
 
   // The create form. Its top half is the project's overview header, filled in
   // where it will appear; the rest is the setup a header doesn't show.
@@ -286,46 +287,11 @@
       <h2 id="new-conventions-heading" class="text-[1.15rem] font-semibold tracking-tight text-[var(--text)]">Conventions</h2>
       <p class="text-body-sm text-[var(--text-muted)] mt-0.5">
         The rules for working in this tracker. Agents read them with their briefing at the start
-        of each session. Pick a starting point; the page stays yours to edit.
+        of each session. Pick a starting point; you can edit it or switch templates
+        later on the project's Conventions tab.
       </p>
     </div>
-    <div class="grid sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Conventions template" aria-busy={templates === null}>
-      {#if templates === null}
-        {#each [0, 1, 2, 3] as i (i)}
-          <div class="h-[4.5rem] rounded-xl bg-[var(--chart-tile)] animate-pulse motion-reduce:animate-none"></div>
-        {/each}
-      {/if}
-      {#each templates ?? [] as t (t.key)}
-        {@const selected = conventions === t.key}
-        <button
-          type="button"
-          role="radio"
-          aria-checked={selected}
-          data-template={t.key}
-          class="flex items-start gap-3 rounded-xl px-4 py-3.5 text-left transition-colors border
-                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]
-                 {selected
-            ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
-            : 'border-transparent bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] hover:border-[var(--border)]'}"
-          onclick={() => (conventions = t.key)}
-        >
-          <span
-            class="mt-0.5 size-4 shrink-0 rounded-full border-2 grid place-items-center
-                   {selected ? 'border-[var(--accent)]' : 'border-[var(--text-faint)]'}"
-          >
-            {#if selected}<span class="size-2 rounded-full bg-[var(--accent)]"></span>{/if}
-          </span>
-          <span class="flex-1 min-w-0">
-            <span class="block text-body-sm font-medium {selected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">
-              {t.name}
-            </span>
-            {#if t.summary}
-              <span class="block text-caption text-[var(--text-muted)] leading-snug mt-0.5">{t.summary}</span>
-            {/if}
-          </span>
-        </button>
-      {/each}
-    </div>
+    <ConventionsTemplatePicker {templates} bind:selected={conventions} previewHeight="16rem" />
   </section>
 </div>
 

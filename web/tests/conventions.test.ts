@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { conventionsState, startingTemplates } from "../src/lib/pages/conventions";
+import {
+  FALLBACK_TEMPLATES,
+  conventionsRoute,
+  conventionsState,
+  defaultTemplateKey,
+  pageRoute,
+  templateName,
+} from "../src/lib/pages/conventions";
 import type { ConventionTemplate } from "../src/lib/api";
 
 const row = (id: number, preview: string, conventions?: boolean) => ({ id, preview, conventions });
@@ -26,25 +33,34 @@ describe("conventionsState", () => {
   });
 });
 
-describe("startingTemplates", () => {
+describe("routes", () => {
+  it("opens the conventions page on its tab and any other page in Pages", () => {
+    expect(conventionsRoute("LIF")).toBe("/LIF/conventions");
+    expect(pageRoute("LIF", { id: 7, conventions: true })).toBe("/LIF/conventions");
+    expect(pageRoute("LIF", { id: 7, conventions: false })).toBe("/LIF/pages/7");
+    expect(pageRoute("LIF", { id: 7 })).toBe("/LIF/pages/7");
+  });
+});
+
+describe("templates", () => {
   const t = (key: ConventionTemplate["key"], content: string): ConventionTemplate => ({
     key,
-    name: key,
+    name: key === "empty" ? "Empty" : key,
     summary: "",
     content,
   });
 
-  it("drops the empty template and keeps server order", () => {
-    const keys = startingTemplates([
-      t("empty", ""),
-      t("ai_managed", "a"),
-      t("human_managed", "b"),
-      t("human_owned", "c"),
-    ]).map((x) => x.key);
-    expect(keys).toEqual(["ai_managed", "human_managed", "human_owned"]);
+  it("calls the empty template Blank and keeps the other names", () => {
+    expect(templateName(t("empty", ""))).toBe("Blank");
+    expect(templateName(t("human_owned", "c"))).toBe("human_owned");
   });
 
-  it("drops a template with no body", () => {
-    expect(startingTemplates([t("ai_managed", "  ")])).toEqual([]);
+  it("starts on the first template with text", () => {
+    expect(defaultTemplateKey([t("empty", ""), t("ai_managed", "a"), t("human_owned", "c")])).toBe("ai_managed");
+  });
+
+  it("starts on the first template when none has text", () => {
+    expect(defaultTemplateKey(FALLBACK_TEMPLATES)).toBe("empty");
+    expect(defaultTemplateKey([])).toBe("empty");
   });
 });

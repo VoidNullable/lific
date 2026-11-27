@@ -57,7 +57,7 @@ const server = await createServer({
 const stamp = "2026-09-10T12:00:00Z";
 const longName = "The extraordinarily long project name that must not hide its actions";
 const longTitle = "Investigate the extraordinarily long sidebar regression title with enough detail to wrap across several lines";
-const destinations = ["Overview", "Issues", "Board", "Modules", "Pages", "Plans", "Graph", "Files", "Activity", "Insights"];
+const destinations = ["Overview", "Issues", "Board", "Modules", "Pages", "Conventions", "Plans", "Graph", "Files", "Activity", "Insights"];
 type Call = { method: string; path: string; query: string; body: any };
 type Gate = { method: string; path: string; status: number; release: () => void; promise: Promise<void> };
 type Item = { kind: "folder" | "project"; id: number };

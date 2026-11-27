@@ -66,6 +66,7 @@ const SECTION_LABELS: Record<string, string> = {
   graph: "Graph",
   pages: "Pages",
   files: "Files",
+  conventions: "Conventions",
   plans: "Plans",
   modules: "Modules",
   activity: "Activity",
