@@ -47,6 +47,7 @@
   // `canEdit` = maintainer/admin: label management.
   import { projectRole, loadProjectRole, deriveCanPublish } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
+  import { folderPaths } from "../lib/sidebarTree";
 
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
@@ -559,7 +560,7 @@
         {#if !canManage}
           <p class="flex items-center gap-2 text-body-sm text-[var(--text-muted)] rounded-lg bg-[var(--bg-subtle)] px-3.5 py-2.5">
             <Lock size={14} class="shrink-0" />
-            Only a project lead or an admin can change these settings. Your sidebar group is yours to set.
+            Only a project lead or an admin can change these settings. Your sidebar folder is yours to set.
           </p>
         {/if}
 
@@ -711,13 +712,13 @@
                 }}
                 class="{inputClass} max-w-[36ch]"
               >
-                <option value="">No group</option>
-                {#each groups as group (group.id)}
-                  <option value={String(group.id)}>{group.name}</option>
+                <option value="">No folder</option>
+                {#each folderPaths(groups) as group (group.id)}
+                  <option value={String(group.id)}>{group.label}</option>
                 {/each}
               </select>
             {/snippet}
-            {@render row("Sidebar group", "Where this project sits in your sidebar. Only you see it.", groupControl, "project-group")}
+            {@render row("Sidebar folder", "Where this project sits in your sidebar. Only you see it.", groupControl, "project-group")}
           </div>
         </section>
 

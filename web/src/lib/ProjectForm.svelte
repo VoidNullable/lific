@@ -10,6 +10,7 @@
   } from "./api";
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
+  import { folderPaths } from "./sidebarTree";
   import { FALLBACK_TEMPLATES } from "./pages/conventions";
 
   let {
@@ -90,8 +91,8 @@
   let previewId = $derived((identifier.trim().toUpperCase() || "PRO") + "-1");
 
   let groupOptions = $derived([
-    { value: null, label: "No group" },
-    ...groups.map((g) => ({ value: g.id, label: g.name })),
+    { value: null, label: "No folder" },
+    ...folderPaths(groups).map((g) => ({ value: g.id, label: g.label })),
   ]);
 
   let userOptions = $derived([
@@ -203,12 +204,12 @@
   </div>
 
   {#if groups.length > 0}
-    <!-- Sidebar grouping. Personal to the signed-in user, unlike Lead. -->
+    <!-- Sidebar folder. Personal to the signed-in user, unlike Lead. -->
     <div class="mb-8 max-w-xs">
       <label class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit">
-        Group
+        Folder
       </label>
-      <Select options={groupOptions} bind:value={groupId} placeholder="No group" />
+      <Select options={groupOptions} bind:value={groupId} placeholder="No folder" />
     </div>
   {/if}
 
