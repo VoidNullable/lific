@@ -786,7 +786,7 @@ fn write_all_clients(
         let out_key = if args.stdio || args.oauth {
             None
         } else {
-            this_key.clone()
+            this_key
         };
         let auth_hint = if args.oauth {
             match spec.oauth {

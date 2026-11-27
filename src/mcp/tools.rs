@@ -18240,11 +18240,7 @@ mod authz_gating_tests {
                 project: Some("MEM".into()),
             },
         ] {
-            let entity = scope.entity.clone();
-            let project = scope.project.clone();
-            let denied = as_user(&non_member, || {
-                m.list_attachments(Parameters(ListAttachmentsInput { entity, project }))
-            });
+            let denied = as_user(&non_member, || m.list_attachments(Parameters(scope)));
             assert!(is_forbidden(&denied), "non-member list: {denied}");
             assert!(!denied.contains("secret.txt"), "{denied}");
         }
