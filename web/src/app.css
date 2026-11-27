@@ -739,10 +739,11 @@ html[data-motion="reduced"] *::after {
      reliably zoom back out, leaving the whole page rescaled). On coarse
      pointers, floor form-field font-size at 16px regardless of the utility
      class or data-font-scale. Fixed px (not rem) so html font-scale settings
-     can't drag it back under the threshold. */
+     can't drag it back under the threshold. Fields marked data-display-field
+     are already set larger (a title typed in place) and keep their size. */
   @media (pointer: coarse) {
-    input,
-    textarea,
+    input:not([data-display-field]),
+    textarea:not([data-display-field]),
     select {
       font-size: 16px !important;
     }

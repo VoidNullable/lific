@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### New project form
+
+- The form is laid out as the project's overview header: pick the icon, type the name as a title and the description under it, then the setup rows and a conventions template below. On wide screens a preview shows the project's sidebar row and its issue and page links as you type.
+- The suggested identifier never starts with a digit and steps around ones already in use (`LIF` taken suggests `LIF2`). Typing keeps only letters and digits, and an identifier the server would refuse is named before you submit, with Create disabled until it is fixed. A changed identifier can go back to the suggestion in one click.
+- `Ctrl+Enter` (`Cmd+Enter` on a Mac) creates the project. A failed create shows its reason in the form, not only in the top bar.
+- Deactivated accounts are no longer offered as the project lead.
+
+### Fixes
+
+- Creating or renaming a project to an identifier already in use answers `409` naming the identifier, instead of `500`.
+
 ## v3.0.0 (2026-11-27)
 
 Lific 3.0 is a major release, and several changes can break an existing setup: project roles are always enforced, the `/mcp/<token>` route is gone, published projects move to their normal links and take `/public/api` with them, and the web UI keeps its session only in an HttpOnly cookie, so sign-in responses no longer return a token. Read Before you upgrade first. Most of the rest is for agents sharing a tracker. An agent can claim an issue for a set time, retry a create without filing it twice, record a decision, and get the project's conventions page at the top of every briefing, which now remembers where it left off. The web UI is redrawn almost everywhere, from the sidebar and Inbox to the issue and page views, and bodies are edited in place. Seventeen migrations run on first start.

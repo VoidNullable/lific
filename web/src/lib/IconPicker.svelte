@@ -7,9 +7,15 @@
   let {
     value = "",
     onchange,
+    size = "md",
+    empty,
   }: {
     value?: string;
     onchange?: (value: string) => void;
+    /** md is the 40px field trigger; lg the 48px tile a project header uses. */
+    size?: "md" | "lg";
+    /** What the trigger shows with no icon chosen; a plus by default. */
+    empty?: import("svelte").Snippet;
   } = $props();
 
   let open = $state(false);
@@ -151,14 +157,18 @@
 <div class="relative">
   <!-- Trigger button -->
   <button
-    class="size-10 rounded-lg border border-[var(--border)] bg-[var(--bg-subtle)]
+    class="{size === 'lg' ? 'size-12 rounded-xl' : 'size-10 rounded-lg'} border border-[var(--border)] bg-[var(--bg-subtle)]
            flex items-center justify-center text-title
            hover:border-[var(--accent)] transition-colors"
     onclick={toggle}
     title="Choose icon"
+    aria-label="Choose icon"
+    aria-expanded={open}
   >
     {#if value}
-      <ProjectIcon {value} size={20} class="text-[var(--text)]" />
+      <ProjectIcon {value} size={size === "lg" ? 22 : 20} class="text-[var(--text)]" />
+    {:else if empty}
+      {@render empty()}
     {:else}
       <span class="text-[var(--text-faint)] text-body">+</span>
     {/if}

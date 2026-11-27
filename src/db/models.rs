@@ -1091,6 +1091,21 @@ pub struct Bot {
     pub connected: bool,
     #[serde(default)]
     pub tool_id: Option<String>,
+    /// When its newest live API key was issued, if it has one.
+    #[serde(default)]
+    pub key_created_at: Option<String>,
+    /// Whether a live OAuth token connects it (a client that signed in).
+    #[serde(default)]
+    pub oauth: bool,
+    /// Its most recent write or MCP read, `YYYY-MM-DD HH:MM:SS` UTC.
+    #[serde(default)]
+    pub last_active: Option<String>,
+    /// Writes it has made, from the audit log.
+    #[serde(default)]
+    pub changes: i64,
+    /// Comments it wrote. Deleting the account deletes these.
+    #[serde(default)]
+    pub comments: i64,
 }
 
 // ── API Key (user-facing) ────────────────────────────────────
