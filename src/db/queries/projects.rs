@@ -229,6 +229,27 @@ pub(crate) fn validate_identifier(identifier: &str) -> Result<(), LificError> {
     Ok(())
 }
 
+/// A taken identifier is the caller's to fix, so it answers as a conflict
+/// naming the identifier rather than surfacing the unique index's error as a
+/// server failure. The index (NOCASE) still backs this up.
+fn ensure_identifier_free(
+    conn: &Connection,
+    identifier: &str,
+    except: Option<i64>,
+) -> Result<(), LificError> {
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE identifier = ?1 COLLATE NOCASE AND id IS NOT ?2)",
+        params![identifier, except],
+        |row| row.get(0),
+    )?;
+    if taken {
+        return Err(LificError::Conflict(format!(
+            "identifier '{identifier}' is already used by another project"
+        )));
+    }
+    Ok(())
+}
+
 pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Project, LificError> {
     validate_identifier(&input.identifier)?;
     // LIF-233: append new projects below existing ones rather than letting them
@@ -239,6 +260,7 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
     // key) used to leave a leaderless project behind that only an admin could
     // then reach.
     super::savepoint(conn, "create_project", || {
+        ensure_identifier_free(conn, &input.identifier, None)?;
         conn.execute(
             "INSERT INTO projects (name, identifier, description, emoji, lead_user_id, sort_order)
              VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))",
@@ -341,6 +363,7 @@ pub fn update_project(
         }
         if let Some(ref identifier) = input.identifier {
             validate_identifier(identifier)?;
+            ensure_identifier_free(conn, identifier, Some(id))?;
             conn.execute(
                 "UPDATE projects SET identifier = ?1 WHERE id = ?2",
                 params![identifier, id],
@@ -585,7 +608,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(LificError::Conflict(msg)) if msg.contains("'DUP'")),
+            "a taken identifier is a conflict naming it, got: {result:?}"
+        );
     }
 
     // ── LIF-134: identifier grammar ──────────────────────────
