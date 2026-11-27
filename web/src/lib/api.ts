@@ -833,17 +833,53 @@ export async function unarchiveProject(id: number) {
   return request<UnarchivedProject>(`/archived-projects/${id}/unarchive`, { method: "POST" });
 }
 
-/** A user's sidebar project group. `project_ids` carries only projects the
- *  caller can see — the server drops memberships pointing at projects whose
- *  access was revoked, so a group never renders an entry that 403s on click. */
+/** One entry in the sidebar tree. */
+export type SidebarItem = { kind: "folder" | "project"; id: number };
+
+/** A user's sidebar folder (a "project group" on the wire). `items` holds its
+ *  subfolders and projects in sidebar order; `project_ids` just the projects.
+ *  Both carry only projects the caller can see: the server drops memberships
+ *  pointing at projects whose access was revoked, so a folder never renders
+ *  an entry that 403s on click. */
 export interface ProjectGroup {
   id: number;
   user_id: number;
   name: string;
+  parent_id: number | null;
+  /** 1 for a top-level folder. */
+  depth: number;
   sort_order: number;
   project_ids: number[];
+  items: SidebarItem[];
   created_at: string;
   updated_at: string;
+}
+
+/** The whole sidebar tree: the top level in order, and every folder
+ *  depth-first. */
+export interface SidebarLayout {
+  root: SidebarItem[];
+  groups: ProjectGroup[];
+  max_depth: number;
+}
+
+/** Put `item` inside `parent_id` (null: the top level), directly before
+ *  `before`, or last when `before` is null. */
+export interface SidebarMove {
+  item: SidebarItem;
+  parent_id: number | null;
+  before: SidebarItem | null;
+}
+
+export async function getSidebarLayout() {
+  return request<SidebarLayout>("/project-groups/layout");
+}
+
+export async function moveSidebarItem(move: SidebarMove) {
+  return request<SidebarLayout>("/project-groups/move", {
+    method: "PUT",
+    body: JSON.stringify(move),
+  });
 }
 
 export async function listProjectGroups() {
@@ -857,10 +893,16 @@ export async function reorderProjectGroups(ids: number[]) {
   });
 }
 
-export async function createProjectGroup(name: string) {
+/** Create a folder in `parentId` (null: the top level). With `contains`,
+ *  that project or folder moves into it in the same write. */
+export async function createProjectGroup(
+  name: string,
+  parentId: number | null = null,
+  contains: SidebarItem | null = null,
+) {
   return request<ProjectGroup>("/project-groups", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, parent_id: parentId, contains }),
   });
 }
 
