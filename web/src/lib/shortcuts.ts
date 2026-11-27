@@ -21,7 +21,7 @@ import { shortcutHelpState } from "./shortcutHelpState.svelte";
 import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
 import { mobileNavState } from "./mobileNavState.svelte";
 
-export type ShortcutScope = "global" | "list" | "board" | "inbox" | "detail" | "peek" | "palette" | "editor";
+export type ShortcutScope = "global" | "list" | "board" | "pages" | "inbox" | "detail" | "peek" | "palette" | "editor";
 
 export interface ShortcutEntry {
   /** Display form. Space-separated tokens render as separate <kbd> chips,
@@ -31,12 +31,13 @@ export interface ShortcutEntry {
   scope: ShortcutScope;
 }
 
-export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "inbox", "detail", "peek", "palette", "editor"];
+export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "pages", "inbox", "detail", "peek", "palette", "editor"];
 
 export const SCOPE_LABEL: Record<ShortcutScope, string> = {
   global: "Global",
   list: "Issue list",
   board: "Board",
+  pages: "Pages",
   inbox: "Inbox",
   detail: "Issue and page view",
   peek: "Peek panel",
@@ -81,6 +82,20 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "C", label: "New issue", scope: "board" },
   { keys: "F", label: "Open filters", scope: "board" },
   { keys: "/", label: "Focus search", scope: "board" },
+
+  // ── Pages (PageList.svelte onKeydown) ────────────────────
+  { keys: "J ↓", label: "Next page", scope: "pages" },
+  { keys: "K ↑", label: "Previous page", scope: "pages" },
+  { keys: "Enter", label: "Open the focused page", scope: "pages" },
+  { keys: "Space", label: "Peek the focused page (without the reading pane)", scope: "pages" },
+  { keys: "P", label: "Pin or unpin", scope: "pages" },
+  { keys: "X", label: "Select or deselect", scope: "pages" },
+  { keys: "Ctrl/⌘ A", label: "Select every page shown", scope: "pages" },
+  { keys: "C", label: "New page", scope: "pages" },
+  { keys: "F", label: "Open filters", scope: "pages" },
+  { keys: "/", label: "Focus search", scope: "pages" },
+  { keys: "Right-click", label: "Page actions (press and hold on touch)", scope: "pages" },
+  { keys: "Esc", label: "Close a popover, clear the selection or the preview", scope: "pages" },
 
   // ── Issue and page view (DocumentDetail.svelte, IssueDetail.svelte) ──
   { keys: "E", label: "Edit the description", scope: "detail" },

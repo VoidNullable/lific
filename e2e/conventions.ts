@@ -11,8 +11,12 @@
  *     full text readable before choosing;
  *   - "Use <template>" creates the page and the tab becomes that page, with
  *     its state in briefings shown and no switch to flip;
- *   - the Pages list shows neither a conventions block nor the page, and the
- *     page's old address and a palette lookup both lead to the tab;
+ *   - the Pages list and its search leave the page out; the folder pane's
+ *     Conventions entry is a link to the tab with the page's state (not
+ *     written, on, off), never a scope of the list, and a view saved with
+ *     the old Conventions scope opens All pages;
+ *   - the page's old address, with or without a comment target, and a
+ *     palette lookup lead to the tab;
  *   - Change template asks first, then replaces the text, and the old text
  *     is in the page history;
  *   - turning it off and back on each ask first, survive a reload, and keep
@@ -40,7 +44,7 @@ import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BIN = process.env.LIFIC_BIN ?? join(ROOT, "target", "debug", "lific");
-const SHOTS = process.env.SHOTS ?? "/tmp/opencode/conventions-tab-shots";
+const SHOTS = process.env.SHOTS ?? "/tmp/opencode/conventions-tab-shots/v2";
 const ADMIN_PASSWORD = "conventions-admin-password-123";
 const PASSWORD = "conventions-user-password-123";
 
@@ -171,6 +175,49 @@ function sampleLine(t: Template): string {
   return line.slice(0, 30);
 }
 
+/** The Pages folder pane's Conventions entry: a link to the tab, with the
+ *  page's state, never the list's selected scope. Opens the pane's drawer
+ *  on a phone. */
+async function conventionsEntry(page: Page, vp: Viewport, base: string, ident: string, state: string) {
+  await page.goto(`${base}/#/${ident}/pages`);
+  if (vp.mobile) await page.getByRole("button", { name: /^Folders:/ }).click();
+  const entry = page.getByTestId("conventions-entry");
+  await entry.waitFor({ state: "visible", timeout: 15_000 });
+  await waitFor(page, () => entry.getAttribute("data-state"), (v) => v === state, `the entry says ${state}`);
+  assert.equal(await entry.evaluate((el) => el.tagName), "A", "the entry is a link");
+  assert.equal(await entry.getAttribute("href"), `#/${ident}/conventions`, "the entry links to the tab");
+  assert.equal(await entry.getAttribute("aria-current"), null, "the entry is never the selected scope");
+  return entry;
+}
+
+/** Undo a stored page diff (unified, no file header) on the text it
+ *  produced, giving back the text before the edit. */
+function undoDiff(after: string, diff: string): string {
+  const newLines = after.split("\n");
+  const old: string[] = [];
+  let next = 0; // index into newLines
+  for (const line of diff.split("\n")) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      // An empty side is numbered one line earlier in unified diffs.
+      const start = Math.max(0, Number(hunk[1]) - 1);
+      while (next < start) old.push(newLines[next++]);
+      continue;
+    }
+    if (line.startsWith("\\") || line === "") continue;
+    if (line.startsWith(" ")) {
+      old.push(line.slice(1));
+      next++;
+    } else if (line.startsWith("-")) {
+      old.push(line.slice(1));
+    } else if (line.startsWith("+")) {
+      next++;
+    }
+  }
+  while (next < newLines.length) old.push(newLines[next++]);
+  return old.join("\n");
+}
+
 /** Open the document's ⋯ menu and pick an item. */
 async function menu(page: Page, item: string) {
   await page.getByRole("button", { name: "More actions" }).first().click();
@@ -202,6 +249,10 @@ async function scenario(
     content: "Steps before a release",
     status: "active",
   });
+
+  // Pages links to the tab, and says nothing is written yet.
+  await conventionsEntry(page, vp, base, ids.bare, "missing");
+  if (vp.mobile) await page.getByRole("button", { name: "Close folders" }).click();
 
   // The tab is in the navigation.
   await page.goto(`${base}/#/${ids.bare}/pages`);
@@ -235,12 +286,40 @@ async function scenario(
   await waitFor(page, () => preview.getAttribute("data-template"), (v) => v === "human_managed", "picking previews it");
   assert.ok((await preview.innerText()).includes(sampleLine(byKey("human_managed"))), "the preview follows the choice");
   await radios.locator('[role=radio][data-template="empty"]').click();
-  assert.ok((await preview.innerText()).includes("empty page"), "Blank says what it is");
-  await radios.locator('[role=radio][data-template="human_managed"]').click();
+  await preview.getByTestId("template-blank").waitFor({ state: "visible" });
+  assert.ok((await preview.innerText()).includes("An empty page"), "Blank says what it is");
   const use = chooser.getByTestId("conventions-use-template");
+  assert.equal((await use.innerText()).trim(), "Start blank", "the action names the blank start");
+  await assertNoOverflow(page, `${vp.name} conventions, Blank`);
+  await shot(page, vp, "01-tab-blank");
+
+  await radios.locator('[role=radio][data-template="human_managed"]').click();
   assert.equal((await use.innerText()).trim(), "Use Human managed", "one action names the choice");
+  // The longest template, so there is a middle to scroll to.
+  const longest = templates.reduce((a, b) => (b.content.length > a.content.length ? b : a));
+  await radios.locator(`[role=radio][data-template="${longest.key}"]`).click();
+  await waitFor(page, () => preview.getAttribute("data-template"), (v) => v === longest.key, "the longest is previewed");
+  // The text is laid out at full length (no box of its own to scroll), and
+  // its header with the action stays in view as the page scrolls.
+  const text = preview.getByTestId("template-text");
+  assert.equal(
+    await text.evaluate((el) => el.scrollHeight - el.clientHeight),
+    0,
+    "the text is not cut off in a scroll box",
+  );
+  await chooser.evaluate((el) => {
+    const scroller = el.parentElement!;
+    scroller.scrollTop = (scroller.scrollHeight - scroller.clientHeight) / 2;
+  });
+  await page.waitForTimeout(200);
+  const scrolled = await chooser.evaluate((el) => el.parentElement!.scrollTop);
+  assert.ok(scrolled > 0, "the page scrolls the text");
+  const useBox = await use.boundingBox();
+  assert.ok(useBox && useBox.y >= 0 && useBox.y < vp.height, "the action stays in view mid-text");
   await assertNoOverflow(page, `${vp.name} conventions, no page`);
-  await shot(page, vp, "01-tab-template-choice");
+  await shot(page, vp, "02-tab-template-mid-text");
+  await chooser.evaluate((el) => (el.parentElement!.scrollTop = 0));
+  await radios.locator('[role=radio][data-template="human_managed"]').click();
   console.log(`ok   ${vp.name}: without a page the tab offers four templates with their full text`);
 
   // ── Use it: the tab becomes the page ────────────────────────────────
@@ -256,24 +335,58 @@ async function scenario(
   assert.equal(created.status, "active", "the page is created active");
   await page.getByText(sampleLine(byKey("human_managed"))).first().waitFor({ state: "visible" });
   await assertNoOverflow(page, `${vp.name} conventions page`);
-  await shot(page, vp, "02-tab-with-page");
+  await shot(page, vp, "03-tab-with-page");
   console.log(`ok   ${vp.name}: a template creates the page and the tab shows it`);
 
   // ── Pages leaves it out; old links lead to the tab ──────────────────
   await page.goto(`${base}/#/${ids.bare}/pages`);
   await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("conventions-section").count(), 0, "no conventions block on Pages");
   const copies = await page.evaluate((ident) => {
     const main = document.querySelector("main") ?? document.body;
     return [...main.querySelectorAll("button, a")].filter((el) => el.textContent?.includes(ident)).length;
   }, created.identifier);
   assert.equal(copies, 0, "the conventions page is not listed in Pages");
   await assertNoOverflow(page, `${vp.name} pages`);
-  await shot(page, vp, "03-pages-list");
+  // Nor does a search on Pages find it.
+  if (vp.mobile) await page.getByRole("button", { name: "Search pages" }).click();
+  await page.getByPlaceholder("Search pages...").fill(created.identifier);
+  await page.getByText("No pages match").waitFor({ state: "visible" });
+  await page.getByTestId("pages-empty").getByRole("button", { name: "Clear search" }).click();
+  // A view saved while Conventions was a scope of this list opens All pages.
+  await page.evaluate((ident) => {
+    localStorage.setItem(`lific:pages-view:${ident}`, JSON.stringify({ scope: "conventions", pane: true }));
+  }, ids.bare);
+  await page.reload();
+  const pagesEntry = await conventionsEntry(page, vp, base, ids.bare, "on");
+  assert.ok(
+    (await page.getByTestId("pages-scope").innerText()).includes("All pages"),
+    "a saved Conventions scope falls back to All pages",
+  );
+  await page.getByText("Release checklist").filter({ visible: true }).first().waitFor({ state: "visible" });
+  await shot(page, vp, "04-pages-folder-pane");
+  await pagesEntry.click();
+  await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
+  await status.waitFor({ state: "visible" });
 
   await page.goto(`${base}/#/${ids.bare}/pages/${created.id}`);
   await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
   await status.waitFor({ state: "visible" });
+
+  // A link to one of its comments, in either form, keeps the target.
+  const comment = await api(page, "POST", `/pages/${created.id}/comments`, { content: `Linked comment ${vp.name}` });
+  for (const link of [
+    `${base}/#/${ids.bare}/pages/${created.id}?comment=${comment.id}`,
+    `${base}/${ids.bare}/pages/${created.id}#comment-${comment.id}`,
+  ]) {
+    await page.goto(link);
+    await page.waitForURL(`${base}/#/${ids.bare}/conventions?comment=${comment.id}`, { timeout: 15_000 });
+    await page.locator(`#comment-${comment.id}`).waitFor({ state: "visible", timeout: 15_000 });
+    const inView = await page.locator(`#comment-${comment.id}`).evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return r.bottom > 0 && r.top < window.innerHeight;
+    });
+    assert.ok(inView, `${link}: the linked comment is scrolled into view`);
+  }
   if (!vp.mobile) {
     await page.goto(`${base}/#/${ids.bare}/pages`);
     await page.getByText("Release checklist").filter({ visible: true }).first().waitFor();
@@ -285,12 +398,13 @@ async function scenario(
     await page.keyboard.press("Enter");
     await page.waitForURL(new RegExp(`#/${ids.bare}/conventions$`), { timeout: 15_000 });
   }
-  console.log(`ok   ${vp.name}: Pages leaves the page out, and its old address${vp.mobile ? "" : " and a palette lookup"} open the tab`);
+  console.log(
+    `ok   ${vp.name}: Pages leaves the page out of its list and search and links to the tab; its old address${vp.mobile ? "" : " and a palette lookup"} open the tab`,
+  );
 
   // ── Change template, behind a confirmation ──────────────────────────
   await page.goto(tab);
   await status.waitFor({ state: "visible", timeout: 15_000 });
-  const before = (await api(page, "GET", `/pages/${created.id}/activity`)).items.length;
   await menu(page, "Change template…");
   const dialog = page.getByTestId("conventions-dialog");
   await dialog.waitFor({ state: "visible" });
@@ -301,8 +415,36 @@ async function scenario(
   const confirm = dialog.getByTestId("conventions-dialog-confirm");
   assert.equal((await confirm.innerText()).trim(), "Replace with Human owned");
   await assertNoOverflow(page, `${vp.name} change template`);
-  await shot(page, vp, "04-change-template-confirm");
+  await shot(page, vp, "05-change-template-dialog");
+  // Focus stays in the dialog, and nothing behind it reacts to keys.
+  for (let i = 0; i < 30; i++) {
+    await page.keyboard.press("Tab");
+    const inside = await dialog.evaluate((el) => el.contains(document.activeElement));
+    assert.ok(inside, `Tab ${i + 1} kept focus in the dialog`);
+  }
+  const backgroundTookFocus = await page.evaluate(() => {
+    const btn = document.querySelector<HTMLElement>('button[aria-label="More actions"]')!;
+    const before = document.activeElement;
+    btn.focus();
+    const took = document.activeElement === btn;
+    (before as HTMLElement | null)?.focus();
+    return took;
+  });
+  assert.equal(backgroundTookFocus, false, "the page behind the dialog can't take focus");
+  // Esc closes it and focus goes back to the menu button.
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.ok(page.url().endsWith(`#/${ids.bare}/conventions`), "Esc closed the dialog, not the page");
+  // The dialog's close event runs a task after it hides.
+  await waitFor(
+    page,
+    () => page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName),
+    (v) => v === "More actions",
+    "focus returns to the menu button",
+  );
   // Cancel changes nothing.
+  await menu(page, "Change template…");
+  await dialog.waitFor({ state: "visible" });
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await dialog.waitFor({ state: "hidden" });
   assert.equal((await api(page, "GET", `/pages/${created.id}`)).content, created.content, "cancel keeps the text");
@@ -316,8 +458,14 @@ async function scenario(
     (c) => c === byKey("human_owned").content,
     "the text is the new template",
   );
-  const after = (await api(page, "GET", `/pages/${created.id}/activity`)).items.length;
-  assert.ok(after > before, "the replacement is in the page history");
+  // The history entry holds the old text: undoing its diff on the new text
+  // gives back exactly what the page said before.
+  const history = (await api(page, "GET", `/pages/${created.id}/activity`)).items;
+  const entry = history.find((a: { field: string | null }) => a.field === "content_diff" || a.field === "content");
+  assert.ok(entry, "the replacement is in the page history");
+  const previous =
+    entry.field === "content" ? entry.old_value : undoDiff(byKey("human_owned").content, entry.new_value);
+  assert.equal(previous.trimEnd(), created.content.trimEnd(), "the history entry holds the old text");
   console.log(`ok   ${vp.name}: Change template asks first, then replaces the text, with history`);
 
   // ── Turn off, then back on ──────────────────────────────────────────
@@ -338,7 +486,10 @@ async function scenario(
   assert.equal(await status.getAttribute("data-enabled"), "false", "off survives a reload");
   assert.ok((await status.innerText()).includes("Left out of agents' briefings"));
   assert.equal((await api(page, "GET", `/pages/${created.id}`)).content, byKey("human_owned").content, "off keeps the text");
-  await shot(page, vp, "05-tab-off");
+  await shot(page, vp, "06-tab-off");
+  await conventionsEntry(page, vp, base, ids.bare, "off");
+  await page.goto(tab);
+  await status.waitFor({ state: "visible", timeout: 15_000 });
   await menu(page, "Put back in briefings…");
   await dialog.waitFor({ state: "visible" });
   assert.equal(await dialog.getAttribute("data-mode"), "on");
@@ -377,9 +528,17 @@ async function scenario(
     (await page.getByTestId("template-preview").innerText()).includes(sampleLine(byKey("human_owned"))),
     "the form previews the choice",
   );
-  await picker.scrollIntoViewIfNeeded();
+  // The form shows the opening of the text and a way to read the rest.
+  const more = page.getByRole("button", { name: "Show the full text" });
+  await more.waitFor({ state: "visible" });
+  await page.getByRole("heading", { name: "Conventions", exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole("heading", { name: "Conventions", exact: true }).evaluate((el) =>
+    el.scrollIntoView({ block: "start" }),
+  );
   await assertNoOverflow(page, `${vp.name} new project`);
-  await shot(page, vp, "06-new-project-picker");
+  await shot(page, vp, "07-new-project-conventions");
+  await more.click();
+  await page.getByRole("button", { name: "Show less" }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Create project" }).click();
   await page.waitForURL(new RegExp(`/${ids.created}/overview$`), { timeout: 15_000 });
   const picked = await projectByIdent(page, ids.created);
@@ -409,7 +568,10 @@ async function viewerScenario(browser: Browser, base: string, ident: string, err
   await page.waitForTimeout(500);
   assert.equal(await chooser.locator("[data-template]").count(), 0, "a viewer gets no templates");
   assert.ok((await chooser.innerText()).includes("no conventions yet"), "a viewer is told there are none");
-  await shot(page, vp, "07-viewer-no-conventions");
+  await shot(page, vp, "08-viewer-no-conventions");
+  // Pages links a viewer to the same tab.
+  await (await conventionsEntry(page, vp, base, ident, "missing")).click();
+  await chooser.waitFor({ state: "visible", timeout: 15_000 });
 
   await api(adminPage, "POST", "/pages", {
     project_id: project.id,
@@ -442,9 +604,39 @@ async function signedOutScenario(browser: Browser, base: string, ident: string, 
   await status.waitFor({ state: "visible", timeout: 15_000 });
   await page.getByText("Readers read this.").waitFor({ state: "visible" });
   assert.ok(page.url().endsWith(`#/${ident}/conventions`), "a reader stays on the tab");
-  assert.equal(await page.getByRole("menuitem", { name: "Change template…" }).count(), 0);
+  // Open the menu, then check it holds only reading actions.
+  await page.getByRole("button", { name: "More actions" }).first().click();
+  const items = page.getByRole("menu").getByRole("menuitem");
+  await items.first().waitFor({ state: "visible" });
+  const labels = (await items.allInnerTexts()).map((s) => s.trim());
+  assert.deepEqual(labels, ["Copy link"], `a reader's menu reads only (got ${JSON.stringify(labels)})`);
+  await page.keyboard.press("Escape");
   await assertNoOverflow(page, "signed out conventions");
-  console.log("ok   signed out: a published project's tab is readable");
+  console.log("ok   signed out: a published project's tab is readable, with no changes on offer");
+  await context.close();
+}
+
+/** The project index fails to load: the tab says so and can try again. */
+async function indexFailureScenario(browser: Browser, base: string, ident: string, errors: string[]) {
+  const vp = VIEWPORTS[0];
+  // A fresh context, so no cached copy of the project stands in.
+  const context = await newContext(browser, vp);
+  const page = await signIn(context, base, "ada", ADMIN_PASSWORD);
+  page.on("pageerror", (err) => errors.push(`index failure: ${err}`));
+  const project = await projectByIdent(page, ident);
+  let failing = true;
+  await page.route(`**/api/projects/${project.id}/index*`, (route) =>
+    failing
+      ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "index unavailable" }) })
+      : route.continue(),
+  );
+  await page.goto(`${base}/#/${ident}/conventions`);
+  await page.getByText("Couldn't load conventions").waitFor({ state: "visible", timeout: 20_000 });
+  await shot(page, vp, "09-index-failure");
+  failing = false;
+  await page.getByRole("button", { name: "Try again" }).click();
+  await page.getByTestId("conventions-status").waitFor({ state: "visible", timeout: 15_000 });
+  console.log("ok   index failure: the tab shows the error and recovers on Try again");
   await context.close();
 }
 
@@ -539,6 +731,7 @@ async function main(): Promise<number> {
     await scenario(browser, base, VIEWPORTS[1], { bare: "BAREB", emptyPage: "EMPTB", created: "PICKB" }, templates, errors);
     await viewerScenario(browser, base, "VIEW", errors);
     await signedOutScenario(browser, base, "PUB", errors);
+    await indexFailureScenario(browser, base, "PUB", errors);
 
     assert.deepEqual(errors, [], "no page errors");
     console.log(`conventions: all checks passed (screenshots in ${SHOTS})`);

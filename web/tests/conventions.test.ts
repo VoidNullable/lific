@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
   FALLBACK_TEMPLATES,
+  conventionsRedirect,
   conventionsRoute,
   conventionsState,
   defaultTemplateKey,
   pageRoute,
   templateName,
 } from "../src/lib/pages/conventions";
+import { commentTargetFromHash } from "../src/lib/commentLinks";
 import type { ConventionTemplate } from "../src/lib/api";
 
 const row = (id: number, preview: string, conventions?: boolean) => ({ id, preview, conventions });
@@ -39,6 +41,43 @@ describe("routes", () => {
     expect(pageRoute("LIF", { id: 7, conventions: true })).toBe("/LIF/conventions");
     expect(pageRoute("LIF", { id: 7, conventions: false })).toBe("/LIF/pages/7");
     expect(pageRoute("LIF", { id: 7 })).toBe("/LIF/pages/7");
+  });
+});
+
+describe("conventionsRedirect", () => {
+  it("carries a hash route's ?comment= target to the tab", () => {
+    expect(conventionsRedirect("LIF", { pathname: "/", hash: "#/LIF/pages/12?comment=42" })).toEqual({
+      route: "/LIF/conventions?comment=42",
+      url: "/#/LIF/conventions?comment=42",
+    });
+  });
+
+  it("turns a path-style link's #comment- anchor into the router's form", () => {
+    expect(conventionsRedirect("LIF", { pathname: "/LIF/pages/12", hash: "#comment-42" })).toEqual({
+      route: "/LIF/conventions?comment=42",
+      url: "/#/LIF/conventions?comment=42",
+    });
+  });
+
+  it("keeps a base path and drops the old page path", () => {
+    expect(conventionsRedirect("LIF", { pathname: "/lific/LIF/pages/12", hash: "#comment-7" }).url).toBe(
+      "/lific/#/LIF/conventions?comment=7",
+    );
+    expect(conventionsRedirect("LIF", { pathname: "/lific/", hash: "#/LIF/pages/12" }).url).toBe(
+      "/lific/#/LIF/conventions",
+    );
+  });
+
+  it("goes to the bare tab without a comment target", () => {
+    expect(conventionsRedirect("LIF", { pathname: "/", hash: "#/LIF/pages/12" })).toEqual({
+      route: "/LIF/conventions",
+      url: "/#/LIF/conventions",
+    });
+  });
+
+  it("reads what it writes", () => {
+    const { route } = conventionsRedirect("LIF", { pathname: "/LIF/pages/12", hash: "#comment-42" });
+    expect(commentTargetFromHash(`#${route}`)).toBe("comment-42");
   });
 });
 

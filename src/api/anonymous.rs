@@ -176,6 +176,7 @@ const ANONYMOUS_READS: &[&str] = &[
     "/api/projects",
     "/api/projects/{n}",
     "/api/projects/{n}/index",
+    "/api/projects/{n}/pages/meta",
     "/api/projects/{n}/changes",
     "/api/projects/{n}/board",
     "/api/projects/{n}/issue-counts",

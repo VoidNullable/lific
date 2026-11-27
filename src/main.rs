@@ -20,6 +20,7 @@ mod issue_refs;
 mod links;
 mod mcp;
 mod oauth;
+mod page_meta;
 mod preview;
 mod project_archive;
 mod ratelimit;

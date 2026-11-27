@@ -35,7 +35,7 @@
   import { readingMinutes, wordCount } from "../lib/detail/outline";
   import { PenLine, CircleDot, CheckCircle2, Archive, Pin, ScrollText, Replace, EyeOff, Eye } from "lucide-svelte";
   import ConventionsDialog, { type ConventionsDialogMode } from "../lib/pages/ConventionsDialog.svelte";
-  import { conventionsRoute } from "../lib/pages/conventions";
+  import { conventionsRedirect, conventionsRoute } from "../lib/pages/conventions";
   import type { ConventionTemplate } from "../lib/api";
   import type { MenuItem } from "../lib/DeleteMenu.svelte";
 
@@ -175,8 +175,9 @@
     // LIF-524: the conventions page lives on its own tab. Replace, so Back
     // skips the old address; a comment target rides along.
     if (res.data.conventions && !conventionsTab) {
-      const comment = location.hash.match(/#comment-\d+$/)?.[0] ?? "";
-      location.replace(`#${conventionsRoute(projectIdentifier)}${comment}`);
+      const { route, url } = conventionsRedirect(projectIdentifier, location);
+      history.replaceState(null, "", url);
+      navigate(route);
       return;
     }
     page = res.data;
@@ -570,6 +571,7 @@
     pageIdentifier={page.identifier}
     onReplace={replaceWithTemplate}
     onSetEnabled={setConventionsEnabled}
+    returnFocus={() => document.querySelector<HTMLElement>('button[aria-label="More actions"]')}
   />
 {/if}
 

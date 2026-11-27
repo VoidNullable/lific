@@ -441,6 +441,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Delta sync (LIF-439) — read-side, Viewer ──
         (("GET", "/api/projects/{id}/changes"), Gated(Read)),
         (("GET", "/api/projects/{id}/index"), Gated(Read)),
+        (("GET", "/api/projects/{id}/pages/meta"), Gated(Read)),
         (("GET", "/api/export/issues/{identifier}"), Gated(Read)),
         (("GET", "/api/export/pages/{identifier}"), Gated(Read)),
         (("GET", "/api/export/projects/{identifier}"), Gated(Read)),
