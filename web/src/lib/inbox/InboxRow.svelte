@@ -84,6 +84,7 @@
 <div
   class="inbox-row group relative flex items-center gap-2 pl-1.5 pr-3 h-11 sm:h-10
          border-b border-[var(--border)] last:border-b-0 transition-colors
+         first:rounded-t-[calc(var(--radius-lg)-1px)] last:rounded-b-[calc(var(--radius-lg)-1px)]
          {active ? 'bg-[var(--accent-subtle)]' : checked ? 'bg-[var(--bg-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}
          {laterOpen ? 'z-20' : ''}"
   data-identifier={issue.identifier}
